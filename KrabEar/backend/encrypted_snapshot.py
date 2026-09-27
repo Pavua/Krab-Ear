@@ -326,20 +326,34 @@ def _encrypt_journal(source: Path, crypto: Any) -> bytes:
 #      except-ветке safety-проверки здесь означал бы ровно то падение ENOSPC,
 #      ради которого гард существует.
 
-# Рост строки при шифровании: base64 (4/3) + префикс `ENC1:` + метка. Уже
-# зашифрованные строки переносятся байт-в-байт, поэтому 1.4 — верхняя граница
-# для набора из разнородных строк, а не «средний размер».
-ENC1_EXPANSION_FACTOR = 1.4
+# Рост строки при шифровании НЕ оценивается коэффициентом: `_encrypt_journal`
+# переносит уже ENC1-строку байт-в-байт (расширения нет), а plaintext-строку
+# растягивает ровно на `SENTINEL + base64(nonce + ciphertext + tag)`. Поэтому
+# размер бандла считается ТОЧНО, построчно, из самих файлов
+# (`estimate_snapshot_bytes`) — и никакой «двойной копии» в пороге нет.
+#
+# Константы ниже — копия констант `history_crypto` (SENTINEL, _NONCE_BYTES,
+# _GCM_TAG_BYTES). Дублируются НАМЕРЕННО: модуль снимков сознательно не
+# импортирует `history_crypto` (иначе AES грузится всем, кто импортирует
+# снимки). Расхождение констант ловит тест
+# `test_estimate_is_byte_exact_for_every_shape_of_set` — он сравнивает оценку с
+# реально записанным снимком байт-в-байт.
+ENC1_SENTINEL_BYTES = len("ENC1:")
+ENC1_NONCE_BYTES = 12
+ENC1_GCM_TAG_BYTES = 16
+ENC1_PREFIX = b"ENC1:"
 
-# Запас сверху: манифест, записи каталога, округление блоков APFS/HFS+. При
-# 1.5 порог ОДНОЙ копии равен 2.1× размера журналов — «снимок + страховка»,
-# ровно как в решении 1 карточки. Меньше — риск ENOSPC на последнем файле,
-# больше — отказ там, где места хватает.
-DISK_GUARD_SAFETY_FACTOR = 1.5
+# Запас сверху ОТЛОЖЕННОГО размера бандла. Что он покрывает (измерено/обосновано,
+# а не «на глаз»): манифест и записи каталога (килобайты на наборе в гигабайты),
+# округление блоков APFS/HFS+ и гонку «проверили место → пишем», пока том может
+# занять кто-то ещё. 10% — потому что всё перечисленное величина порядка
+# процентов, а не кратных; прежние 2.1× (1.4 «рост» × 1.5 «запас») отказывали
+# даже при 2.0× свободного места, то есть блокировали бэкапы в норме.
+DISK_GUARD_SAFETY_FACTOR = 1.1
 
-# Порог применяется к ПОЛНОМУ набору реестра. Если журналов нет вовсе, места
-# нужно мало, но проверять всё равно надо: пустой профиль на полном томе всё
-# равно должен получить честный отказ, а не «успех» нулевого снимка.
+# Пол порога для МАЛЕНЬКОГО набора. Нужен, чтобы пустой/крошечный профиль всё
+# равно получал честный отказ на заполненном томе. Это ПОЛ, а не потребность:
+# в тексте отказа он отделён от реально посчитанного требования.
 DISK_GUARD_MIN_REQUIRED_BYTES = 1 << 16
 
 
@@ -385,10 +399,11 @@ def _nearest_existing_dir(path: Any) -> Path:
 def journals_size(directory: Any) -> int:
     """Суммарный размер десяти управляемых журналов в каталоге (0 — если их нет).
 
-    Единственное определение «сколько байт занимает набор»: используется и
-    для live-профиля (``data_dir``), и для каталога снимка. Ошибка чтения
-    отдельного файла не подменяется нулём молча — она просто не добавляется к
-    оценке снизу, а отказ «файл не читается» всё равно поднимет протокол.
+    Дешёвая величина (stat, без чтения): нужна отчёту о месте, который зовётся из
+    статуса авто-бэкапа, и тестам как «размер набора на диске». Порог гарда её не
+    использует — там нужен `estimate_snapshot_bytes` (размер ПОСЛЕ шифрования).
+    Ошибка чтения отдельного файла не подменяется нулём молча: отказ «файл не
+    читается» всё равно поднимет протокол.
     """
     total = 0
     base = Path(directory)
@@ -401,17 +416,142 @@ def journals_size(directory: Any) -> int:
     return total
 
 
+def _enc1_line_bytes(plaintext_bytes: int) -> int:
+    """Размер ENC1-строки по размеру её plaintext (байты, без перевода строки).
+
+    Ровно то, что делает ``HistoryCrypto.encrypt_line``:
+    ``SENTINEL + base64(nonce + ciphertext + GCM-тег)`` с nonce 12 и тегом 16.
+    """
+    payload = plaintext_bytes + ENC1_NONCE_BYTES + ENC1_GCM_TAG_BYTES
+    return ENC1_SENTINEL_BYTES + 4 * -(-payload // 3)  # 4*ceil(payload/3)
+
+
+def estimate_snapshot_bytes(*, directory: Any) -> dict:
+    """ТОЧНЫЙ размер бандла ENC1, который запишет снимок этого набора.
+
+    Построчный проход по самим файлам, БЕЗ шифрования и без ключа:
+
+      * строка, уже начинающаяся с ``ENC1:``, попадает в снимок байт-в-байт
+        (``_encrypt_journal`` только проверяет её расшифровкой) → размер не
+        меняется. Именно поэтому прежний порог «×1.4» был не просто завышен, а
+        вдвое завышен для нормального (полностью зашифрованного) профиля;
+      * открытая строка растёт ровно на ``_enc1_line_bytes(len)``: измерение на
+        реальных диктовках даёт 1.40–1.42× для длинных RU/ES строк, и заметно
+        больше для «микро»-строк (у ``{"id":"t1"}`` база64 фиксированных 28
+        байт стоит дороже самой строки) — усреднённый коэффициент здесь врал бы
+        в обе стороны;
+      * отсутствующий журнал — валидная ПУСТАЯ запись реестра (0 байт), как и в
+        ``_encrypt_journal``;
+      * разделители считаются так же, как в писателе: ``join('\\n')`` плюс
+        хвостовой ``\\n``, если он был в источнике.
+
+    Возвращает ``{bytes, enc1_lines, plaintext_lines, files}``. Ничего не пишет,
+    не расшифровывает и не обращается к ключу.
+    """
+    base = Path(directory)
+    total = 0
+    enc1_lines = 0
+    plaintext_lines = 0
+    files = 0
+    for name in HISTORY_JOURNAL_FILENAMES:
+        journal_path = base / name
+        try:
+            if not journal_path.is_file():
+                continue
+            handle = journal_path.open("rb")
+        except OSError:
+            continue
+        files += 1
+        with handle:
+            file_total = 0
+            count = 0
+            ends_with_newline = True
+            for raw in handle:
+                ends_with_newline = raw.endswith(b"\n")
+                body = raw[:-1] if ends_with_newline else raw
+                if body.startswith(ENC1_PREFIX):
+                    file_total += len(body)
+                    enc1_lines += 1
+                else:
+                    # Пустая строка — тоже «открытая» и тоже шифруется (45 байт).
+                    file_total += _enc1_line_bytes(len(body))
+                    plaintext_lines += 1
+                count += 1
+        if count == 0:
+            continue
+        # join("\\n") + хвостовой "\\n" — как в _encrypt_journal.
+        total += file_total + (count if ends_with_newline else count - 1)
+    return {
+        "bytes": total,
+        "enc1_lines": enc1_lines,
+        "plaintext_lines": plaintext_lines,
+        "files": files,
+    }
+
+
+def _snapshot_manifest_bytes(snapshot_dir: Any) -> int:
+    """Сумма ``files[].size`` манифеста снимка — фактический размер бандла.
+
+    Манифест уже проверен ``verify_snapshot`` (совпадение size/sha256 с файлами),
+    поэтому доверять его числам можно; при нечитаемом/неполном манифесте
+    возвращается 0, и тогда порог посчитает жив��й набор (консервативно для
+    профиля, у которого снимок новее).
+    """
+    try:
+        manifest_data = _read_manifest(Path(snapshot_dir))
+    except SnapshotOperationRefused:
+        return 0
+    if not isinstance(manifest_data, dict):
+        return 0
+    entries = manifest_data.get("files")
+    if not isinstance(entries, list):
+        return 0
+    total = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        size = entry.get("size")
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            continue
+        total += size
+    return total
+
+
 def required_bytes(
     *,
     journal_bytes: int,
     copies: int = 1,
     safety_factor: float = DISK_GUARD_SAFETY_FACTOR,
 ) -> int:
-    """Порог места для ``copies`` копий набора журналов в одном каталоге."""
+    """Порог места для ``copies`` копий бандла размера ``journal_bytes``.
+
+    ``journal_bytes`` — размер бандла ПОСЛЕ шифрования (его даёт
+    ``estimate_snapshot_bytes``), а не размер журналов на диске: для полностью
+    зашифрованного набора это ≈1.0×, для смешанного — уже посчитанный рост.
+    """
     if copies < 1:
         raise ValueError(f"copies должен быть >= 1, получено {copies}")
-    need = int(journal_bytes * copies * ENC1_EXPANSION_FACTOR * safety_factor)
+    need = int(journal_bytes * copies * safety_factor)
     return max(need, DISK_GUARD_MIN_REQUIRED_BYTES)
+
+
+def _requirement_text(*, journal_bytes: int, need: int, copies: int) -> str:
+    """Человекочитаемая часть отказа: реальное требование и, отдельно, пол.
+
+    NIT-2: прежний текст для крошечного набора показывал «нужно ~65536 байт»,
+    где 65536 — это пол гарда, а не потребность (реальная была 6 КБ). Владелец
+    читал это как «истории нужно 64 КБ».
+    """
+    detail = (
+        f"нужно {need} байт (бандл {journal_bytes} × {copies} копии × "
+        f"запас {DISK_GUARD_SAFETY_FACTOR})"
+    )
+    if need == DISK_GUARD_MIN_REQUIRED_BYTES and journal_bytes * copies * DISK_GUARD_SAFETY_FACTOR < need:
+        return (
+            f"{detail}; это ПОЛ гарда для малого набора, реальный расчёт по "
+            f"набору — {int(journal_bytes * copies * DISK_GUARD_SAFETY_FACTOR)} байт"
+        )
+    return detail
 
 
 def _ensure_space_for(
@@ -428,14 +568,13 @@ def _ensure_space_for(
     для снимка это корень backups, для restore-staging — ``data_dir``. Проверка
     идёт по ближайшему существующему предку и по его реальному тому.
 
-    Возвращает фактические числа (свободно/нужно) — их видно в логе отказа и
-    в наблюдаемости; при отказе поднимает ``SnapshotOperationRefused`` с
+    Возвращает фактические числа (свободно/нужно) — их видно в логе и в
+    наблюдаемости; при отказе поднимает ``SnapshotOperationRefused`` с
     ``snapshot_insufficient_space`` и ``pending=False``: на диске ничего не
     начато, поэтому «незавершённой операции» не существует.
     """
-    need = required_bytes(
-        journal_bytes=journal_bytes, copies=copies, safety_factor=safety_factor
-    )
+    raw_need = int(journal_bytes * copies * safety_factor)
+    need = max(raw_need, DISK_GUARD_MIN_REQUIRED_BYTES)
     queried = _nearest_existing_dir(target_dir)
     try:
         free = int(_filesystem_usage(queried).free)
@@ -449,8 +588,9 @@ def _ensure_space_for(
     if free < need:
         raise SnapshotOperationRefused(
             REASON_INSUFFICIENT_SPACE,
-            f"не хватает места для {what}: нужно ~{need} байт, свободно {free} "
-            f"на {queried} (журналы {journal_bytes} байт × {copies})",
+            f"не хватает места для {what}: "
+            f"{_requirement_text(journal_bytes=journal_bytes, need=need, copies=copies)}, "
+            f"свободно {free} на {queried}",
         )
     report = {
         "target": str(target_dir),
@@ -473,17 +613,17 @@ def _ensure_space_for(
 
 def _volume_report(target_dir: Any) -> dict:
     """Сведения о томе одного целевого каталога. Никогда не бросает."""
-    path = Path(target_dir)
+    target_path = Path(target_dir)
     report: dict[str, Any] = {
-        "path": str(path),
+        "path": str(target_path),
         "free_bytes": None,
         "total_bytes": None,
         "error": None,
     }
     try:
-        queried = _nearest_existing_dir(path)
+        queried = _nearest_existing_dir(target_path)
         usage = _filesystem_usage(queried)
-        report["path"] = str(path)
+        report["path"] = str(target_path)
         report["queried"] = str(queried)
         report["free_bytes"] = int(usage.free)
         report["total_bytes"] = int(usage.total)
@@ -491,7 +631,7 @@ def _volume_report(target_dir: Any) -> dict:
         # Только имя типа ошибки: подробности (пути ФС, errno) в IPC не нужны, а
         # «неизвестно» обязано быть видно как `free_bytes: null`, а не как 0.
         report["error"] = type(exc).__name__
-        logger.warning("encrypted_snapshot: отчёт о месте для %s неполон: %s", path, exc)
+        logger.warning("encrypted_snapshot: отчёт о месте для %s неполон: %s", target_path, exc)
     return report
 
 
@@ -521,12 +661,18 @@ def snapshot_space_report(*, data_dir: Any) -> dict:
         journals = journals_size(base)
     except Exception:  # noqa: BLE001 — крайний предохранитель диагностики
         logger.warning("encrypted_snapshot: отчёт о месте не построен", exc_info=True)
-        return {"checked_at": None, "journals_bytes": None,
-                "required_bytes_one_copy": None, "targets": {}}
+        return {
+            "checked_at": None,
+            "journals_bytes": None,
+            "targets": {},
+        }
+    # `required_bytes_one_copy` здесь НЕТ намеренно: точное требование считается
+    # проходом по журналам (`estimate_snapshot_bytes`), а статус зовётся из UI
+    # часто — читать гигабайты ради читаемого поля нельзя. Требование живёт в
+    # тексте отказа и в логе гарда, где оно и нужно.
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "journals_bytes": journals,
-        "required_bytes_one_copy": required_bytes(journal_bytes=journals, copies=1),
         "targets": targets,
     }
 
@@ -964,12 +1110,14 @@ def build_encrypted_snapshot(
     # операция волны, которая при заполненном томе роняла запись журнала
     # истории, то есть приводила к её потере. Отказ здесь оставляет профиль
     # ровно как был: ни staging, ни каталога снимка, ни правок живых файлов.
-    # Порог — по фактическому размеру реестра × 1 копия + запас (карточка,
-    # решение 1); ``backups_root`` уже разыменован, поэтому при symlink на
-    # другой том спрашивается именно тот том.
+    #
+    # Порог — ТОЧНЫЙ размер бандла после шифрования (`estimate_snapshot_bytes`),
+    # умноженный на одну копию и запас 10%. Никакого «×2.1 от размера журналов»:
+    # для полностью ENC1-профиля (обычное состояние при включённой политике) снимок
+    # занимает ровно столько же, сколько журналы (NIT-2 ревью).
     _ensure_space_for(
         target_dir=backups_root,
-        journal_bytes=journals_size(data_dir),
+        journal_bytes=estimate_snapshot_bytes(directory=data_dir)["bytes"],
         copies=1,
         what="снимка истории",
     )
@@ -2853,22 +3001,27 @@ def restore_encrypted_snapshot(
         # Два назначения — два независимых тома, и это не паранойя:
         #   * ``data_dir``: приватный staging (выходные журналы) ПЛЮС tmp-копия
         #     каждого журнала рядом с живым файлом перед ``os.replace``
-        #     (``_apply_verified_snapshot_locked``) — то есть две копии набора;
+        #     (``_apply_verified_snapshot_locked``) — то есть две копии бандла;
         #   * ``backups_root``: pre-restore снимок — одна копия.
-        # Размер набора берём как максимум из двух: pre-restore снимает ЖИВОЕ
-        # состояние, а выходные файлы собираются из СНИМКА, и «среднее» здесь
+        #
+        # Размер бандла: снимок известен ТОЧНО из его манифеста (это сумма полей
+        # ``files[].size``, то есть фактический ciphertext), а живой набор
+        # считается точным проходом. Берём максимум: pre-restore снимает ЖИВОЕ
+        # состояние, выходные файлы собираются из СНИМКА, и «среднее» здесь
         # означало бы заниженный порог ровно на том restore, где снимок крупнее
         # текущей истории.
-        unit_bytes = max(journals_size(data_dir), journals_size(resolved))
+        snapshot_bytes = _snapshot_manifest_bytes(resolved)
+        live_bytes = estimate_snapshot_bytes(directory=data_dir)["bytes"]
+        bundle = max(snapshot_bytes, live_bytes)
         _ensure_space_for(
             target_dir=data_dir,
-            journal_bytes=unit_bytes,
+            journal_bytes=bundle,
             copies=2,
             what="восстановления истории",
         )
         _ensure_space_for(
             target_dir=backups_root.resolve(),
-            journal_bytes=unit_bytes,
+            journal_bytes=live_bytes,
             copies=1,
             what="pre-restore снимка",
         )

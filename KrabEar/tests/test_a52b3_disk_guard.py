@@ -100,6 +100,16 @@ def _data_bytes(data_dir: Path) -> dict[str, bytes]:
     }
 
 
+def _read_ndjson_lines(path: Path) -> list[str]:
+    text = path.read_text("utf-8")
+    if text == "":
+        return []
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _journal_bytes(data_dir: Path) -> int:
     """Суммарный размер управляемых журналов на диске (как считает гард)."""
     total = 0
@@ -360,36 +370,166 @@ class TestDiskGuardRefusesBeforeAnyWrite:
         assert exc.value.reason == snap.REASON_INSUFFICIENT_SPACE
         assert _dirs(other_volume) == []
 
-    def test_room_for_snapshot_but_not_for_safety_net_is_refused(self, tmp_path, monkeypatch):
-        """Страховка — не опция: без неё цена неудачного restore выше отказа."""
+    def test_estimate_is_byte_exact_for_every_shape_of_set(self, tmp_path):
+        """Оценка обязана СОВПАДАТЬ с реально записанным снимком (NIT-2, измерение).
+
+        Никакого «коэффициента на глаз»: если оценка разойдётся с `_encrypt_journal`
+        хоть на байт, гард либо врёт об отказе, либо пропускает ENOSPC. Проверяются
+        все формы набора: смесь ENC1/plaintext, пустые строки, отсутствующие
+        журналы, файл без хвостового перевода строки.
+        """
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
         _settings_on(data_dir)
-        _seed(_store_with_crypto(data_dir, crypto), ["одна"])
-        journal_bytes = _journal_bytes(data_dir)
-        assert journal_bytes > 0
-        one_copy = int(journal_bytes * snap.ENC1_EXPANSION_FACTOR)
-        need = snap.required_bytes(journal_bytes=journal_bytes, copies=1)
-        assert one_copy < need  # запас реально существует, а не фикция
+        _seed(_store_with_crypto(data_dir, crypto), ["одна", "две"])
+        # Смешанный набор: дописываем plaintext-строку и пустую строку вручную.
+        history = data_dir / "history.ndjson"
+        history.write_bytes(
+            history.read_bytes()
+            + json.dumps({"id": "plain-1", "text": "открытая строка"}, ensure_ascii=False).encode("utf-8")
+            + b"\n"
+            + b"\n"
+        )
+        # Журнал без хвостового перевода строки + «микро»-строки (худший случай
+        # роста: база64 фиксированных 28 байт на строку).
+        (data_dir / "history_tags.ndjson").write_text(
+            '{"id":"t1"}\n{"id":"t2"}', encoding="utf-8"
+        )
 
-        _install_usage(monkeypatch, lambda _p: one_copy)
+        estimate = snap.estimate_snapshot_bytes(directory=data_dir)
+        result = snap.create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=data_dir / "backups" / "snapshot_est",
+            crypto=crypto,
+            transaction_id="tx-est",
+            policy_on=True,
+        )
+
+        assert estimate["bytes"] == result["size_bytes"]
+        assert estimate["plaintext_lines"] >= 3  # дописанная + пустая + tags
+        assert estimate["enc1_lines"] >= 1
+
+    def test_fully_encrypted_set_needs_its_own_size_not_twice(self, tmp_path, monkeypatch):
+        """NIT-2: ENC1-строки переносятся байт-в-байт — места нужно ровно 1.0×.
+
+        Прежний порог 2.1× отказывал при 1.05/1.2/1.5/2.0× свободного места, то
+        есть блокировал бэкапы в нормальном состоянии диска (проба ревьюера).
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _seed(_store_with_crypto(data_dir, crypto), [f"запись-{i} " + "текст " * 50 for i in range(300)])
+        journal_bytes = _journal_bytes(data_dir)
+        need = snap.required_bytes(
+            journal_bytes=snap.estimate_snapshot_bytes(directory=data_dir)["bytes"], copies=1
+        )
+        # Запас 10% — и никаких «2.1× от размера журналов».
+        assert need < int(journal_bytes * 1.2)
+        free = int(journal_bytes * 1.2)
+
+        _install_usage(monkeypatch, lambda _p: free)
+        result = snap.create_encrypted_snapshot(
+            data_dir=data_dir,
+            backup_dir=data_dir / "backups" / "snapshot_1",
+            crypto=crypto,
+            transaction_id="tx-a52b3-enc1-fit",
+            policy_on=True,
+        )
+
+        assert result["state"] == snap.STATE_COMMITTED
+
+    def test_mixed_set_needs_more_than_encrypted_one(self, tmp_path, monkeypatch):
+        """NIT-2: смешанный/открытый набор действительно дороже — и это видно в отказе."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, [f"запись-{i} " + "текст " * 50 for i in range(300)])
+        # Половину history.ndjson делаем открытой (как недомигрированный пробор).
+        history = data_dir / "history.ndjson"
+        lines = _read_ndjson_lines(history)
+        history.write_text(
+            "\n".join([crypto.decrypt_line(ln) for ln in lines[: len(lines) // 2]]) + "\n",
+            encoding="utf-8",
+        )
+        journal_bytes = _journal_bytes(data_dir)  # ПОСЛЕ правки: иначе доля «обманывает»
+        mixed_need = snap.required_bytes(
+            journal_bytes=snap.estimate_snapshot_bytes(directory=data_dir)["bytes"], copies=1
+        )
+        free = int(journal_bytes * 1.2)
+        # Рост настоящий, а не «оценка на глаз»: смешанному набору нужно больше
+        # места, чем занимает он сам (и больше, чем ENC1-профилю на том же диске).
+        assert snap.estimate_snapshot_bytes(directory=data_dir)["bytes"] > journal_bytes
+        assert mixed_need > free
+        _install_usage(monkeypatch, lambda _p: free)
+
         with pytest.raises(SnapshotOperationRefused) as exc:
             snap.create_encrypted_snapshot(
                 data_dir=data_dir,
                 backup_dir=data_dir / "backups" / "snapshot_1",
                 crypto=crypto,
-                transaction_id="tx-a52b3-tight",
+                transaction_id="tx-a52b3-mixed",
                 policy_on=True,
             )
-        assert exc.value.reason == snap.REASON_INSUFFICIENT_SPACE
 
-        # Ровно порог — проходит (сравнение «<», не «<=»).
+        assert exc.value.reason == snap.REASON_INSUFFICIENT_SPACE
+        # Отказ называет РЕАЛЬНОЕ требуемое число, а не «×2.1 от журналов».
+        assert str(mixed_need) in str(exc.value)
+        assert "65536" not in str(exc.value)  # пол не выдаётся за требование
+
+    def test_refusal_separates_garage_floor_from_real_requirement(self, tmp_path, monkeypatch):
+        """NIT-2: пол 64 КБ — это пол, а не «потребность»; текст обязан это сказать."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _seed(_store_with_crypto(data_dir, crypto), ["одна"])
+        real = snap.required_bytes(
+            journal_bytes=snap.estimate_snapshot_bytes(directory=data_dir)["bytes"], copies=1
+        )
+        assert real == snap.DISK_GUARD_MIN_REQUIRED_BYTES  # набор крошечный → сработал пол
+        _install_usage(monkeypatch, lambda _p: 1024)
+
+        with pytest.raises(SnapshotOperationRefused) as exc:
+            snap.create_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=data_dir / "backups" / "snapshot_1",
+                crypto=crypto,
+                transaction_id="tx-a52b3-floor",
+                policy_on=True,
+            )
+
+        message = str(exc.value)
+        assert "пол гарда" in message.lower()
+        assert str(snap.DISK_GUARD_MIN_REQUIRED_BYTES) in message
+        # И сразу виден реальный расчёт по набору, а не только пол.
+        assert f"реальный расчёт по набору — {int(snap.estimate_snapshot_bytes(directory=data_dir)['bytes'] * snap.DISK_GUARD_SAFETY_FACTOR)} байт" in message
+
+    def test_safety_margin_is_ten_percent_not_a_multiple(self, tmp_path, monkeypatch):
+        """Граница запаса: ровно need — проходит, need-1 — отказ (сравнение «<»)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        _seed(_store_with_crypto(data_dir, crypto), [f"запись-{i} " + "текст " * 50 for i in range(300)])
+        bundle = snap.estimate_snapshot_bytes(directory=data_dir)["bytes"]
+        need = snap.required_bytes(journal_bytes=bundle, copies=1)
+        assert need == pytest.approx(bundle * snap.DISK_GUARD_SAFETY_FACTOR, rel=0.01)
+
+        _install_usage(monkeypatch, lambda _p: need - 1)
+        with pytest.raises(SnapshotOperationRefused):
+            snap.create_encrypted_snapshot(
+                data_dir=data_dir,
+                backup_dir=data_dir / "backups" / "snapshot_1",
+                crypto=crypto,
+                transaction_id="tx-a52b3-edge",
+                policy_on=True,
+            )
+
         _install_usage(monkeypatch, lambda _p: need)
         result = snap.create_encrypted_snapshot(
             data_dir=data_dir,
             backup_dir=data_dir / "backups" / "snapshot_2",
             crypto=crypto,
-            transaction_id="tx-a52b3-exact",
+            transaction_id="tx-a52b3-edge-ok",
             policy_on=True,
         )
         assert result["state"] == snap.STATE_COMMITTED
@@ -808,7 +948,9 @@ class TestSpaceObservability:
             assert target["total_bytes"] is None
             assert target["error"] == "OSError"
         assert report["journals_bytes"] >= 0
-        assert report["required_bytes_one_copy"] >= snap.DISK_GUARD_MIN_REQUIRED_BYTES
+        # Требование в отчёте НЕ выдумывается дешёвой арифметикой (NIT-2): его
+        # точная величина живёт в тексте отказа, а здесь только дешёвые числа.
+        assert "required_bytes_one_copy" not in report
 
     def test_diagnostics_exposes_space_report(self, tmp_path, monkeypatch):
         from backend.health_check_service import disk_space_status
