@@ -2203,8 +2203,12 @@ class TestPendingRestoreBlocksWriters:
         mgr = AutoBackupManager(store=store, interval_hours=0)
 
         status = mgr.get_auto_backup_status()
+        # N7: маркера на диске уже нет, но вердикт попытки остаётся видимым —
+        # иначе докачка была бы известна только из логов.
         assert status["restore_pending"] is False
-        assert status["restore_recovery"] is None
+        assert status["restore_recovery"] is not None
+        assert status["restore_recovery"]["rolled_forward"] is True
+        assert status["restore_recovery"]["pending"] is False
         # И backup снова работает.
         out = mgr.check_and_backup()
         assert out["backed_up"] is True
@@ -2219,9 +2223,13 @@ class TestPendingRestoreBlocksWriters:
         store = _store_with_crypto(data_dir, None)
         status = AutoBackupManager(store=store, interval_hours=0).get_auto_backup_status()
 
+        # Действительный признак — свежий с диска: pending не может быть, потому
+        # что маркера нет. Вердикт может помнить ПРОШЛУЮ попытку этого процесса
+        # (так и задумано в N7), но он не имеет права утверждать, что pending.
         assert status["restore_pending"] is False
-        assert status["restore_recovery"] is None
         assert "blocked_by_pending" in status
+        if status["restore_recovery"] is not None:
+            assert status["restore_recovery"]["pending"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -2959,7 +2967,10 @@ class TestPendingVisibleInStatusSurfaces:
         )
         diag2 = restore_pending_status(clean)
         assert diag2["restore_pending"] is False
-        assert diag2["restore_recovery"] is None
+        if diag2["restore_recovery"] is not None:
+            # N7: в процессе могла быть прошлая попытка (тесты делят процесс) —
+            # запрещено только утверждать pending при отсутствии маркера.
+            assert diag2["restore_recovery"]["pending"] is False
 
     def test_ping_contract_stays_bit_exact(self, tmp_path):
         """Регресс: handle_ping НЕ расширяем (закреплён 6-ключевой контракт).
@@ -2993,3 +3004,220 @@ class TestPendingVisibleInStatusSurfaces:
         assert status["blocked_by_pending"] is True
         assert status["restore_recovery"]["pending"] is True
         assert status["restore_recovery"]["pre_restore_snapshot"]
+
+
+# ---------------------------------------------------------------------------
+# N7 — обвязка, которую читают только тесты, недопустима
+# ---------------------------------------------------------------------------
+
+
+class TestNoDecorativeRecoveryWrapper:
+    """N7: ``_LAST_RECOVERY_VERDICT`` писался и читался только тестами.
+
+    В волне, где сам аудит ловит декоративную обвязку, такая обвязка
+    недопустима. Вариантов два: подключить к пользовательской поверхности или
+    удалить вместе с тестами. Выбран первый — вердикт нужен UI, и он уже
+    доступен через статус авто-бэкапа.
+    """
+
+    def test_cached_verdict_is_exposed_on_user_surface(self, tmp_path):
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        # До обслуживания: сигнал с диска, последней попытки ещё не было.
+        before = mgr.get_auto_backup_status()
+        assert before["restore_pending"] is True
+        assert before["restore_recovery"]["pending"] is True
+
+        # Обслуживание докатывает — теперь у поверхности есть и результат попытки.
+        mgr.check_and_backup()
+        after = mgr.get_auto_backup_status()
+
+        assert after["restore_pending"] is False
+        assert after["restore_recovery"] is not None
+        assert after["restore_recovery"]["rolled_forward"] is True
+        assert after["restore_recovery"]["transaction_id"]
+        assert after["restore_recovery"]["records_carried"] >= 0
+
+    def test_status_never_exposes_empty_verdict_after_attempt(self, tmp_path):
+        """После попытки докачки вердикт не должен молча пропасть из статуса."""
+        from backend.auto_backup import AutoBackupManager
+
+        data_dir, crypto, _snap, store = _ragged_with_real_items(tmp_path)
+        mgr = AutoBackupManager(store=store, interval_hours=0)
+        mgr.check_and_backup()
+
+        for _ in range(3):
+            status = mgr.get_auto_backup_status()
+            assert status["restore_recovery"] is not None, "вердикт попытки потерян"
+            assert status["restore_pending"] is False
+
+    def test_cached_verdict_never_claims_pending_against_disk(self, tmp_path):
+        """Кэш не имеет права заявить pending там, где диск говорит «маркера нет».
+
+        Проверка на ПОРЯДОК: сначала подкладываем cached-вердикт с pending=True,
+        затем спрашиваем чистый профиль.
+        """
+        from backend import encrypted_snapshot as es
+
+        clean = tmp_path / "clean_no_marker"
+        clean.mkdir(parents=True, exist_ok=True)
+        es._LAST_RECOVERY_VERDICT = {
+            "ok": False,
+            "pending": True,
+            "reason": "snapshot_recovery_pending",
+            "state": "COMMITTING",
+            "rolled_forward": False,
+        }
+        try:
+            verdict = es.restore_verdict(clean)
+        finally:
+            es._LAST_RECOVERY_VERDICT = None
+
+        assert verdict is not None
+        assert verdict["pending"] is False, "кэш перебил диск"
+        # Историческая часть сохранена.
+        assert verdict["state"] == "COMMITTING"
+        assert es.restore_verdict(clean) is None, "после сброса кэша — только диск"
+
+# ---------------------------------------------------------------------------
+# N8 — паритет reason-кодов: ни один код не должен жить только в коде
+# ---------------------------------------------------------------------------
+
+
+def _reason_codes_in_source() -> dict[str, str]:
+    """Все ``REASON_* = "…'`` из модуля snapshot: имя константы → значение."""
+    import ast
+
+    from backend import encrypted_snapshot as es
+
+    path = Path(es.__file__)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: dict[str, str] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.Assign):
+            continue
+        target = node.targets[0]
+        if not isinstance(target, ast.Name) or not target.id.startswith("REASON_"):
+            continue
+        try:
+            value = ast.literal_eval(node.value)
+        except ValueError:
+            continue
+        if isinstance(value, str):
+            out[target.id] = value
+    return out
+
+
+def _reasons_section(doc: str) -> str:
+    """Текст раздела «Отказы» документации restore (границы по заголовкам)."""
+    start = doc.index("**Отказы (все — до первой записи")
+    rest = doc[start:]
+    for marker in ("\n### ", "\n---\n", "\n**Recovery"):
+        idx = rest.find(marker)
+        if idx != -1:
+            rest = rest[:idx]
+    return rest
+
+
+class TestReasonCodeParity:
+    """N8: ``test_ipc_docs_parity`` проверяет имена методов, не reason-коды.
+
+    Четыре кода из b1-create-side обитали в коде без единого упоминания в
+    документации. Теперь любое новое значение обязано попасть либо в таблицу
+    причин restore/backup, либо в явный allowlist внутренних кодов.
+    """
+
+    # Внутренние коды протокола публикации снимка (b1 create-side). Они НЕ
+    # достижимы из restore/recovery и сознательно не табулируются: документ
+    # описывает контракты IPC-поверхности, а не внутренний prepare/commit.
+    INTERNAL_ALLOWLIST = {
+        "REASON_FINGERPRINT_MISMATCH",
+        "REASON_POLICY_OFF",
+        "REASON_PUBLISH_FAILED",
+        "REASON_ROUNDTRIP_MISMATCH",
+    }
+
+    def test_every_reason_code_is_documented_or_allowlisted(self):
+        doc = (
+            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
+        ).read_text(encoding="utf-8")
+        undoc = [
+            f"{name}={value}"
+            for name, value in sorted(_reason_codes_in_source().items())
+            if name not in self.INTERNAL_ALLOWLIST and f"`{value}`" not in doc
+        ]
+        assert undoc == [], f"reason-коды без документации: {undoc}"
+
+    def test_allowlist_is_not_a_dumping_ground(self):
+        """Allowlist не должен расти молча: каждый внутренний код — с причиной."""
+        all_codes = set(_reason_codes_in_source())
+        assert self.INTERNAL_ALLOWLIST <= all_codes, (
+            "allowlist ссылается на несуществующие коды: "
+            f"{sorted(self.INTERNAL_ALLOWLIST - all_codes)}"
+        )
+        # Внутренние коды не должны просачиваться в документ как «достижимые».
+        doc = (
+            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
+        ).read_text(encoding="utf-8")
+        leaked = [
+            _reason_codes_in_source()[name]
+            for name in sorted(self.INTERNAL_ALLOWLIST)
+            if f"`{_reason_codes_in_source()[name]}`" in doc
+        ]
+        assert leaked == [], f"внутренние коды попали в таблицу причин: {leaked}"
+
+    def test_all_codes_share_the_documented_prefix(self):
+        """Единый словарь причин: префикс snapshot_/restore_ (House-стиль волны)."""
+        for name, value in sorted(_reason_codes_in_source().items()):
+            assert value.startswith(("snapshot_", "restore_")), f"{name}={value}"
+
+    def test_documented_table_has_no_unknown_codes(self):
+        """Обратная сторона: документ не обещает несуществующий код."""
+        doc = (
+            Path(__file__).resolve().parents[2] / "docs" / "IPC_API_REFERENCE.md"
+        ).read_text(encoding="utf-8")
+        known = set(_reason_codes_in_source().values())
+        import re
+
+        # Обратная проверка scoped на раздел «Отказы» и только на токены с
+        # префиксом snapshot_: имена методов (`restore_history`) и поля
+        # (`restore_pending`) под него не попадают. Значения поля
+        # restored_entries_source перечислены явно — новые значения придётся
+        # добавить здесь, а не молча проскочить.
+        source_values = {"store_count", "snapshot_lines", "unknown"}
+        referenced = {
+            m.group(1)
+            for m in re.finditer(r"`(snapshot_[a-z_]+)`", _reasons_section(doc))
+        }
+        unknown = sorted(referenced - known - source_values)
+        assert unknown == [], f"раздел причин ссылается на несуществующие коды: {unknown}"
+
+    def test_cached_verdict_never_claims_pending_against_disk(self, tmp_path):
+        """Кэш не имеет права заявить pending там, где диск говорит «маркера нет».
+
+        Проверка на ПОРЯДОК: сначала подкладываем cached-вердикт с pending=True,
+        затем спрашиваем чистый профиль.
+        """
+        from backend import encrypted_snapshot as es
+
+        clean = tmp_path / "clean_no_marker"
+        clean.mkdir(parents=True, exist_ok=True)
+        es._LAST_RECOVERY_VERDICT = {
+            "ok": False,
+            "pending": True,
+            "reason": "snapshot_recovery_pending",
+            "state": "COMMITTING",
+            "rolled_forward": False,
+        }
+        try:
+            verdict = es.restore_verdict(clean)
+        finally:
+            es._LAST_RECOVERY_VERDICT = None
+
+        assert verdict is not None
+        assert verdict["pending"] is False, "кэш перебил диск"
+        # Историческая часть сохранена.
+        assert verdict["state"] == "COMMITTING"
+        assert es.restore_verdict(clean) is None, "после сброса кэша — только диск"

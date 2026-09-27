@@ -22,7 +22,7 @@ from backend.encrypted_snapshot import (
     SnapshotOperationRefused,
     create_encrypted_snapshot,
     has_pending_restore,
-    read_pending_restore_verdict,
+    restore_verdict as restore_verdict_fn,
     recover_pending_restore_from_store,
     recover_pending_state,
 )
@@ -682,10 +682,12 @@ class AutoBackupManager:
             # поэтому раньше статус показывал «всё спокойно», и фоновый цикл
             # создавал снимок рваного набора. Сигнал дешёвый (iterdir) и не
             # трогает ключ.
-            restore_verdict = None
+            # N7: сначала диск (актуально), а если маркера уже нет — вердикт
+            # последней попытки из кэша модуля. Иначе докачка была бы видна
+            # только в логах: маркер убран, статус пуст, владелец не знает, что
+            # профиль был рваным и что именно перенесено.
             restore_pending = has_pending_restore(self.store.data_dir)
-            if restore_pending:
-                restore_verdict = read_pending_restore_verdict(self.store.data_dir)
+            restore_verdict = restore_verdict_fn(self.store.data_dir)
             blocked_by_pending = bool(recovery and recovery.get("pending")) or restore_pending
 
             # Что РЕАЛЬНО было последним: снимок, legacy-копия или отказ.

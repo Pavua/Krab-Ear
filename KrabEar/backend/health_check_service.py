@@ -45,14 +45,14 @@ def restore_pending_status(data_dir) -> dict:
     Не смогли проверить → считаем «есть» (fail-closed): молчаливый «всё хорошо»
     в диагностике опаснее ложной тревоги.
     """
-    from backend.encrypted_snapshot import (
-        has_pending_restore,
-        read_pending_restore_verdict,
-    )
+    from backend.encrypted_snapshot import has_pending_restore, restore_verdict
 
     try:
         pending = has_pending_restore(data_dir)
-        verdict = read_pending_restore_verdict(data_dir) if pending else None
+        # N7: пока маркер есть — читаем диск (истина); после докачки — кэш
+        # последней попытки, иначе «произошло восстановление» исчезает из
+        # диагностики в тот же момент, когда владельцу это важнее всего.
+        verdict = restore_verdict(data_dir)
     except Exception:  # noqa: BLE001 — диагностика не имеет права падать
         logger.warning("restore_pending_status: проверка не удалась", exc_info=True)
         return {
