@@ -472,6 +472,178 @@ def disk_free_bytes(target_dir: Any) -> int | None:
 
 
 # ----------------------------------------------------------------------
+# A5.2b3 — retention снимков нового протокола
+# ----------------------------------------------------------------------
+#
+# Спека §6: auto-backup gate стоит ДО retention/pruning. Здесь retention живёт
+# отдельной функцией и вызывается ТОЛЬКО после успешного снимка.
+#
+# Четыре границы, каждая закреплена тестом (карточка b3, решения 3–5):
+#   1. трогаются ТОЛЬКО новые форматы; legacy `backup_*`/`auto_backup_*` при ON
+#      не удаляются никогда — там могут лежать plaintext-копии, инвентаризация
+#      которых принадлежит A5.2c и решению владельца;
+#   2. лимиты на СЕМЕЙСТВА (`max_copies` отдельно для ручных и авто-снимков,
+#      отдельный потолок для pre-restore страховок), а не один общий счётчик:
+#      иначе ручной бэкап владельца вытеснялся бы авто-циклом;
+#   3. при ЖИВОМ pending restore не удаляется ничего: его pre-restore снимок —
+#      страховка незавершённой операции, а сам каталог маркера лежит в data_dir
+#      и сюда не попадает вовсе;
+#   4. OFF-профиль сюда не заходит (вызов только из ветки encrypted), поэтому
+#      прежнее поведение OFF не меняется ни в чём.
+
+# Порядок проверок в `snapshot_family` обязателен: `snapshot_prerestore_*`
+# начинается с `snapshot_`, поэтому «сначала prerestore, потом auto, потом
+# manual» — иначе страховка restore попала бы в счётчик ручных снимков.
+SNAPSHOT_FAMILY_PRERESTORE = "prerestore"
+SNAPSHOT_FAMILY_AUTO = "auto"
+SNAPSHOT_FAMILY_MANUAL = "manual"
+
+PRERESTORE_PREFIX = "snapshot_prerestore_"
+AUTO_SNAPSHOT_PREFIX = "auto_snapshot_"
+MANUAL_SNAPSHOT_PREFIX = "snapshot_"
+
+# Потолок для pre-restore страховок. Три — с запасом к «последнему»: у сорванного
+# restore остаётся страховка, а не один-единственный снимок, который следующий
+# же retention снёс бы.
+PRERESTORE_KEEP = 3
+
+
+def snapshot_family(name: str) -> str:
+    """Семейство каталога снимка: ``prerestore`` / ``auto`` / ``manual`` / ``''``.
+
+    ``''`` — не снимок нового протокола: legacy-копия, приватный staging или
+    постороннее имя. Fail-closed: неизвестное имя не попадает ни в одну семью и
+    потому никогда не будет удалено.
+    """
+    if name.startswith(PRERESTORE_PREFIX):
+        return SNAPSHOT_FAMILY_PRERESTORE
+    if name.startswith(AUTO_SNAPSHOT_PREFIX):
+        return SNAPSHOT_FAMILY_AUTO
+    if name.startswith(MANUAL_SNAPSHOT_PREFIX):
+        return SNAPSHOT_FAMILY_MANUAL
+    return ""
+
+
+def _prune_family(
+    *, backups_root: Path, family: str, keep: int, is_pending: Callable[[], bool]
+) -> list[Path]:
+    """Удаляет самые старые каталоги семейства сверх ``keep``.
+
+    Сортировка по имени — имена меточные и монотонные (``snapshot_<ts>``,
+    ``auto_snapshot_<ts>``, ``snapshot_prerestore_<stamp>-<rand>``), поэтому
+    «старый/новый» не требует чтения манифестов (счётчик остаётся дешёвым, как
+    ``_list_snapshot_dirs`` в auto_backup).
+
+    ``is_pending()`` перепроверяется ПЕРЕД каждым удалением: restore мог начаться
+    прямо посреди прохода, и его страховка не должна исчезнуть из-под него.
+    """
+    if keep < 0:
+        raise ValueError(f"keep должен быть >= 0, получено {keep}")
+    root = Path(backups_root)
+    if not root.is_dir():
+        return []
+    candidates = sorted(
+        p
+        for p in root.iterdir()
+        if p.is_dir()
+        and not p.is_symlink()
+        and not p.name.startswith(".")
+        and snapshot_family(p.name) == family
+    )
+    excess = len(candidates) - keep
+    if excess <= 0:
+        return []
+    removed: list[Path] = []
+    for path in candidates:  # старые → новые
+        if excess <= 0:
+            break
+        if is_pending():
+            logger.warning(
+                "encrypted_snapshot: retention %s прерван — начался restore, "
+                "его снимки не трогаем", family,
+            )
+            break
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:  # noqa: BLE001 — чистка не должна ронять цикл
+            logger.warning("encrypted_snapshot: не удалось удалить %s: %s", path.name, exc)
+            continue
+        removed.append(path)
+        excess -= 1
+    if removed:
+        try:
+            _fsync_dir(root)
+        except SnapshotOperationRefused as exc:  # уже удалили — молчать о fsync нельзя
+            logger.warning("encrypted_snapshot: retention не подтвердил каталог: %s", exc)
+    return removed
+
+
+def prune_snapshot_family(
+    *,
+    backups_root: Any,
+    data_dir: Any,
+    max_copies: int,
+    prerestore_keep: int = PRERESTORE_KEEP,
+) -> dict:
+    """Retention снимков нового протокола. Вызывается ТОЛЬКО после успеха.
+
+    Порядок (обе части обязательны):
+      * сначала снимки (``max_copies``), потом страховки restore
+        (``prerestore_keep``) — «сначала дешёвое, потом дорогое» не работает
+        здесь: обе операции необратимы, важен только факт успешного снимка;
+      * pre-restore страховки — последними, потому что удаление снимка, из
+        которого владелец собирался восстанавливаться, и удаление страховки
+        сорванного restore одинаково необратимы, а лимит у них разный.
+
+    Возвращает отчёт (без исключений): ``removed``/``skipped_reason``/
+    ``families`` — вызывающий логирует, а статус может показать.
+    """
+    root = Path(backups_root)
+
+    def _is_pending() -> bool:
+        try:
+            return bool(restore_marker_dirs(data_dir))
+        except SnapshotOperationRefused:
+            return True  # не смогли проверить — считаем «есть», не удаляем
+
+    if _is_pending():
+        # Граница 3: при живом pending restore не удаляется НИЧЕГО.
+        return {
+            "ok": True,
+            "removed": [],
+            "removed_count": 0,
+            "skipped_reason": REASON_RECOVERY_PENDING,
+            "families": {},
+        }
+
+    families = {
+        SNAPSHOT_FAMILY_MANUAL: max(0, int(max_copies)),
+        SNAPSHOT_FAMILY_AUTO: max(0, int(max_copies)),
+        SNAPSHOT_FAMILY_PRERESTORE: max(0, int(prerestore_keep)),
+    }
+    removed: list[Path] = []
+    for family, keep in families.items():
+        removed.extend(
+            _prune_family(
+                backups_root=root, family=family, keep=keep, is_pending=_is_pending
+            )
+        )
+    skipped = REASON_RECOVERY_PENDING if _is_pending() else None
+    if removed:
+        logger.info(
+            "encrypted_snapshot: retention новых форматов — удалено %d (%s)",
+            len(removed), ", ".join(sorted(p.name for p in removed)),
+        )
+    return {
+        "ok": True,
+        "removed": [str(p) for p in removed],
+        "removed_count": len(removed),
+        "skipped_reason": skipped,
+        "families": {name: keep for name, keep in families.items()},
+    }
+
+
+# ----------------------------------------------------------------------
 # Где лежат снимки и что можно восстанавливать
 # ----------------------------------------------------------------------
 

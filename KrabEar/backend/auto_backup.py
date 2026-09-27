@@ -22,6 +22,7 @@ from backend.encrypted_snapshot import (
     SnapshotOperationRefused,
     create_encrypted_snapshot,
     has_pending_restore,
+    prune_snapshot_family,
     restore_verdict as restore_verdict_fn,
     recover_pending_restore_from_store,
     recover_pending_state,
@@ -263,6 +264,28 @@ class AutoBackupManager:
             except Exception as exc:
                 logger.warning("Не удалось удалить авто-бэкап %s: %s", d, exc)
         return len(to_delete)
+
+    def _prune_snapshot_family(self) -> dict:
+        """A5.2b3: retention снимков нового протокола (после успешного снимка).
+
+        Отдельный вызов вместо расширения ``_prune_old_backups`` намеренно: у них
+        разные границы. Legacy-копии при ON не удаляются никогда (решение
+        владельца/A5.2c), а лимиты новых форматов задаёт владелец через
+        ``max_copies`` — то же самое число, что и для legacy, но в своей семье.
+
+        Retention не имеет права уронить цикл: любая ошибка здесь — предупреждение
+        в лог, а не отказ только что сделанного бэкапа.
+        """
+        try:
+            return prune_snapshot_family(
+                backups_root=self.backups_dir,
+                data_dir=self.store.data_dir,
+                max_copies=self.max_copies,
+            )
+        except Exception:  # noqa: BLE001 — снимок уже зафиксирован, не роняем цикл
+            logger.warning("auto_backup: retention снимков не выполнен", exc_info=True)
+            return {"ok": False, "removed": [], "removed_count": 0, "skipped_reason": None,
+                    "families": {}}
 
     def _store_lock(self) -> ContextManager[Any]:
         """Возвращает контекст-менеджер file-lock'а StateStore.
@@ -596,7 +619,15 @@ class AutoBackupManager:
             # Retention (A5.2a §6: gate ДО prune) — только для OFF-профиля.
             # При ON снимки нового протокола и legacy-копии НЕ удаляются:
             # инвентаризация и решение по старым plaintext — A5.2c.
-            if not result.get("encrypted"):
+            #
+            # A5.2b3: при ON снимок ТЕПЕРЬ имеет свой retention (только новые
+            # форматы) — но вызывается он ПОСЛЕ успешного снимка и никогда при
+            # отказе: иначе «место кончилось» удаляло бы ещё и старые копии,
+            # которые в этот момент тем более нужны. Legacy `backup_*` /
+            # `auto_backup_*` при этом не трогаются вовсе (см. решение 4).
+            if result.get("encrypted"):
+                self._prune_snapshot_family()
+            else:
                 self._prune_old_backups()
 
             meta["last_backup_ts"] = datetime.now(timezone.utc).isoformat()

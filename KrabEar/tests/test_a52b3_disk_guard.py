@@ -34,6 +34,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend import auto_backup as auto_backup_mod
 from backend import encrypted_snapshot as snap
 from backend.encrypted_snapshot import SnapshotOperationRefused
 from backend.history_crypto import HistoryCrypto
@@ -486,3 +487,222 @@ def test_shim_actually_blocks_the_real_binary(tmp_path):
     assert result.returncode == 1
     assert marker.read_text(encoding="utf-8").strip() == "probe"
     assert shutil.which("security") == str(shim)
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — retention только для новых форматов
+# ---------------------------------------------------------------------------
+
+def _fake_snapshot_dir(data_dir: Path, crypto, name: str, txid: str) -> Path:
+    """Настоящий COMMITTED-снимок под заданным именем (тот же протокол, что в проде)."""
+    return _make_snapshot(data_dir, crypto, name=name, txid=txid)
+
+
+def _plain_dir(parent: Path, name: str) -> Path:
+    """Каталог-заглушка (legacy-копия/постороннее имя) — без протокола снимка."""
+    path = parent / name
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "history.ndjson").write_text('{"id":"legacy"}\n', encoding="utf-8")
+    return path
+
+
+def _mgr(store, *, max_copies: int, interval_hours: float = 0.0):
+    return auto_backup_mod.AutoBackupManager(
+        store=store, interval_hours=interval_hours, max_copies=max_copies
+    )
+
+
+def _live_restore_marker(data_dir: Path, *, pre_restore: Path, target: Path) -> Path:
+    """Живой restore-маркер в data_dir (сорванный restore — как после crash)."""
+    staging = data_dir / f"{snap.RESTORE_STAGING_PREFIX}restore-20260101T000000Z-abcd"
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / snap.RESTORE_MARKER_FILENAME).write_text(
+        json.dumps(
+            {
+                "version": snap.RESTORE_MARKER_VERSION,
+                "state": "COMMITTING",
+                "transaction_id": "restore-20260101T000000Z-abcd",
+                "target_snapshot": str(target),
+                "pre_restore_snapshot": str(pre_restore),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return staging
+
+
+def _family(backups_root: Path, family: str) -> list[str]:
+    """Имена каталогов СЕМЕЙСТВА по классификатору модуля (не по префиксу в тесте)."""
+    if not backups_root.is_dir():
+        return []
+    return sorted(
+        p.name for p in backups_root.iterdir() if p.is_dir() and snap.snapshot_family(p.name) == family
+    )
+
+
+class TestRetentionCapsNewFormats:
+    def test_auto_snapshots_capped_by_max_copies_keeping_newest(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(3):
+            _fake_snapshot_dir(data_dir, crypto, f"auto_snapshot_20200101_00000{i}", f"tx-old-{i}")
+
+        result = _mgr(store, max_copies=2).check_and_backup()
+
+        assert result["backed_up"] is True
+        left = _family(data_dir / "backups", "auto")
+        assert len(left) == 2, left
+        # Из трёх старых остался самый новый + только что созданный.
+        assert "auto_snapshot_20200101_000000" not in left
+        assert "auto_snapshot_20200101_000002" in left
+
+    def test_manual_snapshots_capped_in_their_own_family(self, tmp_path, monkeypatch):
+        """Отдельная семья со своим лимитом: ручной бэкап не вытесняется авто."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(3):
+            _fake_snapshot_dir(data_dir, crypto, f"snapshot_20200101_00000{i}", f"tx-man-{i}")
+        _fake_snapshot_dir(data_dir, crypto, "auto_snapshot_20200101_000000", "tx-auto-0")
+
+        _mgr(store, max_copies=2).check_and_backup()
+
+        manual = _family(data_dir / "backups", "manual")
+        assert len(manual) == 2, manual
+        assert "snapshot_20200101_000002" in manual
+        # Авто-семья своим лимитом не тронута (1 старая + 1 новая = 2 при max_copies=2).
+        auto = _family(data_dir / "backups", "auto")
+        assert len(auto) == 2, auto
+        assert "auto_snapshot_20200101_000000" in auto
+
+    def test_prerestore_snapshots_capped(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(6):
+            _fake_snapshot_dir(
+                data_dir, crypto, f"snapshot_prerestore_20200101T00000{i}Z-0000", f"tx-pre-{i}"
+            )
+
+        _mgr(store, max_copies=7).check_and_backup()
+
+        left = _family(data_dir / "backups", "prerestore")
+        assert len(left) == snap.PRERESTORE_KEEP, left
+        assert left == sorted(left)[-snap.PRERESTORE_KEEP:]
+
+    def test_legacy_backups_never_deleted_at_on(self, tmp_path, monkeypatch):
+        """Инвентаризация legacy plaintext — A5.2c и решение владельца."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        legacy = [_plain_dir(data_dir / "backups", f"backup_20200101_00000{i}") for i in range(3)]
+        legacy += [
+            _plain_dir(data_dir / "backups", f"auto_backup_20200101_00000{i}") for i in range(3)
+        ]
+
+        result = _mgr(store, max_copies=1).check_and_backup()
+
+        assert result["backed_up"] is True
+        for path in legacy:
+            assert path.is_dir(), f"{path.name} удалён retention'ом"
+        status = _mgr(store, max_copies=1).get_auto_backup_status()
+        assert status["total_backups"] == 3
+
+    def test_off_profile_keeps_legacy_prune_and_touches_nothing_new(self, tmp_path, monkeypatch):
+        """OFF-профиль не меняется ни в чём (бит-в-бит прежнее поведение)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_off(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(3):
+            _plain_dir(data_dir / "backups", f"auto_backup_20200101_00000{i}")
+        snapshot_like = _plain_dir(data_dir / "backups", "snapshot_20200101_000000")
+
+        result = _mgr(store, max_copies=2).check_and_backup()
+
+        assert result["backed_up"] is True
+        assert result.get("backup_path", "").find("auto_backup_") != -1
+        left = _dirs(data_dir / "backups", "auto_backup_")
+        assert len(left) == 2, left
+        assert snapshot_like.is_dir()  # retention новых форматов при OFF не вызывается
+
+    def test_pending_restore_blocks_retention_entirely(self, tmp_path, monkeypatch):
+        """Ничего не удаляется, пока жив pending-маркер (в т.ч. его снимки)."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(5):
+            _fake_snapshot_dir(
+                data_dir, crypto, f"snapshot_prerestore_20200101T00000{i}Z-0000", f"tx-pre-{i}"
+            )
+        target = _fake_snapshot_dir(data_dir, crypto, "snapshot_20200101_000000", "tx-target")
+        pre = data_dir / "backups" / "snapshot_prerestore_20200101T000000Z-0000"
+        _live_restore_marker(data_dir, pre_restore=pre, target=target)
+        before = _dirs(data_dir / "backups")
+
+        result = snap.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=1
+        )
+
+        assert result["removed"] == []
+        assert result["skipped_reason"] == snap.REASON_RECOVERY_PENDING
+        assert _dirs(data_dir / "backups") == before
+        # Каталог, на который ссылается живой маркер, цел — это страховка.
+        assert pre.is_dir() and target.is_dir()
+
+    def test_retention_runs_only_after_a_successful_snapshot(self, tmp_path, monkeypatch):
+        """Отказ цикла не должен удалять ничего: prune — только ПОСЛЕ успеха."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        for i in range(4):
+            _fake_snapshot_dir(data_dir, crypto, f"auto_snapshot_20200101_00000{i}", f"tx-o-{i}")
+        before = _dirs(data_dir / "backups", "auto_snapshot_")
+        _install_usage(monkeypatch, _nothing)  # место кончилось → снимок не создастся
+
+        result = _mgr(store, max_copies=1).check_and_backup()
+
+        assert result["backed_up"] is False
+        assert result["skipped_reason"] == snap.REASON_INSUFFICIENT_SPACE
+        assert _dirs(data_dir / "backups", "auto_snapshot_") == before
+
+    def test_prune_leaves_no_temp_dirs_and_counters_agree(self, tmp_path, monkeypatch):
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed(store, ["одна"])
+        _install_usage(monkeypatch, _plenty)
+        for i in range(3):
+            _fake_snapshot_dir(data_dir, crypto, f"auto_snapshot_20200101_00000{i}", f"tx-o-{i}")
+
+        mgr = _mgr(store, max_copies=2)
+        mgr.check_and_backup()
+        status = mgr.get_auto_backup_status()
+
+        backups_root = data_dir / "backups"
+        assert sorted(p.name for p in backups_root.iterdir() if p.is_dir() and p.name.startswith(".")) == [
+            ".staging"
+        ]
+        assert status["encrypted_snapshots"] == len(_dirs(backups_root, "auto_snapshot_"))
+        assert status["max_copies"] == 2
