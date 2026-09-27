@@ -2192,6 +2192,8 @@ class HistoryService:
           - все цепочки записей (recording_chains.json) — W1730
           - семантический индекс (embeddings), если подключён
           - версии транскрипций, если подключён менеджер версий
+          - permanent deletion ledger (history_purged_ids.ndjson) — A5.2c1
+          - ``*.bak*``-копии истории и настроек — A5.2c1
 
         **Требует подтверждения (W1734 FIX-D)**: параметр ``confirm`` должен быть
         равен ``True`` (bool) или строке ``"PURGE_ALL"``. Без него возвращает ошибку
@@ -2208,7 +2210,14 @@ class HistoryService:
             call_sessions_deleted (int): количество удалённых сессий звонков (0 если N/A)
             transcripts_deleted (int): количество удалённых .md файлов в transcripts/ (W1749)
             rescue_deleted (int): количество удалённых файлов rescue-spill (R1, 2026-07-24)
+            obsidian_deleted (int): количество удалённых синхронизированных .md (W1766)
             semantic_purged (bool): True если семантический индекс очищен
+            backups_deleted (int): количество удалённых migration-backup каталогов (A5.2c1)
+            deletion_ledger_purged (bool): True если permanent ledger снесён (A5.2c1)
+            stale_copies_removed (int): количество удалённых ``*.bak*``-копий (A5.2c1)
+            encryption_key_shredded (bool): True если ключ истории удалён/не существовал (A5.2c1)
+            history_encryption_enabled_after (bool): состояние флага ПОСЛЕ purge;
+                purge флаг НЕ переключает (решение владельца) (A5.2c1)
             complete (bool): True если все вторичные шаги завершились без ошибок
             errors (list[str]): имена шагов, завершившихся с ошибкой (без PII)
         """
@@ -2506,15 +2515,20 @@ class HistoryService:
         # DataMigrator._create_backup() копирует history.ndjson и settings.json в
         # <data_dir>/backups/migration_backup_<ts>/.  Полные снапшоты истории
         # сохраняются там бессрочно и переживают purge без этого шага.
+        # A5.2c1: счётчик снимается в переменную уровня шага — ответ purge обязан
+        # машинно-читаемо сказать, сколько копий уничтожено (раньше число жило
+        # только в логе, и владелец не мог отличить « backups/ снесли» от «нет
+        # backups/ вообще»).
+        backups_deleted = 0
         try:
             import shutil as _shutil
             _backups_dir = Path(self.store.data_dir) / "backups"
             if _backups_dir.is_dir():
-                _backup_count = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
+                backups_deleted = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
                 _shutil.rmtree(_backups_dir, ignore_errors=True)
                 logger.info(
                     "purge_all_data: удалено %d migration backup директорий из %s",
-                    _backup_count,
+                    backups_deleted,
                     _backups_dir,
                 )
         except Exception:
@@ -3056,14 +3070,20 @@ class HistoryService:
         # delete_history_key — no-op без Keychain (KeystoreUnavailable на Linux/CI → не
         # ошибка purge). Сбрасываем ленивый крипто-кэш StateStore, чтобы следующая запись
         # (если шифрование оставлено включённым) сгенерировала НОВЫЙ ключ.
+        #
+        # A5.2c1: флаг `history_encryption_enabled` purge НЕ переключает — решение
+        # владельца остаётся его (политика молча не меняется). Ответ сообщает
+        # пост-фактум, что флаг остался включённым.
+        encryption_key_shredded = False
         try:
             from backend.crypto_keystore import delete_history_key, KeystoreUnavailable
             try:
                 delete_history_key()
+                encryption_key_shredded = True
             except KeystoreUnavailable:
-                # Нет Keychain (Linux/CI) → ключа нет → нечего shred'ить: не
+                # Нет Keychain (Linux/CI) → ключа нет → нечего shred'ить. Это не
                 # ошибка purge и НЕ повод пропустить остальные шаги.
-                pass
+                encryption_key_shredded = True
             self.store._history_crypto_initialized = False
             self.store._history_crypto_instance = None
         except Exception:
@@ -3108,6 +3128,31 @@ class HistoryService:
             logger.warning("purge_all_data: удаление содержимого temp_uploads/ не удалось", exc_info=True)
             secondary_errors.append("temp_uploads")
 
+        # --- A5.2c1: пост-фактум флага шифрования (НЕ переключаем его) ---
+        # Purge уничтожает данные, но политику не меняет: решение владельца
+        # остаётся его. Значение читается ПОСЛЕ всех шагов, чтобы ответ был
+        # честным («профиль остался на ON, но данных в нём нет»), а не обещанием.
+        #
+        # Сбой чтения НЕ пополняет `errors`: это не провал зачистки (ничего не
+        # осталось на диске из-за неудачного чтения флага), а невозможность
+        # сообщить состояние. ВНИМАНИЕ: в этом случае поле `false`, то есть
+        # «определить не удалось» здесь НЕ отличается от «выключено» — в ответе
+        # purge нет третьего состояния. Компенсирующий признак: тот же сбой
+        # делает битый settings.json, который виден в errors шага 15; а сам
+        # флаг при битом settings читается фейл-closed в True на всех путях
+        # записи (read_history_encryption_flag), то есть профиль не уйдёт
+        # молча в plaintext.
+        history_encryption_enabled_after = False
+        try:
+            history_encryption_enabled_after = bool(
+                self.store.load_settings().get("history_encryption_enabled", False)
+            )
+        except Exception:
+            logger.warning(
+                "purge_all_data: не удалось прочитать флаг history_encryption_enabled",
+                exc_info=True,
+            )
+
         # --- C. W1734: Audit log entry ---
         try:
             from backend.privacy_audit import get_privacy_audit_logger
@@ -3124,6 +3169,13 @@ class HistoryService:
                     "transcripts_deleted": transcripts_deleted,
                     "rescue_deleted": rescue_deleted,
                     "obsidian_deleted": obsidian_deleted,
+                    # A5.2c1: только счётчики и флаги состояния — ни ключа,
+                    # ни содержимого .bak-копий в комплайнс-трейл не пишется.
+                    "backups_deleted": backups_deleted,
+                    "deletion_ledger_purged": deletion_ledger_purged,
+                    "stale_copies_removed": stale_copies_removed,
+                    "encryption_key_shredded": encryption_key_shredded,
+                    "history_encryption_enabled_after": history_encryption_enabled_after,
                     "secondary_errors": secondary_errors,
                 },
             )
@@ -3144,6 +3196,12 @@ class HistoryService:
                 "rescue_deleted": rescue_deleted,
                 "obsidian_deleted": obsidian_deleted,
                 "semantic_purged": semantic_purged,
+                # A5.2c1: результат зачистки виден в crash-report, а не только в
+                # ответе IPC (ответ не переживает рестарт процесса).
+                "backups_deleted": backups_deleted,
+                "deletion_ledger_purged": deletion_ledger_purged,
+                "stale_copies_removed": stale_copies_removed,
+                "encryption_key_shredded": encryption_key_shredded,
             },
         )
         # --- W1749 CRITICAL-1: loud error when purge is only partial ---
@@ -3159,7 +3217,8 @@ class HistoryService:
 
         logger.info(
             "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
-            "obsidian=%d semantic_purged=%s errors=%s",
+            "obsidian=%d semantic_purged=%s backups=%d stale_copies=%d ledger_purged=%s "
+            "key_shredded=%s encryption_after=%s errors=%s",
             history_deleted,
             transcripts_deleted,
             chains_deleted,
@@ -3168,6 +3227,11 @@ class HistoryService:
             call_sessions_deleted,
             obsidian_deleted,
             semantic_purged,
+            backups_deleted,
+            stale_copies_removed,
+            deletion_ledger_purged,
+            encryption_key_shredded,
+            history_encryption_enabled_after,
             secondary_errors,
         )
         return {
@@ -3181,6 +3245,15 @@ class HistoryService:
             "rescue_deleted": rescue_deleted,
             "obsidian_deleted": obsidian_deleted,
             "semantic_purged": semantic_purged,
+            # A5.2c1: машинно-читаемый результат зачистки. Владелец должен
+            # видеть по ОТВЕТУ, что именно уничтожено, а не восстанавливать это
+            # по косвенным признакам (отсутствующий файл мог и не быть).
+            "backups_deleted": backups_deleted,
+            "deletion_ledger_purged": deletion_ledger_purged,
+            "stale_copies_removed": stale_copies_removed,
+            "encryption_key_shredded": encryption_key_shredded,
+            # Флаг политики purge НЕ меняет — сообщаем состояние пост-фактум.
+            "history_encryption_enabled_after": history_encryption_enabled_after,
             "complete": len(secondary_errors) == 0,
             "errors": secondary_errors,
         }

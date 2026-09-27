@@ -133,3 +133,37 @@ def keychain_available() -> bool:
     Не вызывает ``get_or_create_history_key`` (не создаёт ключ как побочный эффект).
     """
     return sys.platform == "darwin" and shutil.which("security") is not None
+
+
+def history_key_present() -> bool | None:
+    """Read-only проба «есть ли ключ шифрования истории» (A5.2c1).
+
+    Возвращает:
+        True  — ключ есть;
+        False — ключа нет;
+        None  — определить не удалось (Keychain недоступен/заблокирован).
+
+    Ключевой материал НЕ читается: тот же ``find-generic-password``, но БЕЗ ``-w``,
+    поэтому команда не выводит секрет. Проба ничего не создаёт — диагностика не
+    должна восстанавливать ключ побочным эффектом (иначе «проверить, есть ли
+    ключ» само создало бы ключ и тихо изменило состояние профиля).
+
+    ``None``, а не ``False``: «не смогли определить» и «ключа нет» — разные
+    состояния, и подменять одно другим здесь нельзя (fail-closed в сторону
+    неопределённости, не в сторону «всё хорошо»).
+    """
+    if not keychain_available():
+        return None
+    result = _run_security(
+        ["find-generic-password", "-s", _SERVICE, "-a", _ACCOUNT]
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == _ITEM_NOT_FOUND_EXIT_CODE:
+        return False
+    # Любой другой код — не «ключа нет», а «не смогли определить».
+    logger.warning(
+        "crypto_keystore: find-generic-password вернул код %d — наличие ключа неизвестно",
+        result.returncode,
+    )
+    return None

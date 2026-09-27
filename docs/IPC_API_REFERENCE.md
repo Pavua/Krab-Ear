@@ -3181,10 +3181,63 @@ Params: `{enabled}` (bool)
 Returns: `{ok, enabled, available}` или `{ok: false, error: "keychain_unavailable", enabled}`
 
 ### `purge_all_data`
-*(service.py)*  
+*(service.py → history_service.py)*  
 Privacy-purge с guard'ом авто-бэкапа: удаляет все персистентные хранилища с пользовательскими данными.  
 Params: `{confirm}` — обязателен (`true`/`"PURGE_ALL"`), иначе `confirmation_required`  
 Returns: `{ok, history_deleted, transcripts_deleted, chains_deleted, archive_deleted, bookmarks_deleted, call_sessions_deleted, rescue_deleted, obsidian_deleted, semantic_purged, complete, errors}`
+
+**A5.2c1 — поля результата зачистки.** Добавлены, чтобы результат был читаем
+машиной, а не «отсутствующим файлом = зачистили»:
+
+| Поле | Тип | Смысл |
+|---|---|---|
+| `backups_deleted` | int | сколько каталогов `backups/migration_backup_*` уничтожено (0 если их не было) |
+| `deletion_ledger_purged` | bool | permanent ledger `history_purged_ids.ndjson` снесён |
+| `stale_copies_removed` | int | сколько `*.bak*`-копий истории/настроек убрано |
+| `encryption_key_shredded` | bool | ключ истории удалён из Keychain (или его не было — Linux/CI) |
+| `history_encryption_enabled_after` | bool | состояние флага **после** purge |
+
+Два инварианта, которые поле `history_encryption_enabled_after` фиксирует явно:
+purge **не переключает** `history_encryption_enabled` (это решение владельца) и
+сообщает состояние **пост-фактум**, а не обещает результат. Профиль может
+остаться на `ON` — просто данных в нём больше нет.
+
+**Порядок «данные → ключ».** Ledger и `*.bak*`-копии сносятся **до** удаления
+ключа. Сбой шага данных не повод пропустить удаление ключа (иначе профиль
+остался бы с читаемым прошлым, что хуже), поэтому такие сбои попадают в
+`errors`/`complete`, но не блокируют шаг ключа.
+
+`history_purged_ids.ndjson` **больше не является исключением** из зоны purge.
+Раньше он был allowlisted («только ID, без PII»), и это ломало профиль: шаг
+компактирования дописывает в него ENC1-строки старым ключом, а purge затем
+shred'ит ключ, после чего первое чтение истории падало с `InvalidTag` →
+`HistoryEncryptionUnavailable`. Resurrection-защита возвращённой извне копии
+обеспечивается ledger'ом **самой копии**: restore берёт union
+«текущий ledger ∪ ledger снимка».
+
+### `get_diagnostics` — раздел `history_encryption` (A5.2c1)
+
+*(service.py → health_check_service.py)*
+
+```json
+"history_encryption": {"key_present": true}
+```
+
+`key_present` — **read-only** проба наличия ключа шифрования истории. Проба не
+создаёт ключ и не читает ключевой материал (`find-generic-password` вызывается
+без `-w`), поэтому диагностика не может восстановить ключ побочным эффектом.
+
+Три состояния, и они различаются намеренно:
+
+| Значение | Смысл |
+|---|---|
+| `true` | ключ есть |
+| `false` | ключа нет (например, purge его shred'нул) |
+| `null` | определить не удалось — Keychain недоступен или заблокирован |
+
+`null` — **не** то же самое, что `false`: «ключа нет» и «мы не смогли посмотреть»
+требуют от владельца разных действий. Исключение никогда не пробрасывается —
+`get_diagnostics` не имеет права падать из-за одной пробы.
 
 ---
 

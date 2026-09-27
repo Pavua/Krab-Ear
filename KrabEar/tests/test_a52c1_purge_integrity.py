@@ -477,6 +477,238 @@ class TestExternalCopyResurrectionStillBlocked:
 
 
 # ---------------------------------------------------------------------------
+# Task 2 — RED: машинно-читаемый результат purge
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeResultIsMachineReadable:
+    def test_purge_reports_every_new_field(self, tmp_path, fake_keychain):
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        (data_dir / "history.ndjson.bak-20260926-120000").write_text("x", encoding="utf-8")
+        (data_dir / "settings.json.bak").write_text("{}", encoding="utf-8")
+        (data_dir / "backups" / "migration_backup_20260926").mkdir(parents=True)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert result["encryption_key_shredded"] is True
+        assert result["deletion_ledger_purged"] is True
+        assert result["stale_copies_removed"] == 2, "history.bak + settings.bak"
+        assert result["backups_deleted"] == 1, "backups/migration_backup_20260926"
+        assert result["history_encryption_enabled_after"] is True, (
+            "purge НЕ переключает политику — это решение владельца"
+        )
+        assert _encryption_enabled_now(data_dir) is True, "флаг в settings не тронут"
+
+    def test_previous_contract_fields_survive(self, tmp_path, fake_keychain):
+        """Регрессия контракта: прежние поля на месте, confirm-гейт работает."""
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        svc = HistoryService(store=store)
+
+        refused = svc.handle_purge_all_data({})
+        assert refused["ok"] is False
+        assert refused["error"] == "confirmation_required"
+        assert (data_dir / "history.ndjson").read_text(encoding="utf-8").strip() != ""
+
+        result = svc.handle_purge_all_data({"confirm": True})
+        for field in (
+            "ok",
+            "history_deleted",
+            "chains_deleted",
+            "archive_deleted",
+            "bookmarks_deleted",
+            "call_sessions_deleted",
+            "transcripts_deleted",
+            "rescue_deleted",
+            "obsidian_deleted",
+            "semantic_purged",
+            "complete",
+            "errors",
+        ):
+            assert field in result, f"прежнее поле {field} пропало из ответа purge"
+
+    def test_purge_result_carries_no_secret_values(self, tmp_path, fake_keychain):
+        """В ответе/логе не должно быть ни ключа, ни содержимого .bak-копий."""
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        (data_dir / "settings.json.bak").write_text(
+            json.dumps({"hf_token": "СЕКРЕТ-МАРКЕР", "llm_api_key": "ЕЩЁ-СЕКРЕТ"}),
+            encoding="utf-8",
+        )
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+        blob = json.dumps(result, ensure_ascii=False, default=str)
+
+        assert "СЕКРЕТ-МАРКЕР" not in blob
+        assert "ЕЩЁ-СЕКРЕТ" not in blob
+        assert "секрет владельца" not in blob
+
+
+# ---------------------------------------------------------------------------
+# Task 2 — RED: признак ключа в get_diagnostics, строго read-only
+# ---------------------------------------------------------------------------
+
+
+class _DiagStore:
+    def __init__(self, data_dir: Path) -> None:
+        self.data_dir = data_dir
+
+    def count_active_items(self, lock_timeout_sec=None, nowait: bool = False) -> int:
+        return 3
+
+
+class _DiagSettings:
+    _cache_ttl = 5
+    _cache: dict = {}
+
+    def cached_settings(self, nowait: bool = False) -> dict:
+        return {}
+
+
+def _diag_service(data_dir: Path):
+    from backend.health_check_service import HealthCheckService
+
+    return HealthCheckService(
+        store=_DiagStore(data_dir),
+        health_checker=None,
+        startup_diagnostics=None,
+        integrity_checker=None,
+        llm_probe=None,
+        metrics_collector=None,
+        transcriber=None,
+        llm_rewriter=None,
+        settings_svc=_DiagSettings(),
+        start_time=0.0,
+        app_version="a52c1-test",
+        recorder=None,
+        last_stt_engine_ref=["mlx-whisper"],
+    )
+
+
+class TestDiagnosticsKeyPresenceProbe:
+    def test_diagnostics_reports_key_presence_without_creating_it(self, tmp_path, fake_keychain):
+        """Проба «есть ли ключ» не создаёт ключ — это и есть её смысл."""
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        assert ("KrabEar", "history-encryption-key") not in fake_keychain.items
+
+        before = _snapshot_counters()
+        diag = _diag_service(data_dir).handle_get_diagnostics({})
+        after = _delta(before)
+
+        probe = diag["history_encryption"]
+        assert probe["key_present"] is False, "на профиле без ключа — false"
+        assert ("KrabEar", "history-encryption-key") not in fake_keychain.items, (
+            "диагностика не должна восстанавливать ключ побочным эффектом"
+        )
+        assert after["creates"] == 0, "проба не создаёт ключ"
+        assert after["reads"] == 0, "проба не читает ключевой материал"
+        assert after["probes"] >= 1, "проба обязана быть read-only find без -w"
+        assert after["deletions"] == 0
+
+    def test_diagnostics_reports_present_key(self, tmp_path, fake_keychain):
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        fake_keychain.items[("KrabEar", "history-encryption-key")] = os.urandom(32)
+
+        diag = _diag_service(data_dir).handle_get_diagnostics({})
+
+        assert diag["history_encryption"]["key_present"] is True
+
+    def test_diagnostics_probe_never_leaks_key_material(self, tmp_path, fake_keychain):
+        """Ни ключ, ни его base64 не попадают в диагностику."""
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        raw = os.urandom(32)
+        fake_keychain.items[("KrabEar", "history-encryption-key")] = raw
+
+        diag = _diag_service(data_dir).handle_get_diagnostics({})
+        blob = json.dumps(diag, ensure_ascii=False, default=str)
+
+        assert base64.b64encode(raw).decode() not in blob
+        assert raw.hex() not in blob
+
+    def test_diagnostics_survives_unavailable_keystore(self, tmp_path, monkeypatch):
+        """Keychain недоступен → проба честно сообщает, а не роняет диагностику."""
+        import backend.crypto_keystore as ks
+
+        def _boom(args, *_a, **_kw):
+            raise ks.KeystoreUnavailable("Keychain недоступен")
+
+        monkeypatch.setattr(ks, "_run_security", _boom)
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+
+        diag = _diag_service(data_dir).handle_get_diagnostics({})
+
+        assert diag["history_encryption"]["key_present"] is None, (
+            "неопределённость должна отличаться от «ключа нет»"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Гейт полноты: audit_purge_coverage не должен быть слепым к .bak-семействам
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeCoverageGateSeesBakFamilies:
+    """`audit_purge_coverage` — единственный гейт полноты purge.
+
+    Дыра, найденная в этой волне: сканер не видел `*.bak*` (PERSIST_EXTENSIONS
+    их не содержит, а `_record_glob` отбрасывает шаблон без persist-расширения)
+    ⇒ удаление `.bak`-копий не было обязательным для гейта, и его откат не был
+    бы замечен. Проба ниже требует, чтобы семейство было ВИДИМО.
+    """
+
+    def _guard(self):
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_c1", path)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_guard_records_bak_family_as_a_store(self):
+        guard = self._guard()
+
+        found: dict = {}
+        guard._record_glob(found, "history_service", "x.py", "history.ndjson.bak*", 1)
+
+        assert found, "audit_purge_coverage обязан видеть .bak-семейство как хранилище"
+
+    def test_real_repo_has_no_uncovered_gaps(self, tmp_path):
+        guard = self._guard()
+        result = guard.run_audit()
+        assert result.gaps == [], f"пробелы полноты purge: {[g.store_id for g in result.gaps]}"
+
+    def test_ledger_is_no_longer_allowlisted(self):
+        guard = self._guard()
+        allowlisted = guard.load_allowlist()
+        assert "history_purged_ids.ndjson" not in allowlisted, (
+            "ledger больше не allowlisted-исключение — purge его чистит"
+        )
+
+    def test_allowlist_keeps_its_justification_comment_for_ledger(self):
+        raw = (
+            Path(__file__).resolve().parents[2] / "scripts" / "purge_coverage_allowlist.txt"
+        ).read_text(encoding="utf-8")
+        assert "history_purged_ids.ndjson" in raw, (
+            "решение о снятии ledger'а с allowlist обязано быть задокументировано "
+            "в самом файле allowlist — иначе следующий волнёц снова его вернёт"
+        )
+
+
+# ---------------------------------------------------------------------------
 # KEYCHAIN: два доказательства + инвариант «вне purge обращений нет»
 # ---------------------------------------------------------------------------
 
