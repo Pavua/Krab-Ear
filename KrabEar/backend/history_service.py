@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import stat
 import tempfile
 from datetime import datetime, timedelta, timezone
 import logging
@@ -85,6 +88,326 @@ def _is_safe_export_dir(output_dir: str) -> bool:
         except ValueError:
             continue
     return False
+
+
+# ---------------------------------------------------------------------------
+# A5.2c1 (B1) — permanent deletion ledger: сохранить содержимое, убить шифротекст
+# ---------------------------------------------------------------------------
+
+# Префикс шифротекста истории (SENTINEL `HistoryCrypto`). Дублируется здесь
+# сознательно: purge работает с ledger'ом, который может остаться ENC1 даже при
+# недоступном crypto-инстансе, и не должен импортировать crypto ради проверки.
+_ENC_SENTINEL = "ENC1:"
+
+
+def _journal_holds_ciphertext(path: Path) -> bool:
+    """Есть ли ENC1-строки в журнале. Читает БЕЗ блокировок.
+
+    На нерегулярной записи (fifo/socket/каталог) НЕ открывает файл: `open()`
+    fifo блокируется навсегда, и приватный отчёт в углу чистки оборачивается в
+    остановку всего бэкенда (все читатели истории и настроек делят один flock).
+    """
+    try:
+        if not path.is_file() or path.is_symlink():
+            return False
+        return any(
+            line.strip().startswith(_ENC_SENTINEL)
+            for line in path.read_text(encoding="utf-8").splitlines()
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
+
+
+def _wipe_journal_ciphertext(path: Path) -> bool:
+    """Снести журнал целиком. True — записи действительно не осталось.
+
+    Отдельная функция (а не инлайн-unlink) по двум причинам: вызывающий обязан
+    получить **факт** исчезновения, а не факт вызова; и её имя используется
+    гейтом `audit_purge_coverage` как доказательство уничтожения шифротекста для
+    журналов из `_CIPHERTEXT_DESTRUCTION_STORES` (путь без такого доказательства
+    гейт засчитывать перестаёт).
+    """
+    path.unlink(missing_ok=True)
+    return not os.path.lexists(path)
+
+
+def _irregular_ledger_kind(path: Path) -> str | None:
+    """Что за запись лежит на пути ledger'а, если это НЕ обычный файл.
+
+    Только ``lstat`` — ничего не открываем. None — путь свободен или это
+    обычный файл профиля.
+    """
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return "неразборчивая запись"
+    if stat.S_ISREG(st.st_mode):
+        return None
+    if stat.S_ISLNK(st.st_mode):
+        return "symlink"
+    if stat.S_ISDIR(st.st_mode):
+        return "каталог"
+    if stat.S_ISFIFO(st.st_mode):
+        return "fifo"
+    if stat.S_ISSOCK(st.st_mode):
+        return "сокет"
+    return "нерегулярная запись"
+
+
+def _evict_ledger_entry(path: Path, kind: str) -> Path | None:
+    """Освободить путь ledger'а от нерегулярной записи. None — не вышло.
+
+    Разное поведение по типам НЕ случайно (N2-ревью):
+
+    * **каталог** — содержимое на пути ledger'а может быть чем угодно, вплоть до
+      открытой копии истории владельца (``leftover_history.txt``). Такое
+      содержимое не имеет права переживать privacy-purge, поэтому каталог
+      сносится целиком (``rmtree``). Раньше он уводился rename'ом в
+      ``….irregular/``, где не матчил ни один sweep-паттерн, — то есть
+      переживал purge вместе со содержимым.
+    * **fifo/сокет** — содержимого, которое надо сохранить, здесь нет, но и
+      удалять их на месте НЕЛЬЗЯ: это не наш объект, а ``rename`` безопасен и не
+      открывает файл. Симлинк — тот же случай (и тот же «rename», чтобы цель
+      вне профиля не разыменовывалась).
+    """
+    if kind == "каталог":
+        import shutil as _shutil
+
+        _shutil.rmtree(path)
+        return None
+    for suffix in range(100):
+        aside = path.with_name(f"{path.name}.irregular{suffix or ''}")
+        if os.path.lexists(aside):
+            continue
+        try:
+            os.rename(path, aside)
+            return aside
+        except OSError:
+            return None
+    # 100 свободных имён не нашлось — исчерпание вариантов, тот же «не смогли».
+    return None
+
+
+def _purge_wipe_managed_journals(
+    *, data_dir: Any, secondary_errors: list[str], compact_failed: bool
+) -> None:
+    """Снести безусловно все шифруемые журналы профиля. Вызывается ПОД локом.
+
+    A5.2c1 (B1‴/N1′): инвариант «purge не оставляет шифротекст, который не сможет
+    уничтожить». Журналы зашифрованы тем же codec'ом, что и история
+    (``_append_ndjson``), и чистятся компактированием ТОЛЬКО при успехе, поэтому
+    их снос не может быть условным.
+
+    Шесть delta-журналов (status/tags/favorites/text_updates/action_items/
+    annotations) перечислены в контейнере цикла: в профиле владельца они
+    непустые, и их ENC1 после провала компактирования делал профиль нечитаемым
+    (проба: ``ENC1 ПОСЛЕ purge: [('history_status.ndjson', 2)]`` →
+    ``HistoryEncryptionUnavailable``).
+
+    Идемпотентна: вызывается дважды — под локом в начале зачистки и под локом
+    прямо перед shred'ом ключа (шаг 38-1). Повтор нужен, чтобы закрыть окно
+    «после этих сносов — до shred'а»: лок первого вызова к тому моменту уже
+    отпущен, и писатель метаданных успевает записать ENC1.
+    """
+    # 1) Журнал самой истории — только если компактирование не прошло: иначе
+    #    компактирование его уже переписало, а лишний unlink был бы вторым
+    #    конкурентным вызовом без причины.
+    if compact_failed:
+        try:
+            _history_path = Path(data_dir) / "history.ndjson"
+            if not _wipe_journal_ciphertext(_history_path):
+                _flag_step_error(secondary_errors, "history_ciphertext")
+            else:
+                logger.info(
+                    "purge_all_data: compact не прошёл — history.ndjson снесён, "
+                    "иначе он остался бы нечитаемым после shred'а ключа"
+                )
+        except Exception:
+            logger.warning(
+                "purge_all_data: не удалось снести history.ndjson после сбоя compact",
+                exc_info=True,
+            )
+            _flag_step_error(secondary_errors, "history_ciphertext")
+
+    # 2) Календарные ссылки (wave-36 MED B3): заголовки встреч — PII. Прод-писатель
+    #    — `_append_ndjson` (state_store.py:2399), тот же шифрующий путь, значит
+    #    ENC1 возможен и снос обязан быть доказуемо безусловным. Заодно прежний
+    #    `unlink(missing_ok=True)` не проверял, что файл исчез.
+    try:
+        _calendar_links_path = Path(data_dir) / "history_calendar_links.ndjson"
+        if not _wipe_journal_ciphertext(_calendar_links_path):
+            _flag_step_error(secondary_errors, "calendar_links")
+    except Exception:
+        logger.warning(
+            "purge_all_data: удаление history_calendar_links.ndjson не удалось",
+            exc_info=True,
+        )
+        _flag_step_error(secondary_errors, "calendar_links")
+
+    # 3) Журнал томбестонов — безусловно.
+    #
+    # ЧЕСТНОСТЬ ПРО ПОТЕРЮ: если compact не прошёл, строки томбестонов —
+    # единственный носитель удалённых ID (permanent-реестр их ещё не видел, он
+    # заполняется именно в compact). Их удаление означает неполный реестр, и
+    # это ОБЯЗАНО быть видно в ответе, а не спрятано: шаг `tombstone_registry`
+    # + `complete: false`.
+    try:
+        _tombstones_path = Path(data_dir) / "history_tombstones.ndjson"
+        _tombstones_had_rows = (
+            _tombstones_path.is_file() and _tombstones_path.stat().st_size > 0
+        )
+        if not _wipe_journal_ciphertext(_tombstones_path):
+            _flag_step_error(secondary_errors, "tombstones")
+        elif _tombstones_had_rows and compact_failed:
+            logger.warning(
+                "purge_all_data: compact не прошёл, поэтому удалённые ID были "
+                "только в журнале томбестонов — реестр удалённых ID НЕПОЛОН"
+            )
+            _flag_step_error(secondary_errors, "tombstone_registry")
+    except Exception:
+        logger.warning(
+            "purge_all_data: удаление history_tombstones.ndjson не удалось", exc_info=True
+        )
+        _flag_step_error(secondary_errors, "tombstones")
+
+    # 4) Остальные delta-журналы. Тот же класс, что у истории, и шире него: эти
+    #    журналы пишутся тем же шифрующим `_append_ndjson` и при провале compact
+    #    тоже оставляют ENC1. Содержимое — метаданные записей, которые purge
+    #    всё равно уничтожает, поэтому потери реестра удалений здесь нет.
+    _delta_journals = [
+        "history_status.ndjson",
+        "history_tags.ndjson",
+        "history_favorites.ndjson",
+        "history_text_updates.ndjson",
+        "history_action_items.ndjson",
+        "history_annotations.ndjson",
+    ]
+    for _journal_name in _delta_journals:
+        try:
+            _delta_path = Path(data_dir) / _journal_name
+            if _wipe_journal_ciphertext(_delta_path):
+                continue
+        except Exception:
+            logger.warning(
+                "purge_all_data: удаление %s не удалось", _journal_name, exc_info=True
+            )
+        _flag_step_error(secondary_errors, "delta_journals")
+
+
+def _flag_step_error(secondary_errors: list[str], name: str) -> None:
+    """Добавить имя сбойного шага, не дублируя.
+
+    Один и тот же шаг может упасть в двух местах (например, ledger — в
+    pre-flight и в 37a). Два одинаковых имени в `errors` выглядят как два разных
+    сбоя и мешают отличить «шаг упал» от «шаг упал дважды».
+    """
+    if name not in secondary_errors:
+        secondary_errors.append(name)
+
+
+def _rematerialize_ledger_plaintext(ledger_path: Path, store: Any) -> set[str]:
+    """Переписать permanent deletion ledger открытым, вернуть множество ID.
+
+    B1 (adversarial-ревью): удалять ledger целиком нельзя — для ID, удалённых
+    ПОСЛЕ снимка, он единственная защита от resurrection, и purge открывал дыру
+    молча (``ledger_blocked: 0``, полный текст записи возвращался). Ledger
+    хранит ТОЛЬКО идентификаторы, поэтому переживает purge в открытом виде без
+    утечки PII; уничтожается только шифротекст, который после shred'а ключа
+    стал бы навсегда нечитаемым мусором (исходный дефект волны).
+
+    Raises:
+        Exception: любой сбой чтения/расшифровки/записи. Вызывающий обязан решать
+            судьбу файла сам — молча проглатывать здесь нельзя: наверху стоит
+            выбор между «профиль нечитаем» и «реестр потерян», и он должен быть
+            явным.
+    """
+    from backend.history_crypto import HistoryCrypto
+
+    ids: set[str] = set()
+    unparsable = 0
+    raw = ledger_path.read_text(encoding="utf-8")
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(_ENC_SENTINEL) or HistoryCrypto.is_encrypted(line):
+            crypto = store._get_history_crypto()
+            if crypto is None:
+                raise RuntimeError(
+                    "deletion ledger содержит шифротекст, а ключ недоступен — "
+                    "перематериализация невозможна"
+                )
+            line = crypto.decrypt_line(line)
+        payload = safe_json_loads(line)
+        item_id = str(payload.get("id", "")).strip() if isinstance(payload, dict) else ""
+        if not item_id:
+            # Строки без ID нечего защищать: ни один ридер не извлечёт из неё
+            # идентификатор. Молча выбрасываем, но СЧИТАЕМ и логируем.
+            unparsable += 1
+            continue
+        ids.add(item_id)
+    if unparsable:
+        logger.warning(
+            "purge_all_data: %d строк(и) deletion ledger без пригодного id — "
+            "не переносятся в открытый ledger", unparsable,
+        )
+
+    # Атомарная замена: tmp + fsync + rename, как принято для журналов проекта.
+    # Имя tmp совпадает с семейством `*.tmp`, которое purge тоже зачищает —
+    # то есть «зависший» tmp этого шага не может пережить purge.
+    tmp_path = ledger_path.with_name(ledger_path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        for item_id in sorted(ids):
+            fh.write(json.dumps({"id": item_id}, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp_path.replace(ledger_path)
+    return ids
+
+
+def _remove_derived_copy(path: Path) -> None:
+    """Снести производную копию данных: файл, симлинк (сам линк) или каталог.
+
+    L3 (adversarial-ревью): прежняя проверка `is_file()` молча пропускала и
+    каталог, и висячий симлинк — на диске оставалась папка с копией истории,
+    а purge рапортовала успех. Здесь каждая форма записи снимается явно:
+
+    * symlink  — снимается САМА ссылка, цель не разыменовывается (иначе purge
+      снёс бы или переписал файл вне профиля);
+    * каталог  — сносится целиком (`rmtree`): имя совпало с шаблоном копии,
+      значит содержимое — производные данные;
+    * прочее   — fifo/socket/device: трогать нельзя, но молчать нельзя, поэтому
+      вызывающий увидит запись через `lexists` и объявит шаг невыполненным.
+    """
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.is_dir():
+        import shutil as _shutil
+
+        _shutil.rmtree(path)
+        return
+    raise OSError(f"{path}: нерегулярная запись (не файл, не каталог, не symlink)")
+
+
+def _ledger_holds_no_ciphertext(ledger_path: Path) -> bool:
+    """Проверка ПОСЛЕ перематериализации: в ledger'е не осталось ENC1-строк.
+
+    Fail-closed: отсутствующий файл — «шифротекста нет» (условие выполнено);
+    нечитаемый файл — «не выполнено» (purge обязан об этом сообщить, а не
+    рапортовать успех по незнанию).
+    """
+    if not ledger_path.exists():
+        return True
+    try:
+        return not any(
+            line.strip().startswith(_ENC_SENTINEL)
+            for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 class HistoryService:
@@ -2192,6 +2515,8 @@ class HistoryService:
           - все цепочки записей (recording_chains.json) — W1730
           - семантический индекс (embeddings), если подключён
           - версии транскрипций, если подключён менеджер версий
+          - permanent deletion ledger (history_purged_ids.ndjson) — A5.2c1
+          - ``*.bak*``-копии истории и настроек — A5.2c1
 
         **Требует подтверждения (W1734 FIX-D)**: параметр ``confirm`` должен быть
         равен ``True`` (bool) или строке ``"PURGE_ALL"``. Без него возвращает ошибку
@@ -2208,7 +2533,17 @@ class HistoryService:
             call_sessions_deleted (int): количество удалённых сессий звонков (0 если N/A)
             transcripts_deleted (int): количество удалённых .md файлов в transcripts/ (W1749)
             rescue_deleted (int): количество удалённых файлов rescue-spill (R1, 2026-07-24)
+            obsidian_deleted (int): количество удалённых синхронизированных .md (W1766)
             semantic_purged (bool): True если семантический индекс очищен
+            backups_deleted (int): количество удалённых migration-backup каталогов (A5.2c1)
+            deletion_ledger_purged (bool): True если permanent ledger больше не
+                содержит шифротекст — перематериализован открытым или снесён (A5.2c1/B1)
+            deletion_ledger_ids_preserved (int): сколько удалённых ID сохранено в
+                открытом ledger (B1 — реестр resurrection не должен исчезать)
+            stale_copies_removed (int): количество удалённых ``*.bak*``-копий (A5.2c1)
+            encryption_key_shredded (bool): True если ключ истории удалён/не существовал (A5.2c1)
+            history_encryption_enabled_after (bool): состояние флага ПОСЛЕ purge;
+                purge флаг НЕ переключает (решение владельца) (A5.2c1)
             complete (bool): True если все вторичные шаги завершились без ошибок
             errors (list[str]): имена шагов, завершившихся с ошибкой (без PII)
         """
@@ -2224,14 +2559,180 @@ class HistoryService:
                 ),
             }
 
+        secondary_errors: list[str] = []
+
         # --- 1. Удалить все записи истории (primary — must succeed) ---
         with self.store._lock():
-            active = self.store._load_active_items_unlocked()
-            for item in active:
-                self.store._append_ndjson(self.store.tombstones_path, {"id": item.id})
-            history_deleted = len(active)
+            # --- 1-pre. A5.2c1 (M1′/LOW1) pre-flight пути deletion ledger'а.
+            #
+            # Проверки в 37a НЕДОСТАТОЧНЫ: шаг 1 ниже ТОМБЕЙТОНИТ активные записи
+            # в тот же `history_purged_ids.ndjson`, то есть ссылка успела бы
+            # получить ENC1-строки СНАРУЖИ профиля — прежде чем 37a её заметит.
+            #
+            # Проверка стоит ВНУТРИ `store._lock()`: снаружи оставалось окно
+            # между pre-flight и первой записью, в которое локальный процесс
+            # успевал подставить symlink и забрать 106 байт ENC1 себе (LOW1).
+            # Полностью окно это не закрывает — тот, кто лок не берёт, может
+            # выиграть гонку и позже; остаток задокументирован, а цена
+            # (шифротекст снаружи + потеря реестра) ловится в 37a и объявляется
+            # в errors.
+            #
+            # M1′: проверяется ЛЮБАЯ нерегулярная запись, а не только symlink.
+            # `open()` fifo блокируется навсегда, а ledger читается уже здесь
+            # (`_load_active_items_unlocked` → `_load_deleted_ids_unlocked`) под
+            # ОБЩИМ flock — то есть одна неровная запись в углу приватной
+            # зачистки уводила в таймаут всех читателей истории и настроек.
+            # Никаких `open()` на проверяемый путь: только `lstat`.
+            # Путь берём ОТ `data_dir` — тем же способом, что и шаг 37a, а не из
+            # `store.purged_ids_path`: атрибут есть не у всех store-ов (часть
+            # тестов использует частичные подмены), и проверка безопасности не
+            # должна зависеть от наличия внутреннего атрибута.
+            _preflight_dir = getattr(self.store, "data_dir", None)
+            if _preflight_dir is not None:
+                try:
+                    _ledger_preflight = Path(_preflight_dir) / "history_purged_ids.ndjson"
+                except (TypeError, ValueError, OSError):
+                    # Хранилище без пригодного пути — не файловый профиль,
+                    # ledger'а нет. Ломать общий purge из-за этого нельзя.
+                    _ledger_preflight = None
+                if _ledger_preflight is not None:
+                    _irregular = _irregular_ledger_kind(_ledger_preflight)
+                    if _irregular == "symlink":
+                        # Ссылка снимается САМА, цель не разыменовывается:
+                        # томбестоны пойдут в свежий файл профиля.
+                        try:
+                            _ledger_preflight.unlink()
+                        except OSError:
+                            logger.warning(
+                                "purge_all_data: %s — symlink, снять не удалось",
+                                _ledger_preflight,
+                                exc_info=True,
+                            )
+                            _flag_step_error(secondary_errors, "deletion_ledger")
+                        else:
+                            logger.warning(
+                                "purge_all_data: %s — symlink; ссылка снята до записи, "
+                                "томбестоны пойдут в свежий файл профиля",
+                                _ledger_preflight,
+                            )
+                            _flag_step_error(secondary_errors, "deletion_ledger")
+                    elif _irregular is not None:
+                        # fifo/сокет/каталог: НЕ открываем. Но и не оставляем на
+                        # пути: иначе чтение ledger'а в этом же шаге на fifo
+                        # заблокируется навсегда под общим локом (M1′).
+                        # Каталог сносится целиком (N2 — его содержимое может
+                        # быть открытой копией истории и не имеет права пережить
+                        # purge); fifo/сокет/симлинк уводятся rename'ом, который
+                        # не открывает файл и не разыменовывает цель.
+                        try:
+                            _aside = _evict_ledger_entry(_ledger_preflight, _irregular)
+                        except OSError:
+                            _aside = None
+                            logger.warning(
+                                "purge_all_data: %s — %s; освободить путь не удалось",
+                                _ledger_preflight,
+                                _irregular,
+                                exc_info=True,
+                            )
+                        else:
+                            logger.warning(
+                                "purge_all_data: %s — %s вместо файла профиля; %s. "
+                                "Запись не читалась; реестр удалённых ID может быть "
+                                "неполным — см. errors",
+                                _ledger_preflight,
+                                _irregular,
+                                (
+                                    f"уведена в {_aside.name}"
+                                    if _aside is not None
+                                    else "снесена вместе с содержимым"
+                                    if _irregular == "каталог"
+                                    else "уведена в сторону"
+                                ),
+                            )
+                        _flag_step_error(secondary_errors, "deletion_ledger")
+                        if os.path.lexists(_ledger_preflight):
+                            # N3: ветка ДОСТИЖИМА, а не «страховка на
+                            # невозможное» — rename может вернуть ENOENT (запись
+                            # исчезла между lstat и rename), EPERM/EACCES или
+                            # исчерпать 100 вариантов `.irregular`. Оставлять запись
+                            # на пути НЕЛЬЗЯ: следующая же операция с путём уйдёт в
+                            # блокировку под общим flock, то есть «записать ошибку
+                            # и продолжить» здесь означало бы ВИСЯЩИЙ purge. Поэтому
+                            # отказ громкий и до шага 1 — владелец увидит его сразу.
+                            logger.error(
+                                "purge_all_data: %s — %s не удалось освободить; "
+                                "purge прерван, чтобы не читать этот путь",
+                                _ledger_preflight,
+                                _irregular,
+                            )
+                            self._push_error(
+                                code="history.purge_preflight_failed",
+                                message_debug=(
+                                    f"purge pre-flight не смог освободить путь ledger'а: "
+                                    f"{_irregular}"
+                                ),
+                                context={"data_dir": str(self.store.data_dir)},
+                            )
+                            # N4: отказ ПИШЕТСЯ в комплаенс-трейл. Ранний возврат
+                            # происходит до `log_event` ниже, поэтому без этой
+                            # записи `privacy_audit.log` не показал бы, что purge
+                            # отказан, — а «в отчёте чисто» читается как «владелец
+                            # стёр профиль». Общая IPC-аудит-запись это частично
+                            # смягчала, но не отменяет: действие не выполнено, и
+                            # оно должно быть видно именно в журнале privacy-purge.
+                            # Ключ `message` добавлен по образцу `confirmation_required`
+                            # — иначе клиенту нечего показать.
+                            try:
+                                from backend.privacy_audit import get_privacy_audit_logger
 
-        secondary_errors: list[str] = []
+                                get_privacy_audit_logger().log_event(
+                                    # Тот же category/action, что у успешного пути
+                                    # ниже, — иначе отказ и выполнение разъедутся
+                                    # по двум разным «действиям» в комплаенс-трейле.
+                                    category="privacy",
+                                    action="purge_all_data",
+                                    details={
+                                        # Отказ, а не выполнение: иначе в трейле
+                                        # лежал бы `purge_all_data` без единого
+                                        # счётчика и читался бы как успех.
+                                        "result": "refused",
+                                        "reason": "preflight_failed",
+                                        "ledger_entry": _irregular,
+                                        "secondary_errors": list(secondary_errors),
+                                    },
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "purge_all_data: privacy audit log failed (preflight)",
+                                    exc_info=True,
+                                )
+                            return {
+                                "ok": False,
+                                "error": "preflight_failed",
+                                "message": (
+                                    "Путь permanent deletion ledger'а занят нерегулярной "
+                                    "записью, и освободить его не удалось. Purge "
+                                    "прерван ДО любых удалений, чтобы не читать этот "
+                                    "путь. Освободите путь вручную и повторите."
+                                ),
+                                "errors": list(secondary_errors),
+                                "complete": False,
+                            }
+
+            active = self.store._load_active_items_unlocked()
+            # A5.2c1 (B1‴): собственные томбестоны purge пишутся ОТКРЫТЫМИ.
+            # `_append_ndjson` кодирует строку через `_maybe_encrypt`, поэтому
+            # после ENOSENT/сбоя компактирования (шаг 1b) эти ENC1-строки
+            # пережили бы shred ключа и сделали профиль нечитаемым навсегда.
+            # Ровно то же свойство, что и решение B1 для permanent-реестра: в
+            # журнале только ID, шифровать их нечего, а создавать неуничтожимый
+            # шифротекст внутри шага, который обязан чистить, — нельзя.
+            for item in active:
+                self.store._append_ndjson_raw(
+                    self.store.tombstones_path,
+                    json.dumps({"id": item.id}, ensure_ascii=False),
+                )
+            history_deleted = len(active)
 
         # --- 1b. W1749 CRITICAL-2: compact history.ndjson to physically erase transcript text.
         # Tombstoning alone only logically hides items; the cleartext remains in the NDJSON
@@ -2243,20 +2744,22 @@ class HistoryService:
             logger.warning("purge_all_data: compact failed — cleartext may remain in history.ndjson", exc_info=True)
             secondary_errors.append("compact")
 
-        # --- 1b-2. wave-36 (MED B3): physically delete history_calendar_links.ndjson.
-        # CalendarLinker stores {item_id → Calendar.app event title/id} in this StateStore
-        # sidecar journal.  compact_with_stats() (step 1b) only *selectively rewrites* it,
-        # keeping entries whose id is still active — but (a) it is wrapped in try/except above
-        # so a failed compaction leaves the FULL journal on disk, and (b) even on success the
-        # file itself survives (truncated content, not removed).  Event titles are user PII
-        # (meeting names around real people).  An explicit unlink guarantees the journal is
-        # gone after a privacy-wipe regardless of compaction outcome.  state_store.__init__
-        # re-touches an empty file on next start, so the store stays consistent.
-        try:
-            (Path(self.store.data_dir) / "history_calendar_links.ndjson").unlink(missing_ok=True)
-        except Exception:
-            logger.warning("purge_all_data: удаление history_calendar_links.ndjson не удалось", exc_info=True)
-            secondary_errors.append("calendar_links")
+        # --- 1b-1 … 1b-4 (A5.2c1 B1‴/N1): безусловный снос журналов.
+        # Вызывается ПОД `store._lock()`: каждый писатель метаданных лок берёт
+        # (`set_paste_status` → `with self._lock():` + `_append_ndjson(status_path, …)`,
+        # state_store.py:1067-1070), а снос без лока оставлял окно, в котором запись
+        # метаданных заново создавала `history_status.ndjson` со строкой ENC1 — а shred
+        # ключа ниже делал её нечитаемой навсегда (тот же класс, что закрывала волна,
+        # только в узком окне). Лок реентерабелен: EX→EX — no-op по per-thread
+        # depth-счётчику, вложенного SH→EX здесь нет (блок начинается ПОСЛЕ выхода из
+        # `with` шага 1). Второй вызов — в шаге 38-1, под тем же локом, прямо перед
+        # shred'ом: без него окно «после этих сносов — до shred'а» оставалось открытым.
+        with self.store._lock():
+            _purge_wipe_managed_journals(
+                data_dir=self.store.data_dir,
+                secondary_errors=secondary_errors,
+                compact_failed="compact" in secondary_errors,
+            )
 
         # --- 1c. W1749 CRITICAL-2 / W1771 GAP-1: delete ALL export artefacts in transcripts/.
         # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/
@@ -2506,15 +3009,20 @@ class HistoryService:
         # DataMigrator._create_backup() копирует history.ndjson и settings.json в
         # <data_dir>/backups/migration_backup_<ts>/.  Полные снапшоты истории
         # сохраняются там бессрочно и переживают purge без этого шага.
+        # A5.2c1: счётчик снимается в переменную уровня шага — ответ purge обязан
+        # машинно-читаемо сказать, сколько копий уничтожено (раньше число жило
+        # только в логе, и владелец не мог отличить « backups/ снесли» от «нет
+        # backups/ вообще»).
+        backups_deleted = 0
         try:
             import shutil as _shutil
             _backups_dir = Path(self.store.data_dir) / "backups"
             if _backups_dir.is_dir():
-                _backup_count = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
+                backups_deleted = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
                 _shutil.rmtree(_backups_dir, ignore_errors=True)
                 logger.info(
                     "purge_all_data: удалено %d migration backup директорий из %s",
-                    _backup_count,
+                    backups_deleted,
                     _backups_dir,
                 )
         except Exception:
@@ -2975,25 +3483,245 @@ class HistoryService:
                 )
                 secondary_errors.append("terminal_cache")
 
+        # --- 37a. A5.2c1 + B1 (adversarial-ревью): УНИЧТОЖИТЬ ШИФРОТЕКСТ
+        # permanent deletion ledger (history_purged_ids.ndjson), СОХРАНИВ СОДЕРЖИМОЕ.
+        #
+        # Исходный дефект (зачем шаг вообще нужен): файл был allowlisted-исключением
+        # («ID-only, без PII») и purge его НЕ чистил. Шаг 1b (compact) дописывает в
+        # ledger ENC1-строки СТАРЫМ ключом, а шаг 38 shred'ит ключ → следующее чтение
+        # истории получает InvalidTag → HistoryEncryptionUnavailable, т.е. после
+        # privacy-purge профиль с шифрованием НЕЧИТАЕМ.
+        #
+        # B1, ПОПРАВКА РЕШЕНИЯ: первая версия волны просто удаляла ledger, и это
+        # открывало resurrection. Обоснование карточки («защиту держит ledger САМОЙ
+        # копии») верно ТОЛЬКО для ID, которые копия уже знала мёртвыми. Для ID,
+        # удалённого в текущем профиле ПОСЛЕ снимка, единственная защита — ledger
+        # текущего профиля: возвращённый снаружи снимок вернул бы ПОЛНЫЙ ТЕКСТ
+        # записи и рапортовал об этом молча (ledger_blocked: 0).
+        #
+        # Поэтому: содержимое ledger'а — это ТОЛЬКО идентификаторы (никакого PII,
+        # инвариант его allowlist-исключения сохраняется) — переживает purge
+        # ОТКРЫТЫМ, а уничтожается только шифротекст. Оба ридера уже принимают
+        # открытые строки (state_store._read_history_ndjson_unlocked и
+        # encrypted_snapshot.collect_ledger_union пропускают не-ENC1 как есть),
+        # поэтому профиль остаётся читаемым, а union-защита — рабочей.
+        #
+        # Порядок «данные → ключ»: перематериализация идёт ДО шага 38.
+        deletion_ledger_purged = False
+        deletion_ledger_ids_preserved = 0
+        if _data_dir is not None:
+            try:
+                _ledger_path = _data_dir / "history_purged_ids.ndjson"
+                if _ledger_path.is_symlink():
+                    # Ссылка, а не файл профиля: разыменовывать нельзя (plaintext
+                    # ID ушёл бы наружу по чужому пути), и unlink снимет только
+                    # саму ссылку. Нерегулярная запись — повод объявить шаг
+                    # невыполненным, а не тихо её пропустить.
+                    _ledger_path.unlink()
+                    raise OSError("history_purged_ids.ndjson — symlink, не файл профиля")
+                if _ledger_path.is_file():
+                    _ids = _rematerialize_ledger_plaintext(_ledger_path, self.store)
+                    deletion_ledger_ids_preserved = len(_ids)
+                deletion_ledger_purged = _ledger_holds_no_ciphertext(_ledger_path)
+                if not deletion_ledger_purged:
+                    raise OSError(f"{_ledger_path} всё ещё содержит ENC1-строки")
+                logger.info(
+                    "purge_all_data: permanent deletion ledger — шифротекст уничтожен, "
+                    "%d ID сохранены открытыми",
+                    deletion_ledger_ids_preserved,
+                )
+            except Exception:
+                # ЧТО ИМЕННО сюда попадает (adversarial-ревью раунда 2 проверило
+                # все три гипотезы и опровергло две из них):
+                #   * ledger — symlink вместо файла профиля (проверяется выше);
+                #   * САМА запись перематериализации не удалась (файл читается на
+                #     шаге 1, но запись упала — например, read-only профиль).
+                #
+                # НЕ попадает: недоступный Keychain, не-UTF8 ledger и ledger под
+                # чужим ключом. Все три отсекаются РАНЬШЕ, на шаге 1
+                # (`_load_active_items_unlocked` → `_load_deleted_ids_unlocked`
+                # читает ledger до 37a) и обрывают purge с
+                # HistoryEncryptionUnavailable: ничего не вычищается, ключ
+                # выживает, профиль читаем. Это fail-loud, а не дыра, и
+                # «починить» это fail-soft-чтением ledger'а перед wipe означало бы
+                # решить вопрос безопасности данных без владельца.
+                #
+                # Оставлять ENC1 НЕЛЬЗЯ: после shred'а ключа это навсегда
+                # нечитаемый мусор, который роняет каждое чтение истории — ровно
+                # тот дефект, ради которого шаг существует. Поэтому ledger
+                # сносится, а потеря реестра resurrection объявляется ГРОМКО:
+                # complete: false + errors: ["deletion_ledger"].
+                logger.warning(
+                    "purge_all_data: не удалось перематериализовать deletion ledger "
+                    "в открытый вид — файл уничтожается, реестр удалённых ID потерян",
+                    exc_info=True,
+                )
+                try:
+                    _ledger_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "purge_all_data: не удалось удалить deletion ledger", exc_info=True
+                    )
+                # LOW1: pre-flight (шаг 1-pre) мог уже сообщить про этот же шаг —
+                # два одинаковых имени в errors выглядели бы как два разных сбоя.
+                _flag_step_error(secondary_errors, "deletion_ledger")
+
+        # --- 37b. A5.2c1: зачистить ПРОИЗВОДНЫЕ копии (`.bak*` и `*.tmp`).
+        # В data_dir лежат `history.ndjson.bak*` (в прод-профиле владельца —
+        # 23.4 МБ ОТКРЫТОЙ истории) и `settings.json.bak*` (шесть копий с
+        # непустыми секретами: hf_token, sentry_dsn_agent, voice_gateway_api_key,
+        # stt_gigaam_hf_token, llm_api_key, lm_studio_api_key).
+        #
+        # M1 (adversarial-ревью): кроме `.bak*` переживали ещё и `*.tmp`:
+        # `history.ndjson.migration_tmp` — ПОЛНАЯ копия истории из убитой миграции
+        # шифрования (state_store.py:2527) и `settings.json.tmp` с секретами
+        # (state_store.py:919). Плюс tmp-файлы delta-журналов, если процесс убит
+        # посреди compact. Оба имени НЕ входили в PERSIST_EXTENSIONS, а
+        # `_canonicalize` снимает только `.tmp` ⇒ гейт полноты был к ним слеп.
+        # Хуже того: purge рапортовала `complete: true, errors: [],
+        # stale_copies_removed: 0` — ложный all-clear при полной утечке.
+        #
+        # Почему `*.tmp`, а не перечисление: `.tmp` в data_dir пишут 12+ атомарных
+        # писателей (state_store, recording_chain, settings_backup,
+        # sharing_manager, obsidian_sync, semantic_search через mkstemp, …), и
+        # перечисление «известных» имён — ровно тот способ, которым
+        # `migration_tmp` и просочился в первую очередь. Любой `.tmp` по
+        # построению — копия файла, который purge уничтожает. Побочный эффект
+        # решения зафиксирован тестом: файл, который владелец сам положил в
+        # data_dir с расширением `.tmp`, тоже будет снесён — для privacy-wipe
+        # это приемлемо, и это НЕ молчаливое поведение (оно задокументировано
+        # здесь и в тесте).
+        #
+        # Остальное по-прежнему НЕ трогается: посторонние файлы (notes.txt,
+        # session.log, README.md, подкаталоги) не имеют отношения к purge.
+        #
+        # L3: `is_file()` возвращает False и для каталога, и для висячего
+        # симлинка — оба молча выпадали из зачистки. Симлинк снимаем САМИ (цель
+        # не разыменовываем), каталог снимаем целиком.
+        # L4: счётчик считается ПО ФАКТУ (`lexists` после попытки), а не по
+        # факту вызова unlink — иначе отчёт врал бы в оптимистичную сторону.
+        stale_copies_removed = 0
+        if _data_dir is not None:
+            # Лок вокруг зачистки — ЧЕСТНО О ЧАСТИЧНОМ ЗАКРЫТИИ (LOW2-ревью).
+            # Прежний комментарий здесь утверждал, что лок «закрывает гонку» с
+            # параллельным `save_settings`. Это было НЕВЕРНО: взаимное исключение
+            # требует обеих сторон, а `save_settings` пишет `settings.json.tmp` и
+            # переименовывает его ВНЕ лока (state_store.py:919-924). Проба ревьюера:
+            # все 6 чередований приводят к `FileNotFoundError: settings.json.tmp →
+            # settings.json` у писателя. Живые настройки при этом ЦЕЛЫ (tmp ≠ файл),
+            # то есть потеряна сама запись, а не данные — но ложно утверждать, что
+            # гонка закрыта.
+            #
+            # Что лок ДЕЛАЕТ: сериализует зачистку против писателей, которые лок
+            # БЕРУТ (шаг 1, компактирование, обычные append'ы). Что лок НЕ делает:
+            # писатель без лока (`save_settings`) остаётся гоняющимся. Точная
+            # точка правки — `StateStore.save_settings` (state_store.py:919-924),
+            # файл ЗАПРЕЩЁН в этой волне; см. Tracked risks карточки и отдельную
+            # волну. Вложенного exclusive поверх exclusive здесь нет — блок 37b
+            # не находится под другим `with self.store._lock()`.
+            with self.store._lock():
+                try:
+                    # Паттерны перечислены ЯВНО и РАЗВЁРНУТЫ (без цикла по
+                    # коллекции): статический guard audit_purge_coverage разрешает
+                    # аргумент glob'а только как строковый литерал/константу, и
+                    # цикл по tuple сделал бы зачистку НЕВИДИМОЙ для гейта —
+                    # ровно тот класс «проводка есть, а гейт зелёный», который
+                    # закрывали в b2 (f-string семейства) и b3 (delete-glob).
+                    for _bak_path in (
+                        list(_data_dir.glob("history.ndjson.bak*"))
+                        + list(_data_dir.glob("settings.json.bak*"))
+                        + list(_data_dir.glob("*.tmp"))
+                        # `*.tmp` НЕ матчит `migration_tmp` (подчёркивание вместо
+                        # точки) — а именно этот файл (ПОЛНАЯ копия истории из убитой
+                        # миграции шифрования) был главной находкой ревьюера. Отдельная
+                        # ветка окончания, а не попытка одной регулярки на всё.
+                        + list(_data_dir.glob("*_tmp"))
+                    ):
+                        try:
+                            _remove_derived_copy(_bak_path)
+                        except OSError:
+                            logger.warning(
+                                "purge_all_data: не удалось удалить %s", _bak_path, exc_info=True
+                            )
+                            secondary_errors.append("stale_copies")
+                            continue
+                        # L4: «уничтожено» — только если записи действительно нет.
+                        if os.path.lexists(_bak_path):
+                            logger.warning(
+                                "purge_all_data: %s пережил зачистку", _bak_path
+                            )
+                            secondary_errors.append("stale_copies")
+                            continue
+                        stale_copies_removed += 1
+                    if stale_copies_removed:
+                        logger.info(
+                            "purge_all_data: удалено %d .bak-копий", stale_copies_removed
+                        )
+                except Exception:
+                    logger.warning("purge_all_data: зачистка .bak-копий не удалась", exc_info=True)
+                    secondary_errors.append("stale_copies")
+
         # --- 38. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
         # Без этого выживший AES-256 ключ расшифровывает pre-purge бэкап history.ndjson
         # (Time Machine / iCloud / FS-снапшот) — ciphertext + живой ключ = весь текст.
-        # delete_history_key — no-op без Keychain (KeystoreUnavailable на Linux/CI → не
-        # ошибка purge). Сбрасываем ленивый крипто-кэш StateStore, чтобы следующая запись
+        # Сбрасываем ленивый крипто-кэш StateStore, чтобы следующая запись
         # (если шифрование оставлено включённым) сгенерировала НОВЫЙ ключ.
-        try:
-            from backend.crypto_keystore import delete_history_key, KeystoreUnavailable
-            try:
-                delete_history_key()
-            except KeystoreUnavailable:
-                pass  # нет Keychain (Linux/CI) → ключа нет → нечего удалять
-            self.store._history_crypto_initialized = False
-            self.store._history_crypto_instance = None
-        except Exception:
-            logger.warning(
-                "purge_all_data: удаление ключа шифрования из Keychain не удалось", exc_info=True
+        #
+        # A5.2c1, два решения здесь:
+        #  * флаг `history_encryption_enabled` purge НЕ переключает — это решение
+        #    владельца; ответ сообщает состояние пост-фактум;
+        #  * `encryption_key_shredded` берётся из РЕЗУЛЬТАТА delete_history_key(),
+        #    а не из самого факта вызова. Неудачный exit code `security` (заблокированный
+        #    Keychain, отказ) обязан давать False: рапортовать «ключ уничтожен» при
+        #    живом ключе — это fail-open, и он опаснее самой ошибки, потому что
+        #    владелец поверит отчёту. L2: сама delete_history_key() дополнительно
+        #    ПОДТВЕРЖДАЕТ отсутствие read-only пробой (без `-w`), так что «удалил»
+        #    и «уничтожен» больше не смешиваются; именно эта проба даёт +1 к
+        #    счётчику `probes` внутри шага purge;
+        #  * не shred'ённый ключ — ШАГОВАЯ ошибка (`errors`/`complete`), иначе
+        #    механизм W1749 «loud error when purge is only partial» обошёл бы
+        #    ровно тот случай, ради которого написан: живой ключ + pre-purge
+        #    бэкап = вся история, а `complete: true` читается как «зачистил всё».
+        #    Асимметрия обязательна: KeystoreUnavailable (нет Keychain на
+        #    Linux/CI) — НЕ ошибка, там shred истинен (ключа не существует).
+        # --- 38-1. A5.2c1 (N1′): финальный снос журналов и shred — ПОД ОДНИМ
+        # локом. Лок, взятый на сносах 1b-1…1b-4, к шагу 38 уже отпущен, поэтому
+        # окно «после сносов — до shred'а» оставалось открытым: писатель
+        # метаданных (`set_paste_status` и соседи берут лок) успевал записать ENC1
+        # в `history_status.ndjson`, а shred делал его нечитаемым — ровно тот
+        # класс, который волна закрыла, только в узком окне. Повторный снос
+        # идемпотентен и дешёв (несколько unlink'ов) и делает «данные → ключ»
+        # атомарным для всех писателей, которые лок БЕРУТ. Вложенного SH→EX
+        # нет: лок здесь берётся заново, вне каких-либо других.
+        with self.store._lock():
+            _purge_wipe_managed_journals(
+                data_dir=self.store.data_dir,
+                secondary_errors=secondary_errors,
+                compact_failed="compact" in secondary_errors,
             )
-            secondary_errors.append("encryption_key")
+            encryption_key_shredded = False
+            try:
+                from backend.crypto_keystore import delete_history_key, KeystoreUnavailable
+                try:
+                    encryption_key_shredded = delete_history_key()
+                except KeystoreUnavailable:
+                    # Нет Keychain (Linux/CI) → ключа нет → shred'ить нечего. Это НЕ
+                    # ошибка purge и НЕ повод пропустить остальные шаги; результат —
+                    # «уничтожен» в смысле «на этой платформе ключа не существует».
+                    encryption_key_shredded = True
+                self.store._history_crypto_initialized = False
+                self.store._history_crypto_instance = None
+                if not encryption_key_shredded:
+                    logger.error(
+                        "purge_all_data: ключ шифрования истории НЕ уничтожен — "
+                        "профиль остаётся расшифровываемым (pre-purge копии читаемы)"
+                    )
+                    secondary_errors.append("encryption_key")
+            except Exception:
+                logger.warning(
+                    "purge_all_data: удаление ключа шифрования из Keychain не удалось", exc_info=True
+                )
+                secondary_errors.append("encryption_key")
 
         # --- 39. S3/M-B: удалить сырые REST-загрузки (temp_uploads/) ---
         # TEMP_DIR = settings.DATA_DIR / "temp_uploads" (rest_server.py) хранит сырое
@@ -3031,6 +3759,31 @@ class HistoryService:
             logger.warning("purge_all_data: удаление содержимого temp_uploads/ не удалось", exc_info=True)
             secondary_errors.append("temp_uploads")
 
+        # --- A5.2c1: пост-фактум флага шифрования (НЕ переключаем его) ---
+        # Purge уничтожает данные, но политику не меняет: решение владельца
+        # остаётся его. Значение читается ПОСЛЕ всех шагов, чтобы ответ был
+        # честным («профиль остался на ON, но данных в нём нет»), а не обещанием.
+        #
+        # Сбой чтения НЕ пополняет `errors`: это не провал зачистки (ничего не
+        # осталось на диске из-за неудачного чтения флага), а невозможность
+        # сообщить состояние. ВНИМАНИЕ: в этом случае поле `false`, то есть
+        # «определить не удалось» здесь НЕ отличается от «выключено» — в ответе
+        # purge нет третьего состояния. Компенсирующий признак: тот же сбой
+        # делает битый settings.json, который виден в errors шага 15; а сам
+        # флаг при битом settings читается фейл-closed в True на всех путях
+        # записи (read_history_encryption_flag), то есть профиль не уйдёт
+        # молча в plaintext.
+        history_encryption_enabled_after = False
+        try:
+            history_encryption_enabled_after = bool(
+                self.store.load_settings().get("history_encryption_enabled", False)
+            )
+        except Exception:
+            logger.warning(
+                "purge_all_data: не удалось прочитать флаг history_encryption_enabled",
+                exc_info=True,
+            )
+
         # --- C. W1734: Audit log entry ---
         try:
             from backend.privacy_audit import get_privacy_audit_logger
@@ -3047,6 +3800,14 @@ class HistoryService:
                     "transcripts_deleted": transcripts_deleted,
                     "rescue_deleted": rescue_deleted,
                     "obsidian_deleted": obsidian_deleted,
+                    # A5.2c1: только счётчики и флаги состояния — ни ключа,
+                    # ни содержимого .bak-копий в комплайнс-трейл не пишется.
+                    "backups_deleted": backups_deleted,
+                    "deletion_ledger_purged": deletion_ledger_purged,
+                    "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
+                    "stale_copies_removed": stale_copies_removed,
+                    "encryption_key_shredded": encryption_key_shredded,
+                    "history_encryption_enabled_after": history_encryption_enabled_after,
                     "secondary_errors": secondary_errors,
                 },
             )
@@ -3067,6 +3828,13 @@ class HistoryService:
                 "rescue_deleted": rescue_deleted,
                 "obsidian_deleted": obsidian_deleted,
                 "semantic_purged": semantic_purged,
+                # A5.2c1: результат зачистки виден в crash-report, а не только в
+                # ответе IPC (ответ не переживает рестарт процесса).
+                "backups_deleted": backups_deleted,
+                "deletion_ledger_purged": deletion_ledger_purged,
+                "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
+                "stale_copies_removed": stale_copies_removed,
+                "encryption_key_shredded": encryption_key_shredded,
             },
         )
         # --- W1749 CRITICAL-1: loud error when purge is only partial ---
@@ -3082,7 +3850,8 @@ class HistoryService:
 
         logger.info(
             "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
-            "obsidian=%d semantic_purged=%s errors=%s",
+            "obsidian=%d semantic_purged=%s backups=%d stale_copies=%d ledger_purged=%s "
+            "ledger_ids=%d key_shredded=%s encryption_after=%s errors=%s",
             history_deleted,
             transcripts_deleted,
             chains_deleted,
@@ -3091,6 +3860,12 @@ class HistoryService:
             call_sessions_deleted,
             obsidian_deleted,
             semantic_purged,
+            backups_deleted,
+            stale_copies_removed,
+            deletion_ledger_purged,
+            deletion_ledger_ids_preserved,
+            encryption_key_shredded,
+            history_encryption_enabled_after,
             secondary_errors,
         )
         return {
@@ -3104,6 +3879,20 @@ class HistoryService:
             "rescue_deleted": rescue_deleted,
             "obsidian_deleted": obsidian_deleted,
             "semantic_purged": semantic_purged,
+            # A5.2c1: машинно-читаемый результат зачистки. Владелец должен
+            # видеть по ОТВЕТУ, что именно уничтожено, а не восстанавливать это
+            # по косвенным признакам (отсутствующий файл мог и не быть).
+            "backups_deleted": backups_deleted,
+            "deletion_ledger_purged": deletion_ledger_purged,
+            # B1: ledger сохранён ОТКРЫТЫМ (в нём только ID, без PII) — его
+            # содержимое держит защиту от resurrection для ID, удалённых
+            # после снимка. Ноль означает «реестр потерян», и это громко
+            # отражается в complete/errors.
+            "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
+            "stale_copies_removed": stale_copies_removed,
+            "encryption_key_shredded": encryption_key_shredded,
+            # Флаг политики purge НЕ меняет — сообщаем состояние пост-фактум.
+            "history_encryption_enabled_after": history_encryption_enabled_after,
             "complete": len(secondary_errors) == 0,
             "errors": secondary_errors,
         }

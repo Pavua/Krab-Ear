@@ -38,6 +38,11 @@ class _FakeStore:
     def _append_ndjson(self, path: Any, payload: dict) -> None:
         pass
 
+    def _append_ndjson_raw(self, path: Any, line: str) -> None:
+        # A5.2c1 (B1‴): обход codec'а — открытая запись вместо ENC1. Этот фейк,
+        # как и его сосед `_append_ndjson`, ничего не пишет намеренно.
+        return None
+
     @property
     def tombstones_path(self) -> str:
         return "fake_tombstones.ndjson"

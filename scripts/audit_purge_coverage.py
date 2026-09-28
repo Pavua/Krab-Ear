@@ -99,8 +99,52 @@ PURGE_METHOD_NAMES: frozenset[str] = frozenset(
 # uses these extensions, so they only ever surface via the per-extension (f-string /
 # glob) sibling-extension detection — adding them here lets that path recognise them.
 PERSIST_EXTENSIONS: frozenset[str] = frozenset(
-    {"json", "ndjson", "txt", "npy", "key", "csv", "html", "srt"}
+    {"json", "ndjson", "txt", "npy", "key", "csv", "html", "srt", "bak"}
 )
+
+# A5.2c1: a ``.bak``-copy is a DERIVED copy of the store whose name precedes it
+# (``history.ndjson`` → ``history.ndjson.bak`` / ``.bak-<ts>``).  It holds the
+# same cleartext the base store holds, so a privacy purge that leaves it behind is
+# not a purge.  The guard used to be structurally blind to this family:
+# ``_record_glob`` dropped any pattern whose trailing token is not a known
+# extension, and ``history.ndjson.bak*`` ends in ``bak*`` — so deleting the
+# purge's ``*.bak*`` sweep was invisible here, exactly the "wiring removed but
+# 0 gaps stayed green" class the A5.2b2 review closed for f-string families.
+# Recognised by SHAPE, so a future producer cannot fall through silently.
+BACKUP_COPY_SUFFIX_RE = re.compile(r"^\.(?P<ext>[a-z0-9]+)\.bak(?:[-._0-9A-Za-z*]*)$")
+_BACKUP_GLOB_RE = re.compile(r"^(?P<base>.+?)\.bak[-._0-9A-Za-z*]*$")
+
+# A5.2c1 (M1): atomic-write temp copies.  ``x.ndjson.tmp`` / ``x.ndjson.migration_tmp``
+# are the temp file of an atomic write that DIED before its rename — i.e. a full
+# copy of the store.  ``history.ndjson.migration_tmp`` was the reviewer's finding:
+# a complete plaintext copy of history, and ``settings.json.tmp`` a settings copy
+# with secrets, both surviving a purge that reported ``complete: true``.
+#
+# The guard was blind to them TWICE OVER, and both holes mattered:
+#   * ``migration_tmp`` is not a known extension, so it was never a store;
+#   * ``_canonicalize`` strips ``.tmp`` — so ``settings.json.tmp`` collapsed ONTO
+#     ``settings.json``, which is ALLOWLISTED.  A temp file was therefore "covered"
+#     by the allowlist entry of the very file it is a copy of.
+# The family is therefore recorded under its OWN canonical id (``*.tmp`` / ``*_tmp``)
+# and coverage demands an explicit sweep of that family in the purge.  Both endings
+# are listed separately because ``*.tmp`` does NOT match ``migration_tmp`` — the
+# underscore is the whole reason the first leak slipped through.
+# ``.irregular`` добавлен по находке N2: pre-flight уводит нерегулярную запись
+# (fifo/сокет) в ``<name>.irregular``, и такая запись не должна выпадать из зоны
+# purge МОЛЧА.
+#
+# ЧЕСТНО О РАЗДЕЛЕНИИ (N2′ — прежний комментарий здесь врал): семейство нужно
+# ТОЛЬКО ГЕЙТУ, то есть для ВИДИМОСТИ. СВИПА `.irregular` в purge НЕТ и
+# добавлять его нельзя:
+#   * `.irregular` — отложенная НЕРЕГУЛЯРНАЯ запись (fifo/сокет), а не временная
+#     копия данных. Каталоги с этой ветки уже снимаются `rmtree`, так что в
+#     отложенной ветке остаются только fifo/сокет;
+#   * снос пользовательских `*.irregular` был бы over-delete: проверено пробой
+#     ревьюера, файл `моё_заметка.irregular` переживает purge — и это правильное
+#     поведение, а не пробел (тест в test_a52c1_purge_integrity.py фиксирует его
+#     как намеренное решение, чтобы следующий волнёц не «допилил» свип).
+# Реальный свип покрывает `.bak*` / `*.tmp` / `*_tmp` — это производные копии.
+TEMP_FAMILY_SUFFIXES: tuple[str, ...] = (".tmp", "_tmp", ".irregular")
 
 # Filenames that the discovery scanner must never treat as a real store even if
 # they syntactically match (transient probes etc.).
@@ -213,9 +257,57 @@ def _canonicalize(name: str) -> str:
     return n
 
 
+def _temp_family(suffix: str) -> str | None:
+    """Канонический id семейства temp-копий по окончанию (``*.tmp`` / ``*_tmp``).
+
+    ``suffix`` — либо имя файла (``settings.json.tmp``), либо литерал суффикса
+    (``".ndjson.migration_tmp"``). None — это не temp-копия. Возвращается
+    СЕМЕЙСТВО, а не точное имя: у ``journal_path.with_suffix(".tmp")`` база
+    неизвестна статически (это переменная цикла), и требовать от purge
+    «удали history_status.tmp» вместо «удали всё, что кончается на .tmp» было бы
+    и неточно, и непроверяемо.
+    """
+    name = suffix.strip()
+    for ending in TEMP_FAMILY_SUFFIXES:
+        if name.endswith(ending) and len(name) > len(ending):
+            return f"*{ending}"
+    return None
+
+
+def _looks_like_backup_copy(name: str) -> bool:
+    """``history.ndjson.bak`` / ``settings.json.bak1`` / ``…bak-20260926``?
+
+    A5.2c1: backup copies are data stores in their own right — the base name must
+    itself look like a store, so ``bak`` alone is never a store but
+    ``history.ndjson.bak`` is one.  The canonical family id is
+    ``<base>.bak*`` so all timestamped/numbered variants collapse into ONE
+    store the purge must sweep explicitly.
+    """
+    match = _BACKUP_GLOB_RE.match(name)
+    if match is None:
+        return False
+    base = match.group("base")
+    parts = base.rsplit(".", 1)
+    return len(parts) == 2 and parts[1] in PERSIST_EXTENSIONS
+
+
+def _backup_family(name: str) -> str | None:
+    """Канонический id семейства ``<base>.bak*`` (None — не backup-копия)."""
+    match = _BACKUP_GLOB_RE.match(name)
+    if match is None:
+        return None
+    base = match.group("base")
+    parts = base.rsplit(".", 1)
+    if len(parts) != 2 or parts[1] not in PERSIST_EXTENSIONS:
+        return None
+    return f"{base}.bak*"
+
+
 def _looks_like_store_filename(name: str) -> bool:
     if name in _NEVER_A_STORE:
         return False
+    if _looks_like_backup_copy(name):
+        return True
     parts = name.rsplit(".", 1)
     if len(parts) == 2 and parts[1] in PERSIST_EXTENSIONS:
         return True
@@ -566,6 +658,21 @@ def _record_glob(
     clears the whole family.  Bare ``*.ext`` globs are the containing subdir
     (tracked via mkdir/dir refs) — skipped here to avoid noise."""
     basename = pattern.rsplit("/", 1)[-1]
+    # A5.2c1 (M1): a ROOT-level ``*.tmp`` / ``*_tmp`` sweep is a real family the
+    # purge must clear.  It is NOT the "containing subdir" case the wildcard
+    # skip below is about: there is no subdir, the whole data dir is the family.
+    if "/" not in pattern:
+        family = _temp_family(basename)
+        if family is not None and basename == family:
+            found.setdefault(pattern, StoreRef(pattern, module, f"{rel}:{lineno}"))
+            return
+    # A5.2c1: a ``*.bak*`` sweep is a NARROW family (the base name is static),
+    # so it is a real store the purge must cover — recorded under its canonical
+    # id so all variants (``bak``, ``bak1``, ``bak-<ts>``) collapse together.
+    family = _backup_family(basename)
+    if family is not None:
+        found.setdefault(pattern, StoreRef(pattern, module, f"{rel}:{lineno}"))
+        return
     ext_match = re.search(r"\.([a-z0-9]+)$", basename)
     if ext_match is None:
         return
@@ -689,6 +796,55 @@ def discover_stores_in_module(path: Path) -> list[StoreRef]:
                         _qualify(resolver.attr_subpath(_name_of(recv)), pattern),
                         node.lineno,
                     )
+            # (b') A5.2c1: ``<data-dir-rooted path>.with_suffix(".X.bak…")`` —
+            # ПРОИЗВОДИТЕЛЬ backup-копии. Без этой ветки гейт был слеп к месту,
+            # где копия РЕАЛЬНО создаётся (``migrate_history_encryption``
+            # делает ``history.ndjson.with_suffix(".ndjson.bak")``): снос
+            # sweep'а в purge проходил бы как «0 gaps», хотя на диске лежит
+            # открытая копия истории.  Регистрируем ПРОИЗВОДИТЕЛЯ, а не
+            # потребителя — иначе гейт сам себя оправдывал бы.
+            if attr == "with_suffix" and node.args:
+                suffix = _const_str(node.args[0])
+                if suffix is not None and BACKUP_COPY_SUFFIX_RE.match(suffix):
+                    # ``subpath`` here is the BASE FILE's path under data_dir
+                    # (``_register_dir`` treats any ``self.X = data_dir / "y"``
+                    # as a root, file or not).  ``with_suffix`` REPLACES the last
+                    # extension: ``history.ndjson`` + ``.ndjson.bak`` → stem
+                    # ``history`` + suffix = ``history.ndjson.bak``.
+                    base_path = resolver.base_subpath(recv)
+                    if not base_path:
+                        continue
+                    parent = base_path.rsplit("/", 1)[0] if "/" in base_path else ""
+                    base_name = base_path.rsplit("/", 1)[-1]
+                    parts = base_name.rsplit(".", 1)
+                    if len(parts) != 2 or parts[1] not in PERSIST_EXTENSIONS:
+                        continue
+                    store_id = _qualify(parent, parts[0] + suffix)
+                    found.setdefault(
+                        store_id, StoreRef(store_id, module, f"{rel}:{node.lineno}")
+                    )
+            # (b'') A5.2c1 (M1): ПРОИЗВОДИТЕЛЬ temp-копии. Две формы, обе в бою:
+            #   * ``path.with_suffix(".json.tmp")``    (state_store.save_settings)
+            #   * ``path + ".tmp"`` / ``stem + suffix + ".tmp"``
+            #     (translation_cache, export_scheduler, usage_tracker, event_replay)
+            # Регистрируем СЕМЕЙСТВО (``*.tmp`` / ``*_tmp``), потому что у
+            # ``journal_path.with_suffix(".tmp")`` в _compact_unlocked база —
+            # переменная цикла, и требование «удали конкретное имя» было бы
+            # невыполнимо.  Требование к purge: явный sweep этого семейства.
+            if attr == "with_suffix" and node.args:
+                family = _temp_family(_const_str(node.args[0]) or "")
+                if family is not None:
+                    found.setdefault(
+                        family, StoreRef(family, module, f"{rel}:{node.lineno}")
+                    )
+            if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+                for side in (node.left, node.right):
+                    family = _temp_family(_const_str(side) or "")
+                    if family is not None:
+                        found.setdefault(
+                            family, StoreRef(family, module, f"{rel}:{node.lineno}")
+                        )
+                        break
             # (c) (base_dir / "sub").mkdir(...)
             if attr == "mkdir" and isinstance(recv, ast.BinOp) and isinstance(
                 recv.op, ast.Div
@@ -794,6 +950,256 @@ def _glob_pattern_const(node: ast.AST, consts: dict[str, str]) -> str | None:
     return "".join(chunks)
 
 
+def _loop_sources(func: ast.FunctionDef) -> dict[str, list[ast.AST]]:
+    """Имя переменной цикла → элементы контейнера, который он итерирует.
+
+    Нужно для journal-зачисток вида ``for name in _delta_journals: path / name`` —
+    там id хранилища приходит из КОНТЕЙНЕРА, а не из тела, и без такого разбора
+    требование «id среди аргументов» отвергло бы правильный код (ровно как
+    разбираются контейнеры циклов в ``_state_store_compaction_coverage``).
+    Контейнер умеется и встроенный, и через переменную — обе формы встречаются
+    в purge.
+    """
+    assignments = _assigned_values(func)
+    out: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        source = node.iter
+        if isinstance(source, ast.Name):
+            resolved = assignments.get(source.id)
+            source = resolved if isinstance(resolved, (ast.List, ast.Tuple)) else None
+        if not isinstance(source, (ast.List, ast.Tuple)):
+            continue
+        for stmt in node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]:
+            name = _name_of(stmt)
+            if name is not None:
+                out.setdefault(name, []).extend(source.elts)
+    return out
+
+
+def _expr_names_store(
+    expr: ast.AST,
+    store_id: str,
+    assignments: dict[str, ast.AST],
+    loop_sources: dict[str, list[ast.AST]] | None = None,
+) -> bool:
+    """Упоминается ли id хранилища в выражении (с разыменкой переменных).
+
+    Нужен разбор переменных, потому что реальный код честно пишет
+    ``_wipe_journal_ciphertext(_tombstones_path)``, где путь задан присваиванием
+    ``_tombstones_path = Path(data_dir) / "history_tombstones.ndjson"``. Требование
+    «id обязан быть АРГУМЕНТОМ» без такого разбора отвергло бы правильный код, а
+    «id где-то в функции» — пропустило бы мёртвый вызов (LOW3).
+    """
+    for sub in ast.walk(expr):
+        if isinstance(sub, ast.Constant) and sub.value == store_id:
+            return True
+        if isinstance(sub, ast.Name):
+            if loop_sources:
+                for element in loop_sources.get(sub.id, []):
+                    if _expr_names_store(element, store_id, assignments, loop_sources):
+                        return True
+            target = assignments.get(sub.id)
+            if target is not None and target is not sub:
+                if _expr_names_store(target, store_id, assignments, loop_sources):
+                    return True
+    return False
+
+
+def _assigned_values(func: ast.FunctionDef) -> dict[str, ast.AST]:
+    """Имя переменной → выражение, которым она присвоена (последнее присваивание)."""
+    out: dict[str, ast.AST] = {}
+    for node in ast.walk(func):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if value is None:
+                continue
+            for target in targets:
+                name = _name_of(target)
+                if name is not None:
+                    out[name] = value
+    return out
+
+
+def _reachable_helpers(func: ast.FunctionDef) -> list[ast.FunctionDef]:
+    """Модульные хелперы, вызываемые из тела ``func`` (один уровень).
+
+    A5.2c1 (N1′): доказательство уничтожения может лежать в хелпере, а не в
+    теле purge — вынос сносов журналов в ``_purge_wipe_managed_journals`` сделал
+    снос невидимым гейту, и все proof-gated журналы «выпали» из покрытия. Поиск
+    только по телу purge означал бы: любая рефакторинг-выноска способна тихо
+    обнулить требование доказательства.
+    """
+    tree_module = getattr(func, "_krab_module", None)
+    if tree_module is None:
+        return []
+    called: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            name = _name_of(node.func)
+            if name is not None:
+                called.add(name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                called.add(alias.asname or alias.name)
+    out: list[ast.FunctionDef] = []
+    for candidate in ast.walk(tree_module):
+        if (
+            isinstance(candidate, ast.FunctionDef)
+            and candidate.name in called
+            and candidate.name != func.name
+        ):
+            out.append(candidate)
+    return out
+
+
+def _has_proof_for(func: ast.FunctionDef, store_id: str, proofs: tuple[str, ...]) -> bool:
+    """Доказательство уничтожения шифротекста ИМЕННО для этого хранилища.
+
+    Требуется и сам вызов, и id хранилища среди его аргументов (с разыменкой
+    переменных и разбором контейнеров циклов) — иначе мёртвый вызов
+    доказательства в любой части функции засчитывал бы настоящее хранилище.
+    Ищется в теле purge И в модульных хелперах, которые purge вызывает.
+    """
+    return _has_proof_in(func, store_id, proofs) or any(
+        _has_proof_in(helper, store_id, proofs)
+        for helper in _reachable_helpers(func)
+    )
+
+
+def _has_proof_in(func: ast.FunctionDef, store_id: str, proofs: tuple[str, ...]) -> bool:
+    assignments = _assigned_values(func)
+    loop_sources = _loop_sources(func)
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        called = (
+            fn.id
+            if isinstance(fn, ast.Name)
+            else fn.attr
+            if isinstance(fn, ast.Attribute)
+            else None
+        )
+        if called in proofs and any(
+            _expr_names_store(arg, store_id, assignments, loop_sources) for arg in node.args
+        ):
+            return True
+    return False
+
+
+def _has_call_to(func: ast.FunctionDef, names: tuple[str, ...]) -> bool:
+    """Есть ли в теле функции вызов одной из перечисленных функций.
+
+    Проверяется именно ВЫЗОВ (``Name(...)`` / ``attr(...)``), а не любое
+    упоминание: иначе импорт или комментарий засчитывались бы как доказательство.
+    """
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Name) and fn.id in names:
+            return True
+        if isinstance(fn, ast.Attribute) and fn.attr in names:
+            return True
+    return False
+
+
+# A5.2c1: журналы, чья приватность держится на УНИЧТОЖЕНИИ ШИФРОТЕКСТА, а не на
+# самом факте упоминания пути. Покрытием для них считается только явная проверка
+# уничтожения — см. фильтр в конце ``_collect_removed_names_in_function``.
+#
+# B1‴ добавил ``history_tombstones.ndjson``: purge пишет собственные томбестоны
+# открытыми, но компактирование чистит журнал ТОЛЬКО при успехе, а провал
+# компактирования — банальный сценарий. Без требования явного доказательства
+# сняли бы зачистку 1b-3 молча, и гейт снова стал бы зелёным на собственном
+# главном изменении.
+_CIPHERTEXT_DESTRUCTION_STORES: dict[str, tuple[str, ...]] = {
+    "history_purged_ids.ndjson": (
+        "_ledger_holds_no_ciphertext",
+        "_rematerialize_ledger_plaintext",
+    ),
+    "history_tombstones.ndjson": ("_wipe_journal_ciphertext",),
+    # N1: `history.ndjson` сносится БЕЗУСЛОВНО только при провале compact
+    # (шаг 1b-1), но в список не попадал, и покрытие кредитовалось из
+    # УСЛОВНОГО компактирования. NC-B ревьюера: отключить 1b-1 → «0 gaps».
+    "history.ndjson": ("_wipe_journal_ciphertext",),
+    # N1 (проверено, а не предположено): прод-писатель — `_append_ndjson`
+    # (state_store.py:2399), тот же шифрующий путь, поэтому ENC1 возможен.
+    "history_calendar_links.ndjson": ("_wipe_journal_ciphertext",),
+    # N1 (собственная находка, измерена пробой): остальные delta-журналы тоже
+    # шифруются и чистятся компактированием только при успехе. Шаг 1b-4 сносит
+    # их безусловно, и гейт обязан это требовать.
+    "history_status.ndjson": ("_wipe_journal_ciphertext",),
+    "history_tags.ndjson": ("_wipe_journal_ciphertext",),
+    "history_favorites.ndjson": ("_wipe_journal_ciphertext",),
+    "history_text_updates.ndjson": ("_wipe_journal_ciphertext",),
+    "history_action_items.ndjson": ("_wipe_journal_ciphertext",),
+    "history_annotations.ndjson": ("_wipe_journal_ciphertext",),
+}
+
+# Все функции-доказательства уничтожения шифротекста. Нужны цикловому разбору
+# ниже: переменная цикла засчитывается, только если участвует в вызове
+# доказательства.
+_ALL_WIPE_PROOFS: frozenset[str] = frozenset(
+    _name for _proofs in _CIPHERTEXT_DESTRUCTION_STORES.values() for _name in _proofs
+)
+
+
+def _loop_carried_store_ids(func: ast.FunctionDef) -> set[str]:
+    """id хранилищ, приходящие из контейнера цикла, который purge реально чистит.
+
+    Условие признака: переменная цикла участвует либо в построении пути
+    (``... / var``), либо в вызове функции-доказательства уничтожения. Простое
+    перечисление имён в цикле НЕ засчитывается — иначе гейт начал бы верить
+    любым константам рядом с циклом.
+    """
+    found: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        loop_vars = {
+            _name_of(stmt)
+            for stmt in (
+                node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]
+            )
+        }
+        loop_vars.discard(None)
+        if not loop_vars:
+            continue
+        body_nodes = [sub for stmt in node.body for sub in ast.walk(stmt)]
+        uses_path = any(
+            isinstance(sub, ast.BinOp)
+            and isinstance(sub.op, ast.Div)
+            and any(
+                isinstance(leaf, ast.Name) and leaf.id in loop_vars
+                for leaf in ast.walk(sub)
+            )
+            for sub in body_nodes
+        )
+        uses_proof = any(
+            isinstance(sub, ast.Call)
+            and _name_of(sub.func) in _ALL_WIPE_PROOFS
+            and any(
+                isinstance(leaf, ast.Name) and leaf.id in loop_vars
+                for arg in sub.args
+                for leaf in ast.walk(arg)
+            )
+            for sub in body_nodes
+        )
+        if not (uses_path or uses_proof):
+            continue
+        for var in loop_vars:
+            for element in _loop_sources(func).get(var, []):
+                if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                    canon = _canonicalize(element.value)
+                    if _looks_like_store_filename(canon):
+                        found.add(canon)
+    return found
+
+
 def _collect_removed_names_in_function(
     func: ast.FunctionDef, consts: dict[str, str], module_attrs: dict[str, str]
 ) -> set[str]:
@@ -839,6 +1245,18 @@ def _collect_removed_names_in_function(
                     removed.add(pattern)
                 elif _is_narrow_family(pattern):
                     removed.add(pattern)
+                elif _temp_family(pattern) == pattern:
+                    # A5.2c1 (M1): a root-level ``*.tmp`` / ``*_tmp`` sweep is the
+                    # proof of coverage for exactly that family — the same
+                    # relationship ``history.ndjson.bak*`` has to
+                    # ``history.ndjson.bak``.  The blanket "leading ``*`` means
+                    # the whole directory, so it proves nothing" rule must yield
+                    # here: the discovery side now has a canonical id for this
+                    # family, and refusing to credit it would leave the family
+                    # permanently uncovered (i.e. the guard would demand a sweep
+                    # that can never be recognised, and every future purge
+                    # would be reported as a gap).
+                    removed.add(pattern)
 
     # self._path / self._x_path attributes that are unlinked/replaced/rmtree'd.
     for node in ast.walk(func):
@@ -856,6 +1274,26 @@ def _collect_removed_names_in_function(
                         fname = _canonicalize(module_attrs[attr])
                         if _looks_like_store_filename(fname):
                             removed.add(fname)
+    # N1: id, приходящие из КОНТЕЙНЕРА цикла (``for name in _delta_journals:
+    # _wipe_journal_ciphertext(Path(data_dir) / name)``). Раньше такие id в
+    # ``removed`` не попадали — правый операнд деления не литерал — и журнал
+    # покрывался ТОЛЬКО кредитом условного компактирования. Требование
+    # «literal id, иначе не видно» здесь само было дырой гейта: правильная
+    # зачистка выглядела как её отсутствие. Добавляем ДО proof-фильтра ниже,
+    # иначе фильтр их не увидит и снятие зачистки снова останется зелёным.
+    removed |= _loop_carried_store_ids(func)
+
+    # A5.2c1: упоминание пути ≠ уничтожение шифротекста. Pre-flight «ledger —
+    # symlink вместо файла профиля» адресует `history_purged_ids.ndjson`, но лишь
+    # снимает ссылку; ENC1-строки он не трогает. Пока такое упоминание
+    # засчитывалось как покрытие, удаление 37a (перематериализация + проверка
+    # «шифротекста не осталось») снова сделало бы гейт зелёным — то есть гейт
+    # перестал бы ловить собственное главное изменение. Ровно тот класс
+    # «проводка есть, а гейт зелёный», который закрывали в b2/b3/M2.
+    for _store_id, _proofs in _CIPHERTEXT_DESTRUCTION_STORES.items():
+        if _store_id in removed and not _has_proof_for(func, _store_id, _proofs):
+            removed.discard(_store_id)
+
     return removed
 
 
@@ -1083,21 +1521,162 @@ def _filenames_cleared_by_module(module_stem: str) -> set[str]:
 def _state_store_compaction_coverage() -> set[str]:
     """Files emptied by ``state_store._compact_unlocked`` (history.ndjson +
     sidecar journals).  ``handle_purge_all_data`` tombstones all items then
-    calls ``compact_with_stats``, so these are physically cleared."""
+    calls ``compact_with_stats``, so these are physically cleared.
+
+    A5.2c1 (M2): «упоминается в теле compact'а» больше НЕ равно «очищается».
+    Прежняя версия засчитывала ЛЮБОЕ упоминание атрибута-журнала, включая
+    ``purged_ids_path``, куда идёт ТОЛЬКО ``append`` + ``fsync``. Из-за этого
+    удаление шага 37a из purge (то есть самое главное изменение волны) проходило
+    как «0 gaps»: permanent ledger был «покрыт» правдоподобным, но неверным
+    основанием — negative control NC2 ревьюера давал exit 0.
+
+    Засчитываются только журналы, которые РЕАЛЬНО усекаются или заменяются:
+
+    1. цель ``X.replace(...)`` / ``X.unlink()`` / ``X.write_text(...)`` /
+       ``X.open("w")`` — прямое усечение журнала;
+    2. переменная цикла, которая является целью ``replace``/``unlink`` в теле
+       цикла, — а сам цикл итерируется по списку/кортежу атрибутов
+       (``for journal_path in [tombstones, status, tags, ...]``) или по словарю
+       (``for journal_path, prepared in surviving_lines.items()``). Именно так
+       усекаются delta-журналы: база приходит из КОНТЕЙНЕРА цикла, а не из
+       тела.
+    """
     tree = _parse(STATE_STORE)
     consts = collect_string_constants(tree)
     attr_filenames = _module_attr_filenames(tree, consts)
+
+    def _journal_attr(node: ast.AST) -> str | None:
+        """Имя атрибута-журнала, если узел разрешается в известный файл."""
+        attr = _name_of(node)
+        if attr in attr_filenames:
+            return attr
+        return None
+
+    def _clear_target_names(nodes: list[ast.AST]) -> set[str]:
+        """Имена (атрибуты И переменные), стоящие ЦЕЛЬЮ очистки.
+
+        Цель — это то, что ``replace``/``unlink``/``write_text`` ПИШЕТ:
+        ``tmp.replace(journal_path)`` усекает ``journal_path``, а ``tmp`` —
+        временный файл, а не журнал.
+        """
+        names: set[str] = set()
+        for sub in nodes:
+            if not (isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute)):
+                continue
+            op = sub.func.attr
+            if op == "unlink":
+                cands: list[ast.AST] = [sub.func.value]
+            elif op == "replace":
+                # Path.replace(dest): dest=args[0]; os.replace(src, dest): dest=args[1]
+                cands = list(sub.args)
+            elif op in {"write_text", "write_bytes"}:
+                cands = [sub.func.value]
+            elif op == "open" and sub.args:
+                # Только усекающий режим.  ``with purged_ids_path.open("r+b")``
+                # в compact'е — это fsync, а не очистка: такой open не имеет
+                # права засчитывать журнал (M2).
+                mode = _const_str(sub.args[0]) if isinstance(sub.args[0], ast.Constant) else None
+                if mode is None or not mode.startswith("w"):
+                    continue
+                cands = [sub.func.value]
+            else:
+                continue
+            for cand in cands:
+                name = _name_of(cand)
+                if name is not None:
+                    names.add(name)
+        return names
+
+    def _loop_target_names(node: ast.AST) -> set[str]:
+        """Переменные, в которые цикл пишет (``for x`` / ``for x, y``)."""
+        targets: set[str] = set()
+        for stmt in (node.target,):
+            for sub in ast.walk(stmt):
+                name = _name_of(sub)
+                if name is not None:
+                    targets.add(name)
+        return targets
+
+    def _container_attrs(node: ast.AST) -> set[str]:
+        """Атрибуты-журналы, перечисленные в ИСТОЧНИКЕ цикла (list/tuple/dict)."""
+        attrs: set[str] = set()
+        source = node.iter
+        if isinstance(source, (ast.List, ast.Tuple)):
+            for elt in getattr(source, "elts", []):
+                attr = _journal_attr(elt)
+                if attr is not None:
+                    attrs.add(attr)
+        elif isinstance(source, ast.Dict):
+            for key in source.keys:
+                if key is None:
+                    continue
+                attr = _journal_attr(key)
+                if attr is not None:
+                    attrs.add(attr)
+        return attrs
+
+    def _add(attr: str) -> None:
+        fname = _canonicalize(attr_filenames[attr])
+        if _looks_like_store_filename(fname):
+            cleared.add(fname)
+
     cleared: set[str] = set()
     for fn_name in ("_compact_unlocked", "compact_with_stats"):
         fn = _find_function(tree, fn_name)
         if fn is None:
             continue
-        for node in ast.walk(fn):
-            attr = node.attr if isinstance(node, ast.Attribute) else None
-            if attr in attr_filenames:
-                fname = _canonicalize(attr_filenames[attr])
-                if _looks_like_store_filename(fname):
-                    cleared.add(fname)
+
+        all_nodes = list(ast.walk(fn))
+        clear_targets = _clear_target_names(all_nodes)
+
+        # (1) журнал стоит целью очистки прямо в теле (self.history_path в
+        #     ``tmp_history.replace(self.history_path)``).
+        for attr in clear_targets & set(attr_filenames):
+            _add(attr)
+
+        # ``D[var] = ...`` — какие словари наполняются внутри функции; нужно,
+        # чтобы поймать ключи, приходящие из контейнера ДРУГОГО цикла.
+        subscript_sources: dict[str, set[str]] = {}
+        for sub in all_nodes:
+            if (
+                isinstance(sub, ast.Assign)
+                and isinstance(sub.targets[0], ast.Subscript)
+                and isinstance(sub.targets[0].value, ast.Name)
+            ):
+                idx = sub.targets[0].slice
+                name = _name_of(idx)
+                if name is not None:
+                    subscript_sources.setdefault(
+                        sub.targets[0].value.id, set()
+                    ).add(name)
+
+        for node in all_nodes:
+            if not isinstance(node, (ast.For, ast.AsyncFor)):
+                continue
+            loop_vars = _loop_target_names(node)
+            if not (loop_vars & clear_targets):
+                continue
+            # (2a) журналы приходят прямо из контейнера этого цикла.
+            for attr in _container_attrs(node):
+                _add(attr)
+            # (2b) ``for journal_path, prepared in surviving_lines.items():`` —
+            #      ключи — из словаря, который наполняет ДРУГОЙ цикл; имя
+            #      переменной связывает их.
+            source = node.iter
+            if (
+                isinstance(source, ast.Call)
+                and isinstance(source.func, ast.Attribute)
+                and source.func.attr == "items"
+                and isinstance(source.func.value, ast.Name)
+            ):
+                for key_var in subscript_sources.get(source.func.value.id, set()):
+                    for other in all_nodes:
+                        if (
+                            isinstance(other, (ast.For, ast.AsyncFor))
+                            and key_var in _loop_target_names(other)
+                        ):
+                            for attr in _container_attrs(other):
+                                _add(attr)
     return cleared
 
 
@@ -1107,6 +1686,10 @@ def extract_purge_coverage() -> set[str]:
     hs_consts = collect_string_constants(hs_tree)
     hs_attrs = _module_attr_filenames(hs_tree, hs_consts)
     purge_fn = _find_function(hs_tree, "handle_purge_all_data")
+    # A5.2c1 (N1′): доказательство может лежать в хелпере, вызываемом из purge,
+    # поэтому функции нужна ссылка на модуль (см. `_reachable_helpers`).
+    if purge_fn is not None:
+        purge_fn._krab_module = hs_tree  # type: ignore[attr-defined]
     if purge_fn is None:
         raise SystemExit(
             "audit_purge_coverage: handle_purge_all_data not found in "
@@ -1134,15 +1717,44 @@ def extract_purge_coverage() -> set[str]:
         covered |= _filenames_cleared_by_module(module_stem)
 
     # (c) state_store compaction (history.ndjson + sidecar journals).
-    covered |= _state_store_compaction_coverage()
+    #
+    # B1‴: для журналов из ``_CIPHERTEXT_DESTRUCTION_STORES`` кредит компактирования
+    # НЕ засчитывается. Компактирование чистит их УСЛОВНО — «если не упало»,
+    # и именно этот провал оставлял ENC1-строки, которые purge уже не мог
+    # уничтожить (шаг shred'а ключа). Пока такое кредитование живёт, снятие
+    # безусловной зачистки 1b-3 проходило как «0 gaps»: гейт закрывал
+    # условный шаг и требовал доказательства от безусловного.
+    covered |= _state_store_compaction_coverage() - set(_CIPHERTEXT_DESTRUCTION_STORES)
 
     # (d) module-level helpers, которые тело purge вызывает (в т.ч. через
     # локальный импорт) — A5.2b2 review B3.
     covered |= _local_helper_purge_coverage(purge_fn)
 
-    # Canonicalise filename ids (strip .tmp) but preserve the ``*.ext`` / ``*``
-    # extension-family markers verbatim (they carry no temp suffix).
-    return {c if c.endswith("*") or "/*." in c else _canonicalize(c) for c in covered}
+    # Canonicalise filename ids (strip a *filename* ``.tmp``) but preserve the
+    # ``*.ext`` / ``*`` extension-family markers verbatim.
+    # A5.2c1 (M1): temp-family markers (``*.tmp`` / ``*_tmp``) must ALSO be kept
+    # verbatim — they are FAMILIES, not filenames, and canonicalising them
+    # collapsed ``*.tmp`` into a bare ``*``.  That bare ``*`` then covered
+    # nothing while looking like coverage, i.e. the pool and the discovered id
+    # stopped matching on a family the purge really does sweep.  Note the
+    # asymmetry with a real filename: for ``settings.json.tmp`` collapsing onto
+    # ``settings.json`` is CORRECT (it is a copy of that file, and the reader
+    # of the copy is the purge of the file); for the family marker it is not.
+    # A5.2c1 (N1′): единый proof-фильтр по ИТОГОВОМУ покрытию — где бы ни
+    # появилось покрытие (тело purge, его хелперы, коллабораторы), хранилище из
+    # `_CIPHERTEXT_DESTRUCTION_STORES` без доказуемого уничтожения шифротекста не
+    # считается покрытым. Раньше фильтр жил только внутри тела purge, из-за
+    # чего вынос сноса в хелпер тихо обнулял требование.
+    for _store_id, _proofs in _CIPHERTEXT_DESTRUCTION_STORES.items():
+        if _store_id in covered and not _has_proof_for(purge_fn, _store_id, _proofs):
+            covered.discard(_store_id)
+
+    return {
+        c
+        if c.endswith("*") or "/*." in c or _temp_family(c) == c
+        else _canonicalize(c)
+        for c in covered
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1190,8 +1802,30 @@ def _is_covered(
       4. A *directory* whose every discovered child file is itself covered (an
          empty shell once its contents are wiped — e.g. ``archive/`` whose only
          content ``archive/archive.ndjson`` is cleared by ``clear_all``).
+      5. **A5.2c1 backup-copy family:** a ``.bak`` store is covered when the pool
+         names the SAME family — a purge sweep of ``history.ndjson.bak*`` covers
+         the producer-discovered ``history.ndjson.bak`` and vice versa.  The
+         family is matched by canonical id, so ``bak`` / ``bak1`` / ``bak-<ts>``
+         cannot each sneak past a sweep that only removed one variant.
+         A5.2c1 (L1): the pool entry must ITSELF be a family — contain ``*`` —
+         or be the exact ``store_id``.  Requiring only a shared family id let a
+         non-wildcard sweep (``history.ndjson.bak``, NC3 of the review) close the
+         whole family while every timestamped copy survived.  A single member is
+         evidence about itself only (rule 1), never about its family.
     """
     pool = covered | allowlisted
+    # (5) A5.2c1: backup-copy family — match on the canonical ``<base>.bak*`` id.
+    #     L1: пустая запись пула (без wildcard) права закрыть семейство не имеет.
+    own_family = _backup_family(store_id.rsplit("/", 1)[-1])
+    if own_family is not None:
+        for entry in pool:
+            if entry.endswith("/"):
+                continue
+            entry_base = entry.rsplit("/", 1)[-1]
+            if "*" not in entry_base and entry_base != store_id.rsplit("/", 1)[-1]:
+                continue
+            if _backup_family(entry_base) == own_family:
+                return True
     # (0) sibling-extension family store ``<subdir>/*.ext``.
     if "/*." in store_id:
         if store_id in pool:
@@ -1233,6 +1867,17 @@ def _local_helper_purge_coverage(purge_fn: ast.FunctionDef) -> set[str]:
     gate test what it claims to test.
     """
     covered: set[str] = set()
+    # A5.2c1 (N1′): хелперы ТОГО ЖЕ модуля. Раньше путь вел только к хелперам
+    # ДРУГИХ модулей (через локальный импорт), поэтому вынос сносов журналов в
+    # модульный `_purge_wipe_managed_journals` сделал их невидимыми гейту: все
+    # proof-gated журналы выпали из покрытия. Рефакторинг-выноска не должна
+    # обнулять требование доказательства.
+    _module = getattr(purge_fn, "_krab_module", None)
+    if _module is not None:
+        _mconsts = collect_string_constants(_module)
+        _mattrs = _module_attr_filenames(_module, _mconsts)
+        for _helper in _reachable_helpers(purge_fn):
+            covered |= _collect_removed_names_in_function(_helper, _mconsts, _mattrs)
     # Локальные импорты ВНУТРИ тела purge: ``from backend.X import name``.
     local_imports: dict[str, str] = {}
     for node in ast.walk(purge_fn):

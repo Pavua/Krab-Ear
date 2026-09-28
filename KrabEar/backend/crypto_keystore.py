@@ -107,23 +107,76 @@ def get_or_create_history_key() -> bytes:
     return key
 
 
-def delete_history_key() -> None:
-    """Удаляет ключ шифрования из Keychain.
+def delete_history_key() -> bool:
+    """Удаляет ключ шифрования из Keychain и ПОДТВЕРЖДАЕТ отсутствие.
 
-    Если ключ не найден — ошибка игнорируется.
+    Возвращает:
+        True  — ключ уничтожен (удалён) или его не было, и отсутствие подтверждено;
+        False — уничтожить не удалось, либо результат не удалось подтвердить.
+
+    A5.2c1: вызывающий (privacy-purge) обязан знать исход. Раньше функция
+    глотала неудачный exit code в лог и возвращала None, из-за чего отчёт
+    purge рапортовал «ключ уничтожен» даже когда живой ключ остался на месте —
+    а живой ключ в сочетании с pre-purge бэкапом означает всю историю.
+    Fail-closed: неопределённость и отказ оба дают False, а не True.
+
+    L2 (adversarial-ревью) — два риска, оба закрыты здесь:
+
+    1. «Ключа не было» определялось ПОДСТРОКОЙ stderr (``could not be found``).
+       На другой локали тот же самый успешный purge стал бы «частичным» — а
+       владелец, регулярно получающий ложный ``complete: false``, начинает
+       игнорировать сам признак. Решение принимает EXIT CODE, как это уже делает
+       соседний :func:`get_or_create_history_key` (``_ITEM_NOT_FOUND_EXIT_CODE``).
+    2. ``security delete`` может вернуть 0, а элемент остаться на месте
+       (заблокированный Keychain по другому пути, гонка с другим процессом,
+       посредник). Поэтому «удалил» ≠ «уничтожен»: после успешного кода
+       делается read-only подтверждение отсутствия тем же приёмом, что и
+       :func:`history_key_present` (без ``-w``, ключевой материал не читается).
+       Неопределённость (``None``) — тоже False: подтвердить не смогли.
 
     Raises:
-        KeystoreUnavailable: если ``security`` CLI не найден (не macOS).
+        KeystoreUnavailable: если ``security`` CLI не найден (не macOS) **или если
+            на этом хосте Keychain недоступен по платформе** (B1′). Вызывающий
+            трактует это как «на этой платформе ключа не существует».
     """
+    # B1′ (ubuntu-parity): проверка ПЕРЕД запуском процесса. Платформа решает всё:
+    # на хосте без Keychain подтвердить удаление нечем, и возвращать
+    # непроверяемый ``False`` нельзя — тесты патчат ``_run_security``, то есть
+    # «удаление проходит», а платформа остаётся чужой, и purge рапортовал бы
+    # «ключ не уничтожен» на CI, где ключа не существует в принципе. Это ровно
+    # то, что делает ``_run_security`` на не-darwin (FileNotFoundError →
+    # KeystoreUnavailable), только решение принимается до spawn: нечего
+    # спрашивать про ключ у машины, у которой нет Keychain. Существующая ветка
+    # purge ``except KeystoreUnavailable`` уже означает «здесь ключа нет».
+    if not keychain_available():
+        raise KeystoreUnavailable(
+            "Keychain на этой платформе недоступен — удалять нечего"
+        )
+
     result = _run_security(
         ["delete-generic-password", "-s", _SERVICE, "-a", _ACCOUNT]
     )
-    if result.returncode != 0 and "could not be found" not in result.stderr.lower():
+    if result.returncode not in (0, _ITEM_NOT_FOUND_EXIT_CODE):
         logger.warning(
             "crypto_keystore: delete-generic-password завершился с кодом %d: %s",
             result.returncode,
             result.stderr.strip(),
         )
+        return False
+
+    present = history_key_present()
+    if present is True:
+        logger.error(
+            "crypto_keystore: delete вернул код 0, но ключ всё ещё в Keychain — "
+            " shred не засчитан"
+        )
+        return False
+    if present is None:
+        logger.warning(
+            "crypto_keystore: не удалось подтвердить отсутствие ключа — shred не засчитан"
+        )
+        return False
+    return True
 
 
 def keychain_available() -> bool:
@@ -133,3 +186,37 @@ def keychain_available() -> bool:
     Не вызывает ``get_or_create_history_key`` (не создаёт ключ как побочный эффект).
     """
     return sys.platform == "darwin" and shutil.which("security") is not None
+
+
+def history_key_present() -> bool | None:
+    """Read-only проба «есть ли ключ шифрования истории» (A5.2c1).
+
+    Возвращает:
+        True  — ключ есть;
+        False — ключа нет;
+        None  — определить не удалось (Keychain недоступен/заблокирован).
+
+    Ключевой материал НЕ читается: тот же ``find-generic-password``, но БЕЗ ``-w``,
+    поэтому команда не выводит секрет. Проба ничего не создаёт — диагностика не
+    должна восстанавливать ключ побочным эффектом (иначе «проверить, есть ли
+    ключ» само создало бы ключ и тихо изменило состояние профиля).
+
+    ``None``, а не ``False``: «не смогли определить» и «ключа нет» — разные
+    состояния, и подменять одно другим здесь нельзя (fail-closed в сторону
+    неопределённости, не в сторону «всё хорошо»).
+    """
+    if not keychain_available():
+        return None
+    result = _run_security(
+        ["find-generic-password", "-s", _SERVICE, "-a", _ACCOUNT]
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == _ITEM_NOT_FOUND_EXIT_CODE:
+        return False
+    # Любой другой код — не «ключа нет», а «не смогли определить».
+    logger.warning(
+        "crypto_keystore: find-generic-password вернул код %d — наличие ключа неизвестно",
+        result.returncode,
+    )
+    return None

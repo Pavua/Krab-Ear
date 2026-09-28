@@ -722,6 +722,32 @@ def _neutralize_keychain_security():
 
 
 @pytest.fixture(autouse=True)
+def _simulate_non_darwin_host(request, monkeypatch):
+    """A5.2c1 (B1′): прогон в ubuntu-режиме — ``KRAB_A52C1_SIMULATE_NON_DARWIN=1``.
+
+    Код волны ходит в Keychain, а значит зависит от платформы, поэтому «зелёный
+    на macOS» ничего не доказывает: ``ubuntu-latest`` в CI и
+    ``pre_merge_py312_check`` (Python 3.12 без mlx) гоняют те же файлы. Фикс L2
+    сделал ``delete_history_key()`` зависимым от ``keychain_available()``, и на
+    ubuntu подтверждение отсутствия возвращало ``None`` ⇒ ``shredded=False`` при
+    успешном удалении — 8 новых падений плюс 2 независимо сломанных, то есть
+    ровно тот класс, который репозиторий называет ubuntu-parity (локально
+    зелёное, на CI красное).
+
+    Отличие от :func:`_neutralize_keychain_security`: та подменяет ``security``
+    на FileNotFoundError, эта — флипает ``sys.platform``. Обе нужны: тесты,
+    которые патчат ``_run_security`` напрямую, обходят CLI-подмену, и тогда
+    единственным носителем «ubuntu-ness» остаётся платформа.
+
+    Флип происходит на этапе ФИКСТУРЫ, то есть ПОСЛЕ коллекции: иначе импорты
+    модулей уехали бы ещё по macOS-пути и симуляция была бы декоративной.
+    """
+    if os.environ.get("KRAB_A52C1_SIMULATE_NON_DARWIN") != "1":
+        return
+    monkeypatch.setattr(sys, "platform", "linux")
+
+
+@pytest.fixture(autouse=True)
 def _purge_leaked_module_stubs():
     """Remove bare-stub and Mock entries from sys.modules after each test."""
     yield

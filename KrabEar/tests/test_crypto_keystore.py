@@ -156,20 +156,59 @@ class TestDeleteHistoryKey(unittest.TestCase):
     """delete_history_key: успех и игнор not-found."""
 
     def test_delete_calls_security(self) -> None:
-        with patch("backend.crypto_keystore._run_security", return_value=_ok_result()) as mock_sec:
+        """Удаление = delete + подтверждение отсутствия (A5.2c1 L2).
+
+        Раньше был ровно один вызов, и «удалил» молча означало «уничтожен».
+        Теперь после успешного кода идёт read-only подтверждение: «уничтожен»
+        — это «удалён И отсутствия удалось подтвердить», иначе purge рапортовал бы
+        успех при живом ключе.
+        """
+        # B1′: тест проверяет семантику удаления, поэтому хост объявлен macOS.
+        # Контракт non-darwin — в test_delete_raises_without_keystore.
+        with patch("backend.crypto_keystore.keychain_available", return_value=True), patch(
+            "backend.crypto_keystore._run_security", return_value=_ok_result()
+        ) as mock_sec:
             from backend.crypto_keystore import delete_history_key
             delete_history_key()  # Не бросает исключений
 
-        self.assertEqual(mock_sec.call_count, 1)
-        self.assertIn("delete-generic-password", mock_sec.call_args[0][0])
+        self.assertEqual(mock_sec.call_count, 2, "delete + подтверждающая проба")
+        delete_call = mock_sec.call_args_list[0][0][0]
+        self.assertIn("delete-generic-password", delete_call)
+        probe_call = mock_sec.call_args_list[1][0][0]
+        self.assertIn("find-generic-password", probe_call)
+        self.assertNotIn("-w", probe_call, "подтверждение не должно читать ключ")
 
     def test_delete_ignores_not_found(self) -> None:
         """Если ключ не найден — не бросает исключение."""
         not_found = _fail_result(44, "The specified item could not be found")
-        with patch("backend.crypto_keystore._run_security", return_value=not_found):
+        with patch("backend.crypto_keystore.keychain_available", return_value=True), patch(
+            "backend.crypto_keystore._run_security", return_value=not_found
+        ):
             from backend.crypto_keystore import delete_history_key
             # Не должен бросать исключение
             delete_history_key()
+
+    def test_delete_raises_without_keystore(self) -> None:
+        """B1′: хост без Keychain → KeystoreUnavailable, а НЕ непроверяемый False.
+
+        Фикс L2 (подтверждение удаления пробой) опирался на ``keychain_available()``,
+        поэтому на не-darwin подтверждение возвращало ``None`` и функция отвечала
+        ``False`` даже при успешном удалении — 8 новых падений на ubuntu-CI при
+        зелёном локальном прогоне. Правда здесь — «на этой платформе ключа нет»,
+        её и выражает KeystoreUnavailable, который purge уже трактует как «ключа
+        не существует». Возвращать ``False`` нельзя: это выглядело бы как
+        «уничтожить не удалось» и ломало бы CI.
+        """
+        from backend.crypto_keystore import KeystoreUnavailable
+
+        with patch("backend.crypto_keystore.keychain_available", return_value=False), patch(
+            "backend.crypto_keystore._run_security"
+        ) as mock_sec:
+            from backend.crypto_keystore import delete_history_key
+            with self.assertRaises(KeystoreUnavailable):
+                delete_history_key()
+
+        mock_sec.assert_not_called()
 
     def test_delete_unavailable_platform(self) -> None:
         """KeystoreUnavailable при отсутствии security CLI."""

@@ -92,6 +92,34 @@ def disk_space_status(data_dir) -> dict:
                 "required_bytes_one_copy": None, "targets": {}}
 
 
+def history_encryption_key_status() -> dict:
+    """A5.2c1: есть ли ключ шифрования истории — для статусных поверхностей.
+
+    Отдельный сигнал от `restore_pending_status`: он про целостность профиля
+    после операции, а этот — про то, чем профиль сейчас защищён. Владельцу
+    нужно видеть «профиль на ON, но ключа нет» ДО следующей записи: иначе
+    вопрос «почему история вдруг стала нечитаемой» остаётся без ответа.
+
+    Строго read-only: `history_key_present()` не создаёт ключ и не читает
+    ключевой материал (в `find-generic-password` нет ``-w``). Диагностика не
+    имеет права восстанавливать ключ побочным эффектом.
+
+    `key_present: null` — «определить не удалось» (Keychain недоступен или
+    заблокирован). Это НЕ то же самое, что `false`: «ключа нет» и «мы не смогли
+    посмотреть» требуют разных действий от владельца. Ни одно из состояний не
+    роняет `get_diagnostics` — исключение гасится в null, а не пробрасывается.
+    """
+    try:
+        from backend.crypto_keystore import history_key_present
+
+        return {"key_present": history_key_present()}
+    except Exception:  # noqa: BLE001 — диагностика не имеет права падать
+        logger.warning(
+            "history_encryption_key_status: проба ключа не удалась", exc_info=True
+        )
+        return {"key_present": None}
+
+
 class HealthCheckService:
     """Обработчики IPC-команд диагностики и проверки здоровья бэкенда."""
 
@@ -343,6 +371,11 @@ class HealthCheckService:
             # `free_bytes: null` — «определить не удалось» и «место кончилось»
             # должны различаться на экране владельца.
             "disk_space": disk_space_status(self.store.data_dir),
+            # A5.2c1: наличие ключа шифрования истории. Ключ есть ВСЕГДА,
+            # `key_present: null` — «определить не удалось» (Keychain
+            # недоступен/заблокирован), что не то же самое, что «ключа нет».
+            # Проба read-only: не создаёт ключ и не читает ключевой материал.
+            "history_encryption": history_encryption_key_status(),
             "system": {
                 "python_version": sys.version,
                 "platform": platform.platform(),
