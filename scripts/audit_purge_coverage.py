@@ -131,7 +131,19 @@ _BACKUP_GLOB_RE = re.compile(r"^(?P<base>.+?)\.bak[-._0-9A-Za-z*]*$")
 # underscore is the whole reason the first leak slipped through.
 # ``.irregular`` добавлен по находке N2: pre-flight уводит нерегулярную запись
 # (fifo/сокет) в ``<name>.irregular``, и такая запись не должна выпадать из зоны
-# purge молча. Семейство нужно и гейту (видимость), и свипу (зачистка).
+# purge МОЛЧА.
+#
+# ЧЕСТНО О РАЗДЕЛЕНИИ (N2′ — прежний комментарий здесь врал): семейство нужно
+# ТОЛЬКО ГЕЙТУ, то есть для ВИДИМОСТИ. СВИПА `.irregular` в purge НЕТ и
+# добавлять его нельзя:
+#   * `.irregular` — отложенная НЕРЕГУЛЯРНАЯ запись (fifo/сокет), а не временная
+#     копия данных. Каталоги с этой ветки уже снимаются `rmtree`, так что в
+#     отложенной ветке остаются только fifo/сокет;
+#   * снос пользовательских `*.irregular` был бы over-delete: проверено пробой
+#     ревьюера, файл `моё_заметка.irregular` переживает purge — и это правильное
+#     поведение, а не пробел (тест в test_a52c1_purge_integrity.py фиксирует его
+#     как намеренное решение, чтобы следующий волнёц не «допилил» свип).
+# Реальный свип покрывает `.bak*` / `*.tmp` / `*_tmp` — это производные копии.
 TEMP_FAMILY_SUFFIXES: tuple[str, ...] = (".tmp", "_tmp", ".irregular")
 
 # Filenames that the discovery scanner must never treat as a real store even if
@@ -1011,13 +1023,53 @@ def _assigned_values(func: ast.FunctionDef) -> dict[str, ast.AST]:
     return out
 
 
+def _reachable_helpers(func: ast.FunctionDef) -> list[ast.FunctionDef]:
+    """Модульные хелперы, вызываемые из тела ``func`` (один уровень).
+
+    A5.2c1 (N1′): доказательство уничтожения может лежать в хелпере, а не в
+    теле purge — вынос сносов журналов в ``_purge_wipe_managed_journals`` сделал
+    снос невидимым гейту, и все proof-gated журналы «выпали» из покрытия. Поиск
+    только по телу purge означал бы: любая рефакторинг-выноска способна тихо
+    обнулить требование доказательства.
+    """
+    tree_module = getattr(func, "_krab_module", None)
+    if tree_module is None:
+        return []
+    called: set[str] = set()
+    for node in ast.walk(func):
+        if isinstance(node, ast.Call):
+            name = _name_of(node.func)
+            if name is not None:
+                called.add(name)
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                called.add(alias.asname or alias.name)
+    out: list[ast.FunctionDef] = []
+    for candidate in ast.walk(tree_module):
+        if (
+            isinstance(candidate, ast.FunctionDef)
+            and candidate.name in called
+            and candidate.name != func.name
+        ):
+            out.append(candidate)
+    return out
+
+
 def _has_proof_for(func: ast.FunctionDef, store_id: str, proofs: tuple[str, ...]) -> bool:
     """Доказательство уничтожения шифротекста ИМЕННО для этого хранилища.
 
     Требуется и сам вызов, и id хранилища среди его аргументов (с разыменкой
-    переменных) — иначе мёртвый вызов доказательства в любой части функции
-    засчитывал бы настоящее хранилище.
+    переменных и разбором контейнеров циклов) — иначе мёртвый вызов
+    доказательства в любой части функции засчитывал бы настоящее хранилище.
+    Ищется в теле purge И в модульных хелперах, которые purge вызывает.
     """
+    return _has_proof_in(func, store_id, proofs) or any(
+        _has_proof_in(helper, store_id, proofs)
+        for helper in _reachable_helpers(func)
+    )
+
+
+def _has_proof_in(func: ast.FunctionDef, store_id: str, proofs: tuple[str, ...]) -> bool:
     assignments = _assigned_values(func)
     loop_sources = _loop_sources(func)
     for node in ast.walk(func):
@@ -1634,6 +1686,10 @@ def extract_purge_coverage() -> set[str]:
     hs_consts = collect_string_constants(hs_tree)
     hs_attrs = _module_attr_filenames(hs_tree, hs_consts)
     purge_fn = _find_function(hs_tree, "handle_purge_all_data")
+    # A5.2c1 (N1′): доказательство может лежать в хелпере, вызываемом из purge,
+    # поэтому функции нужна ссылка на модуль (см. `_reachable_helpers`).
+    if purge_fn is not None:
+        purge_fn._krab_module = hs_tree  # type: ignore[attr-defined]
     if purge_fn is None:
         raise SystemExit(
             "audit_purge_coverage: handle_purge_all_data not found in "
@@ -1684,6 +1740,15 @@ def extract_purge_coverage() -> set[str]:
     # asymmetry with a real filename: for ``settings.json.tmp`` collapsing onto
     # ``settings.json`` is CORRECT (it is a copy of that file, and the reader
     # of the copy is the purge of the file); for the family marker it is not.
+    # A5.2c1 (N1′): единый proof-фильтр по ИТОГОВОМУ покрытию — где бы ни
+    # появилось покрытие (тело purge, его хелперы, коллабораторы), хранилище из
+    # `_CIPHERTEXT_DESTRUCTION_STORES` без доказуемого уничтожения шифротекста не
+    # считается покрытым. Раньше фильтр жил только внутри тела purge, из-за
+    # чего вынос сноса в хелпер тихо обнулял требование.
+    for _store_id, _proofs in _CIPHERTEXT_DESTRUCTION_STORES.items():
+        if _store_id in covered and not _has_proof_for(purge_fn, _store_id, _proofs):
+            covered.discard(_store_id)
+
     return {
         c
         if c.endswith("*") or "/*." in c or _temp_family(c) == c
@@ -1802,6 +1867,17 @@ def _local_helper_purge_coverage(purge_fn: ast.FunctionDef) -> set[str]:
     gate test what it claims to test.
     """
     covered: set[str] = set()
+    # A5.2c1 (N1′): хелперы ТОГО ЖЕ модуля. Раньше путь вел только к хелперам
+    # ДРУГИХ модулей (через локальный импорт), поэтому вынос сносов журналов в
+    # модульный `_purge_wipe_managed_journals` сделал их невидимыми гейту: все
+    # proof-gated журналы выпали из покрытия. Рефакторинг-выноска не должна
+    # обнулять требование доказательства.
+    _module = getattr(purge_fn, "_krab_module", None)
+    if _module is not None:
+        _mconsts = collect_string_constants(_module)
+        _mattrs = _module_attr_filenames(_module, _mconsts)
+        for _helper in _reachable_helpers(purge_fn):
+            covered |= _collect_removed_names_in_function(_helper, _mconsts, _mattrs)
     # Локальные импорты ВНУТРИ тела purge: ``from backend.X import name``.
     local_imports: dict[str, str] = {}
     for node in ast.walk(purge_fn):

@@ -779,8 +779,8 @@ class TestHistoryJournalGateProofs:
         gaps = _audit_mutated(
             _guard_repo_copy(tmp_path / "nc"),
             "KrabEar/backend/history_service.py",
-            "                if not _wipe_journal_ciphertext(_history_path):",
-            "                if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_history_path):",
+            "            if not _wipe_journal_ciphertext(_history_path):",
+            "            if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_history_path):",
         )
         assert "history.ndjson" in gaps, (
             f"отключение безусловного сноса history.ndjson обязано открывать "
@@ -791,8 +791,8 @@ class TestHistoryJournalGateProofs:
         gaps = _audit_mutated(
             _guard_repo_copy(tmp_path / "nc"),
             "KrabEar/backend/history_service.py",
-            "            if not _wipe_journal_ciphertext(_calendar_links_path):",
-            "            if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_calendar_links_path):",
+            "        if not _wipe_journal_ciphertext(_calendar_links_path):",
+            "        if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_calendar_links_path):",
         )
         assert "history_calendar_links.ndjson" in gaps, (
             f"отключение сноса calendar_links обязано открывать пробел; gaps: {sorted(gaps)}"
@@ -928,6 +928,302 @@ class TestFailedLedgerRenameAbortsPurgeLoudly:
         assert result["error"] == "preflight_failed", result
         assert "deletion_ledger" in result["errors"]
         assert result["complete"] is False
+
+
+# ---------------------------------------------------------------------------
+# N1′ — сносы и shred под локом; окно «после сноса — до shred'а» закрыто
+# ---------------------------------------------------------------------------
+
+
+class TestJournalWipesAndShredHoldTheLock:
+    """N1′: то же окно, что закрывала волна, только узкое.
+
+    Сносы журналов шли ВНЕ лока, а каждый писатель метаданных лок берёт
+    (`set_paste_status` → `with self.store._lock():` + `_append_ndjson(status_path,
+    …)`, state_store.py:1067-1070). Запись, попавшая в окно «после сноса — до
+    shred'а ключа», заново создаёт журнал со строкой ENC1, а shred делает её
+    нечитаемой навсегда.
+    """
+
+    def test_metadata_written_in_the_window_is_removed(self, tmp_path, fake_keychain, monkeypatch):
+        """Детерминированная часть: запись в окне должна исчезнуть.
+
+        Писатель эмулируется синхронно (реальный путь `set_paste_status` под
+        локом) в момент, когда первая серия сносов уже прошла. Никакой гонки
+        потоков — проверяется именно «повторный снос перед shred'ом», который и
+        делает «данные → ключ» атомарным.
+        """
+        import backend.history_service as hs
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        item = store.add_history_item(text="секрет владельца")
+        # Компактирование НЕ стабится: стаб оставлял ENC1 от setup-записи в
+        # history.ndjson, и тест измерял бы не своё (первая версия так и делала).
+
+        real_wipe = hs._wipe_journal_ciphertext
+        passes = {"n": 0}
+
+        def _writer_once(path: Path) -> bool:
+            result = real_wipe(path)
+            passes["n"] += 1
+            # Первая серия сносов завершена: пишем метаданные ПОСЛЕ неё, но до
+            # shred'а — то есть ровно в том окне, которое закрывает второй вызов.
+            # За проход: calendar + tombstones + 6 delta = 8 (history.ndjson чистится
+            # только при провале compact, а здесь compact «успешен»).
+            if passes["n"] == 8:
+                with store._lock():
+                    store._append_ndjson(
+                        store.status_path, {"id": item.id, "paste_status": "done"}
+                    )
+            return result
+
+        monkeypatch.setattr(hs, "_wipe_journal_ciphertext", _writer_once)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert result["ok"] is True
+        assert passes["n"] >= 16, "сносы должны быть выполнены дважды (1b и 38-1)"
+        assert _scan_enc1(data_dir) == [], (
+            "запись метаданных из окна «после сноса — до shred'а» обязана быть "
+            "снята повторным сносом под локом"
+        )
+        status = data_dir / "history_status.ndjson"
+        if status.is_file():
+            assert status.read_text(encoding="utf-8").strip() == "", (
+                "в журнале статусов не должно остаться строк, записанных старым ключом"
+            )
+        readable, why = _is_profile_readable(store)
+        assert readable, f"профиль обязан остаться читаемым, а упал: {why}"
+
+    def test_wipe_and_shred_happen_under_the_lock(self, tmp_path, fake_keychain, monkeypatch):
+        """Лок реально удерживается во время финального сноса (шаг 38-1).
+
+        Проверяется на уровне блокировки, а не «на глаз»: в момент финального
+        сноса тест смотрит, держит ли ЭТОТ ЖЕ тред эксклюзивный лок
+        (`StateStore._lock_depth[tid] >= 1`). Если сносы шли без лока, счётчика
+        нет — 0, и тест падает.
+
+        Уточнения, без которых тест врал бы (все пойманы на практике):
+        * проба снимается ТОЛЬКО на финальной серии сносов (второй проход по
+          `history_annotations.ndjson`). Лок между сериями (1b и 38-1) штатно
+          отпускается, и проба там дала бы ложное «защищено»;
+        * вердикт фиксируется В МОМЕНТЕ пробы, а не в конце purge: к моменту
+          проверки лок уже отпущен;
+        * проба делается ЧТЕНИЕМ счётчика, а НЕ попыткой взять лок. И `_lock(
+          nowait=True)`, и тред-конкурент здесь бесполезны: `_lock` реентерабелен
+          per-thread, поэтому из того же треда он достаётся мгновенно (проверено:
+          вариант с `nowait` давал 10/10 ложно-красных). Тред-конкурент работал,
+          но флейкал под нагрузкой — тред мог не попасть в scheduler за
+          отведённое время, то есть гонка была в самом тесте.
+        """
+
+        import backend.history_service as hs
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        real_wipe = hs._wipe_journal_ciphertext
+        seen = {"n": 0, "probe_done": False, "depth": 0}
+
+        def _exclusive_depth() -> int:
+            """Глубина вложенности EX-лока ТЕКУЩЕГО треда (0 = лок не взят)."""
+            with store._lock_reentry_guard:
+                return int(store._lock_depth.get(threading.get_ident(), 0))
+
+        def _probe(path: Path) -> bool:
+            result = real_wipe(path)
+            if path.name == "history_annotations.ndjson":
+                seen["n"] += 1
+                # Вторая серия = финальный снос перед shred'ом (шаг 38-1).
+                if seen["n"] == 2 and not seen["probe_done"]:
+                    seen["probe_done"] = True
+                    seen["depth"] = _exclusive_depth()
+            return result
+
+        monkeypatch.setattr(hs, "_wipe_journal_ciphertext", _probe)
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert seen["probe_done"], "финальный снос не состоялся — тест не проверил лок"
+        assert seen["depth"] >= 1, (
+            f"в момент финального сноса EX-лок не был взят (глубина={seen['depth']}) "
+            f"— сносы идут БЕЗ лока, окно «после сноса — до shred'а» открыто"
+        )
+
+
+class TestPreFlightRefusalIsAudited:
+    """N4: отказ `preflight_failed` обязан попасть в комплаенс-трейл и в ответ."""
+
+    def _refused_purge(self, tmp_path, fake_keychain, monkeypatch):
+        import backend.history_service as hs
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        ledger = data_dir / "history_purged_ids.ndjson"
+        ledger.unlink(missing_ok=True)
+        os.mkfifo(ledger)
+        monkeypatch.setattr(hs, "_evict_ledger_entry", lambda _p, _kind: None)
+        return HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+    def test_refusal_has_human_readable_message(self, tmp_path, fake_keychain, monkeypatch):
+        result = self._refused_purge(tmp_path, fake_keychain, monkeypatch)
+        assert result["ok"] is False
+        assert result["error"] == "preflight_failed"
+        assert result.get("message"), "отказ без message нечего показать владельцу"
+        assert "нерегулярн" in result["message"] or "purge прерван" in result["message"]
+
+    def test_refusal_is_written_to_privacy_audit(self, tmp_path, fake_keychain, monkeypatch):
+        from backend.privacy_audit import get_privacy_audit_logger
+
+        logger = get_privacy_audit_logger()
+        # ВАЖНО: API логгера — read_entries(), а НЕ read_events(). Первая версия
+        # теста проверяла hasattr(..., "read_events") и молча пропускала всю
+        # проверку: у logger такого метода нет, значит аудит не проверялся вообще.
+        before = {(e.get("action"), json.dumps(e.get("details"), sort_keys=True, ensure_ascii=False))
+                  for e in logger.read_entries(limit=200)}
+
+        result = self._refused_purge(tmp_path, fake_keychain, monkeypatch)
+        assert result["ok"] is False
+
+        entries = logger.read_entries(limit=200)
+        assert entries, "privacy_audit вернул пусто — трейл не читается вовсе"
+        new_entries = [
+            e for e in entries
+            if (
+                e.get("action"),
+                json.dumps(e.get("details"), sort_keys=True, ensure_ascii=False),
+            ) not in before
+        ]
+        refusals = [
+            e for e in new_entries
+            if e.get("action") == "purge_all_data"
+            and (e.get("details") or {}).get("result") == "refused"
+        ]
+        assert refusals, (
+            "отказ purge обязан попасть в privacy_audit.log: без него отчёт по "
+            "комплаенс-трейлу показывает «чисто», хотя зачистка не начиналась; "
+            f"новые записи: {[(e.get('action'), e.get('details')) for e in new_entries]}"
+        )
+        # Причина отказа обязана быть в трейле, иначе запись бесполезна для разбора.
+        assert (refusals[-1].get("details") or {}).get("reason") == "preflight_failed", (
+            f"в трейле нет кода отказа: {refusals[-1].get('details')}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# N2′ — честный комментарий про семейство `.irregular`
+# ---------------------------------------------------------------------------
+
+
+class TestIrregularFamilyGateVisibilityOnly:
+    """N2′: `.irregular` виден ГЕЙТУ, но намеренно НЕ зачищается свипом.
+
+    Свипа `.irregular` нет и не должно быть: это отложенная НЕРЕГУЛЯРНАЯ запись
+    (fifo/сокет), а не временная копия. Сносить пользовательские
+    `*.irregular` было бы over-delete — тем более что каталоги теперь сносятся
+    `rmtree` и в отложенной ветке остаются только fifo/сокет.
+    """
+
+    def _guard(self):
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_n2", path)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_family_is_registered_for_visibility(self):
+        guard = self._guard()
+        assert ".irregular" in guard.TEMP_FAMILY_SUFFIXES
+
+    def test_sweep_does_not_delete_user_irregular_files(self, tmp_path, fake_keychain):
+        """Пользовательский `*.irregular` переживает purge — это ЗАФИКСИРОВАНО.
+
+        Проверка, что решения «свипа нет» действительно нет, а не что оно
+        случайно появилось: файл владельца с таким окончанием не является
+        копией данных и не должен исчезать.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        user_file = data_dir / "моё_заметка.irregular"
+        user_file.write_text("заметка владельца", encoding="utf-8")
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert user_file.exists(), (
+            "пользовательский *.irregular — не производная копия данных; сносить "
+            "его было бы over-delete"
+        )
+
+    def test_sweep_patterns_cover_bak_and_tmp_families(self):
+        """Свип закрывает `.bak*` / `.tmp` / `_tmp` — и НЕ `.irregular`."""
+        src = (
+            Path(__file__).resolve().parents[2] / "KrabEar/backend/history_service.py"
+        ).read_text(encoding="utf-8")
+        for pattern in (
+            'glob("history.ndjson.bak*")',
+            'glob("settings.json.bak*")',
+            'glob("*.tmp")',
+            'glob("*_tmp")',
+        ):
+            assert pattern in src, f"свип потерял семейство {pattern}"
+        assert 'glob("*.irregular' not in src, (
+            "свипа `.irregular` быть НЕ должно — это over-delete (N2′)"
+        )
+
+
+# ---------------------------------------------------------------------------
+# N3′ — мёртвая ветка удалена
+# ---------------------------------------------------------------------------
+
+
+def test_evict_has_no_dead_return():
+    """N3′: в `_evict_ledger_entry` не осталось недостижимого `return None`.
+
+    Мёртвая ветка в safety-коде читается как страховка, которой нет: следующий
+    волнёц будет искать, что она защищает, и не найдёт.
+    """
+    import ast
+    import inspect
+
+    import backend.history_service as hs
+
+    src = inspect.getsource(hs._evict_ledger_entry)
+    tree = ast.parse(textwrap_dedent(src))
+    fn = tree.body[0]
+    assert isinstance(fn, ast.FunctionDef)
+    # `return None` — это Return(value=Constant(None)), а не Return(value=None):
+    # первая версия теста искала второе и «находило 0».
+    # Ветки `return None` внутри `if`/`try`/`for` ДОСТИЖИМЫ (каталог, отказ rename,
+    # исчерпание вариантов) — это не мёртвые ветки. Мёртвой была ВТОРАЯ
+    # последовательная `return None` на верхнем уровне тела: до неё уже нельзя
+    # дойти. Поэтому проверка — на ВЕРХНЕМ уровне функции, а не на общем числе.
+    top_level_returns = [n for n in fn.body if isinstance(n, ast.Return)]
+    assert len(top_level_returns) == 1, (
+        f"на верхнем уровне тела ожидался ровно один `return None` (хвостовой), "
+        f"найдено {len(top_level_returns)} — мёртвая ветка вернулась"
+    )
+    assert fn.body[-1] is top_level_returns[0], (
+        "хвостовой `return None` обязан быть ПОСЛЕДНИМ оператором функции — "
+        "иначе он недостижим (код после него не выполняется)"
+    )
+
+
+def textwrap_dedent(src: str) -> str:
+    import textwrap
+
+    return textwrap.dedent(src)
 
 
 # ---------------------------------------------------------------------------
@@ -2295,8 +2591,8 @@ class TestPurgeCoverageCiphertextProofs:
         gaps = _audit_mutated(
             _guard_repo_copy(tmp_path / "nc"),
             "KrabEar/backend/history_service.py",
-            "            if not _wipe_journal_ciphertext(_tombstones_path):",
-            "            if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_tombstones_path):",
+            "        if not _wipe_journal_ciphertext(_tombstones_path):",
+            "        if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_tombstones_path):",
         )
         assert "history_tombstones.ndjson" in gaps, (
             f"безусловная зачистка томбестонов обязана быть доказуемо востребована; gaps: {sorted(gaps)}"
