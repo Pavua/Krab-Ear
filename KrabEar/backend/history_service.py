@@ -186,9 +186,114 @@ def _evict_ledger_entry(path: Path, kind: str) -> Path | None:
             return aside
         except OSError:
             return None
+    # 100 свободных имён не нашлось — исчерпание вариантов, тот же «не смогли».
     return None
 
-    return None
+
+def _purge_wipe_managed_journals(
+    *, data_dir: Any, secondary_errors: list[str], compact_failed: bool
+) -> None:
+    """Снести безусловно все шифруемые журналы профиля. Вызывается ПОД локом.
+
+    A5.2c1 (B1‴/N1′): инвариант «purge не оставляет шифротекст, который не сможет
+    уничтожить». Журналы зашифрованы тем же codec'ом, что и история
+    (``_append_ndjson``), и чистятся компактированием ТОЛЬКО при успехе, поэтому
+    их снос не может быть условным.
+
+    Шесть delta-журналов (status/tags/favorites/text_updates/action_items/
+    annotations) перечислены в контейнере цикла: в профиле владельца они
+    непустые, и их ENC1 после провала компактирования делал профиль нечитаемым
+    (проба: ``ENC1 ПОСЛЕ purge: [('history_status.ndjson', 2)]`` →
+    ``HistoryEncryptionUnavailable``).
+
+    Идемпотентна: вызывается дважды — под локом в начале зачистки и под локом
+    прямо перед shred'ом ключа (шаг 38-1). Повтор нужен, чтобы закрыть окно
+    «после этих сносов — до shred'а»: лок первого вызова к тому моменту уже
+    отпущен, и писатель метаданных успевает записать ENC1.
+    """
+    # 1) Журнал самой истории — только если компактирование не прошло: иначе
+    #    компактирование его уже переписало, а лишний unlink был бы вторым
+    #    конкурентным вызовом без причины.
+    if compact_failed:
+        try:
+            _history_path = Path(data_dir) / "history.ndjson"
+            if not _wipe_journal_ciphertext(_history_path):
+                _flag_step_error(secondary_errors, "history_ciphertext")
+            else:
+                logger.info(
+                    "purge_all_data: compact не прошёл — history.ndjson снесён, "
+                    "иначе он остался бы нечитаемым после shred'а ключа"
+                )
+        except Exception:
+            logger.warning(
+                "purge_all_data: не удалось снести history.ndjson после сбоя compact",
+                exc_info=True,
+            )
+            _flag_step_error(secondary_errors, "history_ciphertext")
+
+    # 2) Календарные ссылки (wave-36 MED B3): заголовки встреч — PII. Прод-писатель
+    #    — `_append_ndjson` (state_store.py:2399), тот же шифрующий путь, значит
+    #    ENC1 возможен и снос обязан быть доказуемо безусловным. Заодно прежний
+    #    `unlink(missing_ok=True)` не проверял, что файл исчез.
+    try:
+        _calendar_links_path = Path(data_dir) / "history_calendar_links.ndjson"
+        if not _wipe_journal_ciphertext(_calendar_links_path):
+            _flag_step_error(secondary_errors, "calendar_links")
+    except Exception:
+        logger.warning(
+            "purge_all_data: удаление history_calendar_links.ndjson не удалось",
+            exc_info=True,
+        )
+        _flag_step_error(secondary_errors, "calendar_links")
+
+    # 3) Журнал томбестонов — безусловно.
+    #
+    # ЧЕСТНОСТЬ ПРО ПОТЕРЮ: если compact не прошёл, строки томбестонов —
+    # единственный носитель удалённых ID (permanent-реестр их ещё не видел, он
+    # заполняется именно в compact). Их удаление означает неполный реестр, и
+    # это ОБЯЗАНО быть видно в ответе, а не спрятано: шаг `tombstone_registry`
+    # + `complete: false`.
+    try:
+        _tombstones_path = Path(data_dir) / "history_tombstones.ndjson"
+        _tombstones_had_rows = (
+            _tombstones_path.is_file() and _tombstones_path.stat().st_size > 0
+        )
+        if not _wipe_journal_ciphertext(_tombstones_path):
+            _flag_step_error(secondary_errors, "tombstones")
+        elif _tombstones_had_rows and compact_failed:
+            logger.warning(
+                "purge_all_data: compact не прошёл, поэтому удалённые ID были "
+                "только в журнале томбестонов — реестр удалённых ID НЕПОЛОН"
+            )
+            _flag_step_error(secondary_errors, "tombstone_registry")
+    except Exception:
+        logger.warning(
+            "purge_all_data: удаление history_tombstones.ndjson не удалось", exc_info=True
+        )
+        _flag_step_error(secondary_errors, "tombstones")
+
+    # 4) Остальные delta-журналы. Тот же класс, что у истории, и шире него: эти
+    #    журналы пишутся тем же шифрующим `_append_ndjson` и при провале compact
+    #    тоже оставляют ENC1. Содержимое — метаданные записей, которые purge
+    #    всё равно уничтожает, поэтому потери реестра удалений здесь нет.
+    _delta_journals = [
+        "history_status.ndjson",
+        "history_tags.ndjson",
+        "history_favorites.ndjson",
+        "history_text_updates.ndjson",
+        "history_action_items.ndjson",
+        "history_annotations.ndjson",
+    ]
+    for _journal_name in _delta_journals:
+        try:
+            _delta_path = Path(data_dir) / _journal_name
+            if _wipe_journal_ciphertext(_delta_path):
+                continue
+        except Exception:
+            logger.warning(
+                "purge_all_data: удаление %s не удалось", _journal_name, exc_info=True
+            )
+        _flag_step_error(secondary_errors, "delta_journals")
 
 
 def _flag_step_error(secondary_errors: list[str], name: str) -> None:
@@ -2568,9 +2673,48 @@ class HistoryService:
                                 ),
                                 context={"data_dir": str(self.store.data_dir)},
                             )
+                            # N4: отказ ПИШЕТСЯ в комплаенс-трейл. Ранний возврат
+                            # происходит до `log_event` ниже, поэтому без этой
+                            # записи `privacy_audit.log` не показал бы, что purge
+                            # отказан, — а «в отчёте чисто» читается как «владелец
+                            # стёр профиль». Общая IPC-аудит-запись это частично
+                            # смягчала, но не отменяет: действие не выполнено, и
+                            # оно должно быть видно именно в журнале privacy-purge.
+                            # Ключ `message` добавлен по образцу `confirmation_required`
+                            # — иначе клиенту нечего показать.
+                            try:
+                                from backend.privacy_audit import get_privacy_audit_logger
+
+                                get_privacy_audit_logger().log_event(
+                                    # Тот же category/action, что у успешного пути
+                                    # ниже, — иначе отказ и выполнение разъедутся
+                                    # по двум разным «действиям» в комплаенс-трейле.
+                                    category="privacy",
+                                    action="purge_all_data",
+                                    details={
+                                        # Отказ, а не выполнение: иначе в трейле
+                                        # лежал бы `purge_all_data` без единого
+                                        # счётчика и читался бы как успех.
+                                        "result": "refused",
+                                        "reason": "preflight_failed",
+                                        "ledger_entry": _irregular,
+                                        "secondary_errors": list(secondary_errors),
+                                    },
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "purge_all_data: privacy audit log failed (preflight)",
+                                    exc_info=True,
+                                )
                             return {
                                 "ok": False,
                                 "error": "preflight_failed",
+                                "message": (
+                                    "Путь permanent deletion ledger'а занят нерегулярной "
+                                    "записью, и освободить его не удалось. Purge "
+                                    "прерван ДО любых удалений, чтобы не читать этот "
+                                    "путь. Освободите путь вручную и повторите."
+                                ),
                                 "errors": list(secondary_errors),
                                 "complete": False,
                             }
@@ -2600,116 +2744,22 @@ class HistoryService:
             logger.warning("purge_all_data: compact failed — cleartext may remain in history.ndjson", exc_info=True)
             secondary_errors.append("compact")
 
-        # --- 1b-1. A5.2c1 (B1‴): compact не прошёл → шифротекст истории остался бы.
-        # Компактирование — единственное, что переписывает `history.ndjson`
-        # без живых строк. Если оно упало (забитый диск — банальный триггер),
-        # в файле остаётся ENC1-история, а шаг shred'а ключа ниже делает её
-        # нечитаемой навсегда: профиль после purge перестаёт открываться, и
-        # повторный purge падает тем же исключением. Purge всё равно уничтожает
-        # историю, поэтому при провале компактирования файл сносится целиком —
-        # это и есть «не оставлять шифротекст, который не сможешь уничтожить».
-        # `StateStore.__init__` re-touch'ит пустой файл, так что профиль
-        # остаётся целым. Исход объявляется: `compact` уже в errors, плюс
-        # отдельная причина, если файл уцелел.
-        if "compact" in secondary_errors:
-            try:
-                _history_path = Path(self.store.data_dir) / "history.ndjson"
-                if not _wipe_journal_ciphertext(_history_path):
-                    _flag_step_error(secondary_errors, "history_ciphertext")
-                else:
-                    logger.info(
-                        "purge_all_data: compact не прошёл — history.ndjson снесён, "
-                        "иначе он остался бы нечитаемым после shred'а ключа"
-                    )
-            except Exception:
-                logger.warning(
-                    "purge_all_data: не удалось снести history.ndjson после сбоя compact",
-                    exc_info=True,
-                )
-                _flag_step_error(secondary_errors, "history_ciphertext")
-
-        # --- 1b-2. wave-36 (MED B3): physically delete history_calendar_links.ndjson.
-        # CalendarLinker stores {item_id → Calendar.app event title/id} in this StateStore
-        # sidecar journal.  compact_with_stats() (step 1b) only *selectively rewrites* it,
-        # keeping entries whose id is still active — but (a) it is wrapped in try/except above
-        # so a failed compaction leaves the FULL journal on disk, and (b) even on success the
-        # file itself survives (truncated content, not removed).  Event titles are user PII
-        # (meeting names around real people).  An explicit unlink guarantees the journal is
-        # gone after a privacy-wipe regardless of compaction outcome.  state_store.__init__
-        # re-touches an empty file on next start, so the store stays consistent.
-        # A5.2c1 (N1): прод-писатель журнала — `_append_ndjson`, то есть ТОТ ЖЕ
-        # шифрующий путь (state_store.py:2399), значит ENC1 там возможен и снос
-        # обязан быть доказуемо безусловным. Заодно `unlink(missing_ok=True)` не
-        # проверял, что файл исчез, — теперь проверяет.
-        try:
-            _calendar_links_path = Path(self.store.data_dir) / "history_calendar_links.ndjson"
-            if not _wipe_journal_ciphertext(_calendar_links_path):
-                _flag_step_error(secondary_errors, "calendar_links")
-        except Exception:
-            logger.warning("purge_all_data: удаление history_calendar_links.ndjson не удалось", exc_info=True)
-            _flag_step_error(secondary_errors, "calendar_links")
-
-        # --- 1b-3. A5.2c1 (B1‴): журнал томбестонов — безусловная зачистка.
-        # Компактирование чистит его ТОЛЬКО при успехе, а шаг 1b-1 выше показал,
-        # что провал компактирования — банальный сценарий (забитый диск). Тогда
-        # в `history_tombstones.ndjson` остаются строки, а shred ключа ниже
-        # делает их нечитаемыми навсегда. Поэтому зачистка безусловна, ровно
-        # как у `history_calendar_links.ndjson` в 1b-2.
-        #
-        # ЧЕСТНОСТЬ ПРО ПОТЕРЮ (условие ревью): если compact не прошёл, эти
-        # строки — единственный носитель удалённых ID (permanent-реестр их ещё не
-        # видел, он заполняется именно в compact). Их удаление означает неполный
-        # реестр удалённых ID, и это ОБЯЗАНО быть видно в ответе, а не спрятано:
-        # отдельный шаг `tombstone_registry` + `complete: false`.
-        try:
-            _tombstones_path = Path(self.store.data_dir) / "history_tombstones.ndjson"
-            _tombstones_had_rows = _tombstones_path.is_file() and (
-                _tombstones_path.stat().st_size > 0
+        # --- 1b-1 … 1b-4 (A5.2c1 B1‴/N1): безусловный снос журналов.
+        # Вызывается ПОД `store._lock()`: каждый писатель метаданных лок берёт
+        # (`set_paste_status` → `with self._lock():` + `_append_ndjson(status_path, …)`,
+        # state_store.py:1067-1070), а снос без лока оставлял окно, в котором запись
+        # метаданных заново создавала `history_status.ndjson` со строкой ENC1 — а shred
+        # ключа ниже делал её нечитаемой навсегда (тот же класс, что закрывала волна,
+        # только в узком окне). Лок реентерабелен: EX→EX — no-op по per-thread
+        # depth-счётчику, вложенного SH→EX здесь нет (блок начинается ПОСЛЕ выхода из
+        # `with` шага 1). Второй вызов — в шаге 38-1, под тем же локом, прямо перед
+        # shred'ом: без него окно «после этих сносов — до shred'а» оставалось открытым.
+        with self.store._lock():
+            _purge_wipe_managed_journals(
+                data_dir=self.store.data_dir,
+                secondary_errors=secondary_errors,
+                compact_failed="compact" in secondary_errors,
             )
-            if not _wipe_journal_ciphertext(_tombstones_path):
-                _flag_step_error(secondary_errors, "tombstones")
-            elif _tombstones_had_rows and "compact" in secondary_errors:
-                logger.warning(
-                    "purge_all_data: compact не прошёл, поэтому удалённые ID были "
-                    "только в журнале томбестонов — реестр удалённых ID НЕПОЛОН"
-                )
-                _flag_step_error(secondary_errors, "tombstone_registry")
-        except Exception:
-            logger.warning(
-                "purge_all_data: удаление history_tombstones.ndjson не удалось", exc_info=True
-            )
-            _flag_step_error(secondary_errors, "tombstones")
-
-        # --- 1b-4. A5.2c1 (N1, собственная находка): остальные delta-журналы.
-        #
-        # Тот же класс, что 1b-1, и шире него: `history_status`, `history_tags`,
-        # `history_favorites`, `history_text_updates`, `history_action_items` и
-        # `history_annotations` тоже пишутся шифрующим `_append_ndjson` и чистятся
-        # компактированием ТОЛЬКО при успехе. Проба (измерена на живом коде, а не
-        # предположена) при провале compact:
-        #     ENC1 ПОСЛЕ purge: [('history_status.ndjson', 2)]
-        #     профиль читаем: False — HistoryEncryptionUnavailable
-        # В профиле владельца эти журналы непустые, то есть дыра не теоретическая.
-        # Содержимое — метаданные записей, которые purge всё равно уничтожает,
-        # поэтому потери реестра удалений здесь нет (в отличие от 1b-3).
-        _delta_journals = [
-            "history_status.ndjson",
-            "history_tags.ndjson",
-            "history_favorites.ndjson",
-            "history_text_updates.ndjson",
-            "history_action_items.ndjson",
-            "history_annotations.ndjson",
-        ]
-        for _journal_name in _delta_journals:
-            try:
-                _delta_path = Path(self.store.data_dir) / _journal_name
-                if _wipe_journal_ciphertext(_delta_path):
-                    continue
-            except Exception:
-                logger.warning(
-                    "purge_all_data: удаление %s не удалось", _journal_name, exc_info=True
-                )
-            _flag_step_error(secondary_errors, "delta_journals")
 
         # --- 1c. W1749 CRITICAL-2 / W1771 GAP-1: delete ALL export artefacts in transcripts/.
         # Each transcription writes a timestamped Markdown file under <data_dir>/transcripts/
@@ -3634,29 +3684,44 @@ class HistoryService:
         #    бэкап = вся история, а `complete: true` читается как «зачистил всё».
         #    Асимметрия обязательна: KeystoreUnavailable (нет Keychain на
         #    Linux/CI) — НЕ ошибка, там shred истинен (ключа не существует).
-        encryption_key_shredded = False
-        try:
-            from backend.crypto_keystore import delete_history_key, KeystoreUnavailable
+        # --- 38-1. A5.2c1 (N1′): финальный снос журналов и shred — ПОД ОДНИМ
+        # локом. Лок, взятый на сносах 1b-1…1b-4, к шагу 38 уже отпущен, поэтому
+        # окно «после сносов — до shred'а» оставалось открытым: писатель
+        # метаданных (`set_paste_status` и соседи берут лок) успевал записать ENC1
+        # в `history_status.ndjson`, а shred делал его нечитаемым — ровно тот
+        # класс, который волна закрыла, только в узком окне. Повторный снос
+        # идемпотентен и дешёв (несколько unlink'ов) и делает «данные → ключ»
+        # атомарным для всех писателей, которые лок БЕРУТ. Вложенного SH→EX
+        # нет: лок здесь берётся заново, вне каких-либо других.
+        with self.store._lock():
+            _purge_wipe_managed_journals(
+                data_dir=self.store.data_dir,
+                secondary_errors=secondary_errors,
+                compact_failed="compact" in secondary_errors,
+            )
+            encryption_key_shredded = False
             try:
-                encryption_key_shredded = delete_history_key()
-            except KeystoreUnavailable:
-                # Нет Keychain (Linux/CI) → ключа нет → shred'ить нечего. Это НЕ
-                # ошибка purge и НЕ повод пропустить остальные шаги; результат —
-                # «уничтожен» в смысле «на этой платформе ключа не существует».
-                encryption_key_shredded = True
-            self.store._history_crypto_initialized = False
-            self.store._history_crypto_instance = None
-            if not encryption_key_shredded:
-                logger.error(
-                    "purge_all_data: ключ шифрования истории НЕ уничтожен — "
-                    "профиль остаётся расшифровываемым (pre-purge копии читаемы)"
+                from backend.crypto_keystore import delete_history_key, KeystoreUnavailable
+                try:
+                    encryption_key_shredded = delete_history_key()
+                except KeystoreUnavailable:
+                    # Нет Keychain (Linux/CI) → ключа нет → shred'ить нечего. Это НЕ
+                    # ошибка purge и НЕ повод пропустить остальные шаги; результат —
+                    # «уничтожен» в смысле «на этой платформе ключа не существует».
+                    encryption_key_shredded = True
+                self.store._history_crypto_initialized = False
+                self.store._history_crypto_instance = None
+                if not encryption_key_shredded:
+                    logger.error(
+                        "purge_all_data: ключ шифрования истории НЕ уничтожен — "
+                        "профиль остаётся расшифровываемым (pre-purge копии читаемы)"
+                    )
+                    secondary_errors.append("encryption_key")
+            except Exception:
+                logger.warning(
+                    "purge_all_data: удаление ключа шифрования из Keychain не удалось", exc_info=True
                 )
                 secondary_errors.append("encryption_key")
-        except Exception:
-            logger.warning(
-                "purge_all_data: удаление ключа шифрования из Keychain не удалось", exc_info=True
-            )
-            secondary_errors.append("encryption_key")
 
         # --- 39. S3/M-B: удалить сырые REST-загрузки (temp_uploads/) ---
         # TEMP_DIR = settings.DATA_DIR / "temp_uploads" (rest_server.py) хранит сырое
