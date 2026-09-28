@@ -1086,7 +1086,6 @@ class TestPurgeResultIsMachineReadable:
         import backend.crypto_keystore as ks
 
         def _run(args, *_a, **_kw):
-            verb = args[0]
             # delete → rc 0 («успех»), find → rc 0 («элемент на месте»)
             return subprocess.CompletedProcess(list(args), 0, "", "")
 
