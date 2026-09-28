@@ -1339,6 +1339,33 @@ def _guard_repo_copy(tmp_root: Path) -> Path:
     return tmp_root
 
 
+def _audit_mutated_multi(tmp_root: Path, rel: str, pairs) -> set:
+    """Как :func:`_audit_mutated`, но несколько замен в одном файле.
+
+    Нужна там, где отключается ШАГ целиком, а не одна строка: мутация должна
+    убирать доказательство свойства, а не оставлять его соседнюю половину.
+    Каждая замена обязана найти свой кусок (иначе control проверяет не то).
+    """
+    import importlib.util
+    import sys as _sys
+
+    path = tmp_root / rel
+    raw = path.read_text(encoding="utf-8")
+    for old, new in pairs:
+        assert old in raw, f"negative control: мутация не нашла свой кусок в {rel}: {old!r}"
+        raw = raw.replace(old, new, 1)
+    path.write_text(raw, encoding="utf-8")
+
+    guard_path = tmp_root / "scripts" / "audit_purge_coverage.py"
+    spec = importlib.util.spec_from_file_location(
+        f"apc_mut_multi_{abs(hash((rel, tuple(pairs))))}", guard_path
+    )
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return {gap.store_id for gap in mod.run_audit().gaps}
+
+
 def _audit_mutated(tmp_root: Path, rel: str, old: str, new: str = "") -> set:
     """Прогнать гейт по мутированной копии; вернуть множество gap-идов.
 
@@ -1457,16 +1484,76 @@ class TestPurgeCoverageGateChecksItsOwnMainChange:
             )
 
     def test_negative_control_removing_purge_ledger_step_is_a_gap(self, tmp_path):
-        """NC2 ревьюера: снять шаг 37a из purge (оставив новый allowlist)."""
-        gaps = _audit_mutated(
+        """NC2 ревьюера: снять шаг 37a из purge (оставив новый allowlist).
+
+        Отключается ВЕСЬ шаг, а не одна строка. Раньше мутация переименовывала
+        лишь литерал пути, и этого хватало: путь ledger'а больше нигде не
+        упоминался. Теперь его адресует ещё и pre-flight «ledger — symlink»
+        (легитимно: он снимает ссылку), поэтому мутация должна убрать и
+        ДОКАЗАТЕЛЬСТВО уничтожения шифротекста — вызовы
+        ``_rematerialize_ledger_plaintext`` и ``_ledger_holds_no_ciphertext``.
+        Иначе control проверял бы не то свойство, а мутацию одной строки.
+        """
+        gaps = _audit_mutated_multi(
             _guard_repo_copy(tmp_path / "nc"),
             "KrabEar/backend/history_service.py",
-            '_ledger_path = _data_dir / "history_purged_ids.ndjson"',
-            '_ledger_path = _data_dir / "history_purged_ids_DISABLED.ndjson"',
+            [
+                ('_ledger_path = _data_dir / "history_purged_ids.ndjson"',
+                 '_ledger_path = _data_dir / "history_purged_ids_DISABLED.ndjson"'),
+                # ВАЖНО: мутируем ВЫЗОВЫ, а не определения функций. Строки
+                # `_rematerialize_ledger_plaintext(` и `_ledger_holds_no_ciphertext(`
+                # встречаются сначала в `def ...(`, поэтому replace(old, new, 1)
+                # переименовал бы определение, оставив вызовы на месте — и control
+                # проверял бы ровно то свойство, которое обязан ловить.
+                ("_rematerialize_ledger_plaintext(_ledger_path",
+                 "_disabled_rematerialize(_ledger_path"),
+                ("_ledger_holds_no_ciphertext(_ledger_path)",
+                 "_disabled_holds_no_ciphertext(_ledger_path)"),
+            ],
         )
         assert "history_purged_ids.ndjson" in gaps, (
             "без шага 37a ledger нечем покрыть — гейт обязан сказать; "
             f"получили gaps: {sorted(gaps)}"
+        )
+
+    def test_ledger_is_not_covered_by_a_mention_alone(self):
+        """Упоминание пути ledger'а само по себе НЕ закрывает семейство.
+
+        Регресс на сломанное предположение гейта «purge только упоминает
+        хранилище, когда удаляет его»: pre-flight проверяет ссылку и сам путь
+        не удаляет, но одно упоминание закрывало журнал, и удаление 37a
+        проходило бы молча. Для шифротекстового журнала покрытие = явная
+        проверка уничтожения (`_rematerialize_ledger_plaintext` /
+        `_ledger_holds_no_ciphertext`).
+
+        Проверяется ИМЕННО коллектор: правило живёт там, потому что пул `covered`
+        — просто множество имён и поOriginsу не отличить «путь упомянут» от
+        «шифротекст уничтожен». Проверка на уровне `_is_covered` была бы
+        проверкой не того слоя.
+        """
+        import ast
+
+        guard = self._guard()
+        ledger = "history_purged_ids.ndjson"
+
+        mention_only = ast.parse(
+            "def purge_step():\n"
+            "    p = Path(d) / 'history_purged_ids.ndjson'\n"
+            "    return p.is_symlink()\n"
+        ).body[0]
+        assert ledger not in guard._collect_removed_names_in_function(mention_only, {}, {}), (
+            "одно упоминание пути (pre-flight) не должно засчитываться как "
+            "уничтожение шифротекста"
+        )
+
+        with_proof = ast.parse(
+            "def purge_step():\n"
+            "    p = Path(d) / 'history_purged_ids.ndjson'\n"
+            "    _ledger_holds_no_ciphertext(p)\n"
+            "    return True\n"
+        ).body[0]
+        assert ledger in guard._collect_removed_names_in_function(with_proof, {}, {}), (
+            "покрытие должно появляться при НАЛИЧИИ доказательства уничтожения"
         )
 
 
@@ -1648,3 +1735,76 @@ class TestNonDarwinHostContract:
 
         monkeypatch.setattr(ks, "keychain_available", lambda: False)
         assert ks.history_key_present() is None
+
+
+class TestDegradedLedgerIsLoud:
+    """Ветка fail-closed перематериализации должна быть ПРОВЕРЕНА, а не задекларирована.
+
+    Adversarial-ревью раунда 2 установило, что «Keychain недоступен / файл битый»
+    сюда НЕ попадает: ledger читается на шаге 1 и обрывает purge с
+    HistoryEncryptionUnavailable раньше 37a (fail-loud, ничего не вычищается).
+    Реально достижимы две ноги — symlink и провал самой записи — и обе обязаны
+    быть громкими: `complete: false` + `errors: ["deletion_ledger"]`, без ENC1-мусора.
+    """
+
+    def test_write_failure_is_loud_and_leaves_no_ciphertext(
+        self, tmp_path, fake_keychain, monkeypatch
+    ):
+        import backend.history_service as hs
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        svc = HistoryService(store=store)
+        # Погоняем ledger, чтобы в нём появились ID, и сорвём именно ЗАПИСЬ.
+        svc.handle_purge_all_data({"confirm": "PURGE_ALL"})
+        store.add_history_item(text="вторая запись владельца")
+
+        def _boom(*_a, **_kw):
+            raise OSError("диск только что стал read-only")
+
+        monkeypatch.setattr(hs, "_rematerialize_ledger_plaintext", _boom)
+
+        result = svc.handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert result["complete"] is False
+        assert "deletion_ledger" in result["errors"]
+        ledger = data_dir / "history_purged_ids.ndjson"
+        assert not ledger.exists(), "файл должен быть уничтожен, а не оставлен в ENC1"
+        # ENC1-мусора не осталось ни в одном файле профиля.
+        for path in data_dir.rglob("*"):
+            if path.is_file() and path.suffix in {".ndjson", ".json"}:
+                blob = path.read_text(encoding="utf-8", errors="replace")
+                assert "ENC1" not in blob, f"остался шифротекст в {path.name}"
+
+    def test_symlink_ledger_target_is_never_dereferenced(
+        self, tmp_path, fake_keychain
+    ):
+        """Symlink снимается сам, цель снаружи не трогается, потеря реестра громкая."""
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        outside = tmp_path / "чужая-цель.ndjson"
+        outside.write_text('{"id": "чужая"}\n', encoding="utf-8")
+        ledger = data_dir / "history_purged_ids.ndjson"
+        if ledger.exists():
+            ledger.unlink()
+        ledger.symlink_to(outside)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert result["complete"] is False
+        assert "deletion_ledger" in result["errors"]
+        assert not ledger.is_symlink(), "ссылка обязана быть снята ДО первой записи"
+        assert ledger.is_file(), (
+            "в профиле должен появиться свежий обычный ledger, а не ссылка"
+        )
+        assert outside.exists(), "цель вне профиля обязана уцелеть"
+        assert outside.read_text(encoding="utf-8") == '{"id": "чужая"}\n', (
+            "ГЛАВНОЕ: наружу не должно уйти ни одной строки — pre-flight обязан "
+            "снимать ссылку ДО томбестонирования, иначе ledger переписывается "
+            "ENC1 по чужому пути (находка волны, а не ревью)"
+        )

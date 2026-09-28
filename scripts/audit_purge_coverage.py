@@ -935,6 +935,34 @@ def _glob_pattern_const(node: ast.AST, consts: dict[str, str]) -> str | None:
     return "".join(chunks)
 
 
+def _has_call_to(func: ast.FunctionDef, names: tuple[str, ...]) -> bool:
+    """Есть ли в теле функции вызов одной из перечисленных функций.
+
+    Проверяется именно ВЫЗОВ (``Name(...)`` / ``attr(...)``), а не любое
+    упоминание: иначе импорт или комментарий засчитывались бы как доказательство.
+    """
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        if isinstance(fn, ast.Name) and fn.id in names:
+            return True
+        if isinstance(fn, ast.Attribute) and fn.attr in names:
+            return True
+    return False
+
+
+# A5.2c1: журналы, чья приватность держится на УНИЧТОЖЕНИИ ШИФРОТЕКСТА, а не на
+# самом факте упоминания пути. Покрытием для них считается только явная проверка
+# уничтожения — см. фильтр в конце ``_collect_removed_names_in_function``.
+_CIPHERTEXT_DESTRUCTION_STORES: dict[str, tuple[str, ...]] = {
+    "history_purged_ids.ndjson": (
+        "_ledger_holds_no_ciphertext",
+        "_rematerialize_ledger_plaintext",
+    ),
+}
+
+
 def _collect_removed_names_in_function(
     func: ast.FunctionDef, consts: dict[str, str], module_attrs: dict[str, str]
 ) -> set[str]:
@@ -1009,6 +1037,17 @@ def _collect_removed_names_in_function(
                         fname = _canonicalize(module_attrs[attr])
                         if _looks_like_store_filename(fname):
                             removed.add(fname)
+    # A5.2c1: упоминание пути ≠ уничтожение шифротекста. Pre-flight «ledger —
+    # symlink вместо файла профиля» адресует `history_purged_ids.ndjson`, но лишь
+    # снимает ссылку; ENC1-строки он не трогает. Пока такое упоминание
+    # засчитывалось как покрытие, удаление 37a (перематериализация + проверка
+    # «шифротекста не осталось») снова сделало бы гейт зелёным — то есть гейт
+    # перестал бы ловить собственное главное изменение. Ровно тот класс
+    # «проводка есть, а гейт зелёный», который закрывали в b2/b3/M2.
+    for _store_id, _proofs in _CIPHERTEXT_DESTRUCTION_STORES.items():
+        if _store_id in removed and not _has_call_to(func, _proofs):
+            removed.discard(_store_id)
+
     return removed
 
 
