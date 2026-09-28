@@ -405,6 +405,124 @@ class TestStaleCopiesAreWiped:
             "privacy-purge обязан снести .bak-копии истории и настроек"
         )
 
+    def test_temp_copy_families_are_deleted(self, tmp_path, fake_keychain):
+        """M1: `*.tmp`/`*_tmp` — тоже копии уничтожаемых данных.
+
+        Найдено пробой ревьюера: обычный purge рапортовал `complete: true,
+        errors: [], stale_copies_removed: 0`, а на диске лежали
+        `history.ndjson.migration_tmp` (ПОЛНАЯ копия истории из убитой миграции
+        шифрования) и `settings.json.tmp` (с секретами). То есть «успешный»
+        purge — ложный all-clear.
+
+        Семейство `*.tmp` выбрано намеренно: в data_dir `.tmp` пишут 12+
+        атомарных писателей (state_store, recording_chain, settings_backup,
+        sharing_manager, obsidian_sync, semantic_search через mkstemp, …), и
+        перечисление «известных» имён — это ровно тот способ, которым
+        `migration_tmp` и просочился. Каждый `.tmp` по построению — копия
+        файла, который purge уничтожает.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="открытая история владельца")
+        history_copy = (data_dir / "history.ndjson").read_text(encoding="utf-8")
+
+        # Производители: state_store.py:2527 (миграция шифрования) и :919
+        # (атомарная запись settings). Остальные — tmp-файлы delta-журналов,
+        # которые остаются при сбое compact.
+        (data_dir / "history.ndjson.migration_tmp").write_text(history_copy, encoding="utf-8")
+        (data_dir / "settings.json.tmp").write_text(
+            json.dumps({"hf_token": "СЕКРЕТ-МАРКЕР"}), encoding="utf-8"
+        )
+        (data_dir / "history.ndjson.tmp").write_text(history_copy, encoding="utf-8")
+        (data_dir / "history_status.tmp").write_text('{"id":"x","paste_status":"done"}')
+        (data_dir / "history_annotations.tmp").write_text('{"id":"x","note":"заметка"}')
+        # Случайное имя от tempfile.mkstemp(suffix=".tmp") (semantic_search).
+        (data_dir / "tmpab12cd34.tmp").write_text("npy-like", encoding="utf-8")
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        # Проверка обязана ловить ОБА окончания: `*.tmp` не матчит `migration_tmp`
+        # (подчёркивание, а не точка) — именно поэтому первый вариант проверки
+        # сам был слеп к главной утечке ревьюера.
+        left = sorted(
+            {p.name for pat in ("*.tmp", "*_tmp") for p in data_dir.glob(pat)}
+        )
+        assert left == [], f"производные tmp-копии пережили purge: {left}"
+        # Ровно 3, а не 6: `history.ndjson.tmp`, `history_status.tmp` и
+        # `history_annotations.tmp` уничтожает САМА компактирующая ветка purge
+        # (шаг 1b переписывает эти tmp и переименовывает их в живой журнал).
+        # А зачисткой сносятся три, которых purge сам не трогает:
+        # `migration_tmp`, `settings.json.tmp` и mkstemp-имя. Счётчик фиксирует
+        # именно факт исчезновения, поэтому число не «на глаз».
+        assert result["stale_copies_removed"] == 3, (
+            "посчитано только то, что действительно исчезло — иначе отчёт "
+            "«stale_copies_removed: 0» при полной утечке"
+        )
+        assert result["complete"] is True, result["errors"]
+
+    def test_irregular_stale_copies_are_reported_not_skipped(self, tmp_path, fake_keychain):
+        """L3: каталог и висячий симлинк под именем копии — не «молча пройти».
+
+        `is_file()` возвращает False и для каталога, и для битого симлинка, так
+        что оба случая молча выпадали из зачистки и из отчёта: на диске оставалась
+        папка с копией истории и «висящая» ссылка, а purge рапортовала успех.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        as_dir = data_dir / "history.ndjson.bak-dir"
+        as_dir.mkdir()
+        (as_dir / "history.ndjson").write_text("ПОЛНАЯ КОПИЯ", encoding="utf-8")
+        dangling = data_dir / "settings.json.bak-broken"
+        dangling.symlink_to(data_dir / "нет-такого-файла")
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert not os.path.lexists(as_dir), (
+            "каталог под именем копии содержит данные — он обязан быть снесён"
+        )
+        assert not os.path.lexists(dangling), (
+            "висячий симлинк под именем копии обязан быть снят (сам линк, не цель)"
+        )
+        assert result["stale_copies_removed"] == 2, "обе нерегулярные записи посчитаны"
+        assert result["complete"] is True, result["errors"]
+
+    def test_unremovable_stale_copy_is_counted_honestly(self, tmp_path, fake_keychain, monkeypatch):
+        """L4: счётчик занижает/завышает? Обязан считать ПО ФАКТУ.
+
+        `unlink(missing_ok=True)` + безусловный `+= 1` зачитывал бы копию,
+        которая осталась на диске (отказ по правам, гонка, занятый файл). Тогда
+        отчёт врал бы в ту же сторону, что и раньше: «посчитано — значит
+        уничтожено».
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        (data_dir / "history.ndjson.bak-stuck").write_text("копия", encoding="utf-8")
+        (data_dir / "settings.json.tmp").write_text("{}", encoding="utf-8")
+
+        real_unlink = Path.unlink
+
+        def _deny_stuck(self, missing_ok=False):
+            if self.name == "history.ndjson.bak-stuck":
+                raise OSError(13, "Permission denied")
+            return real_unlink(self, missing_ok=missing_ok)
+
+        monkeypatch.setattr(Path, "unlink", _deny_stuck)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert (data_dir / "history.ndjson.bak-stuck").exists(), "прогресс-условие"
+        assert result["stale_copies_removed"] == 1, (
+            "посчитана только та копия, которой действительно не стало"
+        )
+        assert "stale_copies" in result["errors"], "уцелевшая копия — шаговая ошибка"
+        assert result["complete"] is False, "purge с уцелевшими копиями неполон"
+
     def test_foreign_files_in_data_dir_are_not_touched(self, tmp_path, fake_keychain):
         """Зачистка — ЯВНЫМ перечислением паттернов, не широким glob по data_dir."""
         data_dir = _data_dir(tmp_path)
@@ -423,12 +541,13 @@ class TestStaleCopiesAreWiped:
         (data_dir / "subdir" / "keep.json").write_text("{}", encoding="utf-8")
         (data_dir / "history.ndjson.bak-20260926-120000").write_text("x", encoding="utf-8")
 
-        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
 
         for name, body in keep.items():
             assert (data_dir / name).read_text(encoding="utf-8") == body, f"{name} не трогаем"
         assert (data_dir / "subdir" / "keep.json").exists(), "подкаталоги не трогаем"
         assert not (data_dir / "history.ndjson.bak-20260926-120000").exists()
+        assert result["stale_copies_removed"] == 1, "засчитана ровно одна снесённая копия"
 
 
 # ---------------------------------------------------------------------------
@@ -1088,6 +1207,207 @@ class TestPurgeCoverageGateSeesBakFamilies:
             "решение о снятии ledger'а с allowlist обязано быть задокументировано "
             "в самом файле allowlist — иначе следующий волнёц снова его вернёт"
         )
+
+
+# ---------------------------------------------------------------------------
+# M1/M2/L1 — гейт полноты не должен быть слепым и не должен «проверять сам себя»
+# ---------------------------------------------------------------------------
+
+
+def _guard_repo_copy(tmp_root: Path) -> Path:
+    """Копия репозитория, достаточная гейту (он чистый AST — импортов не тянет).
+
+    Нужна для negative control: мутация в tmp-копии обязана давать `gaps > 0`.
+    Проверять мутацию на рабочем дереве нельзя — это единственный гейт, который
+    защищает purge от отката, и «проверить его, сломав его» на живом коде
+    означало бы оставлять репозиторий сломанным.
+    """
+    import shutil
+
+    repo = Path(__file__).resolve().parents[2]
+    for rel in ("scripts", "KrabEar/backend", "KrabEar/core"):
+        src = repo / rel
+        dst = tmp_root / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(src, dst, dirs_exist_ok=True)
+    return tmp_root
+
+
+def _audit_mutated(tmp_root: Path, rel: str, old: str, new: str = "") -> set:
+    """Прогнать гейт по мутированной копии; вернуть множество gap-идов.
+
+    Мутируется файл ``rel`` (обычно purge), а гейт загружается из той же копии —
+    иначе проверялось бы не то. Мутация обязана НАЙТИ свой кусок (``assert``
+    вместо тихого no-op): иначе negative control проверяет не то, что думает.
+    """
+    import importlib.util
+    import sys as _sys
+
+    path = tmp_root / rel
+    raw = path.read_text(encoding="utf-8")
+    assert old in raw, f"negative control: мутация не нашла свой кусок в {rel}"
+    path.write_text(raw.replace(old, new, 1), encoding="utf-8")
+
+    guard_path = tmp_root / "scripts" / "audit_purge_coverage.py"
+    spec = importlib.util.spec_from_file_location(
+        f"apc_mut_{abs(hash((rel, old)))}", guard_path
+    )
+    mod = importlib.util.module_from_spec(spec)
+    _sys.modules[spec.name] = mod
+    spec.loader.exec_module(mod)
+    return {gap.store_id for gap in mod.run_audit().gaps}
+
+
+class TestPurgeCoverageGateTempFamilies:
+    """M1: гейт обязан видеть `.tmp`/`_tmp`-семейства (он был слеп к ним)."""
+
+    def _guard(self):
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_tmp", path)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_temp_families_are_discovered_and_covered(self):
+        guard = self._guard()
+        result = guard.run_audit()
+        # `discovered` — dict, `covered` — set: приводим оба к множеству имён.
+        discovered = set(result.discovered)
+        covered = set(result.covered)
+
+        for family in ("*.tmp", "*_tmp"):
+            assert family in discovered, f"{family} не обнаружен гейтом"
+            assert family in covered, f"sweep {family} не засчитан как покрытие"
+
+    def test_temp_family_ends_are_distinguished(self):
+        guard = self._guard()
+        assert guard._temp_family("settings.json.tmp") == "*.tmp"
+        assert guard._temp_family("history.ndjson.migration_tmp") == "*_tmp", (
+            "`*.tmp` не матчит `migration_tmp` — в этом весь смысл разных семейств"
+        )
+        assert guard._temp_family("history.ndjson.bak") is None
+
+    def test_negative_control_dropping_star_tmp_sweep_is_a_gap(self, tmp_path):
+        gaps = _audit_mutated(
+            _guard_repo_copy(tmp_path / "nc"),
+            "KrabEar/backend/history_service.py",
+            '+ list(_data_dir.glob("*.tmp"))',
+        )
+        assert "*.tmp" in gaps, (
+            f"снятие sweep '*.tmp' обязано открыть пробел; получили: {sorted(gaps)}"
+        )
+
+    def test_negative_control_dropping_underscore_tmp_sweep_is_a_gap(self, tmp_path):
+        gaps = _audit_mutated(
+            _guard_repo_copy(tmp_path / "nc"),
+            "KrabEar/backend/history_service.py",
+            '+ list(_data_dir.glob("*_tmp"))',
+        )
+        assert "*_tmp" in gaps, (
+            f"снятие sweep '*_tmp' обязано открыть пробел; получили: {sorted(gaps)}"
+        )
+
+
+class TestPurgeCoverageGateChecksItsOwnMainChange:
+    """M2: `_state_store_compaction_coverage` не должен засчитывать append-only.
+
+    Найдено ревьюером (NC2): правило считало ЛЮБОЕ упоминание атрибута внутри
+    `_compact_unlocked` признаком «журнал очищен» — включая `purged_ids_path`,
+    куда идёт ТОЛЬКО append+fsync. Поэтому удаление шага 37a из purge проходило
+    как «0 gaps»: гейт проверял не своё главное изменение.
+    """
+
+    def _guard(self):
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_m2", path)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_append_only_ledger_is_not_credited_as_compacted(self):
+        guard = self._guard()
+        cleared = guard._state_store_compaction_coverage()
+
+        assert "history_purged_ids.ndjson" not in cleared, (
+            "permanent ledger в _compact_unlocked ТОЛЬКО дописывается (append+fsync) — "
+            "засчитывать его как «очищенный» значит скрывать отсутствие шага purge"
+        )
+        for genuinely_truncated in (
+            "history.ndjson",
+            "history_tombstones.ndjson",
+            "history_status.ndjson",
+            "history_annotations.ndjson",
+        ):
+            assert genuinely_truncated in cleared, (
+                f"{genuinely_truncated} реально усекается compact'ом — должен считаться"
+            )
+
+    def test_negative_control_removing_purge_ledger_step_is_a_gap(self, tmp_path):
+        """NC2 ревьюера: снять шаг 37a из purge (оставив новый allowlist)."""
+        gaps = _audit_mutated(
+            _guard_repo_copy(tmp_path / "nc"),
+            "KrabEar/backend/history_service.py",
+            '_ledger_path = _data_dir / "history_purged_ids.ndjson"',
+            '_ledger_path = _data_dir / "history_purged_ids_DISABLED.ndjson"',
+        )
+        assert "history_purged_ids.ndjson" in gaps, (
+            "без шага 37a ledger нечем покрыть — гейт обязан сказать; "
+            f"получили gaps: {sorted(gaps)}"
+        )
+
+
+class TestPurgeCoverageFamilyRuleNeedsWildcard:
+    """L1: семейное покрытие нельзя выдавать по записи БЕЗ wildcard.
+
+    NC3 ревьюера: `history.ndjson.bak*` → `history.ndjson.bak` оставлял гейт
+    зелёным, хотя все таймстемп-копии (реальная утечка) выживали. Правило (5)
+    сравнивало только каноническое семейство, не требуя, чтобы запись пула сама
+    была семейной.
+    """
+
+    def _guard(self):
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_l1", path)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_non_wildcard_entry_does_not_cover_the_family(self):
+        guard = self._guard()
+        member = "history.ndjson.bak-20260926"  # таймстемп-вариант семейства
+
+        assert guard._is_covered(member, {"history.ndjson.bak"}, set()) is False, (
+            "запись пула без wildcard не имеет права закрыть семейство"
+        )
+        assert guard._is_covered(member, {"history.ndjson.bak*"}, set()) is True, (
+            "wildcard-запись закрывает семейство"
+        )
+
+    def test_exact_match_still_covers_itself(self):
+        """Правило (1) не сломан: точное имя покрывает само себя."""
+        guard = self._guard()
+        assert guard._is_covered(
+            "history.ndjson.bak", {"history.ndjson.bak"}, set()
+        ) is True
+
+    def test_temp_family_is_not_closed_by_a_single_member(self):
+        guard = self._guard()
+        assert guard._is_covered("*.tmp", {"settings.json.tmp"}, set()) is False, (
+            "одна tmp-копия не означает sweep семейства"
+        )
+        assert guard._is_covered("*.tmp", {"*.tmp"}, set()) is True
 
 
 # ---------------------------------------------------------------------------

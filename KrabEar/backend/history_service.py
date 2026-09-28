@@ -159,6 +159,31 @@ def _rematerialize_ledger_plaintext(ledger_path: Path, store: Any) -> set[str]:
     return ids
 
 
+def _remove_derived_copy(path: Path) -> None:
+    """Снести производную копию данных: файл, симлинк (сам линк) или каталог.
+
+    L3 (adversarial-ревью): прежняя проверка `is_file()` молча пропускала и
+    каталог, и висячий симлинк — на диске оставалась папка с копией истории,
+    а purge рапортовала успех. Здесь каждая форма записи снимается явно:
+
+    * symlink  — снимается САМА ссылка, цель не разыменовывается (иначе purge
+      снёс бы или переписал файл вне профиля);
+    * каталог  — сносится целиком (`rmtree`): имя совпало с шаблоном копии,
+      значит содержимое — производные данные;
+    * прочее   — fifo/socket/device: трогать нельзя, но молчать нельзя, поэтому
+      вызывающий увидит запись через `lexists` и объявит шаг невыполненным.
+    """
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+        return
+    if path.is_dir():
+        import shutil as _shutil
+
+        _shutil.rmtree(path)
+        return
+    raise OSError(f"{path}: нерегулярная запись (не файл, не каталог, не symlink)")
+
+
 def _ledger_holds_no_ciphertext(ledger_path: Path) -> bool:
     """Проверка ПОСЛЕ перематериализации: в ledger'е не осталось ENC1-строк.
 
@@ -3155,16 +3180,40 @@ class HistoryService:
                 )
                 secondary_errors.append("deletion_ledger")
 
-        # --- 37b. A5.2c1: зачистить .bak-копии истории и настроек (явные паттерны).
+        # --- 37b. A5.2c1: зачистить ПРОИЗВОДНЫЕ копии (`.bak*` и `*.tmp`).
         # В data_dir лежат `history.ndjson.bak*` (в прод-профиле владельца —
         # 23.4 МБ ОТКРЫТОЙ истории) и `settings.json.bak*` (шесть копий с
         # непустыми секретами: hf_token, sentry_dsn_agent, voice_gateway_api_key,
-        # stt_gigaam_hf_token, llm_api_key, lm_studio_api_key). Это копии данных,
-        # которые purge и так уничтожает, поэтому они входят в зону зачистки.
+        # stt_gigaam_hf_token, llm_api_key, lm_studio_api_key).
         #
-        # Удаление — ЯВНЫМ перечислением паттернов, а не широким glob по data_dir:
-        # посторонние файлы (notes.txt, session.log, README.md, подкаталоги)
-        # не имеют отношения к purge и не должны исчезать вместе с ним.
+        # M1 (adversarial-ревью): кроме `.bak*` переживали ещё и `*.tmp`:
+        # `history.ndjson.migration_tmp` — ПОЛНАЯ копия истории из убитой миграции
+        # шифрования (state_store.py:2527) и `settings.json.tmp` с секретами
+        # (state_store.py:919). Плюс tmp-файлы delta-журналов, если процесс убит
+        # посреди compact. Оба имени НЕ входили в PERSIST_EXTENSIONS, а
+        # `_canonicalize` снимает только `.tmp` ⇒ гейт полноты был к ним слеп.
+        # Хуже того: purge рапортовала `complete: true, errors: [],
+        # stale_copies_removed: 0` — ложный all-clear при полной утечке.
+        #
+        # Почему `*.tmp`, а не перечисление: `.tmp` в data_dir пишут 12+ атомарных
+        # писателей (state_store, recording_chain, settings_backup,
+        # sharing_manager, obsidian_sync, semantic_search через mkstemp, …), и
+        # перечисление «известных» имён — ровно тот способ, которым
+        # `migration_tmp` и просочился в первую очередь. Любой `.tmp` по
+        # построению — копия файла, который purge уничтожает. Побочный эффект
+        # решения зафиксирован тестом: файл, который владелец сам положил в
+        # data_dir с расширением `.tmp`, тоже будет снесён — для privacy-wipe
+        # это приемлемо, и это НЕ молчаливое поведение (оно задокументировано
+        # здесь и в тесте).
+        #
+        # Остальное по-прежнему НЕ трогается: посторонние файлы (notes.txt,
+        # session.log, README.md, подкаталоги) не имеют отношения к purge.
+        #
+        # L3: `is_file()` возвращает False и для каталога, и для висячего
+        # симлинка — оба молча выпадали из зачистки. Симлинк снимаем САМИ (цель
+        # не разыменовываем), каталог снимаем целиком.
+        # L4: счётчик считается ПО ФАКТУ (`lexists` после попытки), а не по
+        # факту вызова unlink — иначе отчёт врал бы в оптимистичную сторону.
         stale_copies_removed = 0
         if _data_dir is not None:
             try:
@@ -3174,19 +3223,32 @@ class HistoryService:
                 # цикл по tuple сделал бы зачистку НЕВИДИМОЙ для гейта —
                 # ровно тот класс «проводка есть, а гейт зелёный», который
                 # закрывали в b2 (f-string семейства) и b3 (delete-glob).
-                for _bak_path in list(_data_dir.glob("history.ndjson.bak*")) + list(
-                    _data_dir.glob("settings.json.bak*")
+                for _bak_path in (
+                    list(_data_dir.glob("history.ndjson.bak*"))
+                    + list(_data_dir.glob("settings.json.bak*"))
+                    + list(_data_dir.glob("*.tmp"))
+                    # `*.tmp` НЕ матчит `migration_tmp` (подчёркивание вместо
+                    # точки) — а именно этот файл (ПОЛНАЯ копия истории из убитой
+                    # миграции шифрования) был главной находкой ревьюера. Отдельная
+                    # ветка окончания, а не попытка одной регулярки на всё.
+                    + list(_data_dir.glob("*_tmp"))
                 ):
                     try:
-                        if not _bak_path.is_file():
-                            continue
-                        _bak_path.unlink(missing_ok=True)
-                        stale_copies_removed += 1
+                        _remove_derived_copy(_bak_path)
                     except OSError:
                         logger.warning(
                             "purge_all_data: не удалось удалить %s", _bak_path, exc_info=True
                         )
                         secondary_errors.append("stale_copies")
+                        continue
+                    # L4: «уничтожено» — только если записи действительно нет.
+                    if os.path.lexists(_bak_path):
+                        logger.warning(
+                            "purge_all_data: %s пережил зачистку", _bak_path
+                        )
+                        secondary_errors.append("stale_copies")
+                        continue
+                    stale_copies_removed += 1
                 if stale_copies_removed:
                     logger.info(
                         "purge_all_data: удалено %d .bak-копий", stale_copies_removed
