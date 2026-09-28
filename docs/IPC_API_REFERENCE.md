@@ -3197,6 +3197,18 @@ Returns: `{ok, history_deleted, transcripts_deleted, chains_deleted, archive_del
 | `encryption_key_shredded` | bool | ключ истории удалён из Keychain (или его не было — Linux/CI) |
 | `history_encryption_enabled_after` | bool | состояние флага **после** purge |
 
+`encryption_key_shredded` — **fail-closed**: значение берётся из результата
+`security delete-generic-password`, а не из самого факта вызова. Keychain может
+отказать (`User interaction is not allowed`, код 51) — тогда поле равно `false`,
+шаг попадает в `errors` как `"encryption_key"`, а `complete` становится `false`
+(и срабатывает W1749 loud-error). Молча рапортовать «ключ уничтожен» при живом
+ключе нельзя: живой ключ + pre-purge бэкап `history.ndjson` = вся история.
+
+Асимметрия, которую нельзя «закрыть на всякий случай»: **отсутствие** Keychain
+(Linux/CI → `KeystoreUnavailable`) — НЕ ошибка purge, там `encryption_key_shredded`
+равен `true` (на этой платформе ключа не существует). Иначе purge на ubuntu-CI
+был бы «частичным» всегда.
+
 Два инварианта, которые поле `history_encryption_enabled_after` фиксирует явно:
 purge **не переключает** `history_encryption_enabled` (это решение владельца) и
 сообщает состояние **пост-фактум**, а не обещает результат. Профиль может

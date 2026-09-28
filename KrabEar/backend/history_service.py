@@ -3067,25 +3067,41 @@ class HistoryService:
         # --- 38. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
         # Без этого выживший AES-256 ключ расшифровывает pre-purge бэкап history.ndjson
         # (Time Machine / iCloud / FS-снапшот) — ciphertext + живой ключ = весь текст.
-        # delete_history_key — no-op без Keychain (KeystoreUnavailable на Linux/CI → не
-        # ошибка purge). Сбрасываем ленивый крипто-кэш StateStore, чтобы следующая запись
+        # Сбрасываем ленивый крипто-кэш StateStore, чтобы следующая запись
         # (если шифрование оставлено включённым) сгенерировала НОВЫЙ ключ.
         #
-        # A5.2c1: флаг `history_encryption_enabled` purge НЕ переключает — решение
-        # владельца остаётся его (политика молча не меняется). Ответ сообщает
-        # пост-фактум, что флаг остался включённым.
+        # A5.2c1, два решения здесь:
+        #  * флаг `history_encryption_enabled` purge НЕ переключает — это решение
+        #    владельца; ответ сообщает состояние пост-фактум;
+        #  * `encryption_key_shredded` берётся из РЕЗУЛЬТАТА delete_history_key(),
+        #    а не из самого факта вызова. Неудачный exit code `security` (заблокированный
+        #    Keychain, отказ) обязан давать False: рапортовать «ключ уничтожен» при
+        #    живом ключе — это fail-open, и он опаснее самой ошибки, потому что
+        #    владелец поверит отчёту;
+        #  * не shred'ённый ключ — ШАГОВАЯ ошибка (`errors`/`complete`), иначе
+        #    механизм W1749 «loud error when purge is only partial» обошёл бы
+        #    ровно тот случай, ради которого написан: живой ключ + pre-purge
+        #    бэкап = вся история, а `complete: true` читается как «зачистил всё».
+        #    Асимметрия обязательна: KeystoreUnavailable (нет Keychain на
+        #    Linux/CI) — НЕ ошибка, там shred истинен (ключа не существует).
         encryption_key_shredded = False
         try:
             from backend.crypto_keystore import delete_history_key, KeystoreUnavailable
             try:
-                delete_history_key()
-                encryption_key_shredded = True
+                encryption_key_shredded = delete_history_key()
             except KeystoreUnavailable:
-                # Нет Keychain (Linux/CI) → ключа нет → нечего shred'ить. Это не
-                # ошибка purge и НЕ повод пропустить остальные шаги.
+                # Нет Keychain (Linux/CI) → ключа нет → shred'ить нечего. Это НЕ
+                # ошибка purge и НЕ повод пропустить остальные шаги; результат —
+                # «уничтожен» в смысле «на этой платформе ключа не существует».
                 encryption_key_shredded = True
             self.store._history_crypto_initialized = False
             self.store._history_crypto_instance = None
+            if not encryption_key_shredded:
+                logger.error(
+                    "purge_all_data: ключ шифрования истории НЕ уничтожен — "
+                    "профиль остаётся расшифровываемым (pre-purge копии читаемы)"
+                )
+                secondary_errors.append("encryption_key")
         except Exception:
             logger.warning(
                 "purge_all_data: удаление ключа шифрования из Keychain не удалось", exc_info=True

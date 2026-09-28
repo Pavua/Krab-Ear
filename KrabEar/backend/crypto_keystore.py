@@ -107,10 +107,20 @@ def get_or_create_history_key() -> bytes:
     return key
 
 
-def delete_history_key() -> None:
+def delete_history_key() -> bool:
     """Удаляет ключ шифрования из Keychain.
 
-    Если ключ не найден — ошибка игнорируется.
+    Возвращает:
+        True  — ключ уничтожен (удалён) или его не было;
+        False — удаление НЕ удалось (Keychain заблокирован/отказал).
+
+    A5.2c1: вызывающий (privacy-purge) обязан знать исход. Раньше функция
+    глотала неудачный exit code в лог и возвращала None, из-за чего отчёт
+    purge рапортовал «ключ уничтожен» даже когда живой ключ остался на месте —
+    а живой ключ в сочетании с pre-purge бэкапом означает всю историю.
+    Fail-closed: неопределённость и отказ оба дают False, а не True.
+
+    Если ключ не найден — ошибка игнорируется (нечего удалять → True).
 
     Raises:
         KeystoreUnavailable: если ``security`` CLI не найден (не macOS).
@@ -118,12 +128,16 @@ def delete_history_key() -> None:
     result = _run_security(
         ["delete-generic-password", "-s", _SERVICE, "-a", _ACCOUNT]
     )
-    if result.returncode != 0 and "could not be found" not in result.stderr.lower():
-        logger.warning(
-            "crypto_keystore: delete-generic-password завершился с кодом %d: %s",
-            result.returncode,
-            result.stderr.strip(),
-        )
+    if result.returncode == 0:
+        return True
+    if "could not be found" in result.stderr.lower():
+        return True  # ключа не было — «уничтожен» истинно
+    logger.warning(
+        "crypto_keystore: delete-generic-password завершился с кодом %d: %s",
+        result.returncode,
+        result.stderr.strip(),
+    )
+    return False
 
 
 def keychain_available() -> bool:

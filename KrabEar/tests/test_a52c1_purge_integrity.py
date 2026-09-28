@@ -550,6 +550,136 @@ class TestPurgeResultIsMachineReadable:
         assert "ЕЩЁ-СЕКРЕТ" not in blob
         assert "секрет владельца" not in blob
 
+    def test_failed_key_deletion_is_not_reported_as_shredded(
+        self, tmp_path, fake_keychain, monkeypatch
+    ):
+        """Fail-closed: `security delete` не сработал → «shredded» быть НЕ может.
+
+        Найдено пробой OS-уровня: ``delete_history_key()`` глотал неудачный
+        exit code (только лог), поэтому поле рапортовало бы «ключ уничтожен»,
+        хотя живой ключ + pre-purge бэкап = вся история (именно тот аргумент,
+        ради которого шаг shred'а вообще существует). Это recurring-класс
+        «fail-open в safety-проверке» — здесь он закрывается.
+
+        Патчится ``_run_security`` (НЕ сама delete_history_key): так реальная
+        функция keystore отрабатывает и возвращает неуспех, как в проде.
+        """
+        import backend.crypto_keystore as ks
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        def _delete_denied(args, *_a, **_kw):
+            if args[0] == "delete-generic-password":
+                return subprocess.CompletedProcess(
+                    list(args), 51, "", "User interaction is not allowed"
+                )
+            return fake_keychain.run(args)
+
+        monkeypatch.setattr(ks, "_run_security", _delete_denied)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert ("KrabEar", "history-encryption-key") in fake_keychain.items, (
+            "проба должна быть построена так, чтобы ключ реально выжил"
+        )
+        assert result["encryption_key_shredded"] is False, (
+            "не удалось shred'ить ключ — рапортовать об успехе нельзя"
+        )
+
+    def test_failed_key_deletion_marks_purge_incomplete(
+        self, tmp_path, fake_keychain, monkeypatch
+    ):
+        """Выживший ключ делает purge ЧАСТИЧНЫМ — `complete` обязан это сказать.
+
+        Найдено разбором кода рядом с fail-closed shred'ом: у поля
+        `encryption_key_shredded` есть честное значение, но сам purge при этом
+        рапортовал `complete: true, errors: []` — то есть ШАГОВЫЙ механизм
+        W1749 («loud error when purge is only partial») обходил именно тот
+        случай, ради которого он написан: живой ключ + pre-purge бэкап = вся
+        история. Владелец читает `complete` как «зачистил всё».
+        """
+        import backend.crypto_keystore as ks
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        def _delete_denied(args, *_a, **_kw):
+            if args[0] == "delete-generic-password":
+                return subprocess.CompletedProcess(
+                    list(args), 51, "", "User interaction is not allowed"
+                )
+            return fake_keychain.run(args)
+
+        monkeypatch.setattr(ks, "_run_security", _delete_denied)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert "encryption_key" in result["errors"], (
+            "не shred'ённый ключ — шаговая ошибка, а не «всё прошло»"
+        )
+        assert result["complete"] is False, "purge неполон ⇒ complete обязан быть False"
+
+    def test_missing_keystill_counts_as_shredded(self, tmp_path, fake_keychain, monkeypatch):
+        """Обратная сторона: НЕТ Keychain (Linux/CI) — не ошибка purge.
+
+        Асимметрия, которую легко сломать «на всякий случай»: если шумно
+        ругаться на отсутствие Keychain, то на ubuntu-CI purge станет
+        «частичным» всегда. KeystoreUnavailable = «ключа на этой платформе
+        не существует» ⇒ shred истинен, шаг не в errors.
+        """
+        import backend.crypto_keystore as ks
+
+        def _no_cli(args, *_a, **_kw):
+            raise ks.KeystoreUnavailable("security CLI недоступен")
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        monkeypatch.setattr(ks, "_run_security", _no_cli)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert result["encryption_key_shredded"] is True
+        assert "encryption_key" not in result["errors"], (
+            "отсутствие Keychain — не ошибка purge (иначе CI всегда «частичный»)"
+        )
+
+    def test_delete_history_key_reports_outcome_to_caller(self, tmp_path, monkeypatch):
+        """`delete_history_key` обязан различать «удалил» и «не смог».
+
+        Без возвращаемого значения вызывающий (purge) не может отличить
+        успешный shred от молча проглоченной ошибки.
+        """
+        import backend.crypto_keystore as ks
+
+        monkeypatch.setattr(
+            ks, "_run_security", lambda args, *a, **k: subprocess.CompletedProcess(list(args), 0, "", "")
+        )
+        assert ks.delete_history_key() is True, "rc=0 — ключ удалён"
+
+        monkeypatch.setattr(
+            ks,
+            "_run_security",
+            lambda args, *a, **k: subprocess.CompletedProcess(
+                list(args), 44, "", "The specified item could not be found in the keychain."
+            ),
+        )
+        assert ks.delete_history_key() is True, "ключа не было — «уничтожен» истинно"
+
+        monkeypatch.setattr(
+            ks,
+            "_run_security",
+            lambda args, *a, **k: subprocess.CompletedProcess(list(args), 51, "", "not allowed"),
+        )
+        assert ks.delete_history_key() is False, "отказ Keychain — НЕ «уничтожен»"
+
 
 # ---------------------------------------------------------------------------
 # Task 2 — RED: признак ключа в get_diagnostics, строго read-only
