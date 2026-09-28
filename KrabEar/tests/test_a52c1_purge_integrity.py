@@ -1527,6 +1527,10 @@ class TestNoKeychainAccessOutsidePurge:
         assert delta["creates"] == 0, (
             "purge обязан удалить ключ, а не создать новый на его месте"
         )
+        assert delta["probes"] == 1, (
+            "purge делает РОВНО одну read-only пробу — подтверждение отсутствия "
+            "после shred'а (L2). Ни ключевой материал, ни создание ключа."
+        )
 
     def test_audit_purge_coverage_audit_itself_touches_no_keystore(self):
         """Прогон гейта полноты не должен дёргать Keychain (он чистый AST)."""
