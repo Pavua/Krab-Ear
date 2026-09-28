@@ -129,7 +129,10 @@ _BACKUP_GLOB_RE = re.compile(r"^(?P<base>.+?)\.bak[-._0-9A-Za-z*]*$")
 # and coverage demands an explicit sweep of that family in the purge.  Both endings
 # are listed separately because ``*.tmp`` does NOT match ``migration_tmp`` — the
 # underscore is the whole reason the first leak slipped through.
-TEMP_FAMILY_SUFFIXES: tuple[str, ...] = (".tmp", "_tmp")
+# ``.irregular`` добавлен по находке N2: pre-flight уводит нерегулярную запись
+# (fifo/сокет) в ``<name>.irregular``, и такая запись не должна выпадать из зоны
+# purge молча. Семейство нужно и гейту (видимость), и свипу (зачистка).
+TEMP_FAMILY_SUFFIXES: tuple[str, ...] = (".tmp", "_tmp", ".irregular")
 
 # Filenames that the discovery scanner must never treat as a real store even if
 # they syntactically match (transient probes etc.).
@@ -935,6 +938,106 @@ def _glob_pattern_const(node: ast.AST, consts: dict[str, str]) -> str | None:
     return "".join(chunks)
 
 
+def _loop_sources(func: ast.FunctionDef) -> dict[str, list[ast.AST]]:
+    """Имя переменной цикла → элементы контейнера, который он итерирует.
+
+    Нужно для journal-зачисток вида ``for name in _delta_journals: path / name`` —
+    там id хранилища приходит из КОНТЕЙНЕРА, а не из тела, и без такого разбора
+    требование «id среди аргументов» отвергло бы правильный код (ровно как
+    разбираются контейнеры циклов в ``_state_store_compaction_coverage``).
+    Контейнер умеется и встроенный, и через переменную — обе формы встречаются
+    в purge.
+    """
+    assignments = _assigned_values(func)
+    out: dict[str, list[ast.AST]] = {}
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        source = node.iter
+        if isinstance(source, ast.Name):
+            resolved = assignments.get(source.id)
+            source = resolved if isinstance(resolved, (ast.List, ast.Tuple)) else None
+        if not isinstance(source, (ast.List, ast.Tuple)):
+            continue
+        for stmt in node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]:
+            name = _name_of(stmt)
+            if name is not None:
+                out.setdefault(name, []).extend(source.elts)
+    return out
+
+
+def _expr_names_store(
+    expr: ast.AST,
+    store_id: str,
+    assignments: dict[str, ast.AST],
+    loop_sources: dict[str, list[ast.AST]] | None = None,
+) -> bool:
+    """Упоминается ли id хранилища в выражении (с разыменкой переменных).
+
+    Нужен разбор переменных, потому что реальный код честно пишет
+    ``_wipe_journal_ciphertext(_tombstones_path)``, где путь задан присваиванием
+    ``_tombstones_path = Path(data_dir) / "history_tombstones.ndjson"``. Требование
+    «id обязан быть АРГУМЕНТОМ» без такого разбора отвергло бы правильный код, а
+    «id где-то в функции» — пропустило бы мёртвый вызов (LOW3).
+    """
+    for sub in ast.walk(expr):
+        if isinstance(sub, ast.Constant) and sub.value == store_id:
+            return True
+        if isinstance(sub, ast.Name):
+            if loop_sources:
+                for element in loop_sources.get(sub.id, []):
+                    if _expr_names_store(element, store_id, assignments, loop_sources):
+                        return True
+            target = assignments.get(sub.id)
+            if target is not None and target is not sub:
+                if _expr_names_store(target, store_id, assignments, loop_sources):
+                    return True
+    return False
+
+
+def _assigned_values(func: ast.FunctionDef) -> dict[str, ast.AST]:
+    """Имя переменной → выражение, которым она присвоена (последнее присваивание)."""
+    out: dict[str, ast.AST] = {}
+    for node in ast.walk(func):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            value = node.value
+            if value is None:
+                continue
+            for target in targets:
+                name = _name_of(target)
+                if name is not None:
+                    out[name] = value
+    return out
+
+
+def _has_proof_for(func: ast.FunctionDef, store_id: str, proofs: tuple[str, ...]) -> bool:
+    """Доказательство уничтожения шифротекста ИМЕННО для этого хранилища.
+
+    Требуется и сам вызов, и id хранилища среди его аргументов (с разыменкой
+    переменных) — иначе мёртвый вызов доказательства в любой части функции
+    засчитывал бы настоящее хранилище.
+    """
+    assignments = _assigned_values(func)
+    loop_sources = _loop_sources(func)
+    for node in ast.walk(func):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        called = (
+            fn.id
+            if isinstance(fn, ast.Name)
+            else fn.attr
+            if isinstance(fn, ast.Attribute)
+            else None
+        )
+        if called in proofs and any(
+            _expr_names_store(arg, store_id, assignments, loop_sources) for arg in node.args
+        ):
+            return True
+    return False
+
+
 def _has_call_to(func: ast.FunctionDef, names: tuple[str, ...]) -> bool:
     """Есть ли в теле функции вызов одной из перечисленных функций.
 
@@ -955,12 +1058,94 @@ def _has_call_to(func: ast.FunctionDef, names: tuple[str, ...]) -> bool:
 # A5.2c1: журналы, чья приватность держится на УНИЧТОЖЕНИИ ШИФРОТЕКСТА, а не на
 # самом факте упоминания пути. Покрытием для них считается только явная проверка
 # уничтожения — см. фильтр в конце ``_collect_removed_names_in_function``.
+#
+# B1‴ добавил ``history_tombstones.ndjson``: purge пишет собственные томбестоны
+# открытыми, но компактирование чистит журнал ТОЛЬКО при успехе, а провал
+# компактирования — банальный сценарий. Без требования явного доказательства
+# сняли бы зачистку 1b-3 молча, и гейт снова стал бы зелёным на собственном
+# главном изменении.
 _CIPHERTEXT_DESTRUCTION_STORES: dict[str, tuple[str, ...]] = {
     "history_purged_ids.ndjson": (
         "_ledger_holds_no_ciphertext",
         "_rematerialize_ledger_plaintext",
     ),
+    "history_tombstones.ndjson": ("_wipe_journal_ciphertext",),
+    # N1: `history.ndjson` сносится БЕЗУСЛОВНО только при провале compact
+    # (шаг 1b-1), но в список не попадал, и покрытие кредитовалось из
+    # УСЛОВНОГО компактирования. NC-B ревьюера: отключить 1b-1 → «0 gaps».
+    "history.ndjson": ("_wipe_journal_ciphertext",),
+    # N1 (проверено, а не предположено): прод-писатель — `_append_ndjson`
+    # (state_store.py:2399), тот же шифрующий путь, поэтому ENC1 возможен.
+    "history_calendar_links.ndjson": ("_wipe_journal_ciphertext",),
+    # N1 (собственная находка, измерена пробой): остальные delta-журналы тоже
+    # шифруются и чистятся компактированием только при успехе. Шаг 1b-4 сносит
+    # их безусловно, и гейт обязан это требовать.
+    "history_status.ndjson": ("_wipe_journal_ciphertext",),
+    "history_tags.ndjson": ("_wipe_journal_ciphertext",),
+    "history_favorites.ndjson": ("_wipe_journal_ciphertext",),
+    "history_text_updates.ndjson": ("_wipe_journal_ciphertext",),
+    "history_action_items.ndjson": ("_wipe_journal_ciphertext",),
+    "history_annotations.ndjson": ("_wipe_journal_ciphertext",),
 }
+
+# Все функции-доказательства уничтожения шифротекста. Нужны цикловому разбору
+# ниже: переменная цикла засчитывается, только если участвует в вызове
+# доказательства.
+_ALL_WIPE_PROOFS: frozenset[str] = frozenset(
+    _name for _proofs in _CIPHERTEXT_DESTRUCTION_STORES.values() for _name in _proofs
+)
+
+
+def _loop_carried_store_ids(func: ast.FunctionDef) -> set[str]:
+    """id хранилищ, приходящие из контейнера цикла, который purge реально чистит.
+
+    Условие признака: переменная цикла участвует либо в построении пути
+    (``... / var``), либо в вызове функции-доказательства уничтожения. Простое
+    перечисление имён в цикле НЕ засчитывается — иначе гейт начал бы верить
+    любым константам рядом с циклом.
+    """
+    found: set[str] = set()
+    for node in ast.walk(func):
+        if not isinstance(node, (ast.For, ast.AsyncFor)):
+            continue
+        loop_vars = {
+            _name_of(stmt)
+            for stmt in (
+                node.target.elts if isinstance(node.target, ast.Tuple) else [node.target]
+            )
+        }
+        loop_vars.discard(None)
+        if not loop_vars:
+            continue
+        body_nodes = [sub for stmt in node.body for sub in ast.walk(stmt)]
+        uses_path = any(
+            isinstance(sub, ast.BinOp)
+            and isinstance(sub.op, ast.Div)
+            and any(
+                isinstance(leaf, ast.Name) and leaf.id in loop_vars
+                for leaf in ast.walk(sub)
+            )
+            for sub in body_nodes
+        )
+        uses_proof = any(
+            isinstance(sub, ast.Call)
+            and _name_of(sub.func) in _ALL_WIPE_PROOFS
+            and any(
+                isinstance(leaf, ast.Name) and leaf.id in loop_vars
+                for arg in sub.args
+                for leaf in ast.walk(arg)
+            )
+            for sub in body_nodes
+        )
+        if not (uses_path or uses_proof):
+            continue
+        for var in loop_vars:
+            for element in _loop_sources(func).get(var, []):
+                if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                    canon = _canonicalize(element.value)
+                    if _looks_like_store_filename(canon):
+                        found.add(canon)
+    return found
 
 
 def _collect_removed_names_in_function(
@@ -1037,6 +1222,15 @@ def _collect_removed_names_in_function(
                         fname = _canonicalize(module_attrs[attr])
                         if _looks_like_store_filename(fname):
                             removed.add(fname)
+    # N1: id, приходящие из КОНТЕЙНЕРА цикла (``for name in _delta_journals:
+    # _wipe_journal_ciphertext(Path(data_dir) / name)``). Раньше такие id в
+    # ``removed`` не попадали — правый операнд деления не литерал — и журнал
+    # покрывался ТОЛЬКО кредитом условного компактирования. Требование
+    # «literal id, иначе не видно» здесь само было дырой гейта: правильная
+    # зачистка выглядела как её отсутствие. Добавляем ДО proof-фильтра ниже,
+    # иначе фильтр их не увидит и снятие зачистки снова останется зелёным.
+    removed |= _loop_carried_store_ids(func)
+
     # A5.2c1: упоминание пути ≠ уничтожение шифротекста. Pre-flight «ledger —
     # symlink вместо файла профиля» адресует `history_purged_ids.ndjson`, но лишь
     # снимает ссылку; ENC1-строки он не трогает. Пока такое упоминание
@@ -1045,7 +1239,7 @@ def _collect_removed_names_in_function(
     # перестал бы ловить собственное главное изменение. Ровно тот класс
     # «проводка есть, а гейт зелёный», который закрывали в b2/b3/M2.
     for _store_id, _proofs in _CIPHERTEXT_DESTRUCTION_STORES.items():
-        if _store_id in removed and not _has_call_to(func, _proofs):
+        if _store_id in removed and not _has_proof_for(func, _store_id, _proofs):
             removed.discard(_store_id)
 
     return removed
@@ -1467,7 +1661,14 @@ def extract_purge_coverage() -> set[str]:
         covered |= _filenames_cleared_by_module(module_stem)
 
     # (c) state_store compaction (history.ndjson + sidecar journals).
-    covered |= _state_store_compaction_coverage()
+    #
+    # B1‴: для журналов из ``_CIPHERTEXT_DESTRUCTION_STORES`` кредит компактирования
+    # НЕ засчитывается. Компактирование чистит их УСЛОВНО — «если не упало»,
+    # и именно этот провал оставлял ENC1-строки, которые purge уже не мог
+    # уничтожить (шаг shred'а ключа). Пока такое кредитование живёт, снятие
+    # безусловной зачистки 1b-3 проходило как «0 gaps»: гейт закрывал
+    # условный шаг и требовал доказательства от безусловного.
+    covered |= _state_store_compaction_coverage() - set(_CIPHERTEXT_DESTRUCTION_STORES)
 
     # (d) module-level helpers, которые тело purge вызывает (в т.ч. через
     # локальный импорт) — A5.2b2 review B3.

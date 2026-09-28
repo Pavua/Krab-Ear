@@ -63,11 +63,29 @@ event_bridge_token/      # HMAC bridge-auth секрет между IPC/REST п�
 # РЕШЕНИЕ (B1): содержимое ledger'а переживает purge ОТКРЫТЫМ — в нём только
 # идентификаторы, без PII, так что инвариант этого allowlist-исключения
 # сохраняется, — а уничтожается ТОЛЬКО ШИФРОТЕКСТ (`_rematerialize_ledger_plaintext`
-# в шаге 37a). Исходный дефект при этом остаётся закрыт: ENC1-строки после
-# purge в файле не бывает, и профиль остаётся читаемым. Закреплено тестами
-# test_ledger_ciphertext_is_destroyed_after_purge, test_ledger_carries_no_pii,
-# test_id_deleted_after_snapshot_does_not_resurrect_after_purge (+ контрольная
-# нога) — KrabEar/tests/test_a52c1_purge_integrity.py.
+# в шаге 37a). Закреплено тестами test_ledger_ciphertext_is_destroyed_after_purge,
+# test_ledger_carries_no_pii, test_id_deleted_after_snapshot_does_not_resurrect_after_purge
+# (+ контрольная нога) — KrabEar/tests/test_a52c1_purge_integrity.py.
+#
+# ⚠️ УТОЧНЕНИЕ B1‴ (правьте эту формулировку, а не старую): «ENC1-строки после
+# purge в файле не бывает» — истина ТОЛЬКО при успешном компактировании.
+# Компактирование условно, а провал (забитый диск) оставлял в ПРОФИЛЕ
+# нечитаемый шифротекст: ENC1-строки `history.ndjson` (compact их не переписал)
+# и ENC1-строки `history_tombstones.ndjson` (пишет сам шаг 1 purge), а shred
+# ключа ниже делал их нечитаемыми навсегда — профиль переставал открываться, и
+# ПОВТОРНЫЙ purge падал тем же исключением. Поэтому теперь:
+#   * собственные томбестоны purge пишутся ОТКРЫТЫМИ (`_append_ndjson_raw`) —
+#     purge не создаёт шифротекст, который сам же не сможет уничтожить;
+#   * при провале компактирования `history.ndjson` сносится целиком (шаг 1b-1),
+#     иначе он остался бы нечитаемым после shred'а;
+#   * `history_tombstones.ndjson` зачищается БЕЗУСЛОВНО (шаг 1b-3), как и
+#     `history_calendar_links.ndjson`. Цена объявляется: если compact не прошёл,
+#     удалённые ID были только в этом журнале, и purge рапортует шаг
+#     `tombstone_registry` + `complete: false` (реестр удалённых ID неполон).
+# Матрица compact-fail=True/False с полным сканом ENC1 по профилю — в
+# TestPurgeLeavesNoUndestroyableCiphertext. И `history_tombstones.ndjson` внесён в
+# _CIPHERTEXT_DESTRUCTION_STORES: гейт требует доказательства уничтожения и НЕ
+# засчитывает условный кредит компактирования (negative control на снятие 1b-3).
 #
 # НЕ возвращайте эту запись в allowlist: purge обязан уничтожать шифротекст
 # ledger'а (иначе профиль после purge нечитаем) и обязан СОХРАНЯТЬ его

@@ -75,6 +75,15 @@ class FakeStore:
     def _append_ndjson(self, path: Any, payload: dict) -> None:
         self._tombstones.append(payload)
 
+    def _append_ndjson_raw(self, path: Any, line: str) -> None:
+        # A5.2c1 (B1‴): purge пишет собственные томбестоны ОТКРЫТЫМИ, в обход
+        # codec'а (иначе ENC1 пережил бы shred ключа и сделал профиль
+        # нечитаемым). Фейк обязан моделировать ту же семантику: на вход уже
+        # готовая JSON-строка, поэтому в `_tombstones` попадает разобранный dict.
+        import json as _json
+
+        self._tombstones.append(_json.loads(line))
+
     @property
     def tombstones_path(self) -> str:
         return "fake_tombstones.ndjson"

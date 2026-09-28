@@ -58,6 +58,7 @@ import os
 import stat
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 
 import pytest
@@ -293,6 +294,640 @@ def _store_crypto(store: StateStore) -> HistoryCrypto:
     crypto = store._get_history_crypto()
     assert crypto is not None, "профиль ON обязан иметь crypto"
     return crypto
+
+
+def _scan_enc1(data_dir: Path) -> list[tuple[str, int]]:
+    """ВСЕ ENC1-строки профиля: ``[(путь, число строк), …]``.
+
+    Скан по всему `data_dir`, а не по двум «интересным» файлам: инвариант
+    «purge не оставляет шифротекст, который не сможет уничтожить» относится к
+    ПРОФИЛЮ, и пропуск одного журнала (например, появившегося в будущей волне)
+    сделал бы проверку декоративной.
+    """
+    found: list[tuple[str, int]] = []
+    for path in sorted(data_dir.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        count = sum(1 for line in text.splitlines() if line.strip().startswith("ENC1:"))
+        if count:
+            found.append((str(path.relative_to(data_dir)), count))
+    return found
+
+
+def _is_profile_readable(store: StateStore) -> tuple[bool, str]:
+    """Профиль читаем? Возвращает (да/нет, чем упал)."""
+    try:
+        store.get_history_page(None, 50)
+        store._load_deleted_ids_unlocked()
+        return True, ""
+    except Exception as exc:  # noqa: BLE001 — нам важна причина, а не класс
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+# ---------------------------------------------------------------------------
+# B1‴ (BLOCK) — purge не должен СОЗДАВАТЬ шифротекст, который не сможет уничтожить
+# ---------------------------------------------------------------------------
+
+
+class TestPurgeLeavesNoUndestroyableCiphertext:
+    """Заголовок самой волны: «purge при ON ломает чтение истории».
+
+    Проба ревьюера, воспроизведённая здесь как тест (ON-профиль, всё прочее
+    идентично; compact artificially падает):
+
+        compact-fail=False  complete=True  errors=[]
+          ENC1 в профиле: нет                      профиль читаем: True
+        compact-fail=True   complete=False errors=['compact']
+          ENC1 в профиле: [('history.ndjson', 3), ('history_tombstones.ndjson', 3)]
+          профиль читаем: HistoryEncryptionUnavailable
+          повторный purge ПАДАЕТ: HistoryEncryptionUnavailable
+
+    Триггер банальный: privacy-wipe на забитом диске.
+    """
+
+    @pytest.mark.parametrize(
+        "compact_fails", [False, True], ids=["compact-ok", "compact-fail"]
+    )
+    def test_purge_leaves_no_ciphertext_it_cannot_destroy(
+        self, tmp_path, fake_keychain, monkeypatch, compact_fails
+    ):
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        for i in range(3):
+            store.add_history_item(text=f"секрет владельца {i}")
+
+        if compact_fails:
+            def _boom():
+                raise OSError(28, "No space left on device")
+
+            monkeypatch.setattr(store, "compact_with_stats", _boom)
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        left = _scan_enc1(data_dir)
+        assert left == [], (
+            f"purge оставил шифротекст, который не сможет уничтожить (compact_fails="
+            f"{compact_fails}): {left}"
+        )
+        readable, why = _is_profile_readable(store)
+        assert readable, f"профиль обязан остаться читаемым, а упал: {why}"
+
+    def test_compact_failure_is_reported_honestly(self, tmp_path, fake_keychain, monkeypatch):
+        """(в) Сбой компактирования объявлен, а не спрятан.
+
+        Права удалить журнал томбестона безусловны (шаг 1b-3), и это решение
+        стоило части реестра удалений, когда compact не прошёл: строки томбестона
+        были единственным носителем этих ID. Такой исход ОБЯЗАН быть виден в
+        ответе, иначе purge отчитался бы «полностью успешно», потеряв данные.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        def _boom():
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store, "compact_with_stats", _boom)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert "compact" in result["errors"], "сбой компактирования обязан быть в errors"
+        assert result["complete"] is False
+        assert result["history_deleted"] == 1, "сколько записей purge видел — сообщается"
+
+    def test_repeat_purge_works_after_failed_compaction(
+        self, tmp_path, fake_keychain, monkeypatch
+    ):
+        """Повторный purge обязан работать: профиль не должен «залипнуть».
+
+        Именно это и наблюдал ревьюер: после неудачного purge второй вызов
+        падал тем же исключением — то есть у владельца не оставалось способа
+        довести зачистку до конца.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+
+        def _boom():
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store, "compact_with_stats", _boom)
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        # Диск «освободился» — повторяем purge как владелец.
+        monkeypatch.undo()
+        from backend.history_service import HistoryService as _HS
+
+        result = _HS(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert result["ok"] is True, "повторный purge обязан завершиться"
+        assert _scan_enc1(data_dir) == []
+        readable, why = _is_profile_readable(store)
+        assert readable, f"после повторного purge профиль читаем, а упал: {why}"
+
+    def test_purge_tombstones_are_written_in_plaintext(self, tmp_path, fake_keychain):
+        """(1) Собственные томбестоны purge пишутся ОТКРЫТЫМИ.
+
+        Не «должны по документации», а эмпирически: `_append_ndjson` кодирует
+        строку через `_maybe_encrypt`, поэтому шаг 1 обязан звать
+        `_append_ndjson_raw` с уже готовым plaintext. Проверяем на живой матрице
+        (rc/regex), иначе «открытая» запись — миф.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        removed_id = store.add_history_item(text="секрет владельца").id
+        store.delete_history_item(removed_id)
+        # Компактирование НЕ вызываем: томбестон остаётся на диске, и его видно.
+        assert removed_id in {
+            str(p.get("id", "")) for p in store._read_history_ndjson_unlocked(store.tombstones_path)
+        }
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        tomb = data_dir / "history_tombstones.ndjson"
+        if tomb.is_file():
+            raw = tomb.read_text(encoding="utf-8")
+            assert "ENC1:" not in raw, (
+                "томбестоны purge обязаны быть открытыми — иначе после shred'а ключа "
+                "они становятся нечитаемым мусором (B1‴)"
+            )
+
+    def test_append_ndjson_raw_really_does_not_encrypt(self, tmp_path, fake_keychain):
+        """(д) Проверка живой матрицы: `_append_ndjson_raw` не шифрует.
+
+        Фикс B1‴ держится на этом предположении. Если бы `_append_ndjson_raw`
+        кодировал строку, «открытые» томбестоны оказались бы ENC1 — и весь
+        инвариант был бы пустым словом. Проверяем обе стороны: raw пишет
+        открытым, а обычный `_append_ndjson` — шифрует (иначе проверка была бы
+        неубедительной: «raw не шифрует» == «ничего не пишет»).
+        """
+        from backend.state_store import StateStore as _SS
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = _SS(data_dir)
+        crypto = _store_crypto(store)
+
+        raw_line = json.dumps({"id": "Открытый-ID"}, ensure_ascii=False)
+        store._append_ndjson_raw(store.tombstones_path, raw_line)
+        assert store.tombstones_path.read_text(encoding="utf-8").strip() == raw_line, (
+            "_append_ndjson_raw обязан писать строку ДОСЛОВНО, без кодирования"
+        )
+        assert not crypto.is_encrypted(raw_line)
+
+        store._append_ndjson(store.tombstones_path, {"id": "зашифрованный"})
+        assert any(
+            line.strip().startswith("ENC1:")
+            for line in store.tombstones_path.read_text(encoding="utf-8").splitlines()
+        ), (
+            "контрольная нога: обычный append обязан шифровать — иначе проверка "
+            "«raw не шифрует» ничего не доказывает"
+        )
+
+
+# ---------------------------------------------------------------------------
+# M1′ (MEDIUM) — нерегулярная запись на пути ledger'а не должна вешать purge
+# ---------------------------------------------------------------------------
+
+
+class TestIrregularLedgerPathDoesNotStallPurge:
+    """Одна неровная запись не должна превращать зачистку в остановку профиля.
+
+    Проба ревьюера (ON-профиль, на пути `history_purged_ids.ndjson`):
+
+        [dir]     purge RAISED IsADirectoryError
+        [socket]  purge RAISED OSError: [Errno 102] Operation not supported on socket
+        [fifo]    purge STILL RUNNING after 8s
+          stack: history_service.py:2395 → внутри `with self.store._lock():`
+                 → state_store.py:2194 _load_deleted_ids_unlocked → pathlib.open
+          второй поток store._lock(): BLOCKED: StateStoreLockTimeout
+
+    Причина — `open()` fifo/сокета блокируется навсегда, а ledger читается в шаге
+    1 под ОБЩИМ flock: уходил в таймаут не только purge, но и все читатели
+    истории и настроек. Асимметрия, на которую указал ревьюер: шаг 37a такие
+    записи СООБЩАЕТ, а pre-flight молча пропускал.
+    """
+
+    @pytest.mark.parametrize(
+        "kind", ["fifo", "dir", "socket", "symlink"], ids=lambda k: k
+    )
+    def test_purge_completes_with_irregular_ledger_entry(
+        self, tmp_path, fake_keychain, kind
+    ):
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        if kind == "socket":
+            # AF_UNIX ограничен ~104 байтами на путь, а pytest tmp-путь длиннее,
+            # поэтому сокет создаём в коротком каталоге и переносим на место.
+            import shutil as _shutil
+
+            short = Path(tempfile.mkdtemp(prefix="a52c1_sk-"))
+            try:
+                import socket as _socket
+
+                sk = short / "ledger.sock"
+                srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+                srv.bind(str(sk))
+                srv.close()
+                ledger = data_dir / "history_purged_ids.ndjson"
+                ledger.unlink(missing_ok=True)
+                _shutil.move(str(sk), str(ledger))
+            finally:
+                _shutil.rmtree(short, ignore_errors=True)
+        else:
+            ledger = data_dir / "history_purged_ids.ndjson"
+            ledger.unlink(missing_ok=True)
+            if kind == "fifo":
+                os.mkfifo(ledger)
+            elif kind == "dir":
+                ledger.mkdir()
+                (ledger / "вложенный").write_text("данные", encoding="utf-8")
+            else:
+                outside = tmp_path / "вне-профиля.ndjson"
+                outside.write_text('{"id": "чужая"}', encoding="utf-8")
+                ledger.symlink_to(outside)
+
+        # Сторож: purge обязан уложиться в разумное время. Никакого таймаута
+        # pytest — нам нужен именно факт завершения, а не «тест не упал».
+        finished = threading.Event()
+        outcome: dict = {}
+
+        def _run():
+            try:
+                outcome["result"] = HistoryService(store=store).handle_purge_all_data(
+                    {"confirm": "PURGE_ALL"}
+                )
+            except BaseException as exc:  # noqa: BLE001 — фиксируем любой исход
+                outcome["exc"] = exc
+            finally:
+                finished.set()
+
+        worker = threading.Thread(target=_run, daemon=True)
+        worker.start()
+        finished.wait(30)
+
+        assert finished.is_set(), (
+            f"purge ЗАВИС на записи вида '{kind}' — приватная зачистка не имеет "
+            "права уводить в блокировку весь бэкенд"
+        )
+        assert "exc" not in outcome, f"purge упал на '{kind}': {outcome.get('exc')!r}"
+        assert outcome["result"]["ok"] is True
+
+    def test_irregular_ledger_entry_is_reported(self, tmp_path, fake_keychain):
+        """Нерегулярная запись не проходит молча (асимметрия с шагом 37a)."""
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        ledger = data_dir / "history_purged_ids.ndjson"
+        ledger.unlink(missing_ok=True)
+        os.mkfifo(ledger)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert "deletion_ledger" in result["errors"], (
+            "фифо на пути ledger'а — это потеря доверия к профилю, и она обязана "
+            "быть объявлена, а не выглядеть как обычный purge"
+        )
+        assert result["complete"] is False
+        # Сама неровная запись не читалась и не удалилась на месте.
+        assert os.path.lexists(ledger), (
+            "нерегулярная запись уводится в сторону, а не уничтожается: удаление "
+            "fifo/каталога на месте — отдельное решение, а не побочный эффект purge"
+        )
+        assert _scan_enc1(data_dir) == []
+        readable, why = _is_profile_readable(store)
+        assert readable, f"профиль обязан остаться читаемым, а упал: {why}"
+
+    def test_ledger_path_is_never_opened_while_irregular(
+        self, tmp_path, fake_keychain, monkeypatch
+    ):
+        """Инвариант: `open()` не выполняется, ПОКА на пути лежит нерегулярная запись.
+
+        «Никаких open() вообще» было бы неверной формулировкой: после того как
+        запись уведена в сторону, путь занимает обычный файл, и его читать
+        нужно и правильно. Запрет относится к моменту, когда по пути ещё лежит
+        fifo/сокет/каталог — именно такой `open()` и вешает purge.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        ledger = data_dir / "history_purged_ids.ndjson"
+        ledger.unlink(missing_ok=True)
+        os.mkfifo(ledger)
+
+        violations: list[str] = []
+        real_open = Path.open
+
+        def _spy(self, *a, **kw):
+            if self.name.startswith("history_purged_ids") and os.path.lexists(self):
+                mode = os.lstat(self).st_mode
+                if not stat.S_ISREG(mode):
+                    violations.append(f"{self.name} ({oct(mode)})")
+            return real_open(self, *a, **kw)
+
+        monkeypatch.setattr(Path, "open", _spy)
+
+        finished = threading.Event()
+        outcome: dict = {}
+
+        def _run():
+            try:
+                outcome["result"] = HistoryService(store=store).handle_purge_all_data(
+                    {"confirm": "PURGE_ALL"}
+                )
+            except BaseException as exc:  # noqa: BLE001
+                outcome["exc"] = exc
+            finally:
+                finished.set()
+
+        threading.Thread(target=_run, daemon=True).start()
+        assert finished.wait(30), "purge завис"
+
+        assert "exc" not in outcome, f"purge упал: {outcome.get('exc')!r}"
+        assert violations == [], (
+            f"путь ledger'а открыт, пока на нём нерегулярная запись — это и есть "
+            f"висящий purge: {violations}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# N1 — гейт обязан видеть безусловный снос сама истории и остальных журналов
+# ---------------------------------------------------------------------------
+
+
+class TestHistoryJournalsAreWipedUnconditionally:
+    """Инвариант B1‴ доведён до конца: ENC1 не остаётся НИГДЕ в профиле.
+
+    Проба ревьюера (NC-B): шаг 1b-1 отключён → гейт остаётся зелёным, потому
+    что `history.ndjson` кредитуется из УСЛОВНОГО компактирования.
+
+    Собственная находка (измерена, а не предположена): класс шире, чем сама
+    история. `history_status.ndjson` и остальные delta-журналы пишутся тем же
+    шифрующим `_append_ndjson` и при провале compact тоже оставляют ENC1:
+
+        complete: False errors: ['compact', 'tombstone_registry']
+        ENC1 ПОСЛЕ purge: [('history_status.ndjson', 2)]
+        профиль читаем: False — HistoryEncryptionUnavailable
+
+    В профиле владельца эти журналы непустые, то есть дыра не теоретическая.
+    """
+
+    @pytest.mark.parametrize(
+        "journal",
+        [
+            "history.ndjson",
+            "history_status.ndjson",
+            "history_tags.ndjson",
+            "history_favorites.ndjson",
+            "history_text_updates.ndjson",
+            "history_action_items.ndjson",
+            "history_annotations.ndjson",
+            "history_calendar_links.ndjson",
+            "history_tombstones.ndjson",
+        ],
+    )
+    def test_journal_has_no_ciphertext_after_purge_with_failed_compaction(
+        self, tmp_path, fake_keychain, monkeypatch, journal
+    ):
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        item = store.add_history_item(text="секрет владельца")
+
+        # Заполняем журнал ИМЕННО прод-шифрующим путём (как это делает прод).
+        with store._lock():
+            store._append_ndjson(data_dir / journal, {"id": item.id, "payload": "данные"})
+        assert "ENC1:" in (data_dir / journal).read_text(encoding="utf-8"), (
+            "прогресс-условие: журнал зашифрован ДО purge"
+        )
+
+        def _boom():
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr(store, "compact_with_stats", _boom)
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        left = _scan_enc1(data_dir)
+        assert left == [], (
+            f"compact провален, но {journal} оставил шифротекст, который purge "
+            f"не сможет уничтожить после shred'а ключа: {left}"
+        )
+        readable, why = _is_profile_readable(store)
+        assert readable, f"профиль обязан остаться читаемым, а упал: {why}"
+
+    def test_calendar_links_producer_is_the_encrypting_writer(self):
+        """Проверка прод-обоснования, а не догадка (см. отчёт).
+
+        `history_calendar_links.ndjson` пишется через `_append_ndjson` —
+        то есть ТОТ ЖЕ шифрующий путь, что и остальные журналы. Значит он
+        qualifies для безусловного сноса и для proof-гейта.
+        """
+        import inspect
+
+        from backend.state_store import StateStore as _SS
+
+        src = inspect.getsource(_SS)
+        assert "_append_ndjson(\n                self.calendar_links_path" in src or (
+            "self.calendar_links_path" in src and "_append_ndjson" in src
+        ), "прод-писатель calendar_links изменился — перепроверь решение вручную"
+
+
+class TestHistoryJournalGateProofs:
+    """N1: сама история и journal-календарь обязаны быть proof-gated."""
+
+    def _guard(self):
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_n1", path)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_history_journal_is_proof_gated(self):
+        guard = self._guard()
+        for store_id in ("history.ndjson", "history_calendar_links.ndjson"):
+            assert store_id in guard._CIPHERTEXT_DESTRUCTION_STORES, (
+                f"{store_id} зачищается безусловно и способен содержать ENC1 — "
+                "покрытие обязано доказываться уничтожением шифротекста, а не "
+                "кредитом условного компактирования (NC-B)"
+            )
+
+    def test_negative_control_disabling_history_wipe_is_a_gap(self, tmp_path):
+        """NC-B ревьюера: снять снос `history.ndjson` (шаг 1b-1) → gap.
+
+        Мутация УДАЛЯЕТ ВЫЗОВ доказательства, а не закорачивает условие: гейт
+        доказывает проводку, а не достижимость (оговор��но в Tracked risks), и
+        `if False and <вызов>` оставил бы вызов в дереве — то есть такой NC
+        проверял бы не то.
+        """
+        gaps = _audit_mutated(
+            _guard_repo_copy(tmp_path / "nc"),
+            "KrabEar/backend/history_service.py",
+            "                if not _wipe_journal_ciphertext(_history_path):",
+            "                if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_history_path):",
+        )
+        assert "history.ndjson" in gaps, (
+            f"отключение безусловного сноса history.ndjson обязано открывать "
+            f"пробел; gaps: {sorted(gaps)}"
+        )
+
+    def test_negative_control_disabling_calendar_wipe_is_a_gap(self, tmp_path):
+        gaps = _audit_mutated(
+            _guard_repo_copy(tmp_path / "nc"),
+            "KrabEar/backend/history_service.py",
+            "            if not _wipe_journal_ciphertext(_calendar_links_path):",
+            "            if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_calendar_links_path):",
+        )
+        assert "history_calendar_links.ndjson" in gaps, (
+            f"отключение сноса calendar_links обязано открывать пробел; gaps: {sorted(gaps)}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# N2/N3 — нерегулярная запись на пути ledger'а
+# ---------------------------------------------------------------------------
+
+
+class TestLedgerDirectoryIsRemovedWithContents:
+    """N2: каталог на пути ledger'а переживал purge вместе с содержимым.
+
+    `rename` в сторону сохранял каталог как `history_purged_ids.ndjson.irregular/`
+    — он не матчит ни один sweep-паттерн, и внутри могла лежать открытая копия
+    истории. Симлинк/fifo/socket при этом трогать нельзя: там rename — верное
+    поведение (цель вне профиля не разыменовывается).
+    """
+
+    def test_directory_on_ledger_path_is_removed_with_contents(
+        self, tmp_path, fake_keychain
+    ):
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        ledger = data_dir / "history_purged_ids.ndjson"
+        ledger.unlink(missing_ok=True)
+        ledger.mkdir()
+        (ledger / "leftover_history.txt").write_text(
+            "ОТКРЫТАЯ КОПИЯ ИСТОРИИ ВЛАДЕЛЬЦА", encoding="utf-8"
+        )
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        # Инвариант: путь НЕ ДОЛЖЕН остаться каталогом, и его содержимое не должно
+        # нигде пережить. Сам путь после purge законно снова существует — там
+        # теперь обычный файл (его создаёт StateStore/37a), и это правильно.
+        assert not ledger.is_dir(), (
+            "каталог на пути ledger'а пережил purge вместе со содержимым"
+        )
+        assert not (ledger / "leftover_history.txt").exists(), (
+            "содержимое каталога не имеет права переживать privacy-purge"
+        )
+        leftovers = [p.name for p in data_dir.glob("*.irregular*")]
+        assert leftovers == [], (
+            f"отложенные записи не должны переживать purge: {leftovers}"
+        )
+        stray = [p.name for p in data_dir.rglob("leftover_history.txt")]
+        assert stray == [], f"содержимое каталога нашлось в другом месте: {stray}"
+        assert _scan_enc1(data_dir) == []
+        readable, why = _is_profile_readable(store)
+        assert readable, f"профиль обязан остаться читаемым, а упал: {why}"
+        # Содержимое каталога — данные, а не реестр: терять нечего, но исход
+        # объявляется (это по-прежнему потеря доверия к профилю).
+        assert "deletion_ledger" in result["errors"]
+        assert result["complete"] is False
+
+    def test_irregular_family_cannot_become_a_blind_spot(self):
+        """Страховка на будущее: семейство `.irregular` должно быть видимо гейту.
+
+        Даже после rmtree ветки «каталог» rename-путь остаётся для fifo/сокета,
+        и отложенная запись не должна выпадать из зоны purge молча — именно так
+        и появилась находка N2.
+        """
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_irreg", path)
+        guard = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = guard
+        spec.loader.exec_module(guard)
+
+        assert "_tmp" in guard.TEMP_FAMILY_SUFFIXES
+        assert ".irregular" in guard.TEMP_FAMILY_SUFFIXES, (
+            "`.irregular` обязан быть семейством для гейта: иначе отложенная "
+            "нерегулярная запись станет слепой зоной, а ровно это было находкой N2"
+        )
+
+
+class TestFailedLedgerRenameAbortsPurgeLoudly:
+    """N3: ветка недостижимости на самом деле достижима — и опасна.
+
+    `os.rename` может вернуть ошибку (ENOENT — запись исчезла между lstat и
+    rename, EPERM/EACCES, исчерпание 100 вариантов `.irregular`). Если запись
+    осталась на пути, следующая же операция с путём (чтение ledger'а) на fifo
+    уходит в вечную блокировку под общим flock. Поэтому «увести не удалось» —
+    это НЕ «запишем ошибку и пойдём дальше», а громкая остановка.
+    """
+
+    def test_failed_rename_stops_purge_instead_of_stalling(
+        self, tmp_path, fake_keychain, monkeypatch
+    ):
+        import backend.history_service as hs
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        ledger = data_dir / "history_purged_ids.ndjson"
+        ledger.unlink(missing_ok=True)
+        os.mkfifo(ledger)
+
+        monkeypatch.setattr(hs, "_evict_ledger_entry", lambda _p, _kind: None)
+
+        finished = threading.Event()
+        outcome: dict = {}
+
+        def _run():
+            try:
+                outcome["result"] = HistoryService(store=store).handle_purge_all_data(
+                    {"confirm": "PURGE_ALL"}
+                )
+            except BaseException as exc:  # noqa: BLE001
+                outcome["exc"] = exc
+            finally:
+                finished.set()
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        assert finished.wait(30), (
+            "purge ЗАВИС: нерегулярная запись осталась на пути ledger'а, а purge "
+            "всё равно пошёл читать этот путь"
+        )
+        assert "exc" not in outcome, f"purge упал неконтролируемо: {outcome.get('exc')!r}"
+        result = outcome["result"]
+        assert result["ok"] is False, (
+            "purge, который не смог освободить путь ledger'а, обязан сообщить "
+            "об отказе, а не рапортовать частичную зачистку как обычную"
+        )
+        assert result["error"] == "preflight_failed", result
+        assert "deletion_ledger" in result["errors"]
+        assert result["complete"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -562,7 +1197,14 @@ class TestStaleCopiesAreWiped:
         assert result["complete"] is False, "purge с уцелевшими копиями неполон"
 
     def test_foreign_files_in_data_dir_are_not_touched(self, tmp_path, fake_keychain):
-        """Зачистка — ЯВНЫМ перечислением паттернов, не широким glob по data_dir."""
+        """Зачистка — по СЕМЕЙСТВАМ, а не по «всё подряд»; постороннее цело.
+
+        LOW6: докстринг раньше обещал «не широкий glob по data_dir», тогда как
+        M1 сознательно расширил зачистку до `*.tmp`/`*_tmp` — широких по
+        окончанию. Формулировка приведена в соответствие: широки glob по
+        data_dir (снёс бы и `notes.txt`) по-прежнему запрещён, а вот семейства
+        tmp — это по построению копии уничтожаемых файлов, и они в зоне.
+        """
         data_dir = _data_dir(tmp_path)
         _settings_on(data_dir)
         store = StateStore(data_dir)
@@ -1603,6 +2245,87 @@ class TestPurgeCoverageFamilyRuleNeedsWildcard:
         assert guard._is_covered("*.tmp", {"*.tmp"}, set()) is True
 
 
+class TestPurgeCoverageCiphertextProofs:
+    """Гейт обязан требовать доказательства уничтожения шифротекста (B1‴ + LOW3)."""
+
+    def _guard(self):
+        import importlib.util
+        import sys as _sys
+
+        path = Path(__file__).resolve().parents[2] / "scripts" / "audit_purge_coverage.py"
+        spec = importlib.util.spec_from_file_location("audit_purge_coverage_b1h", path)
+        mod = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = mod
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_tombstone_journal_is_proof_gated(self):
+        guard = self._guard()
+        proofs = guard._CIPHERTEXT_DESTRUCTION_STORES.get("history_tombstones.ndjson")
+        assert proofs, (
+            "журнал томбестонов обязан быть в списке stores, чьё покрытие "
+            "доказывается уничтожением шифротекста: purge пишет в него открытым, "
+            "а чистит только безусловно (компактирование при провале не чистит)"
+        )
+
+    def test_proof_call_must_carry_the_store_id(self, tmp_path):
+        """LOW3: мёртвый proof-вызов не должен засчитывать настоящее хранилище.
+
+        Мутация — ровно та, что описал ревьюер: путь в 37a переименован, а
+        вызов доказательства остался в той же функции.
+        """
+        gaps = _audit_mutated(
+            _guard_repo_copy(tmp_path / "nc"),
+            "KrabEar/backend/history_service.py",
+            '_ledger_path = _data_dir / "history_purged_ids.ndjson"',
+            '_ledger_path = _data_dir / "history_purged_ids_OTHER.ndjson"',
+        )
+        assert "history_purged_ids.ndjson" in gaps, (
+            "proof-вызов без id хранилища не является доказательством; gaps: "
+            f"{sorted(gaps)}"
+        )
+
+    def test_negative_control_removing_tombstone_wipe_is_a_gap(self, tmp_path):
+        """B1‴: снять безусловную зачистку томбестонов (шаг 1b-3) → gap.
+
+        Мутация убирает САМ ВЫЗОВ доказательства (как если бы зачистку снесли),
+        а не закорачивает условие: гейт доказывает ПРОВОДКУ, а не достижимость
+        (достижимость статически не проверяется — это записано в Tracked risks).
+        """
+        gaps = _audit_mutated(
+            _guard_repo_copy(tmp_path / "nc"),
+            "KrabEar/backend/history_service.py",
+            "            if not _wipe_journal_ciphertext(_tombstones_path):",
+            "            if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_tombstones_path):",
+        )
+        assert "history_tombstones.ndjson" in gaps, (
+            f"безусловная зачистка томбестонов обязана быть доказуемо востребована; gaps: {sorted(gaps)}"
+        )
+
+    def test_compaction_credit_cannot_stand_in_for_the_wipe(self):
+        """Кредит компактирования не закрывает безусловную зачистку.
+
+        Компактирование чистит журнал ТОЛЬКО при успехе, и именно этот провал
+        оставлял ENC1, который purge уже не мог уничтожить. Пока такое
+        кредитование живёт, снятие 1b-3 проходит как «0 gaps» — гейт закрывает
+        условный шаг и доверяет ему безусловную зачистку.
+        """
+        guard = self._guard()
+        compaction = guard._state_store_compaction_coverage()
+        assert "history_tombstones.ndjson" in compaction, (
+            "прогресс-условие: compact действительно чистит этот журнал"
+        )
+        effective = compaction - set(guard._CIPHERTEXT_DESTRUCTION_STORES)
+        assert "history_tombstones.ndjson" not in effective, (
+            "proof-gated журналы не должны покрываться кредитом компактирования"
+        )
+
+    def test_real_repo_still_has_no_gaps(self, tmp_path):
+        guard = self._guard()
+        result = guard.run_audit()
+        assert result.gaps == [], f"пробелы полноты purge: {[g.store_id for g in result.gaps]}"
+
+
 # ---------------------------------------------------------------------------
 # KEYCHAIN: два доказательства + инвариант «вне purge обращений нет»
 # ---------------------------------------------------------------------------
@@ -1798,6 +2521,11 @@ class TestDegradedLedgerIsLoud:
 
         assert result["complete"] is False
         assert "deletion_ledger" in result["errors"]
+        assert result["errors"].count("deletion_ledger") == 1, (
+            "шаг упал в ДВУХ местах (pre-flight и 37a), но это один и тот же шаг: "
+            f"два одинаковых имени в errors читались бы как два разных сбоя — "
+            f"{result['errors']}"
+        )
         assert not ledger.is_symlink(), "ссылка обязана быть снята ДО первой записи"
         assert ledger.is_file(), (
             "в профиле должен появиться свежий обычный ledger, а не ссылка"
