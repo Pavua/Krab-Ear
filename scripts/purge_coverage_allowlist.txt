@@ -43,28 +43,35 @@ privacy_audit.key        # AES key for the compliance audit log (privacy_audit.l
 event_bridge_token/      # HMAC bridge-auth секрет между IPC/REST процессами (localhost-only trust boundary); не пользовательские данные, аналог privacy_audit.key. Фактически ОДИН файл (не директория) — сканер помечает его directory-style, т.к. имя ссылается через переменную EVENT_BRIDGE_TOKEN_FILENAME, а не строковый литерал с расширением.
 
 # --- ID-only resurrection registry (no PII) -------------------------------
-# A5.2c1: history_purged_ids.ndjson БОЛЬШЕ НЕ allowlisted-исключение — purge
-# удаляет его (шаг 37a в handle_purge_all_data).
+# A5.2c1 + B1: history_purged_ids.ndjson БОЛЬШЕ НЕ allowlisted-исключение.
 #
-# Почему раньше он выживал и почему это было неверно (дефект найден разбором
-# кода, не тестами): файл содержал ТОЛЬКО id, поэтому и попал в allowlist как
-# «не PII». Но он не был нейтральным: шаг компактирования (1b) дописывает в
-# него ENC1-строки СТАРЫМ ключом, а шаг 38 shred'ит ключ. allowlisted-файл purge
-# не чистил → после privacy-purge профиль с шифрованием становился НЕЧИТАЕМ:
-# первое же чтение истории падало с InvalidTag → HistoryEncryptionUnavailable.
-# «Нет PII в ledger'е» не значит «ledger нельзя удалять при wipe».
+# ШАГ 1 (исходный дефект волны, найден разбором кода): файл содержал ТОЛЬКО id,
+# поэтому и попал в allowlist как «не PII». Но он не был нейтральным: шаг
+# компактирования (1b) дописывает в него ENC1-строки СТАРЫМ ключом, а шаг shred'а
+# ключа идёт позже. allowlisted-файл purge не чистил → после privacy-purge профиль
+# с шифрованием становился НЕЧИТАЕМ: первое же чтение истории падало с InvalidTag →
+# HistoryEncryptionUnavailable. «Нет PII в ledger'е» не значит «ledger нельзя
+# трогать при wipe».
 #
-# Обоснование удаления (решение 1 карточки A5.2c1): единственная роль ledger'а —
-# блокировать resurrection ID'ов, которых история уже нет; после полного wipe
-# внутри профиля он бессмысленен. Защита от resurrection ВНЕШНЕЙ копии держит
-# ledger САМОЙ копии: A5.2b2 при сборе union берёт «текущий ledger ∪ ledger
-# снимка», поэтому возвращённый извне старый снимок не воскресит собственные
-# удалённые ID. Это закреплено тестом
-# test_restored_external_copy_cannot_resurrect_its_own_purged_ids
-# (KrabEar/tests/test_a52c1_purge_integrity.py).
+# ШАГ 2 (BLOCK от adversarial-ревью — первое решение волны было НЕВЕРНЫМ):
+# удалять ledger целиком тоже нельзя. Обоснование «защиту держит ledger САМОЙ
+# копии» верно ТОЛЬКО для ID, которые копия уже знала мёртвыми. Для ID,
+# удалённого в текущем профиле ПОСЛЕ снимка, единственная защита — ledger
+# текущего профиля, и purge открывал resurrection МОЛЧА: возвращённый снаружи
+# снимок возвращал полный текст записи, а restore рапортовал `ledger_blocked: 0`.
 #
-# НЕ возвращайте эту запись в allowlist: purge обязан чистить ledger, иначе
-# профиль после purge нечитаем (см. выше).
+# РЕШЕНИЕ (B1): содержимое ledger'а переживает purge ОТКРЫТЫМ — в нём только
+# идентификаторы, без PII, так что инвариант этого allowlist-исключения
+# сохраняется, — а уничтожается ТОЛЬКО ШИФРОТЕКСТ (`_rematerialize_ledger_plaintext`
+# в шаге 37a). Исходный дефект при этом остаётся закрыт: ENC1-строки после
+# purge в файле не бывает, и профиль остаётся читаемым. Закреплено тестами
+# test_ledger_ciphertext_is_destroyed_after_purge, test_ledger_carries_no_pii,
+# test_id_deleted_after_snapshot_does_not_resurrect_after_purge (+ контрольная
+# нога) — KrabEar/tests/test_a52c1_purge_integrity.py.
+#
+# НЕ возвращайте эту запись в allowlist: purge обязан уничтожать шифротекст
+# ledger'а (иначе профиль после purge нечитаем) и обязан СОХРАНЯТЬ его
+# содержимое (иначе resurrection открыт).
 
 # --- Billing / spend counters (no PII) ------------------------------------
 cloud_spend.json         # F2: месячный spend-cap облачного summary — только {"YYYY-MM": usd}; ни текста транскриптов, ни API-ключей. Переживает purge намеренно: сброс обнулил бы учёт лимита трат.
