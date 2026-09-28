@@ -32,6 +32,22 @@
   2. OS-шим: сессионная фикстура кладёт на PATH поддельный исполняемый
      `security`, который ТОЛЬКО пишет маркер вызова. Настоящий бинарь из этой
      сессии недостижим, поэтому «нулевой счётчик» — не артефакт патча.
+
+ПРОГОН В UBUNTU-СИМУЛЯЦИИ (обязательный гейт, B1′):
+
+    KRAB_A52C1_SIMULATE_NON_DARWIN=1 pytest KrabEar/tests/test_a52c1_purge_integrity.py
+
+Код волны ходит в Keychain, а значит зависит от платформы, поэтому «зелёный на
+macOS» ничего не доказывает: `pre_merge_py312_check` запускает те же файлы на
+Python 3.12 БЕЗ mlx, и `ubuntu-latest` в CI — тоже. Фикстура
+`conftest._simulate_non_darwin_host` флипает
+`sys.platform` на не-darwin ПОСЛЕ коллекции (иначе импорты модулей уехали бы
+ещё на macOS-пути) и НЕ трогает `shutil.which` — так что Keychain недоступен
+именно по платформе, а не «случайно спрятан». Найдено ревью: L2-фикс сделал
+`delete_history_key()` зависимым от `keychain_available()`, и на ubuntu
+подтверждение отсутствия возвращало `None` ⇒ `shredded=False` при успешном
+удалении. Это тот же класс, что репозиторий называет ubuntu-parity:
+локально зелёное, на CI красное.
 """
 
 from __future__ import annotations
@@ -148,7 +164,29 @@ def fake_keychain(monkeypatch):
         return fake.run(args)
 
     monkeypatch.setattr(ks, "_run_security", _guarded)
+    # B1′: поддельный Keychain существует — значит хост им обладает. Ассимпцию
+    # объявляем явно, иначе ubuntu-симуляция (sys.platform=linux) валила бы
+    # тесты, проверяющие семантику shred'а, а не поведение платформы.
+    monkeypatch.setattr(ks, "keychain_available", lambda: True)
     return fake
+
+
+@pytest.fixture
+def assume_keychain_host(monkeypatch):
+    """Объявить хост-ассимпцию для тестов, патчащих ``_run_security`` напрямую.
+
+    ``fake_keychain`` закрывает случай «Keychain подменён целиком», но часть
+    тестов волны (A5.2c1 L2) патчит ``_run_security`` точечно, не касаясь
+    ``keychain_available()``. На ubuntu-симуляции guard платформы тогда
+    срабатывает раньше патча, и тест падает не по своей логике.
+
+    Правило: тест, проверяющий семантику удаления ключа, ОБЯЗАН объявить, что
+    хост — macOS. Контракт платформы (non-darwin) проверяется отдельно, в
+    :class:`TestNonDarwinHostContract`.
+    """
+    import backend.crypto_keystore as ks
+
+    monkeypatch.setattr(ks, "keychain_available", lambda: True)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -852,6 +890,7 @@ class TestPurgeDoesNotOpenResurrection:
                 assert set(json.loads(line)) == {"id"}, "ledger хранит ТОЛЬКО id"
 
 
+@pytest.mark.usefixtures("assume_keychain_host")
 class TestPurgeResultIsMachineReadable:
     def test_purge_reports_every_new_field(self, tmp_path, fake_keychain):
         data_dir = _data_dir(tmp_path)
@@ -1536,3 +1575,76 @@ class TestNoKeychainAccessOutsidePurge:
         """Прогон гейта полноты не должен дёргать Keychain (он чистый AST)."""
         _reset_counters()
         assert KEYCHAIN == {"reads": 0, "creates": 0, "deletions": 0, "probes": 0}
+
+
+class TestNonDarwinHostContract:
+    """B1′: контракт хоста без Keychain.
+
+    Фикс L2 (подтверждение shred'а read-only пробой) сделал ``delete_history_key()``
+    зависимым от ``keychain_available()`` → на не-darwin проба возвращала ``None``
+    ⇒ ``shredded=False`` при успешном удалении. Локально (macOS) это зелёное, на
+    ``ubuntu-latest`` в CI — 8 новых падений: ровно тот класс, который репозиторий
+    называет ubuntu-parity.
+
+    Контракт: на хосте, где Keychain нет, удаление **нечем подтверждать**, поэтому
+    функция обязана поднять ``KeystoreUnavailable`` (правда: «здесь ключа не
+    существует»), а НЕ вернуть непроверяемый ``False``. Ветка purge
+    ``except KeystoreUnavailable`` уже трактует это как «уничтожено, ключа нет».
+    """
+
+    def test_delete_raises_instead_of_returning_unverifiable_false(self, monkeypatch):
+        """Главный контракт: не False, а исключение — и без единого вызова CLI."""
+        import backend.crypto_keystore as ks
+
+        spawned: list = []
+        monkeypatch.setattr(ks, "keychain_available", lambda: False)
+        monkeypatch.setattr(ks, "_run_security", lambda args, *a, **kw: spawned.append(args))
+
+        with pytest.raises(ks.KeystoreUnavailable):
+            ks.delete_history_key()
+
+        assert spawned == [], (
+            "на хосте без Keychain спрашивать `security` бессмысленно: нечего "
+            "подтверждать, и настоящий код там падает FileNotFoundError"
+        )
+
+    def test_purge_treats_missing_keychain_as_no_key_to_shred(self, tmp_path, monkeypatch):
+        """purge на non-darwin: «уничтожено» и НЕ ошибка (иначе CI всегда частичный).
+
+        Сценарий намеренно без записи истории: на хосте без Keychain профиль с
+        шифрованием включённым вообще не может накопить шифротекст (StateStore
+        fail-closed на записи), поэтому «профиль с зашифрованной историей на
+        ubuntu» — недостижимое состояние. Проверяем достижимое: зачистка
+        производных копий, полнота результата и честный признак ключа.
+        """
+        import backend.crypto_keystore as ks
+
+        monkeypatch.setattr(ks, "keychain_available", lambda: False)
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        (data_dir / "history.ndjson.bak-20260926-120000").write_text("x", encoding="utf-8")
+        (data_dir / "settings.json.tmp").write_text("{}", encoding="utf-8")
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert result["encryption_key_shredded"] is True
+        assert "encryption_key" not in result["errors"]
+        assert result["complete"] is True, (
+            f"purge обязан быть полным на хосте без Keychain: {result.get('errors')}"
+        )
+        # Зачистка не зависит от Keychain: производные копии сняты в любом случае.
+        assert result["stale_copies_removed"] == 2
+        assert not (data_dir / "history.ndjson.bak-20260926-120000").exists()
+        assert not (data_dir / "settings.json.tmp").exists()
+        # Профиль остаётся читаемым: ключа здесь не существует, а ledger открыт.
+        page, _cursor = StateStore(data_dir).get_history_page(None, 50)
+        assert page == []
+
+    def test_key_presence_probe_is_unknown_without_keystore(self, monkeypatch):
+        """Проба наличия на хосте без Keychain честно неизвестна (None), не False."""
+        import backend.crypto_keystore as ks
+
+        monkeypatch.setattr(ks, "keychain_available", lambda: False)
+        assert ks.history_key_present() is None

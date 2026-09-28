@@ -135,9 +135,24 @@ def delete_history_key() -> bool:
        Неопределённость (``None``) — тоже False: подтвердить не смогли.
 
     Raises:
-        KeystoreUnavailable: если ``security`` CLI не найден (не macOS). Вызывающий
+        KeystoreUnavailable: если ``security`` CLI не найден (не macOS) **или если
+            на этом хосте Keychain недоступен по платформе** (B1′). Вызывающий
             трактует это как «на этой платформе ключа не существует».
     """
+    # B1′ (ubuntu-parity): проверка ПЕРЕД запуском процесса. Платформа решает всё:
+    # на хосте без Keychain подтвердить удаление нечем, и возвращать
+    # непроверяемый ``False`` нельзя — тесты патчат ``_run_security``, то есть
+    # «удаление проходит», а платформа остаётся чужой, и purge рапортовал бы
+    # «ключ не уничтожен» на CI, где ключа не существует в принципе. Это ровно
+    # то, что делает ``_run_security`` на не-darwin (FileNotFoundError →
+    # KeystoreUnavailable), только решение принимается до spawn: нечего
+    # спрашивать про ключ у машины, у которой нет Keychain. Существующая ветка
+    # purge ``except KeystoreUnavailable`` уже означает «здесь ключа нет».
+    if not keychain_available():
+        raise KeystoreUnavailable(
+            "Keychain на этой платформе недоступен — удалять нечего"
+        )
+
     result = _run_security(
         ["delete-generic-password", "-s", _SERVICE, "-a", _ACCOUNT]
     )
