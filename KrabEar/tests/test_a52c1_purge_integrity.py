@@ -313,39 +313,67 @@ class TestProfileStaysReadableAfterPurge:
         reread, _cursor = store.get_history_page(None, 50)
         assert [item["text"] for item in reread] == ["новая запись после purge"]
 
-    def test_deletion_ledger_is_gone_after_purge(self, tmp_path, fake_keychain):
-        """Permanent ledger — копия удалённых id, purge его уничтожает."""
-        data_dir = _data_dir(tmp_path)
-        _settings_on(data_dir)
-        store = StateStore(data_dir)
-        store.add_history_item(text="секрет владельца")
+    def test_deletion_ledger_ciphertext_is_destroyed_after_purge(self, tmp_path, fake_keychain):
+        """Ledger переживает purge открытым — шифротекст обязан исчезнуть.
 
-        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
-
-        assert not (data_dir / "history_purged_ids.ndjson").exists(), (
-            "history_purged_ids.ndjson обязан быть удалён purge — он allowlisted, "
-            "и именно это оставляло профиль нечитаемым после ротации ключа"
-        )
-
-    def test_ledger_recreated_by_restart_is_readable(self, tmp_path, fake_keychain):
-        """Рестарт backend пересоздаёт пустой ledger — профиль остаётся целым.
-
-        ``StateStore.__init__`` re-touch'ит пустой файл, поэтому проверяем не
-        «файла нет», а «файл читается и в нём нет ID».
+        B1 (adversarial-ревью): обоснование карточки «ledger можно снести, его
+        роль держит ledger самой копии» было НЕВЕРНЫМ для ID, удалённых в
+        текущем профиле ПОСЛЕ снимка: их знает только текущий ledger. Поэтому
+        содержимое ledger'а сохраняется намеренно (в нём только ID, без PII) —
+        уничтожается ТОЛЬКО шифротекст. Исходный дефект (профиль нечитаем после
+        shred'а ключа) при этом остаётся починенным.
         """
         data_dir = _data_dir(tmp_path)
         _settings_on(data_dir)
         store = StateStore(data_dir)
-        store.add_history_item(text="секрет владельца")
+        crypto = _store_crypto(store)
+        removed_id = store.add_history_item(text="удалённая запись").id
+        store.delete_history_item(removed_id)
+        store.compact_with_stats()
+
+        ledger = data_dir / "history_purged_ids.ndjson"
+        before = ledger.read_text(encoding="utf-8")
+        assert any(line.startswith("ENC1:") for line in before.splitlines()), (
+            "прогресс-условие: до purge ledger зашифрован — иначе тест врал бы"
+        )
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert ledger.exists(), "содержимое ledger'а переживает purge (B1)"
+        raw = ledger.read_text(encoding="utf-8")
+        encrypted = [line for line in raw.splitlines() if line.startswith("ENC1:")]
+        assert encrypted == [], (
+            "шифротекст обязан быть уничтожен: после shred'а ключа он нечитаем "
+            "и роняет чтение истории (исходный дефект карточки)"
+        )
+        assert removed_id in _plain_ledger_ids(ledger), (
+            "список удалённых ID обязан сохраниться — иначе resurrection открыт"
+        )
+
+    def test_ledger_recreated_by_restart_is_readable(self, tmp_path, fake_keychain):
+        """Рестарт backend не ломает ledger: он остаётся читаемым и полным.
+
+        B1: ledger теперь переживает purge открытым, поэтому после рестарта
+        StateStore не должен ни потерять его содержимое, ни потребовать ключ.
+        Проверяем оба свойства, а не «файл существует».
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        crypto = _store_crypto(store)
+        removed_id = store.add_history_item(text="секрет владельца").id
         HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
 
         restarted = StateStore(data_dir)
         page, _cursor = restarted.get_history_page(None, 50)
 
-        assert page == []
+        assert page == [], "история пуста — purge обязан её очистить"
         ledger = data_dir / "history_purged_ids.ndjson"
-        if ledger.exists():
-            assert ledger.read_text(encoding="utf-8").strip() == ""
+        assert ledger.exists()
+        # Читается обоими ридерами БЕЗ ключа (ключ-то уже уничтожен).
+        assert removed_id in _plain_ledger_ids(ledger)
+        assert removed_id in restarted._load_deleted_ids_unlocked()
+        assert removed_id in set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +478,13 @@ class TestExternalCopyResurrectionStillBlocked:
                 dst.write_bytes(src.read_bytes())
 
         HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
-        assert not (data_dir / "history_purged_ids.ndjson").exists()
+        # B1: ledger переживает purge ОТКРЫТЫМ (шифротекст уничтожен) — его
+        # содержимое держит защиту для ID, удалённых уже ПОСЛЕ снимка.
+        ledger_after = data_dir / "history_purged_ids.ndjson"
+        assert ledger_after.exists(), "ledger не удаляется целиком (B1)"
+        assert not any(
+            line.startswith("ENC1:") for line in ledger_after.read_text(encoding="utf-8").splitlines()
+        ), "шифротекст обязан быть уничтожен"
 
         # Владелец вернул копию снаружи и восстановился.
         restored_backups = data_dir / "backups" / "snapshot_1"
@@ -477,8 +511,228 @@ class TestExternalCopyResurrectionStillBlocked:
 
 
 # ---------------------------------------------------------------------------
-# Task 2 — RED: машинно-читаемый результат purge
+# B1 (BLOCK, adversarial-ревью) — удаление ledger'а открывало resurrection
 # ---------------------------------------------------------------------------
+
+
+def _plain_ledger_ids(ledger: Path) -> set[str]:
+    """ID из ledger'а, читаемые БЕЗ ключа (т.е. пережившие purge открытыми)."""
+    ids: set[str] = set()
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        assert not line.startswith("ENC1:"), "функция только для открытого ledger'а"
+        item_id = json.loads(line).get("id")
+        if item_id:
+            ids.add(str(item_id))
+    return ids
+
+
+def _resurrection_scenario(tmp_path: Path, root: str):
+    """Профиль, в котором ID удалён ПОСЛЕ снимка.
+
+    Возвращает ``(data_dir, store, crypto, external_copy_dir, id_A, id_B)``.
+
+    Ключевая расстановка: снимок снят, когда A и B **оба живы**, поэтому ledger
+    САМОЙ копии про A ничего не знает. Единственная защита A — ledger текущего
+    профиля. Именно её и проверяют обе ноги теста.
+    """
+    data_dir = tmp_path / root / "data"
+    data_dir.mkdir(parents=True)
+    (data_dir / "settings.json").write_text(
+        json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
+    )
+    store = StateStore(data_dir)
+    id_a = store.add_history_item(text="ЗАПИСЬ A").id
+    id_b = store.add_history_item(text="ЗАПИСЬ B").id
+    crypto = _store_crypto(store)
+
+    snapshot_dir = _make_snapshot(data_dir, crypto)
+    assert id_a in set(_live_ids(snapshot_dir, crypto, "history.ndjson")), (
+        "прогресс-условие: в снимке A жива — иначе resurrection-тест был бы пустым"
+    )
+    assert id_a not in set(_live_ids(snapshot_dir, crypto, "history_purged_ids.ndjson")), (
+        "прогресс-условие: ledger снимка про A не знает — защита держится на "
+        "ledger текущего профиля, и только она"
+    )
+
+    # Внешняя копия (purge сносит backups/, поэтому выносим за пределы профиля).
+    external = tmp_path / root / "external" / "snapshot_1"
+    external.parent.mkdir(parents=True, exist_ok=True)
+    for src in sorted(snapshot_dir.rglob("*")):
+        if src.is_file():
+            dst = external / src.relative_to(snapshot_dir)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+
+    # ПОСЛЕ снимка владелец удаляет A → ID попадает в ledger текущего профиля.
+    store.delete_history_item(id_a)
+    store.compact_with_stats()
+    return data_dir, store, crypto, external, id_a, id_b
+
+
+def _return_external_copy(data_dir: Path, external: Path) -> Path:
+    """Владелец вернул копию снаружи — как это делает restore."""
+    restored = data_dir / "backups" / "snapshot_1"
+    restored.parent.mkdir(parents=True, exist_ok=True)
+    for src in sorted(external.rglob("*")):
+        if src.is_file():
+            dst = restored / src.relative_to(external)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+    return restored
+
+
+class TestPurgeDoesNotOpenResurrection:
+    """B1: purge не имеет права ОТКРЫВАТЬ resurrection, который был закрыт."""
+
+    def test_control_leg_blocks_id_before_purge(self, tmp_path, fake_keychain):
+        """КОНТРОЛЬНАЯ нога: ДО purge защита работает.
+
+        Без этой ноги тест ниже нельзя интерпретировать: «A не воскресла» после
+        фикса может означать и «защита есть», и «тест вообще не проверяет
+        resurrection». Контроль доказывает, что сценарий воспроизводит
+        resurrection, а фильтр действительно срабатывает.
+        """
+        data_dir, _store, crypto, external, id_a, id_b = _resurrection_scenario(
+            tmp_path, "control"
+        )
+
+        restored = _return_external_copy(data_dir, external)
+        result = restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=restored,
+            crypto=crypto,
+            policy_read=lambda: True,
+        )
+
+        assert result["ledger_blocked"] >= 1, (
+            "контрольная нога: текущий ledger обязан блокировать A ДО purge"
+        )
+        live = _live_ids(data_dir, crypto, "history.ndjson")
+        assert id_a not in live, "A не воскресает, пока ledger цел"
+        assert id_b in live, "B возвращается — сценарий не вырожден в пустоту"
+
+    def test_id_deleted_after_snapshot_does_not_resurrect_after_purge(
+        self, tmp_path, fake_keychain
+    ):
+        """B1, главный кейс: purge + возврат внешней копии — A не воскресает.
+
+        Дифференциальная проба ревьюера, воспроизведённая тестом:
+          CONTROL (ledger сохранён):  ledger_blocked: 1 → live = [B]
+          A5.2c1 (ledger удалён):     ledger_blocked: 0 → live = [B, A]
+
+        То есть раньше purge ВОЗВРАЩАЛ ПОЛНЫЙ ТЕКСТ записи — и рапортовал об
+        этом молча (`ledger_blocked: 0`), без единого предупреждения в ответе,
+        audit-логе и доках.
+        """
+        data_dir, store, crypto, external, id_a, id_b = _resurrection_scenario(
+            tmp_path, "hole"
+        )
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        restored = _return_external_copy(data_dir, external)
+        result = restore_encrypted_snapshot(
+            data_dir=data_dir,
+            backups_root=data_dir / "backups",
+            snapshot_dir=restored,
+            crypto=crypto,
+            policy_read=lambda: True,
+        )
+
+        assert result["ledger_blocked"] >= 1, (
+            "ledger текущего профиля обязан пережить purge и блокировать A"
+        )
+        live = _live_ids(data_dir, crypto, "history.ndjson")
+        assert id_a not in live, "resurrection: A воскресла после purge"
+        # Полный wipe: purge tombstone'ит ВСЁ, поэтому ledger содержит id и B, и
+        # возвращённый снимок не имеет права принести обратно ничего. Это строже
+        # требования ревьюера (только «A не воскресла»), и это правильно: после
+        # privacy-purge профиль пуст, а не «почти пуст».
+        assert id_b not in live, (
+            "после полного wipe возврат внешней копии не должен воскрешать НИЧЕГО"
+        )
+        assert live == [], "после purge + возврата внешней копии профиль обязан быть пуст"
+
+    def test_compaction_invariant_still_holds_and_survives_purge(
+        self, tmp_path, fake_keychain
+    ):
+        """(в) Инвариант «ledger ДО очистки tombstones» и его выживание.
+
+        Порядок compact'а (append+fsync permanent ledger → только потом чистка
+        tombstones) — то, что делает ledger'ом вообще. Purge обязан его не
+        сломать: перематериализация в открытый вид идёт по уже записанному
+        ledger'у, а не по tombstones.
+        """
+        data_dir, store, crypto, _external, id_a, _id_b = _resurrection_scenario(
+            tmp_path, "invariant"
+        )
+        tombstones = data_dir / "history_tombstones.ndjson"
+
+        # До purge: ledger заполнен, tombstones уже очищены (инвариант W1756).
+        raw = (data_dir / "history_purged_ids.ndjson").read_text(encoding="utf-8")
+        assert any(line.startswith("ENC1:") for line in raw.splitlines())
+        if tombstones.exists():
+            assert tombstones.read_text(encoding="utf-8").strip() == "", (
+                "tombstones обязаны быть очищены ПОСЛЕ записи в permanent ledger"
+            )
+
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        ledger = data_dir / "history_purged_ids.ndjson"
+        assert id_a in _plain_ledger_ids(ledger), (
+            "перематериализация обязана сохранить ID, а не начать с нуля"
+        )
+        # Оба ридера принимают открытый ledger — проверяем на живых вызовах.
+        assert id_a in set(collect_ledger_union(data_dir=data_dir, crypto=crypto))
+        assert id_a in store._load_deleted_ids_unlocked()
+
+    def test_purge_reports_preserved_ledger_ids(self, tmp_path, fake_keychain):
+        """B1: владелец видит по ОТВЕТУ, сколько ID пережило purge.
+
+        Ноль при `complete: true` означал бы «реестр resurrection потерян, но всё
+        прошло» — ровно тот молчаливый all-clear, которого карточка не хочет.
+        """
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        first = store.add_history_item(text="первая").id
+        second = store.add_history_item(text="вторая").id
+        store.delete_history_item(first)
+        store.delete_history_item(second)
+        store.compact_with_stats()
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        # purge tombstone'ит ВСЁ, поэтому к двум удалённым добавляется ещё и
+        # запись, удалённая самим purge (шаг 1).
+        assert result["deletion_ledger_ids_preserved"] >= 2, (
+            "пережившие ID обязаны быть видны в ответе purge"
+        )
+        assert result["complete"] is True, "нормальный путь — purge полон"
+        assert result["errors"] == []
+
+    def test_ledger_carries_no_pii(self, tmp_path, fake_keychain):
+        """Инвариант allowlist'а: в ledger'е только ID, без текста.
+
+        Решение B1 держит ledger живым — значит, в нём не должно быть ничего,
+        кроме идентификаторов. Иначе мы бы сохранили PII.
+        """
+        data_dir, store, _crypto, _external, removed_id, _b = _resurrection_scenario(
+            tmp_path, "pii"
+        )
+        store.add_history_item(text="ТАЙНОЕ СОДЕРЖИМОЕ ВЛАДЕЛЬЦА")
+        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        blob = (data_dir / "history_purged_ids.ndjson").read_text(encoding="utf-8")
+        assert "ТАЙНОЕ СОДЕРЖИМОЕ" not in blob
+        for line in blob.splitlines():
+            if line.strip():
+                assert set(json.loads(line)) == {"id"}, "ledger хранит ТОЛЬКО id"
+
 
 
 class TestPurgeResultIsMachineReadable:

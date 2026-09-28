@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import os
 import tempfile
 from datetime import datetime, timedelta, timezone
 import logging
@@ -85,6 +87,94 @@ def _is_safe_export_dir(output_dir: str) -> bool:
         except ValueError:
             continue
     return False
+
+
+# ---------------------------------------------------------------------------
+# A5.2c1 (B1) — permanent deletion ledger: сохранить содержимое, убить шифротекст
+# ---------------------------------------------------------------------------
+
+# Префикс шифротекста истории (SENTINEL `HistoryCrypto`). Дублируется здесь
+# сознательно: purge работает с ledger'ом, который может остаться ENC1 даже при
+# недоступном crypto-инстансе, и не должен импортировать crypto ради проверки.
+_ENC_SENTINEL = "ENC1:"
+
+
+def _rematerialize_ledger_plaintext(ledger_path: Path, store: Any) -> set[str]:
+    """Переписать permanent deletion ledger открытым, вернуть множество ID.
+
+    B1 (adversarial-ревью): удалять ledger целиком нельзя — для ID, удалённых
+    ПОСЛЕ снимка, он единственная защита от resurrection, и purge открывал дыру
+    молча (``ledger_blocked: 0``, полный текст записи возвращался). Ledger
+    хранит ТОЛЬКО идентификаторы, поэтому переживает purge в открытом виде без
+    утечки PII; уничтожается только шифротекст, который после shred'а ключа
+    стал бы навсегда нечитаемым мусором (исходный дефект волны).
+
+    Raises:
+        Exception: любой сбой чтения/расшифровки/записи. Вызывающий обязан решать
+            судьбу файла сам — молча проглатывать здесь нельзя: наверху стоит
+            выбор между «профиль нечитаем» и «реестр потерян», и он должен быть
+            явным.
+    """
+    from backend.history_crypto import HistoryCrypto
+
+    ids: set[str] = set()
+    unparsable = 0
+    raw = ledger_path.read_text(encoding="utf-8")
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith(_ENC_SENTINEL) or HistoryCrypto.is_encrypted(line):
+            crypto = store._get_history_crypto()
+            if crypto is None:
+                raise RuntimeError(
+                    "deletion ledger содержит шифротекст, а ключ недоступен — "
+                    "перематериализация невозможна"
+                )
+            line = crypto.decrypt_line(line)
+        payload = safe_json_loads(line)
+        item_id = str(payload.get("id", "")).strip() if isinstance(payload, dict) else ""
+        if not item_id:
+            # Строки без ID нечего защищать: ни один ридер не извлечёт из неё
+            # идентификатор. Молча выбрасываем, но СЧИТАЕМ и логируем.
+            unparsable += 1
+            continue
+        ids.add(item_id)
+    if unparsable:
+        logger.warning(
+            "purge_all_data: %d строк(и) deletion ledger без пригодного id — "
+            "не переносятся в открытый ledger", unparsable,
+        )
+
+    # Атомарная замена: tmp + fsync + rename, как принято для журналов проекта.
+    # Имя tmp совпадает с семейством `*.tmp`, которое purge тоже зачищает —
+    # то есть «зависший» tmp этого шага не может пережить purge.
+    tmp_path = ledger_path.with_name(ledger_path.name + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        for item_id in sorted(ids):
+            fh.write(json.dumps({"id": item_id}, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    tmp_path.replace(ledger_path)
+    return ids
+
+
+def _ledger_holds_no_ciphertext(ledger_path: Path) -> bool:
+    """Проверка ПОСЛЕ перематериализации: в ledger'е не осталось ENC1-строк.
+
+    Fail-closed: отсутствующий файл — «шифротекста нет» (условие выполнено);
+    нечитаемый файл — «не выполнено» (purge обязан об этом сообщить, а не
+    рапортовать успех по незнанию).
+    """
+    if not ledger_path.exists():
+        return True
+    try:
+        return not any(
+            line.strip().startswith(_ENC_SENTINEL)
+            for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        )
+    except (OSError, UnicodeDecodeError):
+        return False
 
 
 class HistoryService:
@@ -2213,7 +2303,10 @@ class HistoryService:
             obsidian_deleted (int): количество удалённых синхронизированных .md (W1766)
             semantic_purged (bool): True если семантический индекс очищен
             backups_deleted (int): количество удалённых migration-backup каталогов (A5.2c1)
-            deletion_ledger_purged (bool): True если permanent ledger снесён (A5.2c1)
+            deletion_ledger_purged (bool): True если permanent ledger больше не
+                содержит шифротекст — перематериализован открытым или снесён (A5.2c1/B1)
+            deletion_ledger_ids_preserved (int): сколько удалённых ID сохранено в
+                открытом ledger (B1 — реестр resurrection не должен исчезать)
             stale_copies_removed (int): количество удалённых ``*.bak*``-копий (A5.2c1)
             encryption_key_shredded (bool): True если ключ истории удалён/не существовал (A5.2c1)
             history_encryption_enabled_after (bool): состояние флага ПОСЛЕ purge;
@@ -2989,34 +3082,72 @@ class HistoryService:
                 )
                 secondary_errors.append("terminal_cache")
 
-        # --- 37a. A5.2c1: удалить permanent deletion ledger (history_purged_ids.ndjson).
-        # Раньше файл был allowlisted-исключением («ID-only, без PII») и purge его
-        # НЕ чистил. Это ломало профиль: шаг 1b (compact) дописывает в ledger
-        # ENC1-строки СТАРЫМ ключом, а шаг 38 shred'ит ключ → следующее чтение
+        # --- 37a. A5.2c1 + B1 (adversarial-ревью): УНИЧТОЖИТЬ ШИФРОТЕКСТ
+        # permanent deletion ledger (history_purged_ids.ndjson), СОХРАНИВ СОДЕРЖИМОЕ.
+        #
+        # Исходный дефект (зачем шаг вообще нужен): файл был allowlisted-исключением
+        # («ID-only, без PII») и purge его НЕ чистил. Шаг 1b (compact) дописывает в
+        # ledger ENC1-строки СТАРЫМ ключом, а шаг 38 shred'ит ключ → следующее чтение
         # истории получает InvalidTag → HistoryEncryptionUnavailable, т.е. после
         # privacy-purge профиль с шифрованием НЕЧИТАЕМ.
         #
-        # Обоснование удаления (решение 1 карточки A5.2c1): единственная роль
-        # ledger'а — блокировать resurrection ID'ов, которых история уже нет;
-        # после полного wipe внутри профиля он бессмысленен. Защита от
-        # resurrection ВНЕШНЕЙ копии обеспечивается ledger'ом САМОЙ копии:
-        # A5.2b2 при сборе union берёт «текущий ledger ∪ ledger снимка», поэтому
-        # возвращённый извне старый снимок не воскресит собственные удалённые ID.
-        # Это свойство закреплено тестом
-        # test_restored_external_copy_cannot_resurrect_its_own_purged_ids.
+        # B1, ПОПРАВКА РЕШЕНИЯ: первая версия волны просто удаляла ledger, и это
+        # открывало resurrection. Обоснование карточки («защиту держит ledger САМОЙ
+        # копии») верно ТОЛЬКО для ID, которые копия уже знала мёртвыми. Для ID,
+        # удалённого в текущем профиле ПОСЛЕ снимка, единственная защита — ledger
+        # текущего профиля: возвращённый снаружи снимок вернул бы ПОЛНЫЙ ТЕКСТ
+        # записи и рапортовал об этом молча (ledger_blocked: 0).
         #
-        # Порядок «данные → ключ»: ledger сносится ДО шага 38, иначе между
-        # компактированием и удалением ключа остаётся окно, в котором профиль
-        # уже нечитаем.
+        # Поэтому: содержимое ledger'а — это ТОЛЬКО идентификаторы (никакого PII,
+        # инвариант его allowlist-исключения сохраняется) — переживает purge
+        # ОТКРЫТЫМ, а уничтожается только шифротекст. Оба ридера уже принимают
+        # открытые строки (state_store._read_history_ndjson_unlocked и
+        # encrypted_snapshot.collect_ledger_union пропускают не-ENC1 как есть),
+        # поэтому профиль остаётся читаемым, а union-защита — рабочей.
+        #
+        # Порядок «данные → ключ»: перематериализация идёт ДО шага 38.
         deletion_ledger_purged = False
+        deletion_ledger_ids_preserved = 0
         if _data_dir is not None:
             try:
                 _ledger_path = _data_dir / "history_purged_ids.ndjson"
-                _ledger_path.unlink(missing_ok=True)
-                deletion_ledger_purged = not _ledger_path.exists()
+                if _ledger_path.is_symlink():
+                    # Ссылка, а не файл профиля: разыменовывать нельзя (plaintext
+                    # ID ушёл бы наружу по чужому пути), и unlink снимет только
+                    # саму ссылку. Нерегулярная запись — повод объявить шаг
+                    # невыполненным, а не тихо её пропустить.
+                    _ledger_path.unlink()
+                    raise OSError("history_purged_ids.ndjson — symlink, не файл профиля")
+                if _ledger_path.is_file():
+                    _ids = _rematerialize_ledger_plaintext(_ledger_path, self.store)
+                    deletion_ledger_ids_preserved = len(_ids)
+                deletion_ledger_purged = _ledger_holds_no_ciphertext(_ledger_path)
                 if not deletion_ledger_purged:
-                    raise OSError(f"{_ledger_path} не удалён")
-                logger.info("purge_all_data: permanent deletion ledger удалён")
+                    raise OSError(f"{_ledger_path} всё ещё содержит ENC1-строки")
+                logger.info(
+                    "purge_all_data: permanent deletion ledger — шифротекст уничтожен, "
+                    "%d ID сохранены открытыми",
+                    deletion_ledger_ids_preserved,
+                )
+            except Exception:
+                # Перематериализация не удалась (Keychain недоступен, файл битый).
+                # Оставлять ENC1 НЕЛЬЗЯ: после shred'а ключа это навсегда
+                # нечитаемый мусор, который роняет каждое чтение истории — ровно
+                # тот дефект, ради которого шаг существует. Поэтому ledger
+                # сносится, а потеря реестра resurrection объявляется ГРОМКО:
+                # complete: false + errors: ["deletion_ledger"].
+                logger.warning(
+                    "purge_all_data: не удалось перематериализовать deletion ledger "
+                    "в открытый вид — файл уничтожается, реестр удалённых ID потерян",
+                    exc_info=True,
+                )
+                try:
+                    _ledger_path.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning(
+                        "purge_all_data: не удалось удалить deletion ledger", exc_info=True
+                    )
+                secondary_errors.append("deletion_ledger")
             except Exception:
                 logger.warning(
                     "purge_all_data: удаление history_purged_ids.ndjson не удалось",
@@ -3189,6 +3320,7 @@ class HistoryService:
                     # ни содержимого .bak-копий в комплайнс-трейл не пишется.
                     "backups_deleted": backups_deleted,
                     "deletion_ledger_purged": deletion_ledger_purged,
+                    "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
                     "stale_copies_removed": stale_copies_removed,
                     "encryption_key_shredded": encryption_key_shredded,
                     "history_encryption_enabled_after": history_encryption_enabled_after,
@@ -3216,6 +3348,7 @@ class HistoryService:
                 # ответе IPC (ответ не переживает рестарт процесса).
                 "backups_deleted": backups_deleted,
                 "deletion_ledger_purged": deletion_ledger_purged,
+                "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
                 "stale_copies_removed": stale_copies_removed,
                 "encryption_key_shredded": encryption_key_shredded,
             },
@@ -3234,7 +3367,7 @@ class HistoryService:
         logger.info(
             "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
             "obsidian=%d semantic_purged=%s backups=%d stale_copies=%d ledger_purged=%s "
-            "key_shredded=%s encryption_after=%s errors=%s",
+            "ledger_ids=%d key_shredded=%s encryption_after=%s errors=%s",
             history_deleted,
             transcripts_deleted,
             chains_deleted,
@@ -3246,6 +3379,7 @@ class HistoryService:
             backups_deleted,
             stale_copies_removed,
             deletion_ledger_purged,
+            deletion_ledger_ids_preserved,
             encryption_key_shredded,
             history_encryption_enabled_after,
             secondary_errors,
@@ -3266,6 +3400,11 @@ class HistoryService:
             # по косвенным признакам (отсутствующий файл мог и не быть).
             "backups_deleted": backups_deleted,
             "deletion_ledger_purged": deletion_ledger_purged,
+            # B1: ledger сохранён ОТКРЫТЫМ (в нём только ID, без PII) — его
+            # содержимое держит защиту от resurrection для ID, удалённых
+            # после снимка. Ноль означает «реестр потерян», и это громко
+            # отражается в complete/errors.
+            "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
             "stale_copies_removed": stale_copies_removed,
             "encryption_key_shredded": encryption_key_shredded,
             # Флаг политики purge НЕ меняет — сообщаем состояние пост-фактум.
