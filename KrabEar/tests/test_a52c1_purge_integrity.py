@@ -1030,26 +1030,94 @@ class TestPurgeResultIsMachineReadable:
         """
         import backend.crypto_keystore as ks
 
-        monkeypatch.setattr(
-            ks, "_run_security", lambda args, *a, **k: subprocess.CompletedProcess(list(args), 0, "", "")
-        )
-        assert ks.delete_history_key() is True, "rc=0 — ключ удалён"
+        def _security(delete_rc, find_rc):
+            def _run(args, *_a, **_kw):
+                verb = args[0]
+                rc = delete_rc if verb == "delete-generic-password" else find_rc
+                return subprocess.CompletedProcess(list(args), rc, "", "")
+
+            return _run
+
+        # rc=0 удаления + пробы «нет элемента» ⇒ ключ действительно уничтожен.
+        monkeypatch.setattr(ks, "_run_security", _security(0, 44))
+        assert ks.delete_history_key() is True, "удалено и отсутствие подтверждено пробой"
+
+        # rc=44 — ключа не было; локализация/формулировка stderr не должна влиять
+        # на исход (L2): решение принимает КОД, а не текст.
+        monkeypatch.setattr(ks, "_run_security", _security(44, 44))
+        assert ks.delete_history_key() is True, "ключа не было — «уничтожен» истинно"
+
+        monkeypatch.setattr(ks, "_run_security", _security(51, 44))
+        assert ks.delete_history_key() is False, "отказ Keychain — НЕ «уничтожен»"
+
+    def test_not_found_is_decided_by_exit_code_not_stderr_text(
+        self, tmp_path, monkeypatch
+    ):
+        """L2: локализация/перефраз stderr не должна ломать verdict.
+
+        Раньше «ключа не было» определялось подстрокой `"could not be found"` в
+        stderr. На другой локали (или после смены формулировки) тот же самый
+        успешный purge стал бы `complete: false` — то есть гейт приучил бы
+        владельца игнорировать «частичный purge». Соседний
+        `get_or_create_history_key` уже опирается на `_ITEM_NOT_FOUND_EXIT_CODE`,
+        и shred обязан опираться на тот же признак.
+        """
+        import backend.crypto_keystore as ks
 
         monkeypatch.setattr(
             ks,
             "_run_security",
             lambda args, *a, **k: subprocess.CompletedProcess(
-                list(args), 44, "", "The specified item could not be found in the keychain."
+                list(args), 44, "", "Elemento no encontrado en el llavero."
             ),
         )
-        assert ks.delete_history_key() is True, "ключа не было — «уничтожен» истинно"
-
-        monkeypatch.setattr(
-            ks,
-            "_run_security",
-            lambda args, *a, **k: subprocess.CompletedProcess(list(args), 51, "", "not allowed"),
+        assert ks.delete_history_key() is True, (
+            "rc=44 — ключа нет, независимо от языка stderr"
         )
-        assert ks.delete_history_key() is False, "отказ Keychain — НЕ «уничтожен»"
+
+    def test_reported_success_is_verified_by_probe(self, tmp_path, monkeypatch):
+        """L2: «удалил» ≠ «уничтожен» — отсутствие обязано быть ПОДТВЕРЖДЕНО.
+
+        Найдено пробой ревьюера: `security delete` может вернуть 0, а элемент
+        остаться (заблокированный Keychain по другому пути, гонка с другим
+        процессом, доверенный посредник). Fail-closed: rc=0 при живой пробе —
+        это НЕ «уничтожено». Именно этот случай раньше рапортовался как успех.
+        """
+        import backend.crypto_keystore as ks
+
+        def _run(args, *_a, **_kw):
+            verb = args[0]
+            # delete → rc 0 («успех»), find → rc 0 («элемент на месте»)
+            return subprocess.CompletedProcess(list(args), 0, "", "")
+
+        monkeypatch.setattr(ks, "_run_security", _run)
+        assert ks.delete_history_key() is False, (
+            "rc=0 при подтверждённом наличии элемента — не «уничтожен»"
+        )
+
+    def test_purge_reports_unshredded_when_delete_lies(self, tmp_path, fake_keychain, monkeypatch):
+        """Тот же случай на живом пути purge — ответ обязан быть честным."""
+        import backend.crypto_keystore as ks
+
+        def _delete_ok_but_alive(args, *_a, **_kw):
+            if args[0] == "delete-generic-password":
+                return subprocess.CompletedProcess(list(args), 0, "", "")
+            return fake_keychain.run(args)  # find → 0, элемент «жив»
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="секрет владельца")
+        fake_keychain.items[("KrabEar", "history-encryption-key")] = os.urandom(32)
+
+        monkeypatch.setattr(ks, "_run_security", _delete_ok_but_alive)
+
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+
+        assert ("KrabEar", "history-encryption-key") in fake_keychain.items
+        assert result["encryption_key_shredded"] is False, "живой ключ — не «уничтожен»"
+        assert "encryption_key" in result["errors"]
+        assert result["complete"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -108,11 +108,11 @@ def get_or_create_history_key() -> bytes:
 
 
 def delete_history_key() -> bool:
-    """Удаляет ключ шифрования из Keychain.
+    """Удаляет ключ шифрования из Keychain и ПОДТВЕРЖДАЕТ отсутствие.
 
     Возвращает:
-        True  — ключ уничтожен (удалён) или его не было;
-        False — удаление НЕ удалось (Keychain заблокирован/отказал).
+        True  — ключ уничтожен (удалён) или его не было, и отсутствие подтверждено;
+        False — уничтожить не удалось, либо результат не удалось подтвердить.
 
     A5.2c1: вызывающий (privacy-purge) обязан знать исход. Раньше функция
     глотала неудачный exit code в лог и возвращала None, из-за чего отчёт
@@ -120,24 +120,48 @@ def delete_history_key() -> bool:
     а живой ключ в сочетании с pre-purge бэкапом означает всю историю.
     Fail-closed: неопределённость и отказ оба дают False, а не True.
 
-    Если ключ не найден — ошибка игнорируется (нечего удалять → True).
+    L2 (adversarial-ревью) — два риска, оба закрыты здесь:
+
+    1. «Ключа не было» определялось ПОДСТРОКОЙ stderr (``could not be found``).
+       На другой локали тот же самый успешный purge стал бы «частичным» — а
+       владелец, регулярно получающий ложный ``complete: false``, начинает
+       игнорировать сам признак. Решение принимает EXIT CODE, как это уже делает
+       соседний :func:`get_or_create_history_key` (``_ITEM_NOT_FOUND_EXIT_CODE``).
+    2. ``security delete`` может вернуть 0, а элемент остаться на месте
+       (заблокированный Keychain по другому пути, гонка с другим процессом,
+       посредник). Поэтому «удалил» ≠ «уничтожен»: после успешного кода
+       делается read-only подтверждение отсутствия тем же приёмом, что и
+       :func:`history_key_present` (без ``-w``, ключевой материал не читается).
+       Неопределённость (``None``) — тоже False: подтвердить не смогли.
 
     Raises:
-        KeystoreUnavailable: если ``security`` CLI не найден (не macOS).
+        KeystoreUnavailable: если ``security`` CLI не найден (не macOS). Вызывающий
+            трактует это как «на этой платформе ключа не существует».
     """
     result = _run_security(
         ["delete-generic-password", "-s", _SERVICE, "-a", _ACCOUNT]
     )
-    if result.returncode == 0:
-        return True
-    if "could not be found" in result.stderr.lower():
-        return True  # ключа не было — «уничтожен» истинно
-    logger.warning(
-        "crypto_keystore: delete-generic-password завершился с кодом %d: %s",
-        result.returncode,
-        result.stderr.strip(),
-    )
-    return False
+    if result.returncode not in (0, _ITEM_NOT_FOUND_EXIT_CODE):
+        logger.warning(
+            "crypto_keystore: delete-generic-password завершился с кодом %d: %s",
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return False
+
+    present = history_key_present()
+    if present is True:
+        logger.error(
+            "crypto_keystore: delete вернул код 0, но ключ всё ещё в Keychain — "
+            " shred не засчитан"
+        )
+        return False
+    if present is None:
+        logger.warning(
+            "crypto_keystore: не удалось подтвердить отсутствие ключа — shred не засчитан"
+        )
+        return False
+    return True
 
 
 def keychain_available() -> bool:

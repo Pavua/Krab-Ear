@@ -156,12 +156,23 @@ class TestDeleteHistoryKey(unittest.TestCase):
     """delete_history_key: успех и игнор not-found."""
 
     def test_delete_calls_security(self) -> None:
+        """Удаление = delete + подтверждение отсутствия (A5.2c1 L2).
+
+        Раньше был ровно один вызов, и «удалил» молча означало «уничтожен».
+        Теперь после успешного кода идёт read-only подтверждение: «уничтожен»
+        — это «удалён И отсутствия удалось подтвердить», иначе purge рапортовал бы
+        успех при живом ключе.
+        """
         with patch("backend.crypto_keystore._run_security", return_value=_ok_result()) as mock_sec:
             from backend.crypto_keystore import delete_history_key
             delete_history_key()  # Не бросает исключений
 
-        self.assertEqual(mock_sec.call_count, 1)
-        self.assertIn("delete-generic-password", mock_sec.call_args[0][0])
+        self.assertEqual(mock_sec.call_count, 2, "delete + подтверждающая проба")
+        delete_call = mock_sec.call_args_list[0][0][0]
+        self.assertIn("delete-generic-password", delete_call)
+        probe_call = mock_sec.call_args_list[1][0][0]
+        self.assertIn("find-generic-password", probe_call)
+        self.assertNotIn("-w", probe_call, "подтверждение не должно читать ключ")
 
     def test_delete_ignores_not_found(self) -> None:
         """Если ключ не найден — не бросает исключение."""
