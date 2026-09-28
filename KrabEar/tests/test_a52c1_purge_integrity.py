@@ -326,7 +326,6 @@ class TestProfileStaysReadableAfterPurge:
         data_dir = _data_dir(tmp_path)
         _settings_on(data_dir)
         store = StateStore(data_dir)
-        crypto = _store_crypto(store)
         removed_id = store.add_history_item(text="удалённая запись").id
         store.delete_history_item(removed_id)
         store.compact_with_stats()
@@ -732,7 +731,6 @@ class TestPurgeDoesNotOpenResurrection:
         for line in blob.splitlines():
             if line.strip():
                 assert set(json.loads(line)) == {"id"}, "ledger хранит ТОЛЬКО id"
-
 
 
 class TestPurgeResultIsMachineReadable:
