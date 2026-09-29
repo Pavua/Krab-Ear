@@ -17,6 +17,7 @@
 #   scripts/safe_backend_restart.command            # backend, отказ при записи
 #   scripts/safe_backend_restart.command --wait 120 # ждать окончания до 120с
 #   scripts/safe_backend_restart.command --with-rest# + рестарт REST-юнита
+#   scripts/safe_backend_restart.command --check-only # только idle-проба, без рестарта
 #
 # ⚠️ ВНЕШНИЙ КОНТРАКТ: скрипт вызывается лаунчерами Voice Gateway (их PR #113,
 # 2026-07-22) — имя файла, флаги (--wait/--with-rest) и exit-коды (0 ok /
@@ -30,10 +31,12 @@ REST_UNIT="gui/$(id -u)/ai.krab.ear.rest"
 
 WAIT_SEC=0
 WITH_REST=0
+CHECK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --wait) WAIT_SEC="${2:-60}"; shift 2 ;;
     --with-rest) WITH_REST=1; shift ;;
+    --check-only) CHECK_ONLY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -125,6 +128,11 @@ while REASON=$(busy_reason); do
   echo "[safe-restart] идёт $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
   sleep 3
 done
+
+if [ "$CHECK_ONLY" -eq 1 ]; then
+  echo "[safe-restart] IDLE: запись и встреча не активны; runtime не изменён."
+  exit 0
+fi
 
 echo "[safe-restart] kickstart $BACKEND_UNIT"
 launchctl kickstart -k "$BACKEND_UNIT"

@@ -1,5 +1,19 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## Подготовка cutover 2026-09-29 (после P1/P2)
+
+P1 #2068 и P2 #2069 смержены; удалённая линия = `c3a1779f`.
+Оба post-merge workflow этого exact SHA успешны. Runtime по свежей сверке
+остаётся `245aae2d` (Backend 67525, REST 67608), encryption OFF.
+`scripts/cutover_to_c3a1779f.command` и пара install-скриптов не приняты
+как готовая процедура переключения.
+
+[Runbook подготовки/переключения/отката](superpowers/plans/2026-09-29-safe-release-cutover.md)
+сохраняет действующие plist и меняет только entrypoint/PYTHONPATH.
+Source/preparation review PASS; подготовка bundle и read-only idle-проба пройдены.
+**Cutover не выполнен**: требуется отдельное разрешение владельца и свежий
+preflight/quiet-window. Записи ниже — исторические снимки; очередь P1/P2 закрыта.
+
 ## Приёмка 2026-09-29 (читать первой; ниже — исторические снимки)
 
 **Проверенная база линии и прод-код:** `codex/krab-ear-v2` =

@@ -26,7 +26,8 @@ def reply(**fields):
 
 
 def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
-             fragmented=False, wait=False, function_only=False, with_rest=False, force=False, silent=False, oversized=False):
+             fragmented=False, wait=False, function_only=False, with_rest=False, force=False,
+             silent=False, oversized=False, check_only=False):
     """Читаем real shell и IPC-код; все mutation-команды замыкаются на marker."""
     marker = tmp_path / "launchctl.log"
     source = (ROOT / "scripts" / script).read_text()
@@ -120,7 +121,9 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
         driver = tmp_path / "driver.sh"
         driver.write_text(source)
         try:
-            result = subprocess.run(["/bin/bash", str(driver), *(["--wait", "1"] if wait else []), *(["--with-rest"] if with_rest else [])],
+            result = subprocess.run(["/bin/bash", str(driver), *(["--wait", "1"] if wait else []),
+                                     *(["--with-rest"] if with_rest else []),
+                                     *(["--check-only"] if check_only else [])],
                                     env=env, capture_output=True, text=True, timeout=8)
         finally:
             stopped.set()
