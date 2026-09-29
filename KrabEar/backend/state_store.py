@@ -16,6 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import stat
 import sys
 import threading
 import time
@@ -120,16 +121,27 @@ def history_journal_paths(data_dir: Path) -> tuple[Path, ...]:
 
 
 def has_encrypted_history_in(journal_paths) -> bool:
-    """Есть ли ENC1-строки в любом из переданных журналов."""
+    """Есть ли ENC1-строки в любом из переданных журналов.
+
+    P2: перед open() проверяется регулярность записи (lstat + S_ISREG),
+    чтобы FIFO/каталог/сокет не блокировали процесс под эксклюзивным flock.
+    """
     from backend.history_crypto import SENTINEL
 
     for raw in journal_paths:
         path = Path(raw)
-        if not path.exists():
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
+                continue
+        except OSError:
             continue
-        with path.open("r", encoding="utf-8") as fh:
-            if any(line.startswith(SENTINEL) for line in fh):
-                return True
+        try:
+            with path.open("r", encoding="utf-8") as fh:
+                if any(line.startswith(SENTINEL) for line in fh):
+                    return True
+        except OSError:
+            continue
     return False
 
 
@@ -347,7 +359,22 @@ class StateStore:
                 self.text_updates_path,
                 self.action_items_path,
                 self.calendar_links_path):
-            path.touch(exist_ok=True)
+            try:
+                st = os.lstat(path)
+            except FileNotFoundError:
+                path.touch(exist_ok=True)
+            except OSError:
+                continue
+            else:
+                if not stat.S_ISREG(st.st_mode):
+                    logger.warning(
+                        "StateStore.__init__: %s — нерегулярная запись "
+                        "(тип %s), touch() пропущен",
+                        path.name,
+                        oct(stat.S_IFMT(st.st_mode)),
+                    )
+                else:
+                    path.touch(exist_ok=True)
 
         # Кэш ускоренного поиска по последним N активным записям.
         # Важно: это только read-through оптимизация, источник истины остаётся NDJSON.
@@ -2213,20 +2240,59 @@ class StateStore:
         Используется для всех управляемых журналов, которые могут содержать
         смесь legacy открытых и зашифрованных строк. Plaintext строки
         проходят без изменений через ``_maybe_decrypt``.
+
+        P2 (bounded guard): чтение защищено от зависания на FIFO/сокетах/нерегулярных
+        записях под общим flock. Открытие выполняется с O_NONBLOCK и проверкой fstat.
+        Нерегулярная запись пропускается с warning без зависания и без сноса файла.
         """
-        if not path.exists():
+        try:
+            fd = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0),
+            )
+        except FileNotFoundError:
             return
-        with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                raw = line.strip()
-                if not raw:
-                    continue
-                decrypted = self._maybe_decrypt(raw)
-                payload = safe_json_loads(decrypted)
-                if payload is None:
-                    continue
-                if isinstance(payload, dict):
-                    yield payload
+        except OSError as exc:
+            logger.warning(
+                "_read_history_ndjson_unlocked: не удалось открыть %s: %s",
+                path.name,
+                exc,
+            )
+            return
+
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                logger.warning(
+                    "_read_history_ndjson_unlocked: %s — нерегулярная запись "
+                    "(тип %s), open() пропущен во избежание зависания под flock",
+                    path.name,
+                    oct(stat.S_IFMT(st.st_mode)),
+                )
+                return
+
+            if hasattr(fcntl, "F_SETFL") and hasattr(fcntl, "F_GETFL"):
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
+            with open(fd, "r", encoding="utf-8", closefd=True) as fh:
+                fd = -1  # open теперь владеет дескриптором и закроет его
+                for line in fh:
+                    raw = line.strip()
+                    if not raw:
+                        continue
+                    decrypted = self._maybe_decrypt(raw)
+                    payload = safe_json_loads(decrypted)
+                    if payload is None:
+                        continue
+                    if isinstance(payload, dict):
+                        yield payload
+        finally:
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
 
     def _iter_history_items_unlocked(self) -> Iterator[HistoryItem]:
         """Итератор по основному журналу истории (с расшифровкой если включено)."""
@@ -2264,7 +2330,20 @@ class StateStore:
 
     @staticmethod
     def _append_ndjson_raw(path: Path, line: str) -> None:
-        """Атомарный append уже готовой строки (без JSON-сериализации) с flush/fsync."""
+        """Атомарный append уже готовой строки (без JSON-сериализации) с flush/fsync.
+
+        P2: перед append проверяется, что путь не является нерегулярной записью
+        (FIFO, каталог, сокет), чтобы предотвратить зависание на open(..., 'a').
+        """
+        try:
+            st = os.lstat(path)
+            if not stat.S_ISREG(st.st_mode):
+                raise OSError(
+                    f"{path.name}: нерегулярная запись (тип {oct(stat.S_IFMT(st.st_mode))}), "
+                    "запись отклонена во избежание зависания"
+                )
+        except FileNotFoundError:
+            pass
         with path.open("a", encoding="utf-8") as fh:
             fh.write(line + "\n")
             fh.flush()
@@ -2633,7 +2712,13 @@ class StateStore:
         enabled = self._read_encryption_flag_unlocked()
         total = 0
         encrypted = 0
-        if self.history_path.exists():
+        is_reg = False
+        try:
+            st = os.lstat(self.history_path)
+            is_reg = stat.S_ISREG(st.st_mode)
+        except OSError:
+            pass
+        if is_reg:
             with self.history_path.open("r", encoding="utf-8") as fh:
                 for line in fh:
                     raw = line.strip()
