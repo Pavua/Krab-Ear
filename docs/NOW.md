@@ -2,16 +2,24 @@
 
 ## Приёмка 2026-09-29 (читать первой; ниже — исторические снимки)
 
-**Проверенная база линии:** `codex/krab-ear-v2` = `31568b1f` (#2065).
-Exact-SHA post-merge CI этой базы и релиза `84deb513` зелёный. Последние
-private MLX jobs отказали на admission до запуска тестов; квалификации MLX
-для A5.2 они не доказывают.
-**Прод-backend: `84deb513`** — волна A5.2 (a/b1/b2/b3/c1) **задеплоена
-2026-09-28** (было `bc09490f`). Постдеплой: `ping` ok, версия 2.0.5, история
-13 036 записей читается, `get_diagnostics` показывает новое поле
-`history_encryption.key_present: false`, REST `127.0.0.1:5005/health` → 200,
-privacy-gates 26/26, IPC-смоук 40/44 (4 упали — все LLM-зависимые, модель в
-LM Studio не загружена; автозагрузка brain во время работы запрещена по §brain).
+**Проверенная база линии и прод-код:** `codex/krab-ear-v2` =
+`245aae2d9a1cbe77b6675f8bb87783758e85a826` ([#2066](https://github.com/Pavua/Krab-Ear/pull/2066)).
+Exact-SHA post-merge [CI](https://github.com/Pavua/Krab-Ear/actions/runs/36508537626)
+и [krab-ear-ci](https://github.com/Pavua/Krab-Ear/actions/runs/36508537865)
+завершились success. В 04:03:51 CEST 29.09 backend и REST переведены на
+clean, detached, locked release
+`~/.codex/worktrees/ear-release-245aae2d/Krab Ear`: backend PID 67525,
+REST PID 67608, GigaAM PID 67572. Swift-агент PID 88227 не перезапускался;
+прежний locked release `84deb513` сохранён для отката. Владелец разрешил
+выкатку при текущей нагрузке машины; перед `bootout` прошли четыре idle-пробы
+за 60 с и финальная проба.
+
+**Read-only post-deploy smoke:** IPC ping и REST `/health` 200; запись/встреча
+не активны, wake watchdog не wedged, restore_pending=false, key_present=false.
+История читается: active_count=13 058 до и после, страница из одного элемента
+получена без вывода текста. Live-диктовка, MLX и encrypted-history E2E этим
+не проверены. Последние private MLX jobs отказали на admission до запуска
+тестов; квалификации MLX для A5.2 они не доказывают.
 
 **`history_encryption_enabled` остаётся OFF** — код в рантайме есть, но флаг не
 включён. Прод-профиль содержит `history.ndjson` ~24 МБ **открытым текстом** и
@@ -19,7 +27,7 @@ LM Studio не загружена; автозагрузка brain во врем�
 решения владельца по бэкапам и ротации HF-токена (см. «необратимые решения»):
 старые открытые копии шифрование уже не защитит.
 
-**Живая проверка 29.09 ~02:23 CEST:** backend/REST PID 36853/36856, релиз
+**Исторический снимок до деплоя, 29.09 ~02:23 CEST:** backend/REST PID 36853/36856, релиз
 `84deb513`, release checkout чистый; ping/diagnostics/REST health успешны,
 запись и встреча не активны, restore_pending=false. Агент один (88227),
 подписи валидны, полезная нагрузка app/runtime/build совпадает.
@@ -28,33 +36,36 @@ Sentry за 24 ч: backend issue `KRAB-EAR-BACKEND-1V`, четыре тайма�
 Приём событий организации доступен (92 accepted / 0 limited), свежий ingress
 агента не подтверждён. Полный E2E/MLX отложен: swap ~27.7 ГБ и чужой test gate.
 
-**Принятые PR:** #2060, #2062, #2063, #2064 и #2065 смержены;
+**Принятые PR:** #2060, #2062, #2063, #2064, #2065 и #2066 смержены;
 при начале приёмки открытых PR не было.
 
 **Что НЕЛЬЗЯ делать без решения владельца (необратимо):**
 - Удалять реальные копии/бэкапы в прод-профиле (сейчас ~23.4 МБ открытой истории
   в `.bak` + копии настроек с секретами).
-- Включать `history_encryption_enabled` до деплоя A5.2 + решения по бэкапам.
+- Включать `history_encryption_enabled` до отдельного решения владельца по
+  старым открытым копиям и токенам.
 - Любой новый деплой — только после exact-SHA CI/review и quiet-window
-  (`scripts/safe_backend_restart.command`).
+  с fail-closed проверкой активности; смена release pin требует
+  `bootout`/`bootstrap` по процедуре 11.09.
+
+**Закрыто:** два P1 блокера приёмки (late append при purge и parent fsync
+перед restore replace) исправлены в [#2066](https://github.com/Pavua/Krab-Ear/pull/2066)
+и задеплоены. Это не разрешает включать шифрование.
 
 **Следующая волна (очередь):**
-1. Закрыть два блокера приёмки: late append между compact и shred ключа при
-   purge; отсутствие parent fsync recovery-маркера до первой live replace
-   при restore. Карточка: [purge/key и restore boundary](superpowers/plans/2026-09-29-purge-key-boundary.md).
-   Деплой `84deb513` уже состоялся; сам по себе он не разрешает активацию.
-2. Инвентаризация копий вне профиля (Time Machine / iCloud / worktree'и) — purge
+1. Инвентаризация копий вне профиля (Time Machine / iCloud / worktree'и) — purge
    их **не** закрывает, shred ключа открытые копии не нейтрализует.
-3. Дыры покрытия purge-скоупа, найденные инвентаризацией 2026-09-28:
+2. Дыры покрытия purge-скоупа, найденные инвентаризацией 2026-09-28:
    `.secrets` + `.secrets.bak` и `auto_glossary.json.bak.*` **не** попадают ни в
    одно семейство (`history.ndjson.bak*`, `settings.json.bak*`, `*.tmp`, `*_tmp`).
    Это следующая карточка.
-4. Claim старого checkpoint о `save_settings` вне lock опровергнут на
-   `31568b1f`: запись находится внутри `StateStore._lock()`; synthetic
-   contention и SH→EX проверки пройдены. Отдельный фикс по этому claim не нужен.
-5. FIFO на пути `history_purged_ids.ndjson`: synthetic-проба проходит
+3. FIFO на пути `history_purged_ids.ndjson`: synthetic-проба проходит
    `StateStore.__init__`, но зависает на первом чтении истории. Нужен отдельный
    bounded отказ/путь восстановления; исходный claim о зависании `touch()` неверен.
+
+Claim старого checkpoint о `save_settings` вне lock опровергнут на
+`31568b1f`: запись находится внутри `StateStore._lock()`; synthetic
+contention и SH→EX проверки пройдены. Отдельный фикс по этому claim не нужен.
 
 **Приоритеты повторной проверки сильными моделями** (что отдавать на GPT-6/Astra,
 а что не требует): [`superpowers/plans/2026-09-28-strong-model-review-priority.md`](superpowers/plans/2026-09-28-strong-model-review-priority.md).
