@@ -506,8 +506,11 @@ class PurgeAllDataPartialFailureTestCase(unittest.TestCase):
 
     def test_result_has_complete_true_when_no_errors(self) -> None:
         """When no secondary steps fail, complete=True and errors=[]."""
+        from unittest.mock import patch
+
         svc = _make_svc(self._tmpdir, item_ids=["a"])
-        result = svc.handle_purge_all_data({"confirm": True})
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = svc.handle_purge_all_data({"confirm": True})
         self.assertIn("complete", result)
         self.assertIn("errors", result)
         self.assertTrue(result["complete"])
@@ -871,6 +874,8 @@ class PurgeAllDataLoudErrorTestCase(unittest.TestCase):
 
     def test_no_push_error_when_all_steps_succeed(self) -> None:
         """When all secondary steps succeed, _push_error must NOT be called."""
+        from unittest.mock import patch
+
         svc = _make_svc(self._tmpdir, item_ids=["a"])
         push_calls: list[dict] = []
 
@@ -879,7 +884,8 @@ class PurgeAllDataLoudErrorTestCase(unittest.TestCase):
 
         svc._push_error = fake_push_error  # type: ignore[method-assign]
 
-        result = svc.handle_purge_all_data({"confirm": True})
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = svc.handle_purge_all_data({"confirm": True})
         self.assertTrue(result["complete"])
         self.assertEqual(push_calls, [],
                          "_push_error must NOT be called when purge completes fully")
@@ -997,12 +1003,12 @@ class PurgeRotatesEncryptionKeyTestCase(unittest.TestCase):
         self.assertIsNone(svc.store._history_crypto_instance)
 
     def test_purge_survives_keystore_unavailable(self) -> None:
-        """KeystoreUnavailable (нет Keychain / Linux) НЕ должен ломать purge."""
+        """На Linux отсутствие Keychain не является ошибкой очистки истории."""
         from unittest.mock import patch
         from backend.crypto_keystore import KeystoreUnavailable
 
         svc = _make_svc(self._tmp, item_ids=["a"])
-        with patch(
+        with patch("sys.platform", "linux"), patch(
             "backend.crypto_keystore.delete_history_key",
             side_effect=KeystoreUnavailable("no keychain"),
         ):

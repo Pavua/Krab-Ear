@@ -228,7 +228,10 @@ class RescueForensicsPurgeTest(unittest.TestCase):
         out_dir = self._seed_forensics()
         marker = self._seed_marker()
 
-        result = self._purge()
+        from unittest.mock import patch
+
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = self._purge()
 
         self.assertTrue(result.get("ok"), result)
         self.assertFalse(part_path.exists())
