@@ -139,20 +139,42 @@ IPC docs parity поймал устаревшее описание потери 
 Полный lint этих legacy test-файлов показывает четыре старых неиспользуемых
 импорта (F401) вне изменённых строк; проверка остального diff прошла.
 
-**Вердикт:** два исправленных source-блокера и локальные gates приняты.
-CI новой ветки должен подтвердить точный commit после публикации PR;
-source-review и тесты не являются разрешением на deploy/активацию.
+**Вердикт source gate:** два исправленных блокера и локальные gates приняты.
+[#2066](https://github.com/Pavua/Krab-Ear/pull/2066) смержен как
+`245aae2d9a1cbe77b6675f8bb87783758e85a826`; exact-SHA post-merge
+[CI](https://github.com/Pavua/Krab-Ear/actions/runs/36508537626) и
+[krab-ear-ci](https://github.com/Pavua/Krab-Ear/actions/runs/36508537865)
+завершились success. Source review, CI и deployment — отдельные доказательства;
+они не разрешают включать шифрование.
+
+## Деплой и read-only проверка 29.09 04:03:51 CEST
+
+После четырёх idle-проб за 60 с и финальной проверки backend и REST штатно
+переведены на clean, detached, locked release
+`~/.codex/worktrees/ear-release-245aae2d/Krab Ear` точного merge SHA.
+Backend PID 67525, REST PID 67608, GigaAM PID 67572; Swift-агент PID 88227
+не перезапускался. Оба loaded plist указывают на новый release через
+`ProgramArguments` и `PYTHONPATH`. Прежний `84deb513` сохранён для отката.
+
+Read-only smoke: IPC ping успешен, REST `/health` вернул 200; запись и встреча
+не активны, `history_encryption_enabled=false`, `key_present=false`,
+`restore_pending=false`, wake watchdog не wedged. История читается:
+`active_count=13058` до и после cutover, страница с `limit=1` содержит один
+элемент; текст истории не выводился. Два P1 блокера исправлены в релизе,
+но purge реальных данных, миграция, включение шифрования и live voice/
+encrypted-history E2E не выполнялись.
 
 ## Ограничения приёмки
 
-Full live STT/MLX/E2E не выполнялся: swap достиг ~27.7 ГБ, параллельно работал
-чужой test gate. Выполнен read-only IPC/REST/runtime smoke; он не доказывает
-качество распознавания. Обычные E2E могут менять профиль, переключать privacy,
-восстанавливать агент или регистрировать внешний webhook; они не запускались
-против production.
+Full live STT/MLX/E2E не выполнялся. При source gate swap достиг ~27.7 ГБ,
+параллельно работал чужой test gate; затем владелец отдельно разрешил деплой
+на загруженной машине. Выполнен только read-only IPC/REST/runtime smoke; он
+не доказывает качество распознавания. Обычные E2E могут менять профиль,
+переключать privacy, восстанавливать агент или регистрировать внешний webhook;
+они не запускались против production.
 
-Реальная история, резервные копии, Keychain и флаги не менялись. Новый код не
-задеплоен. Активация шифрования остаётся HOLD до закрытия defects и отдельного
+Реальная история, резервные копии, Keychain и флаги не менялись. Код
+`245aae2d` задеплоен с шифрованием OFF. Активация остаётся HOLD до отдельного
 решения владельца по старым открытым копиям/токенам. Проверка внешних копий
 (Time Machine/iCloud) и отзыв токенов не выполнялись.
 
