@@ -779,8 +779,8 @@ class TestHistoryJournalGateProofs:
         gaps = _audit_mutated(
             _guard_repo_copy(tmp_path / "nc"),
             "KrabEar/backend/history_service.py",
-            "            if not _wipe_journal_ciphertext(_history_path):",
-            "            if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_history_path):",
+            "        if not _wipe_journal_ciphertext(_history_path):",
+            "        if not _wipe_journal_ciphertext_ОТСУТСТВУЕТ(_history_path):",
         )
         assert "history.ndjson" in gaps, (
             f"отключение безусловного сноса history.ndjson обязано открывать "
@@ -945,114 +945,65 @@ class TestJournalWipesAndShredHoldTheLock:
     нечитаемой навсегда.
     """
 
-    def test_metadata_written_in_the_window_is_removed(self, tmp_path, fake_keychain, monkeypatch):
-        """Детерминированная часть: запись в окне должна исчезнуть.
-
-        Писатель эмулируется синхронно (реальный путь `set_paste_status` под
-        локом) в момент, когда первая серия сносов уже прошла. Никакой гонки
-        потоков — проверяется именно «повторный снос перед shred'ом», который и
-        делает «данные → ключ» атомарным.
-        """
-        import backend.history_service as hs
-
+    def test_metadata_written_in_the_window_is_removed(self, tmp_path, fake_keychain):
+        """Метаданные между compact и финальным barrier удаляются до shred."""
         data_dir = _data_dir(tmp_path)
         _settings_on(data_dir)
         store = StateStore(data_dir)
         item = store.add_history_item(text="секрет владельца")
-        # Компактирование НЕ стабится: стаб оставлял ENC1 от setup-записи в
-        # history.ndjson, и тест измерял бы не своё (первая версия так и делала).
+        svc = HistoryService(store=store)
+        written = []
 
-        real_wipe = hs._wipe_journal_ciphertext
-        passes = {"n": 0}
-
-        def _writer_once(path: Path) -> bool:
-            result = real_wipe(path)
-            passes["n"] += 1
-            # Первая серия сносов завершена: пишем метаданные ПОСЛЕ неё, но до
-            # shred'а — то есть ровно в том окне, которое закрывает второй вызов.
-            # За проход: calendar + tombstones + 6 delta = 8 (history.ndjson чистится
-            # только при провале compact, а здесь compact «успешен»).
-            if passes["n"] == 8:
+        class LateMetadata:
+            def clear(self):
                 with store._lock():
                     store._append_ndjson(
                         store.status_path, {"id": item.id, "paste_status": "done"}
                     )
-            return result
+                written.append(True)
 
-        monkeypatch.setattr(hs, "_wipe_journal_ciphertext", _writer_once)
-
-        result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
-
-        assert result["ok"] is True
-        assert passes["n"] >= 16, "сносы должны быть выполнены дважды (1b и 38-1)"
-        assert _scan_enc1(data_dir) == [], (
-            "запись метаданных из окна «после сноса — до shred'а» обязана быть "
-            "снята повторным сносом под локом"
-        )
-        status = data_dir / "history_status.ndjson"
-        if status.is_file():
-            assert status.read_text(encoding="utf-8").strip() == "", (
-                "в журнале статусов не должно остаться строк, записанных старым ключом"
-            )
-        readable, why = _is_profile_readable(store)
-        assert readable, f"профиль обязан остаться читаемым, а упал: {why}"
+        svc._translation_cache = LateMetadata()
+        result = svc.handle_purge_all_data({"confirm": True})
+        assert written, "проба должна записать метаданные между compact и barrier"
+        assert result["complete"] is True
+        assert _scan_enc1(data_dir) == []
+        assert _is_profile_readable(store) == (True, "")
 
     def test_wipe_and_shred_happen_under_the_lock(self, tmp_path, fake_keychain, monkeypatch):
-        """Лок реально удерживается во время финального сноса (шаг 38-1).
-
-        Проверяется на уровне блокировки, а не «на глаз»: в момент финального
-        сноса тест смотрит, держит ли ЭТОТ ЖЕ тред эксклюзивный лок
-        (`StateStore._lock_depth[tid] >= 1`). Если сносы шли без лока, счётчика
-        нет — 0, и тест падает.
-
-        Уточнения, без которых тест врал бы (все пойманы на практике):
-        * проба снимается ТОЛЬКО на финальной серии сносов (второй проход по
-          `history_annotations.ndjson`). Лок между сериями (1b и 38-1) штатно
-          отпускается, и проба там дала бы ложное «защищено»;
-        * вердикт фиксируется В МОМЕНТЕ пробы, а не в конце purge: к моменту
-          проверки лок уже отпущен;
-        * проба делается ЧТЕНИЕМ счётчика, а НЕ попыткой взять лок. И `_lock(
-          nowait=True)`, и тред-конкурент здесь бесполезны: `_lock` реентерабелен
-          per-thread, поэтому из того же треда он достаётся мгновенно (проверено:
-          вариант с `nowait` давал 10/10 ложно-красных). Тред-конкурент работал,
-          но флейкал под нагрузкой — тред мог не попасть в scheduler за
-          отведённое время, то есть гонка была в самом тесте.
-        """
-
+        """Все удаления и реальный fake-key shred видят тот же exclusive lock."""
         import backend.history_service as hs
+        import backend.crypto_keystore as ks
 
         data_dir = _data_dir(tmp_path)
         _settings_on(data_dir)
         store = StateStore(data_dir)
         store.add_history_item(text="секрет владельца")
-
         real_wipe = hs._wipe_journal_ciphertext
-        seen = {"n": 0, "probe_done": False, "depth": 0}
+        depths = []
+        deletes = []
 
-        def _exclusive_depth() -> int:
-            """Глубина вложенности EX-лока ТЕКУЩЕГО треда (0 = лок не взят)."""
+        def exclusive_depth():
             with store._lock_reentry_guard:
-                return int(store._lock_depth.get(threading.get_ident(), 0))
+                tid = threading.get_ident()
+                assert store._lock_mode.get(tid) is False, "shred требует EX, не SH"
+                return store._lock_depth.get(tid, 0)
 
-        def _probe(path: Path) -> bool:
-            result = real_wipe(path)
-            if path.name == "history_annotations.ndjson":
-                seen["n"] += 1
-                # Вторая серия = финальный снос перед shred'ом (шаг 38-1).
-                if seen["n"] == 2 and not seen["probe_done"]:
-                    seen["probe_done"] = True
-                    seen["depth"] = _exclusive_depth()
-            return result
+        def probe(path):
+            depths.append(exclusive_depth())
+            return real_wipe(path)
 
-        monkeypatch.setattr(hs, "_wipe_journal_ciphertext", _probe)
+        def security(args, *_args, **_kwargs):
+            if args[0] == "delete-generic-password":
+                deletes.append(exclusive_depth())
+            return fake_keychain.run(args)
 
-        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
-
-        assert seen["probe_done"], "финальный снос не состоялся — тест не проверил лок"
-        assert seen["depth"] >= 1, (
-            f"в момент финального сноса EX-лок не был взят (глубина={seen['depth']}) "
-            f"— сносы идут БЕЗ лока, окно «после сноса — до shred'а» открыто"
-        )
+        monkeypatch.setattr(hs, "_wipe_journal_ciphertext", probe)
+        monkeypatch.setattr(ks, "_run_security", security)
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": True})
+        assert result["complete"] is True
+        assert len(depths) == 9
+        assert all(depth >= 1 for depth in depths)
+        assert len(deletes) == 1 and deletes[0] >= 1
 
 
 class TestPreFlightRefusalIsAudited:
@@ -1990,6 +1941,7 @@ class TestPurgeResultIsMachineReadable:
         store = StateStore(data_dir)
         store.add_history_item(text="секрет владельца")
 
+        monkeypatch.setattr(ks.sys, "platform", "linux")
         monkeypatch.setattr(ks, "_run_security", _no_cli)
 
         result = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
@@ -2725,6 +2677,7 @@ class TestNonDarwinHostContract:
         """
         import backend.crypto_keystore as ks
 
+        monkeypatch.setattr(ks.sys, "platform", "linux")
         monkeypatch.setattr(ks, "keychain_available", lambda: False)
 
         data_dir = _data_dir(tmp_path)
@@ -2766,7 +2719,7 @@ class TestDegradedLedgerIsLoud:
     быть громкими: `complete: false` + `errors: ["deletion_ledger"]`, без ENC1-мусора.
     """
 
-    def test_write_failure_is_loud_and_leaves_no_ciphertext(
+    def test_write_failure_is_loud_and_retains_ledger_and_key(
         self, tmp_path, fake_keychain, monkeypatch
     ):
         import backend.history_service as hs
@@ -2790,12 +2743,9 @@ class TestDegradedLedgerIsLoud:
         assert result["complete"] is False
         assert "deletion_ledger" in result["errors"]
         ledger = data_dir / "history_purged_ids.ndjson"
-        assert not ledger.exists(), "файл должен быть уничтожен, а не оставлен в ENC1"
-        # ENC1-мусора не осталось ни в одном файле профиля.
-        for path in data_dir.rglob("*"):
-            if path.is_file() and path.suffix in {".ndjson", ".json"}:
-                blob = path.read_text(encoding="utf-8", errors="replace")
-                assert "ENC1" not in blob, f"остался шифротекст в {path.name}"
+        assert ledger.exists(), "ошибка записи не разрешает потерять deletion ledger"
+        assert result["encryption_key_shredded"] is False
+        assert _is_profile_readable(store) == (True, "")
 
     def test_symlink_ledger_target_is_never_dereferenced(
         self, tmp_path, fake_keychain
@@ -2832,3 +2782,173 @@ class TestDegradedLedgerIsLoud:
             "снимать ссылку ДО томбестонирования, иначе ledger переписывается "
             "ENC1 по чужому пути (находка волны, а не ревью)"
         )
+
+
+class TestPurgeKeyBoundary:
+    """Ключ удаляется только после durable union и последней зачистки под локом."""
+
+    @pytest.mark.parametrize("late_mode", ["append", "delete", "delete-compact"])
+    def test_late_writer_cannot_leave_old_ciphertext_or_resurrect(
+        self, tmp_path, fake_keychain, monkeypatch, late_mode
+    ):
+        import shutil
+        import backend.history_service as hs
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="исходная запись")
+        crypto = _store_crypto(store)
+        svc = HistoryService(store=store)
+        late_ids = []
+        external = tmp_path / "external_snapshot"
+
+        def late_write():
+            item = store.add_history_item(text="запись во время purge")
+            late_ids.append(item.id)
+            snapshot = _make_snapshot(data_dir, crypto, "snapshot_late")
+            shutil.copytree(snapshot, external)
+            shutil.rmtree(snapshot)
+            if late_mode != "append":
+                store.delete_history_item(item.id)
+            if late_mode == "delete-compact":
+                store.compact_with_stats()
+            # Прогреваем именно RAM-пути, которые финальный barrier обнуляет.
+            store.count_active_items()
+            store.search_history("запись", None, 10)
+
+        if late_mode == "delete-compact":
+            # Обычный compact между прежней перематериализацией и shred.
+            (data_dir / "settings.json.bak").write_text("{}", encoding="utf-8")
+            remove = hs._remove_derived_copy
+
+            def inject(path):
+                if not late_ids:
+                    late_write()
+                remove(path)
+
+            monkeypatch.setattr(hs, "_remove_derived_copy", inject)
+        else:
+            class LateWriter:
+                def clear(self):
+                    late_write()
+
+            svc._translation_cache = LateWriter()
+
+        result = svc.handle_purge_all_data({"confirm": True})
+        assert late_ids, "проба обязана войти в окно записи"
+        assert result["complete"] is True
+        assert result["encryption_key_shredded"] is True
+        assert not _scan_enc1(data_dir), "старый шифротекст пережил уничтожение ключа"
+        assert _is_profile_readable(store) == (True, "")
+        assert set(late_ids) <= _plain_ledger_ids(store.purged_ids_path)
+        assert store.count_active_items() == 0
+        assert store.search_history("запись", None, 10) == ([], None)
+
+        # Внешняя копия, созданная ДО удаления позднего ID, не воскрешает его.
+        returned = data_dir / "backups" / "snapshot_returned"
+        shutil.copytree(external, returned)
+        restored = restore_encrypted_snapshot(
+            data_dir=data_dir, backups_root=returned.parent,
+            snapshot_dir=returned, crypto=crypto,
+        )
+        assert restored["restored_entries"] == 0
+
+    @pytest.mark.parametrize("failure", ["ledger_write", "parent_fsync", "unlink"])
+    def test_failed_barrier_retains_key_and_allows_retry(
+        self, tmp_path, fake_keychain, monkeypatch, failure
+    ):
+        import backend.history_service as hs
+        import backend.encrypted_snapshot as snapshot
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        item = store.add_history_item(text="сохраняемый ID")
+        svc = HistoryService(store=store)
+        before = _snapshot_counters()
+
+        with monkeypatch.context() as failing:
+            def boom(*_args, **_kwargs):
+                raise OSError(5, "synthetic barrier failure")
+
+            if failure == "ledger_write":
+                failing.setattr(hs, "_rematerialize_ledger_plaintext", boom)
+            elif failure == "parent_fsync":
+                failing.setattr(snapshot, "_fsync_dir", boom)
+            else:
+                failing.setattr(store, "compact_with_stats", boom)
+                unlink = Path.unlink
+
+                def refuse_history(path, *args, **kwargs):
+                    if path == store.history_path:
+                        return boom()
+                    return unlink(path, *args, **kwargs)
+
+                failing.setattr(Path, "unlink", refuse_history)
+
+            result = svc.handle_purge_all_data({"confirm": True})
+            assert result["complete"] is False
+            assert result["encryption_key_shredded"] is False
+            assert _delta(before)["deletions"] == 0, "неуспешный barrier удалил ключ"
+            assert _is_profile_readable(store) == (True, "")
+            assert item.id in store._load_deleted_ids_unlocked()
+
+        retry = svc.handle_purge_all_data({"confirm": True})
+        assert retry["complete"] is True
+        assert retry["encryption_key_shredded"] is True
+        assert item.id in _plain_ledger_ids(store.purged_ids_path)
+        assert _is_profile_readable(store) == (True, "")
+
+    def test_darwin_keystore_timeout_is_not_success(self, tmp_path, fake_keychain, monkeypatch):
+        import backend.crypto_keystore as ks
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="запись до таймаута")
+        monkeypatch.setattr(ks.sys, "platform", "darwin")
+
+        def timeout(*_args, **_kwargs):
+            raise ks.KeystoreUnavailable("synthetic security timeout")
+
+        monkeypatch.setattr(ks, "_run_security", timeout)
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": True})
+        assert result["encryption_key_shredded"] is False
+        assert result["complete"] is False
+        assert "encryption_key" in result["errors"]
+        assert fake_keychain.items, "ключ остался в fake Keychain"
+
+    def test_confirmation_timeout_invalidates_old_crypto_after_delete(
+        self, tmp_path, fake_keychain, monkeypatch
+    ):
+        import backend.crypto_keystore as ks
+
+        data_dir = _data_dir(tmp_path)
+        _settings_on(data_dir)
+        store = StateStore(data_dir)
+        store.add_history_item(text="запись до удаления ключа")
+        monkeypatch.setattr(ks.sys, "platform", "darwin")
+        deleted = []
+        timed_out = []
+
+        def security(args, *_args, **_kwargs):
+            if args[0] == "delete-generic-password":
+                deleted.append(True)
+                return fake_keychain.run(args)
+            if args[0] == "find-generic-password" and "-w" not in args and deleted:
+                timed_out.append(True)
+                raise ks.KeystoreUnavailable("synthetic confirmation timeout")
+            return fake_keychain.run(args)
+
+        monkeypatch.setattr(ks, "_run_security", security)
+        result = HistoryService(store=store).handle_purge_all_data({"confirm": True})
+        assert deleted and timed_out
+        assert not fake_keychain.items, "fake delete действительно уничтожил ключ"
+        assert result["encryption_key_shredded"] is False
+        assert result["complete"] is False
+        assert "encryption_key" in result["errors"]
+        after = store.add_history_item(text="запись после непроверенного удаления")
+        fresh = StateStore(data_dir)
+        rows, _cursor = fresh.get_history_page(None, 50)
+        assert [row["id"] for row in rows] == [after.id]

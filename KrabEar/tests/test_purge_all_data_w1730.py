@@ -764,13 +764,20 @@ class PurgeAllDataCritical2RealEraseTestCase(unittest.TestCase):
         self.assertEqual(result["history_deleted"], 1)
         self.assertTrue(result["ok"])
 
-        # After purge: raw file must NOT contain the transcript text
-        raw_after = store.history_path.read_text(encoding="utf-8")
+        # После purge журнал может быть удалён целиком; оставшийся файл пуст.
+        raw_after = (
+            store.history_path.read_text(encoding="utf-8")
+            if store.history_path.exists() else ""
+        )
         self.assertNotIn(
             secret, raw_after,
             "After purge_all_data, history.ndjson must NOT contain any transcript text "
-            "(compact() must have physically rewritten the file)",
+            "(the file must be physically emptied or removed)",
         )
+        self.assertEqual(raw_after, "")
+        items, cursor = store.get_history_page(cursor=None, limit=50)
+        self.assertEqual(items, [])
+        self.assertIsNone(cursor)
 
     def test_transcript_md_files_deleted_after_purge(self) -> None:
         """After purge_all_data, transcripts/*.md files must be deleted."""
