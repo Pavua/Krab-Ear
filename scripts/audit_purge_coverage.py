@@ -287,6 +287,8 @@ def _looks_like_backup_copy(name: str) -> bool:
     if match is None:
         return False
     base = match.group("base")
+    if base == ".secrets" or base.endswith("/.secrets"):
+        return True
     parts = base.rsplit(".", 1)
     return len(parts) == 2 and parts[1] in PERSIST_EXTENSIONS
 
@@ -297,6 +299,8 @@ def _backup_family(name: str) -> str | None:
     if match is None:
         return None
     base = match.group("base")
+    if base == ".secrets" or base.endswith("/.secrets"):
+        return f"{base}.bak*"
     parts = base.rsplit(".", 1)
     if len(parts) != 2 or parts[1] not in PERSIST_EXTENSIONS:
         return None

@@ -337,6 +337,8 @@ def _remove_derived_copy(path: Path) -> None:
     * прочее   — fifo/socket/device: трогать нельзя, но молчать нельзя, поэтому
       вызывающий увидит запись через `lexists` и объявит шаг невыполненным.
     """
+    if not os.path.lexists(path):
+        return
     if path.is_symlink() or path.is_file():
         path.unlink()
         return
@@ -2472,7 +2474,7 @@ class HistoryService:
           - семантический индекс (embeddings), если подключён
           - версии транскрипций, если подключён менеджер версий
           - permanent deletion ledger (history_purged_ids.ndjson) — A5.2c1
-          - ``*.bak*``-копии истории и настроек — A5.2c1
+          - ``*.bak*``-копии истории, настроек, секретов (.secrets.bak*) и авто-глоссария (auto_glossary.json.bak*) — A5.2c1 / P1
 
         **Требует подтверждения (W1734 FIX-D)**: параметр ``confirm`` должен быть
         равен ``True`` (bool) или строке ``"PURGE_ALL"``. Без него возвращает ошибку
@@ -3431,11 +3433,13 @@ class HistoryService:
         deletion_ledger_purged = False
         deletion_ledger_ids_preserved = 0
 
-        # --- 37b. A5.2c1: зачистить ПРОИЗВОДНЫЕ копии (`.bak*` и `*.tmp`).
+        # --- 37b. A5.2c1 / P1: зачистить ПРОИЗВОДНЫЕ копии (`.bak*` и `*.tmp`).
         # В data_dir лежат `history.ndjson.bak*` (в прод-профиле владельца —
         # 23.4 МБ ОТКРЫТОЙ истории) и `settings.json.bak*` (шесть копий с
         # непустыми секретами: hf_token, sentry_dsn_agent, voice_gateway_api_key,
-        # stt_gigaam_hf_token, llm_api_key, lm_studio_api_key).
+        # stt_gigaam_hf_token, llm_api_key, lm_studio_api_key), а также
+        # `.secrets.bak*` (резервные копии секретов) и `auto_glossary.json.bak*`
+        # (резервные копии извлечённого из транскрипций глоссария).
         #
         # M1 (adversarial-ревью): кроме `.bak*` переживали ещё и `*.tmp`:
         # `history.ndjson.migration_tmp` — ПОЛНАЯ копия истории из убитой миграции
@@ -3492,9 +3496,11 @@ class HistoryService:
                     # цикл по tuple сделал бы зачистку НЕВИДИМОЙ для гейта —
                     # ровно тот класс «проводка есть, а гейт зелёный», который
                     # закрывали в b2 (f-string семейства) и b3 (delete-glob).
-                    for _bak_path in (
+                    for _bak_path in dict.fromkeys(
                         list(_data_dir.glob("history.ndjson.bak*"))
                         + list(_data_dir.glob("settings.json.bak*"))
+                        + list(_data_dir.glob(".secrets.bak*"))
+                        + list(_data_dir.glob("auto_glossary.json.bak*"))
                         + list(_data_dir.glob("*.tmp"))
                         # `*.tmp` НЕ матчит `migration_tmp` (подчёркивание вместо
                         # точки) — а именно этот файл (ПОЛНАЯ копия истории из убитой
@@ -3508,14 +3514,14 @@ class HistoryService:
                             logger.warning(
                                 "purge_all_data: не удалось удалить %s", _bak_path, exc_info=True
                             )
-                            secondary_errors.append("stale_copies")
+                            _flag_step_error(secondary_errors, "stale_copies")
                             continue
                         # L4: «уничтожено» — только если записи действительно нет.
                         if os.path.lexists(_bak_path):
                             logger.warning(
                                 "purge_all_data: %s пережил зачистку", _bak_path
                             )
-                            secondary_errors.append("stale_copies")
+                            _flag_step_error(secondary_errors, "stale_copies")
                             continue
                         stale_copies_removed += 1
                     if stale_copies_removed:
@@ -3524,7 +3530,7 @@ class HistoryService:
                         )
                 except Exception:
                     logger.warning("purge_all_data: зачистка .bak-копий не удалась", exc_info=True)
-                    secondary_errors.append("stale_copies")
+                    _flag_step_error(secondary_errors, "stale_copies")
 
         # --- 38. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
         # Без этого выживший AES-256 ключ расшифровывает pre-purge бэкап history.ndjson
