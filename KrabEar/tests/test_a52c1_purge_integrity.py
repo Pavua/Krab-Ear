@@ -1318,12 +1318,22 @@ class TestStaleCopiesAreWiped:
         (data_dir / "settings.json.bak1").write_text(
             json.dumps({"sentry_dsn_agent": "https://example.invalid/1"}), encoding="utf-8"
         )
+        (data_dir / ".secrets.bak").write_text("OLD_KEY=1", encoding="utf-8")
+        (data_dir / "auto_glossary.json.bak").write_text('{"terms": ["x"]}', encoding="utf-8")
+        (data_dir / ".secrets").write_text("ACTIVE_KEY=active", encoding="utf-8")
 
-        HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
+        res = HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
 
         assert sorted(p.name for p in data_dir.glob("*.bak*")) == [], (
-            "privacy-purge обязан снести .bak-копии истории и настроек"
+            "privacy-purge обязан снести .bak-копии истории, настроек, секретов и глоссария"
         )
+        assert sorted(p.name for p in data_dir.glob(".secrets.bak*")) == [], (
+            ".secrets.bak* обязан быть снесён"
+        )
+        assert (data_dir / ".secrets").read_text(encoding="utf-8") == "ACTIVE_KEY=active", (
+            "активный .secrets не должен быть затронут"
+        )
+        assert res.get("complete") is True
 
     def test_temp_copy_families_are_deleted(self, tmp_path, fake_keychain):
         """M1: `*.tmp`/`*_tmp` — тоже копии уничтожаемых данных.
