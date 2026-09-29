@@ -406,7 +406,10 @@ class PurgeAllDataE2EW1770TestCase(unittest.TestCase):
         svc._collection_manager = cm
         svc._transcript_versions = tvm
 
-        result = svc.handle_purge_all_data({"confirm": True})
+        from unittest.mock import patch
+
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = svc.handle_purge_all_data({"confirm": True})
         self.assertTrue(result.get("ok"), result)
         self.assertTrue(result.get("complete"), f"purge должен быть полным: {result.get('errors')}")
 
@@ -696,7 +699,10 @@ class PurgeW1771GapTestCase(unittest.TestCase):
         svc._live_subs_service = buf
         svc._transcript_versions = tvm
 
-        result = svc.handle_purge_all_data({"confirm": True})
+        from unittest.mock import patch
+
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = svc.handle_purge_all_data({"confirm": True})
         self.assertTrue(result.get("ok"), result)
         self.assertTrue(result.get("complete"), f"purge должен быть полным: {result.get('errors')}")
 

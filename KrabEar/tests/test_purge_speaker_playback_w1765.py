@@ -413,7 +413,10 @@ class PurgeAllDataE2ESpeakerPlaybackTestCase(unittest.TestCase):
         self.assertIn("Иван Иванов", aliases_content)
 
         # --- Purge ---
-        result = svc.handle_purge_all_data({"confirm": True})
+        from unittest.mock import patch
+
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = svc.handle_purge_all_data({"confirm": True})
 
         # --- Assertions ---
         self.assertTrue(result.get("ok"), f"purge должен вернуть ok=True: {result}")

@@ -1115,6 +1115,96 @@ class TestRestoreCommitProtocol:
             **kw,
         )
 
+    @pytest.mark.parametrize("recovered", [False, True], ids=["restore", "recovery"])
+    def test_parent_fsync_precedes_first_live_replace(self, tmp_path, recovered):
+        """COMMITTING должен переживать сбой питания до первой live-замены."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        if recovered:
+            _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        live_before = _data_bytes(data_dir)
+        parent_stat = data_dir.stat()
+        real_fsync = os.fsync
+        synced_states = []
+        replacements = []
+
+        def _trace_fsync(fd):
+            stat = os.fstat(fd)
+            real_fsync(fd)
+            if (stat.st_dev, stat.st_ino) == (parent_stat.st_dev, parent_stat.st_ino):
+                synced_states.extend(_marker(p)["state"] for p in _restore_markers(data_dir))
+
+        def _trace_replace(tmp_file, target):
+            if not replacements:
+                replacements.append((list(synced_states), _data_bytes(data_dir)))
+            _real_replace(tmp_file, target)
+
+        with patch("os.fsync", _trace_fsync), patch(
+            "backend.encrypted_snapshot._replace_journal", _trace_replace
+        ):
+            result = (
+                _recover(data_dir, crypto)
+                if recovered else self._restore(data_dir, crypto, snapshot_dir)
+            )
+
+        assert result["ok"] is True
+        assert replacements, "restore не дошёл до замены живых журналов"
+        states_at_first_replace, live_at_first_replace = replacements[0]
+        assert "COMMITTING" in states_at_first_replace, (
+            "первая live-замена началась без durable записи staging в data_dir"
+        )
+        assert live_at_first_replace == live_before
+
+    @pytest.mark.parametrize("recovered", [False, True], ids=["restore", "recovery"])
+    def test_parent_fsync_failure_leaves_live_journals_untouched(self, tmp_path, recovered):
+        """Отказ fsync родителя отменяет prepare, не рвёт живой набор журналов."""
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        if recovered:
+            _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
+        live_before = _data_bytes(data_dir)
+        parent_stat = data_dir.stat()
+        real_fsync = os.fsync
+        replacements = []
+        failures = []
+
+        def _fail_parent_fsync(fd):
+            stat = os.fstat(fd)
+            if (stat.st_dev, stat.st_ino) == (parent_stat.st_dev, parent_stat.st_ino):
+                failures.append(True)
+                raise OSError(errno.EIO, "synthetic parent fsync failure")
+            real_fsync(fd)
+
+        def _trace_replace(tmp_file, target):
+            replacements.append(target.name)
+            _real_replace(tmp_file, target)
+
+        with patch("os.fsync", _fail_parent_fsync), patch(
+            "backend.encrypted_snapshot._replace_journal", _trace_replace
+        ):
+            if recovered:
+                result = _recover(data_dir, crypto)
+                assert result["ok"] is False
+                assert result["reason"] == "snapshot_fsync_failed"
+                assert result["pending"] is True
+            else:
+                with pytest.raises(SnapshotOperationRefused) as exc:
+                    self._restore(data_dir, crypto, snapshot_dir)
+                assert exc.value.reason == "snapshot_fsync_failed"
+
+        assert failures, "fault injection не достигла fsync родителя"
+        assert replacements == [], "live-замены произошли до отказавшего prepare-fsync"
+        assert _data_bytes(data_dir) == live_before
+        assert has_pending_restore(data_dir) is recovered
+        if recovered:
+            assert _marker(_restore_markers(data_dir)[0])["state"] == "COMMITTING"
+
     def test_crash_after_pre_restore_snapshot_before_marker_leaves_no_evidence(self, tmp_path):
         """Окно (a): отмена ДО COMMITTING оставляет исходные файлы без изменений."""
         data_dir = _data_dir(tmp_path)
@@ -1897,13 +1987,15 @@ class TestPurgeCoversRestoreStaging:
         """Приватный staging restore — тоже новое хранилище: purge обязан его убрать."""
         data_dir = _data_dir(tmp_path)
         crypto = _crypto()
-        _fill_profile(data_dir, crypto)
         _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["удаляемая запись для проверки recovery"])
         snapshot_dir = _make_snapshot(data_dir, crypto)
         _crash_restore(data_dir, crypto, snapshot_dir, at="replace")
         markers = _restore_markers(data_dir)
         assert len(markers) == 1
-        svc = _svc(data_dir, crypto)
+        svc = HistoryService(store=store, cached_settings=lambda: {})
+        assert svc.store.count_active_items() == 1
 
         result = svc.handle_purge_all_data({"confirm": True})
 
@@ -1911,7 +2003,15 @@ class TestPurgeCoversRestoreStaging:
         assert not markers[0].exists()
         assert has_pending_restore(data_dir) is False
         # Данные действительно стёрты, а staging не остался источником утечки.
-        assert (data_dir / "history.ndjson").read_bytes() == b""
+        history = data_dir / "history.ndjson"
+        assert not history.exists() or history.read_bytes() == b""
+        assert svc.handle_get_history_page({"limit": 50})["items"] == []
+        # Даже с прежним тестовым ключом recovery не может воскресить историю.
+        recovery = _recover(data_dir, crypto)
+        assert recovery["pending"] is False
+        assert recovery["rolled_forward"] is False
+        assert svc.handle_get_history_page({"limit": 50})["items"] == []
+        assert not history.exists() or history.read_bytes() == b""
 
     def test_purge_helper_is_noop_without_markers(self, tmp_path):
         data_dir = _data_dir(tmp_path)

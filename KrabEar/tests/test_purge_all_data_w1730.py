@@ -506,8 +506,11 @@ class PurgeAllDataPartialFailureTestCase(unittest.TestCase):
 
     def test_result_has_complete_true_when_no_errors(self) -> None:
         """When no secondary steps fail, complete=True and errors=[]."""
+        from unittest.mock import patch
+
         svc = _make_svc(self._tmpdir, item_ids=["a"])
-        result = svc.handle_purge_all_data({"confirm": True})
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = svc.handle_purge_all_data({"confirm": True})
         self.assertIn("complete", result)
         self.assertIn("errors", result)
         self.assertTrue(result["complete"])
@@ -764,13 +767,20 @@ class PurgeAllDataCritical2RealEraseTestCase(unittest.TestCase):
         self.assertEqual(result["history_deleted"], 1)
         self.assertTrue(result["ok"])
 
-        # After purge: raw file must NOT contain the transcript text
-        raw_after = store.history_path.read_text(encoding="utf-8")
+        # После purge журнал может быть удалён целиком; оставшийся файл пуст.
+        raw_after = (
+            store.history_path.read_text(encoding="utf-8")
+            if store.history_path.exists() else ""
+        )
         self.assertNotIn(
             secret, raw_after,
             "After purge_all_data, history.ndjson must NOT contain any transcript text "
-            "(compact() must have physically rewritten the file)",
+            "(the file must be physically emptied or removed)",
         )
+        self.assertEqual(raw_after, "")
+        items, cursor = store.get_history_page(cursor=None, limit=50)
+        self.assertEqual(items, [])
+        self.assertIsNone(cursor)
 
     def test_transcript_md_files_deleted_after_purge(self) -> None:
         """After purge_all_data, transcripts/*.md files must be deleted."""
@@ -864,6 +874,8 @@ class PurgeAllDataLoudErrorTestCase(unittest.TestCase):
 
     def test_no_push_error_when_all_steps_succeed(self) -> None:
         """When all secondary steps succeed, _push_error must NOT be called."""
+        from unittest.mock import patch
+
         svc = _make_svc(self._tmpdir, item_ids=["a"])
         push_calls: list[dict] = []
 
@@ -872,7 +884,8 @@ class PurgeAllDataLoudErrorTestCase(unittest.TestCase):
 
         svc._push_error = fake_push_error  # type: ignore[method-assign]
 
-        result = svc.handle_purge_all_data({"confirm": True})
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True):
+            result = svc.handle_purge_all_data({"confirm": True})
         self.assertTrue(result["complete"])
         self.assertEqual(push_calls, [],
                          "_push_error must NOT be called when purge completes fully")
@@ -990,12 +1003,12 @@ class PurgeRotatesEncryptionKeyTestCase(unittest.TestCase):
         self.assertIsNone(svc.store._history_crypto_instance)
 
     def test_purge_survives_keystore_unavailable(self) -> None:
-        """KeystoreUnavailable (нет Keychain / Linux) НЕ должен ломать purge."""
+        """На Linux отсутствие Keychain не является ошибкой очистки истории."""
         from unittest.mock import patch
         from backend.crypto_keystore import KeystoreUnavailable
 
         svc = _make_svc(self._tmp, item_ids=["a"])
-        with patch(
+        with patch("sys.platform", "linux"), patch(
             "backend.crypto_keystore.delete_history_key",
             side_effect=KeystoreUnavailable("no keychain"),
         ):

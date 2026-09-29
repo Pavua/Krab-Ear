@@ -2400,6 +2400,9 @@ def _apply_verified_snapshot_locked(
         }
         _write_restore_marker(staging, marker)
         _fsync_dir(staging)
+        # Новый staging должен пережить сбой питания вместе с COMMITTING:
+        # fsync самого staging не сохраняет его запись в родительском каталоге.
+        _fsync_dir(data_dir)
     except SnapshotOperationRefused:
         # Отмена ДО durable COMMITTING: живые файлы не тронуты. Каталог убирается
         # ТОЛЬКО если его создал этот вызов (B1): в recovery-ветке переиспользуемый
