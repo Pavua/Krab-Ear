@@ -467,6 +467,9 @@ class BackendService:
         socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
+        # Startup LLM wiring reads runtime toggles before the other services are
+        # built. Keep the single settings reader available from the first call.
+        self._settings_svc = SettingsService(store=self.store)
         # Спека 2026-08-22 socket-ownership: точный endpoint и snapshot claim'а
         # для честной startup-диагностики (без них — прежний data_dir-фоллбэк).
         self._socket_path_cfg = socket_path
@@ -493,6 +496,11 @@ class BackendService:
 
         # D.10a: LLM rewriter initialization (admin flag check via settings)
         self._llm_rewriter = self._init_llm_rewriter()
+        # The startup worker may run immediately. Install the same runtime getter
+        # used by normal rewrite/privacy checks before starting that thread.
+        if self._llm_rewriter is not None:
+            self._llm_rewriter._settings_getter = self._get_runtime_setting
+            self._llm_rewriter._spend_dir = store.data_dir
         # Fire background warmup if enabled in settings — pre-loads model before first dictation.
         # Wave 58: read RUNTIME settings (settings.json) instead of static DEFAULT_SETTINGS so
         # user-overridden values (e.g. rewriter_warmup_timeout_sec=60 in production) actually
@@ -503,7 +511,10 @@ class BackendService:
         if self._llm_rewriter is not None and _warmup_enabled:
             threading.Thread(
                 target=self._llm_rewriter.warmup_sync,
-                kwargs={"timeout_sec": _warmup_timeout},
+                kwargs={
+                    "timeout_sec": _warmup_timeout,
+                    "should_continue": lambda: llm_warmup_needed(self._get_runtime_setting),
+                },
                 daemon=True,
             ).start()
         self._action_items_extractor = self._init_action_items_extractor()
@@ -543,17 +554,7 @@ class BackendService:
         self.translator._translation_cache = self._translation_cache
         # W1500 — wire runtime settings getter for privacy-mode detection
         self.translator._settings_getter = self._get_runtime_setting
-        # W1755 — wire runtime settings getter to LLMRewriter for privacy-mode detection in
-        # fix_punctuation_only() / summarize().  Previously _settings_getter was initialized to
-        # None and NEVER assigned on the rewriter instance (only the translator was wired at
-        # W1500), making the privacy guard dead: with privacy_mode_enabled=True the rewriter
-        # still POSTed transcript text to LM Studio.  Mirror the translator pattern exactly.
-        if self._llm_rewriter is not None:
-            self._llm_rewriter._settings_getter = self._get_runtime_setting
-            # F2: spend-cap облачного фоллбэка summary пишет месяц/траты в data_dir.
-            self._llm_rewriter._spend_dir = store.data_dir
         self._start_time: float = time.monotonic()
-        self._settings_svc = SettingsService(store=self.store)
         # S3/Задача 2: cloud_stt/cloud_rewriter раньше строили СОБСТВЕННЫЙ
         # StateStore(settings.DATA_DIR) — после выравнивания каталога данных
         # (S3/Задача 1) это те же файлы, что у self.store, а per-thread

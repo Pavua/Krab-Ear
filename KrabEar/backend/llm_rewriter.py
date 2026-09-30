@@ -572,15 +572,15 @@ class LLMRewriter:
         if getter is not None:
             try:
                 rewrite_enabled = bool(getter("llm_rewrite_enabled", False))
+                privacy_enabled = bool(getter("privacy_mode_enabled", True))
             except Exception:
                 logger.debug(
-                    "LLM idle keepalive: не удалось прочитать llm_rewrite_enabled — пинг пропущен"
+                    "LLM idle keepalive: не удалось прочитать настройки — пинг пропущен"
                 )
                 return
-            if not rewrite_enabled:
+            if not rewrite_enabled or privacy_enabled:
                 logger.debug(
-                    "LLM idle keepalive: постобработка выключена (llm_rewrite_enabled=False) — "
-                    "пинг пропущен"
+                    "LLM idle keepalive: постобработка выключена или privacy включён — пинг пропущен"
                 )
                 return
         try:
@@ -1490,6 +1490,7 @@ class LLMRewriter:
         self,
         timeout_sec: Optional[float] = None,
         retry_delays: Optional[list] = None,
+        should_continue: Optional[Callable[[], bool]] = None,
     ) -> None:
         """Синхронный wrapper для запуска warmup в daemon-треде с exponential backoff retry.
 
@@ -1506,6 +1507,8 @@ class LLMRewriter:
                           По умолчанию [5, 10, 20, 30, 60] — 5 попыток суммарно
                           около 2 мин 5 сек. Покрывает типичный boot LM Studio
                           (20-60 с после логина).
+            should_continue: текущий gate автоматического startup-прогрева;
+                             вызывается перед каждой попыткой, ошибка запрещает probe.
         """
         if retry_delays is None:
             retry_delays = [5, 10, 20, 30, 60]
@@ -1513,6 +1516,17 @@ class LLMRewriter:
         attempt = 1
         max_attempts = len(retry_delays) + 1
 
+        def allowed_now() -> bool:
+            if should_continue is None:
+                return True  # standalone callers retain their explicit contract
+            try:
+                return bool(should_continue())
+            except Exception:
+                logger.debug("LLM warmup_sync: настройки недоступны — попытка пропущена")
+                return False
+
+        if not allowed_now():
+            return
         result = self.warmup(timeout_sec=timeout_sec)
         if result:
             logger.info(
@@ -1530,6 +1544,8 @@ class LLMRewriter:
             # Use shutdown_event.wait so the loop exits cleanly if backend shuts down
             if self._shutdown_event.wait(timeout=delay):
                 logger.debug("LLM warmup_sync: shutdown requested, stopping retry loop")
+                return
+            if not allowed_now():
                 return
             result = self.warmup(timeout_sec=timeout_sec)
             if result:

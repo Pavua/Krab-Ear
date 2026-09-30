@@ -30,7 +30,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.llm_rewriter import LLMRewriter
+from backend.llm_rewriter import LLMRewriter  # noqa: E402 — test path setup above
 
 
 def _make_rewriter() -> LLMRewriter:
@@ -61,12 +61,37 @@ class LLMIdleKeepaliveRewriteToggleTests(unittest.TestCase):
     def test_tick_fires_probe_when_rewrite_enabled(self):
         rewriter = _make_rewriter()
         rewriter._settings_getter = lambda key, default: (
-            True if key == "llm_rewrite_enabled" else default
+            {"llm_rewrite_enabled": True, "privacy_mode_enabled": False}.get(key, default)
         )
 
         rewriter._idle_keepalive_tick()
 
         rewriter.warmup_probe.assert_called_once_with(timeout_sec=60.0)
+
+    def test_tick_skips_probe_when_privacy_enabled(self):
+        rewriter = _make_rewriter()
+        rewriter._settings_getter = lambda key, default: {
+            "llm_rewrite_enabled": True,
+            "privacy_mode_enabled": True,
+        }.get(key, default)
+
+        rewriter._idle_keepalive_tick()
+
+        rewriter.warmup_probe.assert_not_called()
+
+    def test_tick_skips_probe_when_privacy_read_fails(self):
+        rewriter = _make_rewriter()
+
+        def getter(key, default):
+            if key == "privacy_mode_enabled":
+                raise OSError("settings unavailable")
+            return True if key == "llm_rewrite_enabled" else default
+
+        rewriter._settings_getter = getter
+
+        rewriter._idle_keepalive_tick()
+
+        rewriter.warmup_probe.assert_not_called()
 
     def test_tick_fires_probe_when_no_settings_getter(self):
         """Backward-compat: без settings_getter (напр. standalone-конструирование
@@ -97,7 +122,7 @@ class LLMIdleKeepaliveRewriteToggleTests(unittest.TestCase):
     def test_tick_never_raises_when_warmup_probe_itself_raises(self):
         rewriter = _make_rewriter()
         rewriter._settings_getter = lambda key, default: (
-            True if key == "llm_rewrite_enabled" else default
+            {"llm_rewrite_enabled": True, "privacy_mode_enabled": False}.get(key, default)
         )
         rewriter.warmup_probe.side_effect = RuntimeError("network down")
 
