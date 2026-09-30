@@ -2,42 +2,50 @@
 
 ## Cutover 2026-09-30 — текущий runtime
 
-**Backend и REST переведены на `c3a1779fcd7b64dbe3d69231479d911a85d5c321`**:
-Backend PID **8854** (02:21:38 CEST), REST PID **9848** (02:22:07 CEST).
-Swift PID 88227 не менялся. P1 #2068 и P2 #2069 теперь присутствуют в runtime.
-Подготовка процедуры смержена отдельно в [#2070](https://github.com/Pavua/Krab-Ear/pull/2070),
-`af7f95e1ffd3e7b7127e472f320e27e58804116d`; runtime pin остаётся `c3a1779f`.
-Оба post-merge workflow каждого из этих SHA завершились success.
+**Backend и REST работают на `1ebd12eb69695296a13c39eac35a9b7af3405ba5`**
+([#2072](https://github.com/Pavua/Krab-Ear/pull/2072)) с 03:37 CEST:
+Backend PID **28862**, REST PID **29222**, Swift PID **88227** не перезапускался.
+Точный post-merge [CI](https://github.com/Pavua/Krab-Ear/actions/runs/36653010975)
+и [krab-ear-ci](https://github.com/Pavua/Krab-Ear/actions/runs/36653010765)
+завершились success. Исправлены ранний порядок `SettingsService` и гейты
+автоматических LLM warmup/keepalive; при живых флагах rewrite/punctuation/keepalive
+**OFF** стартовый прогрев LLM не должен запускаться.
 
-По разрешению владельца выполнены 60-секундное окно тишины, финальный idle gate,
-последовательные bootout с доказанным исчезновением job/PID, замена двух plist
-и bootstrap Backend → IPC readiness → REST. Изменены только entrypoint/PYTHONPATH;
-interpreter, cwd, logs и остальные настройки сохранены. Старый release `245aae2d`
-и приватный bundle сохранены для восстановления по
-[runbook](superpowers/plans/2026-09-29-safe-release-cutover.md).
+По разрешению владельца выполнены четыре idle-пробы за 60 с и финальная проба,
+последовательные `bootout` с подтверждением исчезновения старых job/PID,
+проверенная замена двух plist, `bootstrap` Backend → IPC → REST. Изменились
+только entrypoint и `PYTHONPATH`; interpreter, cwd, logs и прочие настройки
+сохранены. Новый release — clean, detached, locked; `c3a1779f` и приватные
+bundle сохранены для восстановления. Процедура описана в
+[runbook](superpowers/plans/2026-09-29-safe-release-cutover.md); его старые SHA
+и пути не применять повторно. Для этого cutover Backend readiness ограничен
+360 с (сохранённый LLM catalog timeout 240 с), REST — 120 с после Backend.
 
-**Read-only smoke:** IPC ping / REST health 200, новые PID стабильны, история
-читается, restore_pending=false, key_present=false, saved/runtime encryption **OFF**.
-Счётчик активной истории 13 058 → 13 062: независимая сверка нашла четыре записи
-на диске, датированные до cutover; после reload обновился устаревший кэш старого
-процесса. Число физических строк 23 195 до/после одинаково, JSON валиден.
-Источник внешней записи не атрибутирован; live-диктовка/MLX/encrypted E2E не проверялись.
-Sentry MCP доступен, но сводка без timestamps не доказывает свежесть ingress.
-Независимая приёмка: **PASS для запуска и read-only smoke**, без оснований для
-rollback. В startup найден предсуществующий P2: ранний `_get_runtime_setting()`
-вызывается до создания `_settings_svc`, fail-closed privacy default пропускает
-LLM warmup. Такой traceback был и на `245aae2d`; настройки не изменяются.
-Отдельный follow-up — порядок инициализации SettingsService и early keepalive.
+**Независимая read-only приёмка PASS:** Backend/REST `runs=1` без выхода,
+IPC ping и REST `/health` 200; четыре стабильных снимка за ~60 с. История
+читается: счётчик 13 063 перед остановкой → 13 066 после старта, одна запись
+проверена по ID без вывода текста. Журнал содержит 23 199 валидных JSON-строк;
+последние новые записи датированы до cutover. `restore_pending=false`,
+`key_present=false`, saved/runtime encryption **OFF**. В startup наблюдался
+штатный STT warmup; признаков автоматического LLM warmup или прежнего
+`_settings_svc` traceback нет. Существующие warnings о memory pressure и REST
+конфигурации остаются. Sentry принимает события организации и не показывает
+новых unresolved Ear issues после старта, но свежий ingress именно Ear-проектов
+не доказан. Live-диктовка, MLX, TTS и encrypted E2E здесь не проверялись.
 
-**Следующий source candidate:** `codex/ear-startup-settings` исправляет этот
-порядок и проверяет privacy перед каждой автоматической попыткой LLM warmup и
-keepalive. Тесты RED→GREEN, Python 3.12/3.14 и независимый source-review PASS;
-это ещё не runtime-релиз. Исправление вновь разрешает прогрев модели при
-включённых потребителях, поэтому перед отдельным deploy нужны exact-SHA CI,
-проверка живых флагов LLM/brain и ресурсов, затем обычный quiet-window.
+Очередь purge/FIFO P1/P2 закрыта. Шифрование не включать без отдельного решения
+владельца по открытым копиям и ротации токена. Старые релизы и bundle не удалять.
 
-Очередь purge/FIFO P1/P2 закрыта. Шифрование не включать без отдельного решения владельца
-по открытым копиям и ротации токена. Записи ниже — исторические снимки.
+## Cutover `c3a1779f` 2026-09-30 — исторический снимок
+
+Backend PID 8854 стартовал в 02:21:38, REST PID 9848 — в 02:22:07 CEST;
+до следующего cutover они работали на
+`c3a1779fcd7b64dbe3d69231479d911a85d5c321`. Read-only приёмка запуска
+прошла; история 13 058 → 13 062 после обновления старого кэша, журнал 23 195
+валидных строк. Тогда был найден предсуществующий startup-дефект `_settings_svc`,
+исправленный в #2072. Подготовка процедуры —
+[#2070](https://github.com/Pavua/Krab-Ear/pull/2070), отчёт о предыдущем cutover —
+[#2071](https://github.com/Pavua/Krab-Ear/pull/2071).
 
 ## Приёмка 2026-09-29 (исторический снимок)
 
@@ -91,16 +99,13 @@ Sentry за 24 ч: backend issue `KRAB-EAR-BACKEND-1V`, четыре тайма�
 перед restore replace) исправлены в [#2066](https://github.com/Pavua/Krab-Ear/pull/2066)
 и задеплоены. Это не разрешает включать шифрование.
 
-**Следующая волна (очередь):**
+**Очередь на 29.09 (исторический снимок; пункты 2–3 закрыты):**
 1. Инвентаризация копий вне профиля (Time Machine / iCloud / worktree'и) — purge
    их **не** закрывает, shred ключа открытые копии не нейтрализует.
-2. Дыры покрытия purge-скоупа, найденные инвентаризацией 2026-09-28:
-   `.secrets` + `.secrets.bak` и `auto_glossary.json.bak.*` **не** попадают ни в
-   одно семейство (`history.ndjson.bak*`, `settings.json.bak*`, `*.tmp`, `*_tmp`).
-   Это следующая карточка.
-3. FIFO на пути `history_purged_ids.ndjson`: synthetic-проба проходит
-   `StateStore.__init__`, но зависает на первом чтении истории. Нужен отдельный
-   bounded отказ/путь восстановления; исходный claim о зависании `touch()` неверен.
+2. Тогда `.secrets.bak*` и `auto_glossary.json.bak*` не покрывались purge;
+   исправлено в [#2068](https://github.com/Pavua/Krab-Ear/pull/2068).
+3. Тогда FIFO на пути `history_purged_ids.ndjson` мог блокировать чтение;
+   дескрипторная защита реализована в [#2069](https://github.com/Pavua/Krab-Ear/pull/2069).
 
 Claim старого checkpoint о `save_settings` вне lock опровергнут на
 `31568b1f`: запись находится внутри `StateStore._lock()`; synthetic
@@ -111,9 +116,9 @@ contention и SH→EX проверки пройдены. Отдельный фи
 
 ---
 
-Обновлено: **2026-09-18**. Одна страница: база, политика brain/GPU, очередь. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
+Оперативный раздел выше обновлён **2026-09-30**; плановая часть ниже — снимок **2026-09-18**. Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Горизонт 2–4 нед: [`design-briefs/2026-09-05-horizon-plan.md`](design-briefs/2026-09-05-horizon-plan.md). Как работать: [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
-## Деплой 2026-09-18 №2 (актуальный runtime) — ночная волна
+## Деплой 2026-09-18 №2 (исторический снимок) — ночная волна
 
 - **Прод-код:** `e004ba3d` — R1 табло, F5 (ленивая выгрузка семантики),
   F2/F2b (спенд-кап харденинг), журналы. Поведение прода не меняется:
