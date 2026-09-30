@@ -3,8 +3,9 @@
 ## Scope и решение
 
 Карточка: подготовить проверяемую смену Python release, сохранив действующую
-конфигурацию и копии для отката. Текущий этап **source/preparation only**.
-Исполнение раздела «Переключение» требует отдельного разрешения владельца
+конфигурацию и копии для отката. Подготовка и разрешённое владельцем переключение
+завершены; фактическая приёмка 30.09 записана в конце документа.
+Повторное исполнение раздела «Переключение» требует отдельного разрешения владельца
 на downtime Backend и REST. Это не разрешение на encryption, purge,
 миграцию истории, перезапуск Swift, звонки или lifecycle соседей.
 
@@ -240,3 +241,54 @@ STT/TTS/stream-запросы. Backend idle gate не измеряет REST-за
   CI новой ветки инструментов — отдельный gate; не смешивать эти SHA.
 - Lifecycle, полный quiet-window, новое Sentry qualification, live-диктовка и
   MLX не выполнялись. Шифрование не включалось; прод-профиль не менялся.
+
+## Выполнение и read-only приёмка 30.09.2026 CEST
+
+- Владелец разрешил downtime Backend/REST для перехода `245aae2d` → `c3a1779f`.
+  Подготовка #2070 смержена: `af7f95e1ffd3e7b7127e472f320e27e58804116d`.
+  Exact-SHA post-merge [CI](https://github.com/Pavua/Krab-Ear/actions/runs/36634645170)
+  и [krab-ear-ci](https://github.com/Pavua/Krab-Ear/actions/runs/36634645367) success.
+  Reviewed helper/gate/runbook в локальном `1311cedc` совпали с merged tree.
+  Оба указанных выше workflow runtime target `c3a1779f` повторно проверены: success.
+- Независимый pre-execution review: GO при свежих full gates. Memory pressure=1,
+  `memory_pressure -Q` free58%, физически свободно ≈5.56GiB; swap ≈28.86GiB,
+  load38.51. Последовательная замена разрешена без ML/build/тестов.
+- Свежая сверка: старые loaded Backend67525/REST67608 указывают на `245aae2d`;
+  оба release clean/detached/locked, interpreter доступен. Swift88227 стартовал
+  28.09 01:14:09, соответствующий startup marker подтверждает passive Variant B.
+- Четыре idle-пробы: 02:19:13, 02:19:33, 02:19:53, 02:20:14; в каждой нет
+  записи/встречи и established REST-клиентов. Bundle `before` и финальная idle-проба
+  успешны. Старый backend остановлен первым, REST вторым; для каждого доказаны
+  отсутствие job/PID и доступность gui domain, после REST порт5005 свободен.
+- Повторный `verify before`, две атомарные файловые замены кандидатов0600,
+  `verify after`: PASS. Backend bootstrap успешен, новый PID **8854**, start
+  **02:21:38**; валидный IPC ping и loaded target проверены до REST bootstrap.
+  REST PID **9848**, start **02:22:07**, `/health` HTTP200/statusok, listener5005
+  принадлежит9848. Оба loaded entrypoint/PYTHONPATH соответствуют exact `c3a1779f`.
+- Повторные снимки через более60с: PID стабильны, `runs=1`, `never exited`,
+  IPC/REST доступны. Структурное сравнение plist подтвердило сохранение значений
+  interpreter, WorkingDirectory, logs и остальных полей; изменены только
+  entrypoint и PYTHONPATH. Резервные копии исходных plist сохранены побайтово.
+  Swift88227 не менялся.
+- Saved/runtime encryption OFF, encrypted0/plaintext23195, migratingfalse;
+  restore_pending=false, key_present=false; одна запись истории прочитана без
+  вывода содержимого. Старый ping13058 → новый ping/diagnostics13062.
+  Независимая сверка журнала: 23195 валидных JSON-строк, 13071 записи с текстом
+  минус9 tombstones =13062. Четыре дополнительные активные записи датированы
+  29.09 16:59:43/52 и17:55:27/34UTC, до cutover. Старый `_active_ids` не обновляется
+  при внешнем изменении журнала; reload пересчитал существующие записи.
+  Конкретный writer не установлен; это отдельное наблюдение, не изменение P1/P2.
+- Sentry MCP доступен и вернул пять unresolved issues; ответ не содержит
+  timestamps. Свежесть ingress и связь событий с новым runtime не доказаны.
+  Live-диктовка, MLX и encrypted-history E2E не выполнялись.
+- Независимая приёмка: **PASS для запуска и read-only smoke**. Предсуществующий
+  P2 startup-дефект: `service.py:501` → `llm_warmup_needed():395` →
+  `_get_runtime_setting():2060` обращается к `_settings_svc` до его создания
+  на строке556. Traceback зафиксирован 30.09 02:21:48 и в старом runtime
+  29.09 04:03:42; `service.py` между old/target SHA не менялся. Fail-closed
+  privacy=True пропускает LLM warmup; настройки/encryption не записываются.
+  Раннее чтение `llm_idle_keepalive_enabled` также получает default.
+  Порядок инициализации вынесен в отдельный follow-up, в cutover не исправлялся.
+- Откат не потребовался. Старый locked release `245aae2d` и приватный bundle
+  `/Users/pablito/.codex/ear-cutover-c3a1779f-20260929` сохранены.
+  Общий dirty checkout и его WIP не менялись.
