@@ -23,7 +23,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from backend.llm_rewriter import LLMRewriter, CircuitState
+from backend.llm_rewriter import LLMRewriter, CircuitState  # noqa: E402 — test path setup above
 
 
 def _make_rewriter(**kwargs) -> LLMRewriter:
@@ -427,6 +427,58 @@ class TestWarmupSyncWrapper(unittest.TestCase):
         rewriter.warmup = MagicMock(return_value=True)
 
         rewriter.warmup_sync()
+        rewriter.warmup.assert_called_once_with(timeout_sec=None)
+
+    def test_startup_retry_stops_when_privacy_is_enabled(self):
+        rewriter = _make_rewriter()
+        state = {"privacy_mode_enabled": False}
+        rewriter.warmup = MagicMock(return_value=False)
+
+        def enable_privacy(timeout):
+            state["privacy_mode_enabled"] = True
+            return False
+
+        with patch.object(rewriter._shutdown_event, "wait", side_effect=enable_privacy):
+            rewriter.warmup_sync(
+                retry_delays=[1],
+                should_continue=lambda: not state["privacy_mode_enabled"],
+            )
+
+        rewriter.warmup.assert_called_once_with(timeout_sec=None)
+
+    def test_startup_first_attempt_skips_when_disabled(self):
+        rewriter = _make_rewriter()
+        rewriter.warmup = MagicMock(return_value=True)
+
+        rewriter.warmup_sync(should_continue=lambda: False)
+
+        rewriter.warmup.assert_not_called()
+
+    def test_startup_retry_stops_when_settings_read_fails(self):
+        rewriter = _make_rewriter()
+        state = {"read_fails": False}
+
+        def getter(key, default):
+            if state["read_fails"]:
+                raise OSError("settings unavailable")
+            return {
+                "rewriter_warmup_on_startup": True,
+                "llm_rewrite_enabled": True,
+                "privacy_mode_enabled": False,
+            }.get(key, default)
+
+        rewriter.warmup = MagicMock(return_value=False)
+
+        def fail_next_read(timeout):
+            state["read_fails"] = True
+            return False
+
+        with patch.object(rewriter._shutdown_event, "wait", side_effect=fail_next_read):
+            rewriter.warmup_sync(
+                retry_delays=[1],
+                should_continue=lambda: getter("privacy_mode_enabled", False) is False,
+            )
+
         rewriter.warmup.assert_called_once_with(timeout_sec=None)
 
 
