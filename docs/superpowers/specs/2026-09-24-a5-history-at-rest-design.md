@@ -219,6 +219,264 @@ grant — защита от случайного plaintext-вывода дове
 передача в Notes/iMessage и остальные внешние каналы сохраняют существующие
 правила; их согласование относится к отдельной политике внешней передачи.
 
+### 7.1 Typed PolicySnapshot и UNKNOWN (обязательное уточнение A5.3 FINAL GO)
+
+Новый `PolicySnapshot` — типизированный: `KNOWN_OFF | KNOWN_ON | UNKNOWN`,
+отдельно privacy bool, fingerprint и reason. Bool ошибки НЕ кодирует состояние:
+`ON` означает только явно валидный `true`, а не «reader считает ON при сбое».
+`OFF` означает только явно валидный `false` при валидном snapshot. Всё остальное —
+`UNKNOWN`.
+
+UNKNOWN-триггеры (каждый ведёт к UNKNOWN, без исключений): отсутствующий файл
+`settings.json`; не-object или битый JSON; duplicate policy keys при разборе;
+нечитаемый или нерегулярный файл (не regular file); отсутствие любого из ключей
+privacy/encryption policy; значение не exact-bool (`True`/`False`, без
+truthy-интерпретации `1`/`"true"`/`None`); missing или invalid internal revision
+`_plaintext_export_policy_revision`. Ошибка или timeout захвата lock при чтении
+snapshot — тоже UNKNOWN, без cache fallback на прежний snapshot.
+
+UNKNOWN немедленно очищает grants/receipts, увеличивает локальный
+`policy_generation` и запрещает grant И validation с reason
+`plaintext_policy_unavailable`. Восстановление файла с прежними bytes НЕ
+возвращает старое согласие: старый capability остаётся отозванным, при валидном
+ON требуется новый sheet.
+
+A5.2 `read_history_encryption_flag` НЕ менять: он намеренно объединяет ON и
+ошибку в `True`, а missing без ENC1 — в `False`. Его bool никогда не трактовать
+как typed snapshot и не наследовать его fresh-profile OFF fallback внутри
+authorizer. Отсутствие флага никогда не означает OFF для authorizer.
+
+### 7.2 Explicit initialization только для достоверно нового профиля
+
+Startup/settings initialization ДО authorizer сохраняет явные bool-defaults
+только для достоверно нового профиля: `data_dir` создан этим startup с
+`exist_ok=False` и нет восстановленного/унаследованного состояния (ни copy, ни
+restore, ни backup-развёртка). Уже существующий missing/incomplete профиль новым
+НЕ объявляется — он остаётся UNKNOWN до validated repair.
+
+Legacy-файл с обоими валидными bool, но без revision — обычная startup migration
+под store lock (владение карточки A, не authorizer): сохранить те же flags,
+добавить internal revision, без выдачи grant. Legacy с missing/invalid flags
+остаётся UNKNOWN до обычного validated settings repair/save; export UI сообщает
+«Настройки требуют восстановления», никаких defaults из authorizer. Startup
+initializer берёт exclusive `StateStore._lock` заново; если caller держит shared,
+сначала полностью отпускает его, затем exclusive и повторное чтение/проверка.
+Запрещены SH→EX upgrade и сохранение прежнего snapshot после reacquire.
+
+### 7.3 Central commit, revision, lock ordering, fingerprint
+
+Новый internal `_plaintext_export_policy_revision = uuid4().hex` генерируется
+центральным settings commit при КАЖДОЙ поддержанной записи settings, даже с теми
+же значениями. Входное или backup-значение revision всегда игнорировать и
+заменять свежесгенерированным. Это durable версия против ON→OFF→ON между
+процессами, а не secret/capability — её персистентность в settings допустима.
+
+`StateStore.save_settings` и общий `_save_settings_unlocked` сохраняют
+существующие A5 write guards, затем пишут flags + новую revision одним atomic
+replace (temp + fsync + rename). Import/restore/reset/recovery, меняющие
+settings, обязаны идти через этот commit; callback не является единственным
+revoke-механизмом. Конкретный bypass: legacy
+`HistoryService.handle_restore_history:5456` делает `copy2(settings)` —
+settings-часть заменить на validated commit под тем же StateStore lock, без
+вкладывания `save_settings`/`history_flock` нового FD друг в друга
+(`state_store.py:253` прямо описывает нерентерабельность этих двух механизмов).
+Запрет encrypted snapshot restore settings (`encrypted_snapshot.py:3034`)
+сохранить.
+
+Snapshot читать на КАЖДОМ issue/validate/backend sink под `StateStore._lock`
+того же профиля. Затем брать authorizer lock; никогда наоборот. Для manager без
+store инъецировать callback этого store, а не новый независимый history_flock.
+Ошибка/timeout захвата → UNKNOWN + revoke, без cache fallback.
+
+`_read_plaintext_policy_snapshot_unlocked` требует удерживаемый store lock:
+open `O_RDONLY|O_NOFOLLOW|O_NONBLOCK`, fstat обязан показать regular file,
+читать максимум 16 MiB (превышение → UNKNOWN). fstat до/после чтения и финальный
+lstat должны совпасть по `dev/ino/size/mtime_ns/ctime_ns`; иначе UNKNOWN без
+retry по старому snapshot. SHA содержимого не логировать вместе с содержимым.
+
+Fingerprint = `(profile identity, st_dev, st_ino, st_size, st_mtime_ns,
+st_ctime_ns, SHA256(raw_bytes), internal_revision)`; JSON flags и revision
+разобрать ИЗ ЭТИХ bytes, а не читать hash/stat/flags разными cached путями. При
+любом fingerprint mismatch отозвать прежние grants ДО validation и обновить
+remembered snapshot/generation. При valid snapshot вернуть
+`plaintext_session_expired` для старого context; при UNKNOWN —
+`plaintext_policy_unavailable`. Даже same-bool atomic external replacement
+консервативно отзывает grant.
+
+Межпроцессная точка commit — atomic replace flags+revision под общим flock;
+validation сравнивает snapshot под этим flock. Процесс B не очищает RAM процесса
+A напрямую, но первая validation A гарантированно видит новую revision
+поддержанного commit и отказывает старому grant. Полная обнаруживаемость
+злонамеренного same-UID, восстанавливающего revision/metadata или обходящего
+locks, НЕ обещается. Raw recovery replacement вне commit ловится fingerprint;
+supported recovery обязана выдавать новую revision. Partial/failed restore при
+неконсистентном snapshot → UNKNOWN, не fallback OFF.
+
+### 7.4 Epoch, session, capability, потоки, privacy
+
+Backend epoch — случайные 32 bytes на новый `BackendService`/process;
+`app_session_id` — UUID на запуск Swift; capability — `secrets.token_urlsafe(32)`.
+Grants/receipts — только RAM, никогда в settings/UserDefaults/Keychain/logs/
+Sentry/backups/diagnostics/profile. Grant привязан к связке
+profile/service + app_session + epoch + generation + fingerprint snapshot, а не к
+единому флагу на весь backend (такой единый флаг запрещён). A5.2 mock/no-store
+OFF fallback сюда не копировать. Authorizer создаётся и подключается ДО
+scheduler/manager threads. Privacy `true` всегда deny, даже при KNOWN_OFF и даже
+при валидном grant; KNOWN_ON + privacy false требует grant. Normal Swift quit
+отзывает grant best-effort; backend shutdown очищает RAM; crash не гарантирует
+мгновенный отзыв украденного токена. Никакого global active-session для таймера:
+Quick Capture передаёт context своего Swift-процесса. Консервативный trade-off:
+любое settings save/replacement, даже unrelated key, может потребовать нового
+consent — это намеренное безопасное поведение A5.3.
+
+### 7.5 Карта обязательных sinks и проверенные границы
+
+Python (`KrabEar/backend/`): `history_service.py` — export_history:1449 (mkdir/
+write 1449–1452), selected:1830, `_finalize_srt_export`:1998, JSON:2166,
+CSV:2293 — auth до mkdir/temp/write, сохранить render-only варианты; Obsidian:4658
+(privacy gate 4383/4635, затем mkdir/write без capability — закрыть), HTML:5989 и
+alias `generate_html_report` (оба alias при `save_to_file` ведут к одному gate;
+render-only без file consent); batch_export:5623 + `_export_csv_to_dir`:5748
+(проверка до bundle mkdir и отдельная validation каждого файла; context
+прокинуть делегатам); `service.py` export_timeline_svg/json/ical:5566/5620/5669
+(в scope как производные истории; gate ДО `_resolve_timeline_export_dir`:5433 —
+он делает mkdir); `obsidian_sync.py` sync:319/361/398 (прямой sync без
+privacy/capability gate) и `handle_sync`:547 (только privacy) — инъекция общего
+authorizer, отсутствие authorizer = deny, `force` не меняет policy;
+`export_scheduler.py` check_and_export:413 → `_do_export`:164 (StateStore history
+→ temp/fsync/replace; таймер не получает чужой grant; ON запрещён до
+mkdir/pruning, включая direct `_do_export`); `sharing_manager.py`
+`_fetch_items`:609 (читает history) → `prepare_share`:215 →
+`_persist_package`:736/751 (локальный plaintext package — файловый sink; gate
+direct prepare/persist; grant не разрешает внешнюю публикацию).
+
+Swift (`native/KrabEarAgent/`): `HistoryPanelController+History.swift` .md:141,
+.ndjson:192 из `self.items` плюс дополнительная backend-копия:158 — две записи =
+две validation, отказ первой не запускает вторую; `+ExportSelection.swift:325`
+(export_selected_items → локальный файл; fresh preflight после NSSavePanel);
+`+ActionItems.swift:230/266` (get_history_page → Markdown action items; в scope,
+прочитанная история не consent); `+MeetingMode.swift:267` (get_meeting_report;
+`service.py:4895` — отчёт одной записи history; в scope; inject shared session
+coordinator также в standalone report VC); `+StatsReport.swift:98`
+(generate_stats_report → StatsReportGenerator читает active history,
+stats_report.py:734; в scope как history-derived отчёт);
+`AnalyticsDashboardViewController+PDFExport.swift:110` (generate_html_report с
+полными транскриптами → PDF в temporaryDirectory; в scope; fresh validation
+ПОСЛЕ renderer callback; temp тоже plaintext sink); `main+QuickCapture.swift:713`
+(текст заметки → `run_obsidian_sync(items)` с `force:true` без session context —
+явно включён владельцем; consent общий в рамках этого app-session).
+
+Проверенные границы (вне narrow scope, молча не расширять): `+CallAssist.swift:465`
+(payload из VG HTTP `call_assist_service.py:963`, не Ear history — кандидат
+отдельной внешней policy); `+Import.swift:594/642` (operational queue report:
+счётчики/источники/ошибки, не transcript export); glossary CSV
+`HistoryPanelController.swift:2532`, `+ConfigPresets.swift:627`, settings export,
+logger/plist writers — вне narrow history scope; `handle_export_history_markdown`:
+1560–1724 только render/optional pbcopy, файла не пишет, TranscriptWriter не
+вызывает — сохранить privacy gate, НЕ добавлять file consent для clipboard,
+ручной .md writer — `handle_export_history:1449`;
+`TranscriptWriter.write_transcript`:214–244 сам НЕ имеет policy gate
+(mkdir/reserve/atomic write напрямую) — сохраняются ON-block у автоматических
+recorder/import callers `recording_core_service.py:3615/3627` и `:3875/3883`
+через `_should_write_plaintext_md:4428`; сам shared writer не является
+существующим security boundary, новый manual route через него обязан передать
+authorizer context и проверить его до первой mutation, grant автоматические
+копии не разрешает. Карта ограничена перечисленными потоками; whole-diff gate
+обязан проверить новые/переименованные sinks, а не считать таблицу вечным
+allowlist.
+
+### 7.6 IPC, trust boundary, capability/receipt
+
+Имена зафиксировать одинаково в Python/Swift/reference:
+`get_plaintext_export_policy {}` → `{epoch, policy_generation,
+encryption_enabled, privacy_mode_enabled, allowed_without_grant}` (UNKNOWN —
+явный отказ, без токенов); `grant_plaintext_export_session {app_session_id,
+expected_epoch, expected_policy_generation}` → `{capability, epoch,
+policy_generation}` только после явного async sheet в доверенном Swift;
+`revoke_plaintext_export_session {app_session_id, epoch, capability}` →
+идемпотентный revoke этой сессии, не отзывает другие сессии по одному ID;
+`validate_plaintext_export {app_session_id, epoch, capability,
+expected_policy_generation, operation_seq, sink_kind}` → одноразовый локальный
+receipt для одной заранее выбранной Swift-записи. Существующие backend export IPC
+получают namespace `plaintext_export: {app_session_id, epoch, capability,
+expected_policy_generation}`; booleans `confirm`/`force`/`save_to_file` context
+не заменяют. Стабильные reasons: `plaintext_confirmation_required`,
+`plaintext_session_expired`, `plaintext_policy_unavailable`,
+`privacy_mode_active`. Ни один отказ не возвращает ложный успешный path/file.
+
+Проверенная trust boundary честна: `ipc_server.py:292/305` передаёт в service
+только payload, `_handle_connection:313` не удостоверяет Swift/peer identity;
+`ipc_constants.py:26` и chmod:204 устанавливают socket 0600; `service.py:3249`
+дополнительно поддерживает optional HMAC signing, его runtime-состояние не
+проверялось. Ни HMAC, ни handshake версии/capabilities (`IPCClient.swift:220`)
+не доказывают клик человека; client_id/app_session_id/строка «Swift» не являются
+Swift identity. Решение сейчас — trusted-client consent protocol, как явно
+заявляет §7. Backend НЕ отличит headless self-grant от Swift sheet: same-UID
+caller, удовлетворяющий существующей transport authentication (если включена),
+способен вызвать grant RPC — не скрывать это за random UUID/challenge/confirm
+boolean. Supported Swift вызывает grant только после sheet; supported
+CLI/scripts grant автоматически не запрашивают. Headless export без выданного
+context получает отказ. Это защита от accidental export, НЕ запрет всех
+программных self-grant. Отдельный peer-auth/bootstrap дизайн с усиленной
+гарантией в текущем approved narrow threat model отсутствует и не обещается;
+если он потребуется — нужен отдельный дизайн и решение владельца (будущий BLOCK,
+не часть A5.3).
+
+Session capability многоразовая, scope фиксирован перечисленными
+history-file/Obsidian sinks. Preflight receipt одноразовый и связан с
+tuple(session, epoch, generation, seq, sink_kind) плюс неизменной локальной
+closure(destination, content); как session grant или в другом sink его
+использовать нельзя. `operation_seq` монотонен и сериализован shared
+coordinator; backend хранит high-water в grant; повторный/меньший seq
+отклоняется. После неопределённого IPC-результата локальной записи нет. OFF
+тоже требует fresh validation для Swift (privacy/restart); отсутствие capability
+допустимо только при подтверждённом OFF. Operation tracking привязать к RAM
+app-session/epoch также в OFF. Не делать grant на get_history/read/show,
+reconnect, settings load или по старому `confirm=True`. Capability forge в
+export, replay epoch и receipt reuse запрещены; ручной self-grant malicious
+same-UID честно вне гарантии.
+
+### 7.7 Линеаризация, redaction, запреты модели
+
+Swift coordinator сначала при необходимости показывает sheet «открытые файлы,
+включая Quick Capture→Obsidian, до закрытия приложения/смены backend или
+policy»; cancel ничего не выдаёт. Полученный grant позволяет много операций в
+сессии, но НЕ заменяет свежую validation каждой записи. После NSSavePanel/рендера
+зафиксировать destination + immutable content + `sink_kind`; выполнить preflight;
+receipt потребляется ровно один раз в одной closure, не передаётся следующему
+writer. Revocation BEFORE validation: запись запрещена. Revocation AFTER успешной
+validation: разрешено закончить только эту одну запланированную запись, включая
+её atomic temp/rename. Задержка ответа IPC после серверной validation границу не
+меняет. Нет обещания атомарности IPC+локальный write или мгновенного отзыва уже
+проверенного write. Backend writer применяет тот же принцип на каждом файле:
+fresh authorization непосредственно перед первой связанной mutation; после неё
+можно закончить этот файл, следующий требует новую проверку. Batch/Obsidian N
+файлов = N validations; сначала deny до любого mkdir, затем повторные проверки
+по файлам. Отзыв посередине даёт явный partial result, не rollback уже
+разрешённых файлов. Backend Markdown + вторичная копия Swift UX — отдельные
+операции; после отзыва вторая запрещена даже если первая завершилась.
+Policy/epoch mismatch сбрасывает Swift grant; нет автоматического
+regrant/retry после нового epoch — требуется новый явный sheet.
+
+Bearer capability, operation receipt и app-session secret/ID запрещены в
+logs/diagnostics/profile/settings/backups. Internal policy_revision не secret и
+не bearer; его персистентность не исключение для grant. Точечная redaction
+wiring: `service.py:3233` handle_request (warning str(exc), exception traceback),
+`ipc_server.py:389` exception, `observability.py:182` `_sentry_before_send`;
+сохранить `include_local_variables=False:402`. Никогда payload/params в logs;
+auth errors — константные причины без repr token. Sanitizer обрабатывает
+вложенные auth-key values в log/error/event; не логирует исходные
+exception/request при сбое sanitizer. Не считать raw content в RAM нарушением
+file-export policy. Logging-redaction проверяется отдельно от файловых export
+gates.
+
+Не изобретать другую модель доверия, policy fallback или единый флаг-разрешение
+на весь backend. Не отменять независимое whole-diff review будущего кода. Не
+обещать peer-auth. Не переносить устный PASS на новый SHA. Цена решения: удобный
+session consent оставляет разрешённые plaintext-файлы на диске; revoke их не
+удаляет; crash-token theft/same-UID и отдельные каналы передачи остаются честно
+указанными границами.
+
 ## 8. Инвентарь и приёмка
 
 Инвентарь запускается отдельно на согласованных каталогах, без сканирования
