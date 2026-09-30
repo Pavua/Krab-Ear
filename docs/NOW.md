@@ -246,20 +246,15 @@ Source-проверки не доказывают CI другого SHA или �
 
 ## Следующая волна
 
-### A5.2b — следующий кусок (первый приоритет после приёмки A5.2a)
+### A5 — принятые изменения и следующая работа (сверено 30.09)
 
-- **A5.2a DONE (26.09, #2052, source-only).** Fail-closed гейты на всех plaintext
-  legacy-sinks (manual/auto backup+restore, archive, version, schema migration) при
-  `history_encryption_enabled=ON`, с re-check под общим `history.lock`. Прошёл
-  независимый adversarial-ревью: 2 CRITICAL (TOCTOU) и 1 MAJOR (ML под глобальным
-  lock) закрыты. Долг код-видим: `A5_2B_CALLER_SUCCESS_LOG_DEBT` (ложный startup
-  success-log, `service.py` был заморожен баном волны), ErrorBus-проводка
-  `data_dir_policy_reader(push_error=)`.
-- **A5.2b** — manifest/state machine для encrypted multi-file snapshot: recovery,
-  restore с union нынешних tombstones/purged IDs, rollback к plaintext запрещён.
-  Спека: `docs/superpowers/specs/2026-09-24-a5-history-at-rest-design.md`; порядок
-  работ и RED-кейсы — `docs/superpowers/handoffs/2026-09-25-a5-lifecycle-start.md`
-  (в колее с #2052). A5.2c — scoped inventory.
+- **Source `origin/codex/krab-ear-v2` @ `efecb801` сверён 30.09.** A5.2a DONE (#2052): fail-closed гейты plaintext legacy-sinks при `history_encryption_enabled=ON`, re-check под `history.lock`; adversarial-ревью A5.2a закрыло 2 CRITICAL (TOCTOU) и 1 MAJOR.
+- **A5.2b DONE в source:** b1 #2056/4971c24a (encrypted snapshot), b2 #2058/96554b75 (restore/recovery + union tombstones/purged), b3 #2060/7afa21da (diskguard+retention); далее integrity #2066/#2068/#2069 accepted.
+- **Runtime — исторический снапшот 1ebd12eb #2072 (17:47), encryption OFF:** активации и live encrypted E2E-доказательства нет; релиз уже отражён вверху NOW, blanket-GO не даётся.
+- **Scoped inventory 30.09:** ограниченная локальная инвентаризация завершена / review PASS; полное покрытие INCOMPLETE, содержимое UNKNOWN, сырой отчёт приватен и не публикуется.
+- **Долг код-видим:** `A5_2B_CALLER_SUCCESS_LOG_DEBT` активен (`service.py` логирует migration-complete при `MigrationResult.reason=history_encryption_operation_unavailable`); у PolicyReader callback `push_error` есть, но manager-вызовы его не пробрасывают — отдельным долгом, fixed не заявляется.
+- **Спека:** [A5 history-at-rest](superpowers/specs/2026-09-24-a5-history-at-rest-design.md); [handoff 25.09](superpowers/handoffs/2026-09-25-a5-lifecycle-start.md) — исторический порядок работ, A5.2b1–b3 уже приняты.
+- **Дальше:** сначала RED refusal-vs-success logging, затем A5.3 по spec §7 (RAM capability / backend epoch / revoke / policy по каждому sink, включая Obsidian/QuickCapture/Swift writers; отдельные mapping + implementation card + independent security review). Контракт в проверенных точках не реализован; без blanket activation/deletion/rotation/restarts.
 
 ### Инцидент Glovo 2026-09-26 — закрыт (whisper)
 
