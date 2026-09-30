@@ -1,20 +1,38 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## Подготовка cutover 2026-09-29 (после P1/P2)
+## Cutover 2026-09-30 — текущий runtime
 
-P1 #2068 и P2 #2069 смержены; удалённая линия = `c3a1779f`.
-Оба post-merge workflow этого exact SHA успешны. Runtime по свежей сверке
-остаётся `245aae2d` (Backend 67525, REST 67608), encryption OFF.
-`scripts/cutover_to_c3a1779f.command` и пара install-скриптов не приняты
-как готовая процедура переключения.
+**Backend и REST переведены на `c3a1779fcd7b64dbe3d69231479d911a85d5c321`**:
+Backend PID **8854** (02:21:38 CEST), REST PID **9848** (02:22:07 CEST).
+Swift PID 88227 не менялся. P1 #2068 и P2 #2069 теперь присутствуют в runtime.
+Подготовка процедуры смержена отдельно в [#2070](https://github.com/Pavua/Krab-Ear/pull/2070),
+`af7f95e1ffd3e7b7127e472f320e27e58804116d`; runtime pin остаётся `c3a1779f`.
+Оба post-merge workflow каждого из этих SHA завершились success.
 
-[Runbook подготовки/переключения/отката](superpowers/plans/2026-09-29-safe-release-cutover.md)
-сохраняет действующие plist и меняет только entrypoint/PYTHONPATH.
-Source/preparation review PASS; подготовка bundle и read-only idle-проба пройдены.
-**Cutover не выполнен**: требуется отдельное разрешение владельца и свежий
-preflight/quiet-window. Записи ниже — исторические снимки; очередь P1/P2 закрыта.
+По разрешению владельца выполнены 60-секундное окно тишины, финальный idle gate,
+последовательные bootout с доказанным исчезновением job/PID, замена двух plist
+и bootstrap Backend → IPC readiness → REST. Изменены только entrypoint/PYTHONPATH;
+interpreter, cwd, logs и остальные настройки сохранены. Старый release `245aae2d`
+и приватный bundle сохранены для восстановления по
+[runbook](superpowers/plans/2026-09-29-safe-release-cutover.md).
 
-## Приёмка 2026-09-29 (читать первой; ниже — исторические снимки)
+**Read-only smoke:** IPC ping / REST health 200, новые PID стабильны, история
+читается, restore_pending=false, key_present=false, saved/runtime encryption **OFF**.
+Счётчик активной истории 13 058 → 13 062: независимая сверка нашла четыре записи
+на диске, датированные до cutover; после reload обновился устаревший кэш старого
+процесса. Число физических строк 23 195 до/после одинаково, JSON валиден.
+Источник внешней записи не атрибутирован; live-диктовка/MLX/encrypted E2E не проверялись.
+Sentry MCP доступен, но сводка без timestamps не доказывает свежесть ingress.
+Независимая приёмка: **PASS для запуска и read-only smoke**, без оснований для
+rollback. В startup найден предсуществующий P2: ранний `_get_runtime_setting()`
+вызывается до создания `_settings_svc`, fail-closed privacy default пропускает
+LLM warmup. Такой traceback был и на `245aae2d`; настройки не изменяются.
+Отдельный follow-up — порядок инициализации SettingsService и early keepalive.
+
+Очередь P1/P2 закрыта. Шифрование не включать без отдельного решения владельца
+по открытым копиям и ротации токена. Записи ниже — исторические снимки.
+
+## Приёмка 2026-09-29 (исторический снимок)
 
 **Проверенная база линии и прод-код:** `codex/krab-ear-v2` =
 `245aae2d9a1cbe77b6675f8bb87783758e85a826` ([#2066](https://github.com/Pavua/Krab-Ear/pull/2066)).
