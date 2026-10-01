@@ -357,25 +357,6 @@ class SettingsService:
             _log.warning("_maybe_migrate: migration %s→%s failed: %s", schema_ver, CURRENT_SCHEMA_VERSION, exc)
             return settings
 
-    def _maybe_migrate_and_save(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Migrate settings to current schema and write-back to store if needed.
-
-        W1457: Calls store.save_settings(migrated) then invalidate_cache() after
-        schema write-back so cached_settings() always returns the migrated version.
-        Used when loading live settings from store (not from backup restore path).
-        """
-        schema_ver = settings.get("schema_version", "1.0")
-        if schema_ver == CURRENT_SCHEMA_VERSION:
-            return settings
-        migrated = self._maybe_migrate(settings)
-        if migrated is not settings:
-            try:
-                self.store.save_settings(migrated)
-                self.invalidate_cache()  # W1457: invalidate after schema write-back
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("_maybe_migrate_and_save: write-back failed: %s", exc)
-        return migrated
-
     # ------------------------------------------------------------------
     # IPC handlers
     # ------------------------------------------------------------------

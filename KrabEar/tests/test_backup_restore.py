@@ -25,7 +25,11 @@ def _make_service(data_dir: Path) -> HistoryService:
 class BackupHistoryTest(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
-        self.data_dir = Path(self._tmpdir.name)
+        # Профиль создаёт сам StateStore внутри _make_service: достоверно новый,
+        # поэтому первая поддержанная запись настроек разрешена. Раньше каталог
+        # существовал заранее, и любая запись падала бы с отказом по
+        # MISSING_SETTINGS — инварианты backup/restore от этого не меняются.
+        self.data_dir = Path(self._tmpdir.name) / "profile"
         self.svc = _make_service(self.data_dir)
 
     def tearDown(self):

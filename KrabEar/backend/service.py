@@ -70,7 +70,7 @@ from backend.vocabulary_store import VocabularyStore
 from backend.transcriber import Transcriber
 from backend.state_store import StateStore
 from backend.recorder import AudioRecorder
-from backend.models import DEFAULT_SETTINGS
+from backend.plaintext_export_authorization import PolicyState
 from backend.event_replay import EventReplayManager
 from backend.event_bus import bus as event_bus
 from backend.event_bridge import EventBridge
@@ -1845,14 +1845,33 @@ class BackendService:
         self._audit_logger = AuditLogger(data_dir=self.store.data_dir)
 
         # Авто-сид дефолтных STT hotwords при первом запуске (только если список пуст)
+        #
+        # A5.3 карточка A (slice 1): сид — это SUPPORTED WRITE через
+        # ``SettingsService.handle_set_settings`` → ``store.save_settings``, а он
+        # мержит ``DEFAULT_SETTINGS`` и минтит ревизию. На неполном/битом
+        # settings.json ``cached_settings()`` возвращает DEFAULT_SETTINGS, и сид
+        # без всякого действия пользователя записывал полный дефолтный набор —
+        # ровно тот UNKNOWN→KNOWN_OFF, который запрещает контракт п.4/п.8.
+        # Поэтому сид выполняется ТОЛЬКО на известном policy: неполный профиль
+        # остаётся UNKNOWN до validated repair. Стоимость: на таком профиле
+        # hotwords не заводятся автоматически (до repair — правильно).
         if settings.STT_AUTO_SEED_HOTWORDS:
             try:
-                from backend.default_hotwords import seed_hotwords as _seed_hotwords
-                _seeded_count = _seed_hotwords(self._settings_svc, only_if_empty=True)
-                if _seeded_count > 0:
-                    logger.info(
-                        "STT hotwords: авто-сид %d дефолтных брендов/терминов", _seeded_count
+                policy_snapshot = self.store.read_plaintext_policy_snapshot()
+                if policy_snapshot.state is PolicyState.UNKNOWN:
+                    logger.warning(
+                        "STT hotwords: авто-сид пропущен, policy=%s "
+                        "(settings требуют validated repair)",
+                        policy_snapshot.reason,
                     )
+                else:
+                    from backend.default_hotwords import seed_hotwords as _seed_hotwords
+                    _seeded_count = _seed_hotwords(self._settings_svc, only_if_empty=True)
+                    if _seeded_count > 0:
+                        logger.info(
+                            "STT hotwords: авто-сид %d дефолтных брендов/терминов",
+                            _seeded_count,
+                        )
             except Exception:
                 logger.exception("STT hotwords: ошибка авто-сида")
 
@@ -6123,11 +6142,41 @@ def build_service(
     *,
     socket_path: Path | None = None,
     socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
+    profile_created_by_this_startup: bool | None = None,
 ) -> BackendService:
-    """Фабрика backend-сервиса с запуском проверок на старте."""
+    """Фабрика backend-сервиса с запуском проверок на старте.
+
+    A5.3 карточка A (slice 1): прежняя безусловная запись
+    ``store.save_settings(store.load_settings() or dict(DEFAULT_SETTINGS))``
+    выполнялась на КАЖДЫЙ старт и минтила ревизию центрального commit. Так
+    legacy-профиль без ревизии и любой неполный/битый профиль (load_settings()
+    возвращает DEFAULT_SETTINGS) САМИ СЕБЕ становились KNOWN_OFF без действия
+    пользователя — прямое нарушение контракта п.4/п.8 (UNKNOWN обязан запрещать
+    grant/validation до validated repair).
+
+    Теперь стартовая инициализация решает явно и только для достоверно нового
+    профиля (``profile_created_by_this_startup`` — ``data_dir`` создан этим
+    startup c ``exist_ok=False`` и settings.json не было). Легаси с обоими
+    валидными bool мигрирует (те же флаги + новая ревизия, без grant);
+    неполный/битый остаётся UNKNOWN до validated repair.
+
+    ``None`` означает «определить автоматически»: каталога до старта не было.
+    Явный флаг нужен ``main()``, где ``configure_logging`` уже создал каталог.
+    """
+    data_dir = Path(data_dir)
+    if profile_created_by_this_startup is None:
+        profile_created_by_this_startup = not data_dir.exists()
     store = StateStore(data_dir=data_dir)
-    # Гарантируем наличие полного набора дефолтных настроек.
-    store.save_settings(store.load_settings() or dict(DEFAULT_SETTINGS))
+    # Гарантируем наличие полного набора дефолтных настроек — но только там,
+    # где это доказанно новый профиль, иначе legacy/битый профиль не отмывается.
+    startup_policy_outcome = store.initialize_startup_plaintext_policy(
+        new_profile=profile_created_by_this_startup,
+    )
+    logger.info(
+        "build_service: startup policy=%s (new_profile=%s)",
+        startup_policy_outcome,
+        profile_created_by_this_startup,
+    )
     store.maybe_compact()
     return BackendService(
         store=store,
@@ -6218,6 +6267,12 @@ def main() -> None:
         else default_socket_path(data_dir)
     )
 
+    # A5.3 карточка A: «достоверно новый профиль» фиксируется ДО configure_logging
+    # (он сам делает data_dir.mkdir(exist_ok=True)), иначе факт создания каталога
+    # этим startup потерялся бы и первый запуск существующего каталога выглядел
+    # бы как инициализация нового профиля.
+    profile_created_by_this_startup = not data_dir.exists()
+
     configure_logging(data_dir)
 
     # Спека 2026-08-22 socket-ownership: claim захватывается ДО любых тяжёлых
@@ -6299,6 +6354,7 @@ def main() -> None:
             data_dir,
             socket_path=socket_path,
             socket_ownership_snapshot_getter=ownership.snapshot,
+            profile_created_by_this_startup=profile_created_by_this_startup,
         )
         server = IPCServer(socket_path=socket_path, service=service, ownership=ownership)
 

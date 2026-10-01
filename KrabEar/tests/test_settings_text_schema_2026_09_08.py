@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 
 from backend.settings_backup import SettingsBackup
 from backend.settings_service import SettingsService
 from backend.settings_validator import SettingsValidator
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
 from backend.state_store import StateStore
 from core.config import DEFAULT_SETTINGS
 
@@ -113,7 +115,17 @@ def test_bad_backup_restore_preserves_existing_settings(local_settings, key, cap
     backup_id = service._backup.create_backup(corrupt, reason='invalid_type_test')
     with pytest.raises(ValueError) as error:
         service.handle_restore_settings_backup({'backup_id': backup_id})
-    assert json.loads(store.settings_path.read_text()) == before
+    after = json.loads(store.settings_path.read_text())
+    # A5.3 (спека §7.3 / контракт п.9): центральный settings commit генерирует
+    # НОВУЮ `_plaintext_export_policy_revision` на КАЖДОЙ поддержанной записи, даже
+    # при тех же значениях флагов. Отклонённый restore откатывается через
+    # `save_settings(old_settings)` — это поддержанная запись, поэтому ревизия
+    # обязана смениться. Семантических настроек это НЕ меняет, поэтому сравниваем
+    # все ключи, кроме internal-ревизии, и отдельно проверяем её корректность.
+    assert {k: v for k, v in after.items() if k != POLICY_REVISION_KEY} == {
+        k: v for k, v in before.items() if k != POLICY_REVISION_KEY
+    }
+    assert uuid.UUID(hex=after[POLICY_REVISION_KEY]).version == 4
     assert service.cached_settings()[key] == 'existing-value'
     assert SENTINEL not in str(error.value) and SENTINEL not in caplog.text
 
