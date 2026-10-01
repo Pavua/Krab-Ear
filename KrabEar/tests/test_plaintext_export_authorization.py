@@ -24,10 +24,15 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
+import multiprocessing
 import os
+import subprocess
+import sys
 import tempfile
 import threading
+import time
 import types
 import unittest
 import uuid
@@ -1477,6 +1482,1357 @@ class TestCreatedDataDirGatesMissingSettingsWrites(_ForeignSupportedWriteFixture
         self.assertIs(snapshot.privacy_mode_enabled, True, snapshot)
         self.assertEqual(uuid.UUID(hex=snapshot.internal_revision).version, 4)
         self.assertTrue(self.on_disk()["wake_word_enabled"])
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Slice 2 (карточка A): PlaintextExportAuthorizer — issue/validate/revoke.
+#
+# Контракт: A53_STRONG_MODEL_HANDOFF.md п.1,2,4,5,5a,5b,5c,12,15,16,18,19
+# (п.4 — trust boundary, честный тест) + §7.4/§7.6 спеки.
+# Только Python API (IPC — slice 4), только RAM, без sinks/redaction/Swift.
+# Поведенческие тесты: без AST/source-inspection, без реальной истории/ENC1,
+# без sleep (только Barrier/Event/wait с таймаутом). multiprocessing — только
+# в 5a/5b/5c (+ subprocess-проба лёгкости импорта, это не multiprocessing).
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+def _authorizer_module():
+    """Ленивый импорт модуля authorizer (slice 2).
+
+    Пока класса нет (RED), падают только slice-2 тесты, а не весь файл.
+    """
+    from backend import plaintext_export_authorization as module
+
+    return module
+
+
+def _child_preamble():
+    """Гигиена spawn-детей 5a/5b/5c: лёгкая цепочка импорта без service/torch/mlx.
+
+    Вызывается ПЕРВОЙ строкой каждого worker'а. Падение здесь означает, что
+    ``backend.state_store``/``backend.plaintext_export_authorization`` потянули
+    тяжёлые зависимости — чинить код, а не тест.
+    """
+    import sys
+
+    for name in sys.modules:
+        if name == "backend.service" or name.startswith("backend.service."):
+            raise AssertionError("child импортировал backend.service: %s" % name)
+    heavy = [
+        name
+        for name in sys.modules
+        if name.split(".")[0] in ("torch", "mlx", "mlx_whisper")
+    ]
+    assert not heavy, "child потянул тяжёлые ML-зависимости: %r" % (heavy,)
+
+
+class _AuthorizerFixture(_PolicySnapshotFixture):
+    """Временный профиль + authorizer без IPC/BackendService."""
+
+    SESSION_A = "11111111-1111-4111-8111-111111111111"
+    SESSION_B = "22222222-2222-4222-8222-222222222222"
+    SINK_MD = "history-md"
+
+    def authorizer_module(self):
+        return _authorizer_module()
+
+    def make_authorizer(self, **overrides):
+        module = self.authorizer_module()
+        kwargs = {
+            "read_snapshot": self.store.read_plaintext_policy_snapshot,
+            "profile_identity": str(self.data_dir),
+        }
+        kwargs.update(overrides)
+        return module.PlaintextExportAuthorizer(**kwargs)
+
+    def seed_on(self, *, privacy=False, revision=VALID_REVISION):
+        self.seed_known_profile(encryption=True, privacy=privacy, revision=revision)
+
+    def seed_off(self, *, privacy=False, revision=VALID_REVISION):
+        self.seed_known_profile(encryption=False, privacy=privacy, revision=revision)
+
+    def save_flags(self, *, encryption, privacy=False):
+        return self.store.save_settings(
+            {ENCRYPTION_KEY: encryption, PRIVACY_KEY: privacy}
+        )
+
+    def issue_on(self, authorizer=None, session=None):
+        """Сидит ON, выдаёт grant, проверяет базовый успех. Возвращает (az, grant)."""
+        self.seed_on()
+        authorizer = authorizer if authorizer is not None else self.make_authorizer()
+        grant = authorizer.issue_grant(session or self.SESSION_A)
+        self.assertTrue(grant.ok, grant)
+        self.assertIsNone(grant.reason, grant)
+        self.assertTrue(grant.capability, grant)
+        self.assertIsInstance(grant.capability, str)
+        return authorizer, grant
+
+
+class TestGrantLifecycle(_AuthorizerFixture):
+    """§7.4/§7.6: grant lifecycle — issue/validate/revoke, seq, receipt."""
+
+    def test_issue_at_known_on_returns_capability_epoch_generation(self):
+        authorizer, grant = self.issue_on()
+        self.assertEqual(grant.epoch, authorizer.epoch)
+        self.assertIsInstance(authorizer.epoch, bytes)
+        self.assertEqual(len(authorizer.epoch), 32)
+        self.assertEqual(grant.policy_generation, authorizer.policy_generation)
+        self.assertIsInstance(authorizer.policy_generation, int)
+        self.assertEqual(authorizer.active_grant_count, 1)
+
+    def test_default_epoch_is_32_random_bytes(self):
+        first = self.make_authorizer()
+        second = self.make_authorizer()
+        for authorizer in (first, second):
+            self.assertIsInstance(authorizer.epoch, bytes)
+            self.assertEqual(len(authorizer.epoch), 32)
+        self.assertNotEqual(first.epoch, second.epoch)
+
+    def test_explicit_epoch_is_used_verbatim(self):
+        epoch = b"\x01" * 32
+        authorizer = self.make_authorizer(epoch=epoch)
+        self.assertEqual(authorizer.epoch, epoch)
+
+    def test_validate_correct_tuple_returns_single_use_receipt(self):
+        authorizer, grant = self.issue_on()
+        validated = authorizer.validate(
+            self.SESSION_A,
+            authorizer.epoch,
+            grant.capability,
+            grant.policy_generation,
+            1,
+            self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+        self.assertIsNone(validated.reason, validated)
+        self.assertTrue(validated.receipt, validated)
+        self.assertEqual(authorizer.active_receipt_count, 1)
+
+    def test_validate_same_seq_replay_is_denied(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        first = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(first.ok, first)
+        replay = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(replay.ok, replay)
+        self.assertEqual(replay.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+        self.assertIsNone(replay.receipt, replay)
+
+    def test_validate_smaller_seq_is_denied(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        second = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 2, self.SINK_MD,
+        )
+        self.assertTrue(second.ok, second)
+        smaller = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(smaller.ok, smaller)
+        self.assertEqual(smaller.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+
+    def test_operation_seq_grows_monotonically(self):
+        authorizer, grant = self.issue_on()
+        for seq in (1, 2, 3):
+            validated = authorizer.validate(
+                self.SESSION_A, authorizer.epoch, grant.capability,
+                grant.policy_generation, seq, self.SINK_MD,
+            )
+            self.assertTrue(validated.ok, (seq, validated))
+
+    def test_receipt_replay_is_denied(self):
+        authorizer, grant = self.issue_on()
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+        self.assertTrue(authorizer.consume_receipt(validated.receipt))
+        self.assertFalse(authorizer.consume_receipt(validated.receipt))
+        self.assertFalse(authorizer.consume_receipt("forged-receipt"))
+        self.assertEqual(authorizer.active_receipt_count, 0)
+
+    def test_revoke_then_validate_is_denied_and_revoke_is_idempotent(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        self.assertTrue(
+            authorizer.revoke(self.SESSION_A, authorizer.epoch, grant.capability)
+        )
+        self.assertEqual(authorizer.active_grant_count, 0)
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+        # Идемпотентность: повторный revoke той же capability — успех, не ошибка.
+        self.assertTrue(
+            authorizer.revoke(self.SESSION_A, authorizer.epoch, grant.capability)
+        )
+        # Неизвестная capability — тоже успех-идемпотент, не ошибка.
+        self.assertTrue(authorizer.revoke(self.SESSION_A, authorizer.epoch, "nope"))
+
+    def test_revoke_one_session_leaves_other_untouched(self):
+        authorizer, grant_a = self.issue_on(session=self.SESSION_A)
+        grant_b = authorizer.issue_grant(self.SESSION_B)
+        self.assertTrue(grant_b.ok, grant_b)
+        self.assertNotEqual(grant_a.capability, grant_b.capability)
+        self.assertTrue(
+            authorizer.revoke(self.SESSION_A, authorizer.epoch, grant_a.capability)
+        )
+        self.assertEqual(authorizer.active_grant_count, 1)
+        validated_b = authorizer.validate(
+            self.SESSION_B, authorizer.epoch, grant_b.capability,
+            grant_b.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated_b.ok, validated_b)
+        validated_a = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant_a.capability,
+            grant_a.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated_a.ok, validated_a)
+
+    def test_validate_wrong_session_is_denied(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on(session=self.SESSION_A)
+        validated = authorizer.validate(
+            self.SESSION_B, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+
+    def test_validate_unknown_capability_is_denied(self):
+        module = self.authorizer_module()
+        self.seed_on()
+        authorizer = self.make_authorizer()
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, "forged-capability",
+            authorizer.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+        self.assertIsNone(validated.receipt, validated)
+
+
+class TestGenerationRevocation(_AuthorizerFixture):
+    """Контракт п.5/9/10/15/16: revision rotate отзывает прежние grants."""
+
+    def test_supported_save_rotates_revision_and_expires_old_grant(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        generation_then = grant.policy_generation
+        self.save_flags(encryption=True)
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            generation_then, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+        self.assertEqual(authorizer.active_grant_count, 0)
+        self.assertEqual(authorizer.policy_generation, generation_then + 1)
+
+    def test_on_off_on_without_export_revokes_old_grant(self):
+        """ON→OFF→ON без export между переходами: старый grant отозван (п.16)."""
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        generation_then = grant.policy_generation
+        self.save_flags(encryption=False)
+        self.save_flags(encryption=True)
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            generation_then, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+        # Ровно один bump на детект, а не по числу переходов.
+        self.assertEqual(authorizer.policy_generation, generation_then + 1)
+
+    def test_new_grant_after_rotate_validates(self):
+        """Новый sheet после rotate работает: generation продвинулась, consent свежий."""
+        authorizer, grant = self.issue_on()
+        self.save_flags(encryption=True)
+        stale = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(stale.ok, stale)
+        fresh = authorizer.issue_grant(self.SESSION_B)
+        self.assertTrue(fresh.ok, fresh)
+        self.assertGreater(fresh.policy_generation, grant.policy_generation)
+        validated = authorizer.validate(
+            self.SESSION_B, authorizer.epoch, fresh.capability,
+            fresh.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+
+
+class TestUnknownRevocation(_AuthorizerFixture):
+    """Контракт п.4/5 (RED 6): UNKNOWN чистит grants, возврата старого нет."""
+
+    def test_delete_settings_after_issue_gives_unavailable_and_stays_revoked(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        settings_path = self.data_dir / "settings.json"
+        raw = settings_path.read_bytes()
+        settings_path.unlink()
+        try:
+            validated = authorizer.validate(
+                self.SESSION_A, authorizer.epoch, grant.capability,
+                grant.policy_generation, 1, self.SINK_MD,
+            )
+            self.assertFalse(validated.ok, validated)
+            self.assertEqual(
+                validated.reason, module.REASON_PLAINTEXT_POLICY_UNAVAILABLE
+            )
+            self.assertEqual(authorizer.active_grant_count, 0)
+            # Повторный validate не «воскрешает» grant: снова отказ, не успех.
+            again = authorizer.validate(
+                self.SESSION_A, authorizer.epoch, grant.capability,
+                grant.policy_generation, 1, self.SINK_MD,
+            )
+            self.assertFalse(again.ok, again)
+            self.assertEqual(
+                again.reason, module.REASON_PLAINTEXT_POLICY_UNAVAILABLE
+            )
+        finally:
+            settings_path.write_bytes(raw)
+
+    def test_restore_same_bytes_old_grant_still_denied(self):
+        """Возврат прежних байтов НЕ возвращает старое согласие (п.5)."""
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        settings_path = self.data_dir / "settings.json"
+        raw = settings_path.read_bytes()
+        settings_path.unlink()
+        dropped = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(dropped.ok, dropped)
+        settings_path.write_bytes(raw)
+        snapshot = self.store.read_plaintext_policy_snapshot()
+        self.assertIs(snapshot.state, module.PolicyState.KNOWN_ON, snapshot)
+        revived = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(revived.ok, revived)
+        self.assertEqual(revived.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+
+
+class TestPrivacyGates(_AuthorizerFixture):
+    """Контракт п.18: privacy true всегда deny, даже при KNOWN_OFF."""
+
+    def test_issue_at_known_on_with_privacy_true_is_denied(self):
+        module = self.authorizer_module()
+        self.seed_on(privacy=True)
+        authorizer = self.make_authorizer()
+        grant = authorizer.issue_grant(self.SESSION_A)
+        self.assertFalse(grant.ok, grant)
+        self.assertEqual(grant.reason, module.REASON_PRIVACY_MODE_ACTIVE)
+        self.assertIsNone(grant.capability, grant)
+        self.assertEqual(authorizer.active_grant_count, 0)
+
+    def test_privacy_flip_after_issue_denies_with_privacy_reason(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        self.save_flags(encryption=True, privacy=True)
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PRIVACY_MODE_ACTIVE)
+
+    def test_issue_at_known_off_is_denied_without_grant(self):
+        """KNOWN_OFF: grant не выдаётся (не нужен); путь — capabilityless validation."""
+        module = self.authorizer_module()
+        self.seed_off()
+        authorizer = self.make_authorizer()
+        grant = authorizer.issue_grant(self.SESSION_A)
+        self.assertFalse(grant.ok, grant)
+        self.assertEqual(
+            grant.reason, module.REASON_PLAINTEXT_CONFIRMATION_REQUIRED
+        )
+        self.assertIsNone(grant.capability, grant)
+        self.assertEqual(authorizer.active_grant_count, 0)
+
+    def test_validate_without_capability_at_confirmed_off_is_allowed(self):
+        """Подтверждённый OFF не требует capability (§7.6), но требует fresh validation."""
+        authorizer = self.make_authorizer()
+        self.seed_off()
+        generation = authorizer.policy_generation
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, None, generation, 1, self.SINK_MD
+        )
+        self.assertTrue(validated.ok, validated)
+        self.assertTrue(validated.receipt, validated)
+        self.assertTrue(authorizer.consume_receipt(validated.receipt))
+        self.assertFalse(authorizer.consume_receipt(validated.receipt))
+        # Повтор seq и меньший seq — отказ и на OFF-пути.
+        module = self.authorizer_module()
+        replay = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, None, generation, 1, self.SINK_MD
+        )
+        self.assertFalse(replay.ok, replay)
+        self.assertEqual(replay.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+
+    def test_validate_without_capability_at_on_is_denied(self):
+        module = self.authorizer_module()
+        self.seed_on()
+        authorizer = self.make_authorizer()
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, None,
+            authorizer.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(
+            validated.reason, module.REASON_PLAINTEXT_CONFIRMATION_REQUIRED
+        )
+
+    def test_privacy_true_at_off_denies_capabilityless_validate(self):
+        module = self.authorizer_module()
+        self.seed_off(privacy=True)
+        authorizer = self.make_authorizer()
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, None,
+            authorizer.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PRIVACY_MODE_ACTIVE)
+        grant = authorizer.issue_grant(self.SESSION_A)
+        self.assertFalse(grant.ok, grant)
+        self.assertEqual(grant.reason, module.REASON_PRIVACY_MODE_ACTIVE)
+
+
+class TestEpochAndCrashSemantics(_AuthorizerFixture):
+    """Контракт п.1/19 (RED 4): epoch на процесс, replay запрещён."""
+
+    def test_two_authorizers_have_different_epochs(self):
+        first = self.make_authorizer()
+        second = self.make_authorizer()
+        self.assertNotEqual(first.epoch, second.epoch)
+
+    def test_grant_of_one_authorizer_is_rejected_by_other(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        other = self.make_authorizer()
+        self.assertNotEqual(other.epoch, authorizer.epoch)
+        # Чужой epoch (replay epoch запрещён) — отказ.
+        replayed = other.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(replayed.ok, replayed)
+        self.assertEqual(replayed.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+        # Свой epoch, но чужая capability — тоже отказ.
+        forged = other.validate(
+            self.SESSION_A, other.epoch, grant.capability,
+            other.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(forged.ok, forged)
+
+    def test_new_session_id_rejects_old_token(self):
+        """Simulated crash: новый app_session_id не принимает старый token."""
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on(session=self.SESSION_A)
+        validated = authorizer.validate(
+            self.SESSION_B, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(validated.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+
+
+class TestTrustBoundaryIsHonest(_AuthorizerFixture):
+    """Контракт п.4: честная граница — Python API НЕ различает sheet и self-grant."""
+
+    def test_same_uid_caller_can_issue_grant_directly(self):
+        """Документирует границу, а НЕ утверждает «headless impersonation denied».
+
+        Прямой вызов ``issue_grant`` из этого же процесса (тот же UID, тот же
+        Python API, которым пользуется BackendService) технически выдаёт grant:
+        backend НЕ отличит headless self-grant от Swift sheet (§7.6). Это защита
+        от accidental export (supported Swift зовёт grant только после sheet,
+        supported scripts grant автоматически не запрашивают — проверено поиском
+        по коду и зафиксировано в отчёте, а не AST-тестом), НЕ запрет всех
+        программных self-grant. Усиленная peer-auth гарантия — отдельный дизайн
+        (BLOCK в контракте), не часть A5.3.
+        """
+        authorizer, grant = self.issue_on()
+        self.assertTrue(grant.ok, grant)
+        self.assertTrue(grant.capability, grant)
+
+
+class TestLockOrdering(_AuthorizerFixture):
+    """Контракт п.12: snapshot — ДО authorizer lock; contention → UNKNOWN, не hang."""
+
+    def test_validate_under_contended_store_lock_with_nowait_gives_unknown_bounded(self):
+        """Детерминированно через Event'ы, без sleep: holder держит EX store-lock,
+        authorizer читает с nowait → UNKNOWN/provider-error → policy_unavailable."""
+        module = self.authorizer_module()
+        self.seed_on()
+        authorizer = self.make_authorizer(
+            read_snapshot=functools.partial(
+                self.store.read_plaintext_policy_snapshot, nowait=True
+            )
+        )
+        grant = authorizer.issue_grant(self.SESSION_A)
+        self.assertTrue(grant.ok, grant)
+        holding = threading.Event()
+        release = threading.Event()
+        holder_state: dict = {}
+
+        def holder():
+            try:
+                with self.store._lock():
+                    holding.set()
+                    release.wait(timeout=15.0)
+            except BaseException as exc:  # noqa: BLE001 — диагноз в тест
+                holder_state["error"] = exc
+
+        thread = threading.Thread(target=holder, daemon=True)
+        thread.start()
+        try:
+            self.assertTrue(holding.wait(timeout=15.0), "holder не взял store lock")
+            validated = authorizer.validate(
+                self.SESSION_A, authorizer.epoch, grant.capability,
+                grant.policy_generation, 1, self.SINK_MD,
+            )
+        finally:
+            release.set()
+            thread.join(timeout=15.0)
+        self.assertNotIn("error", holder_state, holder_state)
+        self.assertFalse(thread.is_alive(), "store-lock holder завис")
+        self.assertFalse(validated.ok, validated)
+        self.assertEqual(
+            validated.reason, module.REASON_PLAINTEXT_POLICY_UNAVAILABLE
+        )
+        self.assertEqual(authorizer.active_grant_count, 0)
+
+
+class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
+    """Wiring slice 2: создание в __init__ (БЕЗ IPC), новый epoch на сервис."""
+
+    def _build(self, name):
+        from backend.service import build_service
+
+        target = Path(self._tmp.name) / name
+        service = build_service(target)
+        self.addCleanup(service.close)
+        return service
+
+    def test_two_fresh_backend_services_have_different_epochs(self):
+        module = self.authorizer_module()
+        first = self._build("svc-epoch-a")
+        second = self._build("svc-epoch-b")
+        for service in (first, second):
+            authorizer = service._plaintext_export_authorizer
+            self.assertIsInstance(authorizer, module.PlaintextExportAuthorizer)
+            self.assertIsInstance(authorizer.epoch, bytes)
+            self.assertEqual(len(authorizer.epoch), 32)
+            self.assertEqual(
+                authorizer.profile_identity, str(service.store.data_dir)
+            )
+        self.assertNotEqual(
+            first._plaintext_export_authorizer.epoch,
+            second._plaintext_export_authorizer.epoch,
+        )
+
+    def test_constructor_does_no_policy_io_on_known_profile(self):
+        """Конструктор не делает policy-I/O сверх существующего: байты settings
+        известного профиля не меняются (авто-сид пропускается — hotwords уже есть)."""
+        from backend.service import build_service
+
+        payload = _profile(False, False, VALID_REVISION)
+        payload["stt_hotwords"] = ["seeded"]
+        self.write_settings(payload)
+        before = (self.data_dir / "settings.json").read_bytes()
+        service = build_service(self.data_dir)
+        self.addCleanup(service.close)
+        self.assertEqual((self.data_dir / "settings.json").read_bytes(), before)
+        snapshot = self.store.read_plaintext_policy_snapshot()
+        self.assertIs(snapshot.state, module_state_off())
+
+    def test_read_history_show_settings_status_create_no_grants(self):
+        """Read/show/settings-status НЕ создают grants и НЕ мешают живому grant."""
+        from backend.service import build_service
+
+        self.seed_on()
+        service = build_service(self.data_dir)
+        self.addCleanup(service.close)
+        authorizer = service._plaintext_export_authorizer
+        grant = authorizer.issue_grant(self.SESSION_A)
+        self.assertTrue(grant.ok, grant)
+        responses = [
+            service.handle_request(
+                {"id": 1, "method": "get_history_page", "params": {"limit": 5}}
+            ),
+            service.handle_request({"id": 2, "method": "get_settings", "params": {}}),
+            service.handle_request(
+                {"id": 3, "method": "get_diagnostics", "params": {}}
+            ),
+        ]
+        for response in responses:
+            self.assertIsInstance(response, dict, response)
+        self.assertEqual(authorizer.active_grant_count, 1)
+        self.assertEqual(authorizer.active_receipt_count, 0)
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+
+
+def module_state_off():
+    """Ленивый доступ к PolicyState.KNOWN_OFF (модуль slice 2/типизация)."""
+    return _authorizer_module().PolicyState.KNOWN_OFF
+
+
+class TestAuthorizerSerializationHygiene(_AuthorizerFixture):
+    """Контракт п.15b (authorizer-сторона): capability/receipt/session — только RAM."""
+
+    def test_settings_and_profile_contain_only_internal_revision(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+        self.assertTrue(authorizer.consume_receipt(validated.receipt))
+        settings_text = (self.data_dir / "settings.json").read_text(encoding="utf-8")
+        parsed = json.loads(settings_text)
+        for secret in (grant.capability, validated.receipt, self.SESSION_A):
+            self.assertNotIn(secret, settings_text)
+            self.assertNotIn(secret, json.dumps(parsed))
+        # Персистентна только internal revision — НЕ secret/capability.
+        self.assertIn(module.POLICY_REVISION_KEY, parsed)
+        for name in os.listdir(self.data_dir):
+            self.assertNotIn(self.SESSION_A, name)
+        # repr'ы и сериализации НЕ содержат capability/secret.
+        for obj in (
+            authorizer,
+            grant,
+            validated,
+            repr(authorizer),
+            repr(grant),
+            repr(validated),
+        ):
+            self.assertNotIn(grant.capability, repr(obj))
+            self.assertNotIn(validated.receipt, repr(obj))
+
+
+# ── Cross-process fixtures 5a/5b/5c (multiprocessing spawn, без sleep) ──
+
+
+def _worker_5a_granter(data_dir_s, ready_evt, done_evt, result_q):
+    """5a/A: явная инициализация профиля, ON, issue; validation после B."""
+    from pathlib import Path
+
+    _child_preamble()
+    from backend.state_store import StateStore
+    from backend import plaintext_export_authorization as AZ
+
+    try:
+        data_dir = Path(data_dir_s)
+        store = StateStore(data_dir)
+        outcome = store.initialize_startup_plaintext_policy(new_profile=True)
+        authorizer = AZ.PlaintextExportAuthorizer(
+            read_snapshot=store.read_plaintext_policy_snapshot,
+            profile_identity=str(data_dir),
+        )
+        store.save_settings(
+            {"history_encryption_enabled": True, "privacy_mode_enabled": False}
+        )
+        snapshot = store.read_plaintext_policy_snapshot()
+        if snapshot.state is not AZ.PolicyState.KNOWN_ON:
+            result_q.put({"error": "not_on_after_save"})
+            return
+        grant = authorizer.issue_grant("5a-session")
+        if not grant.ok:
+            result_q.put({"error": "issue_failed"})
+            return
+        generation_then = grant.policy_generation
+        before = sorted(path.name for path in data_dir.iterdir())
+        ready_evt.set()
+        if not done_evt.wait(timeout=30.0):
+            result_q.put({"error": "b_timeout"})
+            return
+        validated = authorizer.validate(
+            "5a-session", authorizer.epoch, grant.capability,
+            generation_then, 1, "history-md",
+        )
+        after = sorted(path.name for path in data_dir.iterdir())
+        result_q.put({
+            "denied": not validated.ok,
+            "reason": validated.reason,
+            "generation_then": generation_then,
+            "generation_now": authorizer.policy_generation,
+            "writes_stable": before == after,
+            "startup_outcome": outcome,
+        })
+    except BaseException as exc:  # noqa: BLE001 — диагноз в parent
+        result_q.put({"error": type(exc).__name__})
+
+
+def _worker_5a_changer(data_dir_s, ready_evt, done_evt):
+    """5a/B: поддержанные save OFF, затем ON (оба через центральный commit)."""
+    from pathlib import Path
+
+    _child_preamble()
+    from backend.state_store import StateStore
+
+    store = StateStore(Path(data_dir_s))
+    if not ready_evt.wait(timeout=30.0):
+        raise RuntimeError("5a: grant not ready")
+    store.save_settings(
+        {"history_encryption_enabled": False, "privacy_mode_enabled": False}
+    )
+    store.save_settings(
+        {"history_encryption_enabled": True, "privacy_mode_enabled": False}
+    )
+    done_evt.set()
+
+
+def _worker_5b_granter(data_dir_s, ready_evt, replaced_evt, ack_evt, recovered_evt, result_q):
+    """5b/A: issue ON; validation после synthetic replace и после supported recovery."""
+    from pathlib import Path
+
+    _child_preamble()
+    from backend.state_store import StateStore
+    from backend import plaintext_export_authorization as AZ
+
+    try:
+        data_dir = Path(data_dir_s)
+        store = StateStore(data_dir)
+        authorizer = AZ.PlaintextExportAuthorizer(
+            read_snapshot=store.read_plaintext_policy_snapshot,
+            profile_identity=str(data_dir),
+        )
+        grant = authorizer.issue_grant("5b-session")
+        if not grant.ok:
+            result_q.put({"error": "issue_failed"})
+            return
+        generation_then = grant.policy_generation
+        ready_evt.set()
+        if not replaced_evt.wait(timeout=30.0):
+            result_q.put({"error": "replace_timeout"})
+            return
+        first = authorizer.validate(
+            "5b-session", authorizer.epoch, grant.capability,
+            generation_then, 1, "history-md",
+        )
+        ack_evt.set()
+        if not recovered_evt.wait(timeout=30.0):
+            result_q.put({"error": "recovery_timeout"})
+            return
+        second = authorizer.validate(
+            "5b-session", authorizer.epoch, grant.capability,
+            generation_then, 2, "history-md",
+        )
+        result_q.put({
+            "first_denied": not first.ok,
+            "first_reason": first.reason,
+            "second_denied": not second.ok,
+            "second_reason": second.reason,
+            "generation_then": generation_then,
+            "generation_now": authorizer.policy_generation,
+        })
+    except BaseException as exc:  # noqa: BLE001 — диагноз в parent
+        result_q.put({"error": type(exc).__name__})
+
+
+def _worker_5b_changer(data_dir_s, ready_evt, replaced_evt, ack_evt, recovered_evt):
+    """5b/B: synthetic побайтовая замена мимо commit, затем поддержанный save."""
+    import os
+    from pathlib import Path
+
+    _child_preamble()
+    from backend.state_store import StateStore
+
+    data_dir = Path(data_dir_s)
+    store = StateStore(data_dir)
+    if not ready_evt.wait(timeout=30.0):
+        raise RuntimeError("5b: grant not ready")
+    settings_path = data_dir / "settings.json"
+    raw = settings_path.read_bytes()
+    tmp_path = data_dir / "settings.json.tmp-5b-synthetic"
+    tmp_path.write_bytes(raw)
+    os.replace(tmp_path, settings_path)
+    replaced_evt.set()
+    if not ack_evt.wait(timeout=30.0):
+        raise RuntimeError("5b: phase-1 ack never came")
+    store.save_settings(
+        {"history_encryption_enabled": True, "privacy_mode_enabled": False}
+    )
+    recovered_evt.set()
+
+
+def _worker_5c_validater(
+    data_dir_s, grant_ready_evt, lock_held_evt, attempted_evt, committed_evt, result_q
+):
+    """5c/A: validation с bounded timeout под удерживаемым B локом → UNKNOWN."""
+    from pathlib import Path
+
+    _child_preamble()
+    from backend.state_store import StateStore
+    from backend import plaintext_export_authorization as AZ
+
+    try:
+        data_dir = Path(data_dir_s)
+        store = StateStore(data_dir)
+        bounded_read = functools.partial(
+            store.read_plaintext_policy_snapshot, timeout_sec=5.0
+        )
+        authorizer = AZ.PlaintextExportAuthorizer(
+            read_snapshot=bounded_read,
+            profile_identity=str(data_dir),
+        )
+        grant = authorizer.issue_grant("5c-session")
+        if not grant.ok:
+            result_q.put({"error": "issue_failed"})
+            return
+        generation_then = grant.policy_generation
+        grant_ready_evt.set()
+        if not lock_held_evt.wait(timeout=30.0):
+            result_q.put({"error": "lock_timeout"})
+            return
+        started = time.monotonic()
+        first = authorizer.validate(
+            "5c-session", authorizer.epoch, grant.capability,
+            generation_then, 1, "history-md",
+        )
+        elapsed = time.monotonic() - started
+        attempted_evt.set()
+        if not committed_evt.wait(timeout=30.0):
+            result_q.put({"error": "commit_timeout"})
+            return
+        fresh_grant = authorizer.issue_grant("5c-session-2")
+        fresh_validated_ok = False
+        if fresh_grant.ok:
+            fresh_validated = authorizer.validate(
+                "5c-session-2", authorizer.epoch, fresh_grant.capability,
+                fresh_grant.policy_generation, 1, "history-md",
+            )
+            fresh_validated_ok = bool(fresh_validated.ok)
+        result_q.put({
+            "first_denied": not first.ok,
+            "first_reason": first.reason,
+            "first_elapsed_sec": round(elapsed, 2),
+            "fresh_issue_ok": bool(fresh_grant.ok),
+            "fresh_validate_ok": fresh_validated_ok,
+            "generation_then": generation_then,
+            "generation_now": authorizer.policy_generation,
+        })
+    except BaseException as exc:  # noqa: BLE001 — диагноз в parent
+        result_q.put({"error": type(exc).__name__})
+
+
+def _worker_5c_locker(
+    data_dir_s, grant_ready_evt, lock_held_evt, attempted_evt, committed_evt
+):
+    """5c/B: долгий EX store-lock через Barrier/Event, затем commit + release."""
+    from pathlib import Path
+
+    _child_preamble()
+    from backend.state_store import StateStore
+
+    store = StateStore(Path(data_dir_s))
+    if not grant_ready_evt.wait(timeout=30.0):
+        raise RuntimeError("5c: grant not ready")
+    with store._lock():
+        lock_held_evt.set()
+        if not attempted_evt.wait(timeout=30.0):
+            raise RuntimeError("5c: validation attempt never came")
+    store.save_settings(
+        {"history_encryption_enabled": True, "privacy_mode_enabled": False}
+    )
+    committed_evt.set()
+
+
+class TestCrossProcessAuthorizerFixtures(unittest.TestCase):
+    """Контракт RED 5a/5b/5c: spawn-процессы, независимые StateStore+Authorizer.
+
+    Дети импортируют ТОЛЬКО ``backend.state_store`` +
+    ``backend.plaintext_export_authorization`` (+ stdlib): ``backend.service``
+    запрещён (тяжёлые ML-зависимости → RAM). Синхронизация — Pipe/Event/Barrier
+    (здесь — Event/Queue), никакого sleep. Явно ``spawn`` (macOS).
+    terminate/join в finally — ТОЛЬКО свои fixture-PID.
+    """
+
+    EVT_WAIT_SEC = 60.0
+    JOIN_SEC = 120.0
+
+    def _run_pair(self, target_a, args_a, target_b, args_b):
+        ctx = multiprocessing.get_context("spawn")
+        proc_a = ctx.Process(target=target_a, args=args_a)
+        proc_b = ctx.Process(target=target_b, args=args_b)
+        proc_a.start()
+        proc_b.start()
+        try:
+            proc_a.join(timeout=self.JOIN_SEC)
+            proc_b.join(timeout=self.JOIN_SEC)
+            self.assertFalse(proc_a.is_alive(), "worker A завис (join timeout)")
+            self.assertFalse(proc_b.is_alive(), "worker B завис (join timeout)")
+            self.assertEqual(proc_a.exitcode, 0, "worker A упал")
+            self.assertEqual(proc_b.exitcode, 0, "worker B упал")
+        finally:
+            for proc in (proc_a, proc_b):
+                if proc.is_alive():
+                    proc.terminate()
+                proc.join(timeout=10.0)
+                proc.close()
+
+    def test_5a_cross_process_supported_off_on_revokes_grant(self):
+        """5a: A issue при ON; B supported OFF→ON; первая validation A →
+        session_expired, 0 writes. Никаких общих Python store/mock и sleep."""
+        module = _authorizer_module()
+        with tempfile.TemporaryDirectory(prefix="a53-5a-") as raw:
+            ctx = multiprocessing.get_context("spawn")
+            ready = ctx.Event()
+            done = ctx.Event()
+            results = ctx.Queue()
+            self._run_pair(
+                _worker_5a_granter, (raw, ready, done, results),
+                _worker_5a_changer, (raw, ready, done),
+            )
+            result = results.get(timeout=self.EVT_WAIT_SEC)
+            self.assertNotIn("error", result, result)
+            self.assertTrue(result["denied"], result)
+            self.assertEqual(
+                result["reason"], module.REASON_PLAINTEXT_SESSION_EXPIRED, result
+            )
+            self.assertGreater(
+                result["generation_now"], result["generation_then"], result
+            )
+            self.assertTrue(result["writes_stable"], result)
+
+    def test_5b_cross_process_synthetic_replace_and_supported_recovery_revoke(self):
+        """5b: B атомарно заменяет settings теми же байтами мимо commit —
+        A ловит новый fingerprint (ino/ctime) и отказывает; поддержанная
+        recovery с новой ревизией — тоже revoke старого grant."""
+        module = _authorizer_module()
+        with tempfile.TemporaryDirectory(prefix="a53-5b-") as raw:
+            data_dir = Path(raw)
+            _seed_known_profile(data_dir, encryption=True, privacy=False)
+            ctx = multiprocessing.get_context("spawn")
+            ready = ctx.Event()
+            replaced = ctx.Event()
+            ack = ctx.Event()
+            recovered = ctx.Event()
+            results = ctx.Queue()
+            self._run_pair(
+                _worker_5b_granter, (raw, ready, replaced, ack, recovered, results),
+                _worker_5b_changer, (raw, ready, replaced, ack, recovered),
+            )
+            result = results.get(timeout=self.EVT_WAIT_SEC)
+            self.assertNotIn("error", result, result)
+            self.assertTrue(result["first_denied"], result)
+            self.assertEqual(
+                result["first_reason"], module.REASON_PLAINTEXT_SESSION_EXPIRED,
+                result,
+            )
+            self.assertTrue(result["second_denied"], result)
+            self.assertEqual(
+                result["second_reason"], module.REASON_PLAINTEXT_SESSION_EXPIRED,
+                result,
+            )
+            self.assertGreater(
+                result["generation_now"], result["generation_then"], result
+            )
+
+    def test_5c_cross_process_lock_hold_gives_unknown_then_consistent_snapshot(self):
+        """5c: B держит EX store-lock — validation A с bounded timeout даёт
+        UNKNOWN (не старый cache, не hang); после commit/release A читает
+        новый consistent snapshot (новый grant валидируется)."""
+        module = _authorizer_module()
+        with tempfile.TemporaryDirectory(prefix="a53-5c-") as raw:
+            data_dir = Path(raw)
+            _seed_known_profile(data_dir, encryption=True, privacy=False)
+            ctx = multiprocessing.get_context("spawn")
+            grant_ready = ctx.Event()
+            lock_held = ctx.Event()
+            attempted = ctx.Event()
+            committed = ctx.Event()
+            results = ctx.Queue()
+            self._run_pair(
+                _worker_5c_validater,
+                (raw, grant_ready, lock_held, attempted, committed, results),
+                _worker_5c_locker,
+                (raw, grant_ready, lock_held, attempted, committed),
+            )
+            result = results.get(timeout=self.EVT_WAIT_SEC)
+            self.assertNotIn("error", result, result)
+            self.assertTrue(result["first_denied"], result)
+            self.assertEqual(
+                result["first_reason"], module.REASON_PLAINTEXT_POLICY_UNAVAILABLE,
+                result,
+            )
+            # Bounded, а не hang: timeout чтения 5 с + запас на spawn/flock.
+            self.assertLess(result["first_elapsed_sec"], 30.0, result)
+            self.assertTrue(result["fresh_issue_ok"], result)
+            self.assertTrue(result["fresh_validate_ok"], result)
+            self.assertGreater(
+                result["generation_now"], result["generation_then"], result
+            )
+
+    def test_child_imports_stay_light_without_torch_mlx_or_service(self):
+        """Дети 5a-c обязаны стартовать без torch/mlx/backend.service (RAM)."""
+        marker = "A53_CHILD_IMPORT_PROBE"
+        code = (
+            "import sys, time; "
+            "t0 = time.perf_counter(); "
+            "import backend.state_store; "
+            "import backend.plaintext_export_authorization; "
+            "dt = time.perf_counter() - t0; "
+            "heavy = sorted(m for m in sys.modules "
+            "if m.split('.')[0] in ('torch', 'mlx', 'mlx_whisper') "
+            "or m == 'backend.service' "
+            "or m.startswith('backend.service.')); "
+            "print('%s dt=%%.2f heavy=%%s modules=%%d' %% (dt, heavy, len(sys.modules))); "
+            "sys.exit(1 if heavy else 0)"
+        ) % marker
+        env = dict(os.environ)
+        krabear = str(Path.cwd() / "KrabEar")
+        env["PYTHONPATH"] = krabear + os.pathsep + env.get("PYTHONPATH", "")
+        proc = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=120,
+            env=env, cwd=str(Path.cwd()),
+        )
+        tail = (proc.stdout + proc.stderr)[-2000:]
+        self.assertEqual(proc.returncode, 0, tail)
+        self.assertIn(marker, proc.stdout, tail)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Review pins (reviewer + gate-security BLOCK): snapshot-first issue/consume,
+# seq/sink/capability fail-closed, epoch strictness, fingerprint None guard,
+# token length, single-revoke generation immutability, profile_identity wiring.
+# Только behavioral, без AST/source-inspection, без BackendService.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestReviewPinSeqTypes(_AuthorizerFixture):
+    """FIX 3а: seq ∈ {0, -1, True, 1.0, "1", None} → denied (пины)."""
+
+    def test_nonstandard_seq_variants_are_denied(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        for bad_seq in (0, -1, True, 1.0, "1", None, False, 0.0, [], {}):
+            with self.subTest(seq=repr(bad_seq)):
+                denied = authorizer.validate(
+                    self.SESSION_A, authorizer.epoch, grant.capability,
+                    grant.policy_generation, bad_seq, self.SINK_MD,
+                )
+                self.assertFalse(denied.ok, (bad_seq, denied))
+                self.assertEqual(
+                    denied.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED,
+                    (bad_seq, denied),
+                )
+                self.assertIsNone(denied.receipt, (bad_seq, denied))
+
+
+class TestReviewPinSinkAndCapabilityTypes(_AuthorizerFixture):
+    """FIX 3е: пустой sink_kind / non-str capability → denied fail-closed."""
+
+    def test_empty_sink_kind_is_denied(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        for bad_sink in ("", None, 123, b"history-md", [], {}):
+            with self.subTest(sink=repr(bad_sink)):
+                denied = authorizer.validate(
+                    self.SESSION_A, authorizer.epoch, grant.capability,
+                    grant.policy_generation, 1, bad_sink,
+                )
+                self.assertFalse(denied.ok, (bad_sink, denied))
+                self.assertEqual(
+                    denied.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED,
+                    (bad_sink, denied),
+                )
+                self.assertIsNone(denied.receipt, (bad_sink, denied))
+
+    def test_non_str_capability_at_on_is_denied(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        for bad_cap in (123, b"cap", 1.0, True, [], {}, ("x",)):
+            with self.subTest(cap=repr(bad_cap)):
+                denied = authorizer.validate(
+                    self.SESSION_A, authorizer.epoch, bad_cap,
+                    grant.policy_generation, 1, self.SINK_MD,
+                )
+                self.assertFalse(denied.ok, (bad_cap, denied))
+                self.assertEqual(
+                    denied.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED,
+                    (bad_cap, denied),
+                )
+                self.assertIsNone(denied.receipt, (bad_cap, denied))
+
+
+class TestReviewPinIssueRotateWithoutValidate(_AuthorizerFixture):
+    """FIX 3б: issue → rotate → issue БЕЗ validate: старый мёртв, новый работает."""
+
+    def test_issue_rotate_issue_without_validate(self):
+        module = self.authorizer_module()
+        authorizer, old = self.issue_on()
+        gen0 = old.policy_generation
+        self.save_flags(encryption=True)
+        fresh = authorizer.issue_grant(self.SESSION_A)
+        self.assertTrue(fresh.ok, fresh)
+        self.assertIsNone(fresh.reason, fresh)
+        self.assertGreater(fresh.policy_generation, gen0)
+        self.assertEqual(fresh.policy_generation, gen0 + 1)
+        self.assertEqual(authorizer.active_grant_count, 1)
+        stale = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, old.capability,
+            gen0, 1, self.SINK_MD,
+        )
+        self.assertFalse(stale.ok, stale)
+        self.assertEqual(stale.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED)
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, fresh.capability,
+            fresh.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+
+
+class TestReviewPinMalformedIssueDuringUnknown(_AuthorizerFixture):
+    """FIX 3в (пинит FIX 1): issue("") во время UNKNOWN/privacy всё равно чистит."""
+
+    def test_malformed_issue_during_unknown_still_cleans(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        gen0 = grant.policy_generation
+        self.assertEqual(authorizer.active_grant_count, 1)
+        settings_path = self.data_dir / "settings.json"
+        raw = settings_path.read_bytes()
+        settings_path.unlink()
+        try:
+            denied = authorizer.issue_grant("")
+            self.assertFalse(denied.ok, denied)
+            self.assertEqual(
+                denied.reason, module.REASON_PLAINTEXT_POLICY_UNAVAILABLE, denied
+            )
+            self.assertEqual(authorizer.active_grant_count, 0)
+            self.assertGreater(authorizer.policy_generation, gen0)
+            self.assertEqual(authorizer.policy_generation, gen0 + 1)
+        finally:
+            settings_path.write_bytes(raw)
+
+    def test_malformed_issue_during_privacy_still_cleans(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        gen0 = grant.policy_generation
+        self.save_flags(encryption=True, privacy=True)
+        denied = authorizer.issue_grant("")
+        self.assertFalse(denied.ok, denied)
+        self.assertEqual(denied.reason, module.REASON_PRIVACY_MODE_ACTIVE, denied)
+        self.assertEqual(authorizer.active_grant_count, 0)
+        self.assertGreater(authorizer.policy_generation, gen0)
+
+
+class TestReviewPinConsumeAfterRevokeTrigger(_AuthorizerFixture):
+    """FIX 3г (пинит FIX 2): validate → revoke-триггер → consume == False."""
+
+    def test_consume_after_delete_is_false(self):
+        authorizer, grant = self.issue_on()
+        gen0 = grant.policy_generation
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            gen0, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+        receipt = validated.receipt
+        settings_path = self.data_dir / "settings.json"
+        raw = settings_path.read_bytes()
+        settings_path.unlink()
+        try:
+            self.assertFalse(authorizer.consume_receipt(receipt))
+            self.assertEqual(authorizer.active_grant_count, 0)
+            self.assertEqual(authorizer.active_receipt_count, 0)
+            self.assertGreater(authorizer.policy_generation, gen0)
+        finally:
+            settings_path.write_bytes(raw)
+
+    def test_consume_after_privacy_flip_is_false(self):
+        authorizer, grant = self.issue_on()
+        gen0 = grant.policy_generation
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            gen0, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+        receipt = validated.receipt
+        self.save_flags(encryption=True, privacy=True)
+        self.assertFalse(authorizer.consume_receipt(receipt))
+        self.assertEqual(authorizer.active_grant_count, 0)
+        self.assertEqual(authorizer.active_receipt_count, 0)
+
+    def test_consume_after_rotate_generation_drift_is_false(self):
+        authorizer, grant = self.issue_on()
+        gen0 = grant.policy_generation
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            gen0, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+        receipt = validated.receipt
+        self.save_flags(encryption=True)
+        self.assertFalse(authorizer.consume_receipt(receipt))
+        self.assertEqual(authorizer.active_receipt_count, 0)
+
+
+class TestReviewPinForgedCapabilityDuringUnknown(_AuthorizerFixture):
+    """FIX 3д: forged/чужой capability при UNKNOWN → policy_unavailable + bump."""
+
+    def test_forged_capability_during_unknown_gives_unavailable(self):
+        module = self.authorizer_module()
+        authorizer, grant = self.issue_on()
+        gen0 = grant.policy_generation
+        settings_path = self.data_dir / "settings.json"
+        raw = settings_path.read_bytes()
+        settings_path.unlink()
+        try:
+            denied = authorizer.validate(
+                self.SESSION_A, authorizer.epoch, "forged-capability",
+                gen0, 1, self.SINK_MD,
+            )
+            self.assertFalse(denied.ok, denied)
+            self.assertEqual(
+                denied.reason, module.REASON_PLAINTEXT_POLICY_UNAVAILABLE, denied
+            )
+            self.assertIsNone(denied.receipt, denied)
+            self.assertEqual(authorizer.active_grant_count, 0)
+            self.assertGreater(authorizer.policy_generation, gen0)
+        finally:
+            settings_path.write_bytes(raw)
+
+
+class TestReviewPinTokenLengthAndRevokeGeneration(_AuthorizerFixture):
+    """FIX 4: длина токена + неизменность generation после single-revoke."""
+
+    def test_capability_and_receipt_length_match_urlsafe32(self):
+        import secrets as _secrets
+
+        expected = len(_secrets.token_urlsafe(32))
+        self.assertEqual(expected, 43)
+        authorizer, grant = self.issue_on()
+        self.assertEqual(len(grant.capability), expected)
+        validated = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, grant.capability,
+            grant.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertTrue(validated.ok, validated)
+        self.assertEqual(len(validated.receipt), expected)
+
+    def test_single_revoke_leaves_generation_unchanged(self):
+        authorizer, grant_a = self.issue_on(session=self.SESSION_A)
+        gen0 = grant_a.policy_generation
+        grant_b = authorizer.issue_grant(self.SESSION_B)
+        self.assertTrue(grant_b.ok, grant_b)
+        self.assertEqual(grant_b.policy_generation, gen0)
+        self.assertTrue(
+            authorizer.revoke(self.SESSION_A, authorizer.epoch, grant_a.capability)
+        )
+        self.assertEqual(authorizer.policy_generation, gen0)
+        self.assertEqual(authorizer.active_grant_count, 1)
+
+
+class TestReviewPinEpochStrictness(_AuthorizerFixture):
+    """FIX 4: конструктор принимает только bytes длиной 32, нули/list — отказ."""
+
+    def test_zero_epoch_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.make_authorizer(epoch=b"\x00" * 32)
+
+    def test_list_epoch_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.make_authorizer(epoch=[1] * 32)
+
+    def test_bytearray_epoch_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.make_authorizer(epoch=bytearray(b"\x01" * 32))
+
+    def test_short_and_long_epoch_are_rejected(self):
+        with self.assertRaises(ValueError):
+            self.make_authorizer(epoch=b"\x01" * 31)
+        with self.assertRaises(ValueError):
+            self.make_authorizer(epoch=b"\x01" * 33)
+
+
+class TestReviewPinFingerprintNoneGuard(_AuthorizerFixture):
+    """FIX 4: чужой read_snapshot с KNOWN + fingerprint None → UNKNOWN."""
+
+    def test_known_with_none_fingerprint_is_treated_as_unknown(self):
+        module = self.authorizer_module()
+        self.seed_on()
+        good = self.store.read_plaintext_policy_snapshot()
+        self.assertIsNotNone(good.fingerprint)
+        forged = module.PolicySnapshot(
+            state=good.state,
+            privacy_mode_enabled=False,
+            internal_revision=good.internal_revision,
+            fingerprint=None,
+            reason=None,
+        )
+        authorizer = self.make_authorizer(read_snapshot=lambda: forged)
+        denied_grant = authorizer.issue_grant(self.SESSION_A)
+        self.assertFalse(denied_grant.ok, denied_grant)
+        self.assertEqual(
+            denied_grant.reason, module.REASON_PLAINTEXT_POLICY_UNAVAILABLE,
+            denied_grant,
+        )
+        denied_validate = authorizer.validate(
+            self.SESSION_A, authorizer.epoch, None,
+            authorizer.policy_generation, 1, self.SINK_MD,
+        )
+        self.assertFalse(denied_validate.ok, denied_validate)
+        self.assertEqual(
+            denied_validate.reason, module.REASON_PLAINTEXT_POLICY_UNAVAILABLE,
+            denied_validate,
+        )
+
+
+class TestReviewPinProfileIdentityMismatch(_AuthorizerFixture):
+    """FIX 4: mis-wired read_snapshot (чужой profile) → mismatch→revoke, не молча."""
+
+    def test_miswired_profile_identity_does_not_silently_grant(self):
+        module = self.authorizer_module()
+        self.seed_on()
+        good = self.store.read_plaintext_policy_snapshot()
+        self.assertIsNotNone(good.fingerprint)
+        miswired = module.PolicySnapshot(
+            state=good.state,
+            privacy_mode_enabled=good.privacy_mode_enabled,
+            internal_revision=good.internal_revision,
+            fingerprint=module.PolicyFingerprint(
+                profile_identity="/tmp/definitely-not-this-profile-a53",
+                st_dev=good.fingerprint.st_dev,
+                st_ino=good.fingerprint.st_ino,
+                st_size=good.fingerprint.st_size,
+                st_mtime_ns=good.fingerprint.st_mtime_ns,
+                st_ctime_ns=good.fingerprint.st_ctime_ns,
+                content_sha256=good.fingerprint.content_sha256,
+                internal_revision=good.fingerprint.internal_revision,
+            ),
+            reason=None,
+        )
+        authorizer = self.make_authorizer(read_snapshot=lambda: miswired)
+        denied = authorizer.issue_grant(self.SESSION_A)
+        self.assertFalse(denied.ok, denied)
+        self.assertEqual(
+            denied.reason, module.REASON_PLAINTEXT_SESSION_EXPIRED, denied
+        )
 
 
 if __name__ == "__main__":
