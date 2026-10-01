@@ -70,7 +70,10 @@ from backend.vocabulary_store import VocabularyStore
 from backend.transcriber import Transcriber
 from backend.state_store import StateStore
 from backend.recorder import AudioRecorder
-from backend.plaintext_export_authorization import PolicyState
+from backend.plaintext_export_authorization import (
+    PlaintextExportAuthorizer,
+    PolicyState,
+)
 from backend.event_replay import EventReplayManager
 from backend.event_bus import bus as event_bus
 from backend.event_bridge import EventBridge
@@ -474,6 +477,14 @@ class BackendService:
         # для честной startup-диагностики (без них — прежний data_dir-фоллбэк).
         self._socket_path_cfg = socket_path
         self._socket_ownership_snapshot_getter = socket_ownership_snapshot_getter
+        # A5.3 карточка A, slice 2: authorizer plaintext-export capability —
+        # ТОЛЬКО создание, БЕЗ IPC (IPC-методы и namespace придут в slice 4).
+        # Epoch генерируется внутри authorizer (32 bytes); конструктор не делает
+        # I/O (read_snapshot вызывается лениво, на issue/validate).
+        self._plaintext_export_authorizer = PlaintextExportAuthorizer(
+            read_snapshot=self.store.read_plaintext_policy_snapshot,
+            profile_identity=str(self.store.data_dir),
+        )
         self.vocabulary = VocabularyStore(data_dir=store.data_dir)
         self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
         self._phonetic_vocab_svc = PhoneticVocabService(data_dir=store.data_dir)
