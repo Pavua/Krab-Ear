@@ -8,6 +8,8 @@ Verifies:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import sys
 import tempfile
 import unittest
@@ -64,7 +66,7 @@ class ObsidianAppStatusEmitTests(unittest.TestCase):
         self.bus = _CapturingEventBus()
         data_dir = Path(self.tmp.name) / "data"
         data_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=data_dir, event_bus=self.bus)
+        self.mgr = ObsidianSyncManager(data_dir=data_dir, event_bus=self.bus, plaintext_export_authorizer=off_authorizer())
         vault = Path(self.tmp.name) / "vault"
         vault.mkdir()
         self.mgr.configure(str(vault), folder="Calls")
@@ -195,7 +197,7 @@ class ObsidianAppStatusEmitTests(unittest.TestCase):
         data_dir2.mkdir()
         vault2 = Path(self.tmp.name) / "vault2"
         vault2.mkdir()
-        mgr2 = ObsidianSyncManager(data_dir=data_dir2)  # no event_bus
+        mgr2 = ObsidianSyncManager(data_dir=data_dir2, plaintext_export_authorizer=off_authorizer())  # no event_bus
         mgr2.configure(str(vault2), folder="Calls")
         items = [_make_item(i) for i in range(2)]
         # Should not raise
@@ -222,7 +224,7 @@ class ObsidianAppStatusEmitTests(unittest.TestCase):
         data_dir3.mkdir()
         vault3 = Path(self.tmp.name) / "vault3"
         vault3.mkdir()
-        mgr3 = ObsidianSyncManager(data_dir=data_dir3, event_bus=bus)
+        mgr3 = ObsidianSyncManager(data_dir=data_dir3, event_bus=bus, plaintext_export_authorizer=off_authorizer())
         mgr3.configure(str(vault3), folder="Calls")
         mgr3.sync([_make_item(0)], force=True)
 

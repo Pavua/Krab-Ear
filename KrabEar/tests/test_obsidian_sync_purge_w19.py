@@ -11,6 +11,8 @@ FINDING 2 (LOW, confused-deputy):
   write target is auditable.
 """
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import logging
 import sys
 import unittest
@@ -42,7 +44,7 @@ class TestPurgePartialFailureSurfaced(unittest.TestCase):
         self.vault_dir.mkdir()
         self.data_dir = Path(self._tmpdir.name) / "data"
         self.data_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.mgr.configure(str(self.vault_dir))
 
     def tearDown(self) -> None:
@@ -144,7 +146,7 @@ class TestPurgePartialFailureSurfaced(unittest.TestCase):
 
     def test_vault_not_configured_returns_zero(self) -> None:
         """No vault configured → no-op, returns 0."""
-        mgr = ObsidianSyncManager()
+        mgr = ObsidianSyncManager(plaintext_export_authorizer=off_authorizer())
         result = mgr.purge_all_synced_files()
         self.assertEqual(result, 0)
 
@@ -157,7 +159,7 @@ class TestConfigureVaultPathAuditLog(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.vault_dir = Path(self._tmpdir.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager()
+        self.mgr = ObsidianSyncManager(plaintext_export_authorizer=off_authorizer())
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()

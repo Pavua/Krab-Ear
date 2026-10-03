@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 from backend.plaintext_export_authorization import POLICY_REVISION_KEY
+from backend.plaintext_export_sinks import (
+    BackendSink, PlaintextExportDenied, export_context, precheck_export, run_export_write,
+)
 
 import json
 import os
@@ -384,8 +387,10 @@ class HistoryService:
         playback_tracker: "PlaybackTracker | None" = None,
         transcript_versions: Any | None = None,
         recording_core: Any | None = None,
+        plaintext_export_authorizer: Any | None = None,
     ) -> None:
         self.store = store
+        self._plaintext_export_authorizer = plaintext_export_authorizer
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
         # Если не передан — создаём изолированный список (для тестов).
         self._clipboard_history: list[dict] = clipboard_history if clipboard_history is not None else []
@@ -455,6 +460,16 @@ class HistoryService:
         # deletion unless clear_search_history() is explicitly called during purge.
         # Late-injected by BackendService.__init__ after both objects are constructed.
         self._search_history_mgr: Any = None  # SearchHistoryManager — in-memory query list (user search PII)
+
+    def _write_plaintext_file(self, params: dict[str, Any], path: Path, content: str) -> None:
+        """Одна фиксированная запись; mkdir входит в ту же fresh authorization."""
+        def write() -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
+        run_export_write(
+            self._plaintext_export_authorizer, export_context(params), BackendSink.HISTORY, write,
+        )
 
     # ------------------------------------------------------------------
     # Privacy helpers
@@ -1361,6 +1376,12 @@ class HistoryService:
         if self._is_privacy_mode():
             return {"content": "", "total_items": 0, "path": None, "reason": "privacy_mode_active"}
 
+        if self._coerce_bool(params.get("save_to_file", False), default=False):
+            try:
+                precheck_export(self._plaintext_export_authorizer, export_context(params), BackendSink.HISTORY)
+            except PlaintextExportDenied as exc:
+                return {"content": "", "total_items": 0, "path": None, "reason": exc.reason}
+
         import time as _time
         _t0 = _time.monotonic()
         limit = max(1, min(int(params.get("limit", 500) or 500), 5000))
@@ -1445,11 +1466,12 @@ class HistoryService:
         if self._coerce_bool(params.get("save_to_file", False), default=False):
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                transcripts_dir.mkdir(exist_ok=True)
                 filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
                 file_path = transcripts_dir / filename
-                file_path.write_text(content, encoding="utf-8")
+                self._write_plaintext_file(params, file_path, content)
                 save_path = str(file_path)
+            except PlaintextExportDenied as exc:
+                return {"content": "", "total_items": 0, "path": None, "reason": exc.reason}
             except Exception as exc:
                 logger.warning("Не удалось сохранить экспорт в файл: %s", exc)
 
@@ -1745,6 +1767,12 @@ class HistoryService:
                 "reason": "privacy_mode_active",
             }
 
+        if self._coerce_bool(params.get("save_to_file", False), default=False):
+            try:
+                precheck_export(self._plaintext_export_authorizer, export_context(params), BackendSink.HISTORY)
+            except PlaintextExportDenied as exc:
+                return {"ok": False, "content": "", "entries": 0, "path": None, "reason": exc.reason}
+
         # Валидация item_ids
         raw_ids = params.get("item_ids")
         if not raw_ids or not isinstance(raw_ids, list):
@@ -1815,7 +1843,6 @@ class HistoryService:
             try:
                 base = Path(self.store.data_dir)
                 transcripts_dir = base / "transcripts"
-                transcripts_dir.mkdir(exist_ok=True)
                 ext = "srt" if export_format == "srt" else "md"
                 filename = (
                     f"selected_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -1829,8 +1856,10 @@ class HistoryService:
                         "handle_export_selected_items: путь вне data_dir: %s", resolved
                     )
                 else:
-                    file_path.write_text(content, encoding="utf-8")
+                    self._write_plaintext_file(params, file_path, content)
                     save_path = str(file_path)
+            except PlaintextExportDenied as exc:
+                return {"ok": False, "content": "", "entries": 0, "path": None, "reason": exc.reason}
             except Exception as exc:
                 logger.warning("Не удалось сохранить выбранный экспорт в файл: %s", exc)
 
@@ -1994,11 +2023,12 @@ class HistoryService:
         if self._coerce_bool(params.get("save_to_file", False), default=False):
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                transcripts_dir.mkdir(exist_ok=True)
                 filename = f"srt_{item_id[:8]}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.srt"
                 file_path = transcripts_dir / filename
-                file_path.write_text(srt_content, encoding="utf-8")
+                self._write_plaintext_file(params, file_path, srt_content)
                 save_path = str(file_path)
+            except PlaintextExportDenied as exc:
+                return {"content": "", "item_id": item_id, "speakers": 0, "segments": 0, "path": None, "reason": exc.reason}
             except Exception as exc:
                 logger.warning("Не удалось сохранить SRT в файл: %s", exc)
         return {
@@ -2162,11 +2192,12 @@ class HistoryService:
         if self._coerce_bool(params.get("save_to_file", False), default=False):
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                transcripts_dir.mkdir(exist_ok=True)
                 filename = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
                 file_path = transcripts_dir / filename
-                file_path.write_text(json_text, encoding="utf-8")
+                self._write_plaintext_file(params, file_path, json_text)
                 save_path = str(file_path)
+            except PlaintextExportDenied as exc:
+                return {"ok": False, "entries": 0, "chars": 0, "path": None, "reason": exc.reason}
             except Exception as exc:
                 logger.warning("Не удалось сохранить JSON-экспорт в файл: %s", exc)
 
@@ -2289,10 +2320,12 @@ class HistoryService:
         if save_path or save_path is True:
             from datetime import datetime
             transcripts_dir = self.store.data_dir / "transcripts"
-            transcripts_dir.mkdir(parents=True, exist_ok=True)
             fname = f"export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
             file_path = transcripts_dir / fname
-            file_path.write_text(csv_text, encoding="utf-8")
+            try:
+                self._write_plaintext_file(params, file_path, csv_text)
+            except PlaintextExportDenied as exc:
+                return {"ok": False, "entries": 0, "file": None, "reason": exc.reason}
             file_path = str(file_path)
 
         if copy_to_clipboard:
@@ -4634,7 +4667,6 @@ class HistoryService:
             out_dir = resolved
         else:
             out_dir = Path(self.store.data_dir) / "transcripts"
-        out_dir.mkdir(parents=True, exist_ok=True)
 
         safe_title = (
             doc_title
@@ -4657,7 +4689,10 @@ class HistoryService:
             filename = f"{title_date_str}-{safe_title}-{suffix}.md"
             file_path = out_dir / filename
 
-        file_path.write_text(content, encoding="utf-8")
+        try:
+            self._write_plaintext_file(params, file_path, content)
+        except PlaintextExportDenied as exc:
+            return {"file": None, "entries": 0, "content": "", "reason": exc.reason}
         logger.info("Obsidian экспорт сохранён: %s (%d записей)", file_path, len(items))
 
         return {
@@ -5672,6 +5707,11 @@ class HistoryService:
         if self._is_privacy_mode():
             return {"dir": None, "files": {}, "errors": {}, "total_entries": 0, "reason": "privacy_mode_active"}
 
+        try:
+            precheck_export(self._plaintext_export_authorizer, export_context(params), BackendSink.HISTORY)
+        except PlaintextExportDenied as exc:
+            return {"dir": None, "files": {}, "errors": {}, "total_entries": 0, "reason": exc.reason}
+
         all_formats = {"srt", "csv", "markdown", "obsidian"}
         formats_raw = params.get("formats")
         if formats_raw is None:
@@ -5705,7 +5745,6 @@ class HistoryService:
         else:
             base_dir = Path(self.store.data_dir) / "exports"
         bundle_dir = base_dir / f"export_{timestamp_str}"
-        bundle_dir.mkdir(parents=True, exist_ok=True)
 
         # Получаем записи один раз для подсчёта общего числа
         items_dicts, _ = self.store.get_history_page_filtered(
@@ -5720,11 +5759,14 @@ class HistoryService:
 
         files: dict[str, str] = {}
         errors: dict[str, str] = {}
+        denied_reason: str | None = None
 
         for fmt in requested:
             try:
                 if fmt == "csv":
                     csv_params: dict[str, Any] = {"limit": limit}
+                    if "plaintext_export" in params:
+                        csv_params["plaintext_export"] = params["plaintext_export"]
                     if from_ts is not None:
                         csv_params["from_ts"] = from_ts
                     if to_ts is not None:
@@ -5734,13 +5776,13 @@ class HistoryService:
                 elif fmt == "markdown":
                     md_content = self._build_markdown_content(items_dicts)
                     md_path = bundle_dir / f"export_{timestamp_str}.md"
-                    md_path.write_text(md_content, encoding="utf-8")
+                    self._write_plaintext_file(params, md_path, md_content)
                     files["markdown"] = str(md_path)
 
                 elif fmt == "srt":
                     srt_content = self._build_bulk_srt(items_dicts)
                     srt_path = bundle_dir / f"export_{timestamp_str}.srt"
-                    srt_path.write_text(srt_content, encoding="utf-8")
+                    self._write_plaintext_file(params, srt_path, srt_content)
                     files["srt"] = str(srt_path)
 
                 elif fmt == "obsidian":
@@ -5752,9 +5794,17 @@ class HistoryService:
                         obs_params["from_ts"] = from_ts
                     if to_ts is not None:
                         obs_params["to_ts"] = to_ts
+                    if "plaintext_export" in params:
+                        obs_params["plaintext_export"] = params["plaintext_export"]
                     obs_result = self.handle_export_obsidian(obs_params)
+                    if obs_result.get("reason"):
+                        raise PlaintextExportDenied(obs_result["reason"])
                     files["obsidian"] = obs_result["file"]
 
+            except PlaintextExportDenied as exc:
+                denied_reason = exc.reason
+                errors[fmt] = exc.reason
+                break
             except Exception as exc:
                 logger.warning("batch_export: ошибка формата %s: %s", fmt, exc)
                 errors[fmt] = str(exc)
@@ -5764,10 +5814,11 @@ class HistoryService:
             len(files), len(errors), bundle_dir,
         )
         return {
-            "dir": str(bundle_dir),
+            "dir": str(bundle_dir) if bundle_dir.exists() else None,
             "files": files,
             "errors": errors,
             "total_entries": total_entries,
+            **({"reason": denied_reason, "partial": bool(files)} if denied_reason else {}),
         }
 
     # ------------------------------------------------------------------
@@ -5832,7 +5883,7 @@ class HistoryService:
 
         csv_text = output.getvalue()
         file_path = target_dir / f"export_{timestamp_str}.csv"
-        file_path.write_text(csv_text, encoding="utf-8")
+        self._write_plaintext_file(params, file_path, csv_text)
         return str(file_path)
 
     def _build_markdown_content(self, items_dicts: list[dict]) -> str:
@@ -6012,11 +6063,12 @@ class HistoryService:
         if self._coerce_bool(params.get("save_to_file", False), default=False):
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                transcripts_dir.mkdir(exist_ok=True)
                 filename = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
                 file_path = transcripts_dir / filename
-                file_path.write_text(html_content, encoding="utf-8")
+                self._write_plaintext_file(params, file_path, html_content)
                 save_path = str(file_path)
+            except PlaintextExportDenied as exc:
+                return {"ok": False, "html": "", "entries": 0, "chars": 0, "path": None, "reason": exc.reason}
             except Exception as exc:
                 logger.warning("Не удалось сохранить HTML-отчёт в файл: %s", exc)
 

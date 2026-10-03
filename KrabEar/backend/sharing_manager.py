@@ -24,6 +24,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from backend.ipc_errors import IpcOperationalError
+from backend.plaintext_export_sinks import (
+    BackendSink, PlaintextExportDenied, export_context, precheck_export, run_export_write,
+)
 
 logger = logging.getLogger("KrabEar.Backend.SharingManager")
 
@@ -60,6 +63,16 @@ class SharePackage:
         return asdict(self)
 
 
+class SharePersistenceError(IpcOperationalError):
+    """Файл пакета сохранён, но запись индекса не завершена; rollback запрещён."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.partial = True
+        self.written_file_count = 1
+
+
 class SharingManager:
     """Управляет подготовкой и хранением пакетов для шаринга транскрипций.
 
@@ -73,8 +86,11 @@ class SharingManager:
         default_share_ttl_hours: int = DEFAULT_SHARE_TTL_HOURS,
         share_no_default_ttl: bool = False,
         privacy_mode_fn: Optional[Any] = None,
+        *,
+        plaintext_export_authorizer=None,
     ) -> None:
         self._store = store
+        self._plaintext_export_authorizer = plaintext_export_authorizer
         self._data_dir = Path(getattr(store, "data_dir", "."))
         self._shares_dir = self._data_dir / _SHARES_DIR
         self._index_path = self._shares_dir / _SHARES_INDEX_FILE
@@ -86,14 +102,7 @@ class SharingManager:
         # None → guard disabled (privacy_mode treated as False).
         from typing import Callable as _Callable
         self._privacy_mode_fn: Optional[_Callable[[], bool]] = privacy_mode_fn
-        # W1767 #16: директория shares/ должна быть 0o700 (только владелец).
-        # parents=True создаёт промежуточные директории с дефолтными правами;
-        # окончательный chmod применяется явно.
-        self._shares_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self._shares_dir, 0o700)
-        except Exception as exc:
-            logger.warning("Не удалось установить права 0o700 на %s: %s", self._shares_dir, exc)
+        # Конструктор только читает: каталог/права/TTL меняются после authorization.
         self._load_index()
 
     # ------------------------------------------------------------------
@@ -143,29 +152,29 @@ class SharingManager:
                 loaded = json.loads(raw)
                 if isinstance(loaded, dict):
                     self._index = loaded
-                    # Wave-29: чистим истёкшие записи при загрузке — они несут content
-                    # и копились в shares_index.json across рестартов (memory + privacy).
-                    if self._prune_expired_locked():
-                        self._save_index()
         except Exception as exc:
             logger.warning("Не удалось загрузить индекс shares: %s", exc)
 
-    def _save_index(self) -> None:
-        """Сохраняет индекс пакетов атомарно с правами 0o600 (W1767 #16)."""
-        try:
-            tmp = self._index_path.with_suffix(".tmp")
-            # Открываем через os.open с O_CREAT|O_WRONLY|O_TRUNC и mode=0o600,
-            # чтобы файл с первой записи имел правильные права (не 0o644).
+    def _save_index(self, *, plaintext_export=None, index=None, before_write=None) -> None:
+        """Каждая перезапись индекса с history — отдельный fresh-authorized файл.
+
+        Содержимое фиксируется до authorization. before_write — только внутреннее
+        удаление истёкшего/отозванного payload, связанное с этой записью индекса.
+        """
+        content = json.dumps(self._index if index is None else index, ensure_ascii=False, indent=2)
+        tmp = self._index_path.with_suffix(".tmp")
+
+        def write_index():
+            self._shares_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(self._shares_dir, 0o700)
+            if before_write is not None:
+                before_write()
             fd = os.open(str(tmp), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
-            try:
-                with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fh.write(json.dumps(self._index, ensure_ascii=False, indent=2))
-            except Exception:
-                # fdopen берёт владение fd; при исключении файл уже закрыт
-                raise
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(content)
             tmp.replace(self._index_path)
-        except Exception as exc:
-            logger.error("Не удалось сохранить индекс shares: %s", exc)
+
+        run_export_write(self._plaintext_export_authorizer, plaintext_export, BackendSink.SHARING, write_index)
 
     def _prune_expired_locked(self) -> int:
         """Wave-29: удаляет из _index записи с истёкшим TTL (они несут полный
@@ -185,16 +194,22 @@ class SharingManager:
             and entry.get("expires_at") is not None
             and entry["expires_at"] < now
         ]
-        for sid in expired:
-            entry = self._index.pop(sid, {})
-            fpath = self._resolve_contained_share_path(entry.get("filename", ""))
-            if fpath is not None:
-                try:
-                    fpath.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        if expired:
-            logger.debug("SharingManager: pruned %d expired share(s) from _index", len(expired))
+        if not expired:
+            return 0
+        remaining = {sid: entry for sid, entry in self._index.items() if sid not in expired}
+
+        def remove_expired():
+            for sid in expired:
+                fpath = self._resolve_contained_share_path(self._index[sid].get("filename", ""))
+                if fpath is not None:
+                    try:
+                        fpath.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
+        self._save_index(index=remaining, before_write=remove_expired)
+        self._index = remaining
+        logger.debug("SharingManager: pruned %d expired share(s) from _index", len(expired))
         return len(expired)
 
     # ------------------------------------------------------------------
@@ -215,6 +230,8 @@ class SharingManager:
         format: str = "markdown",
         include_translation: bool = True,
         ttl_hours: Optional[float] = None,
+        *,
+        plaintext_export=None,
     ) -> SharePackage:
         """Упаковывает записи истории в SharePackage.
 
@@ -231,6 +248,7 @@ class SharingManager:
         Raises:
             ValueError: если format не поддерживается или item_ids пустой.
         """
+        precheck_export(self._plaintext_export_authorizer, plaintext_export, BackendSink.SHARING)
         if not item_ids:
             raise ValueError("item_ids не может быть пустым")
         # W1245: cap item_ids to avoid memory bomb
@@ -286,7 +304,12 @@ class SharingManager:
             # повторно после записи файла, но слот уже «занят».
             self._index[share_id] = {"share_id": share_id, "_reserved": True}
 
-        self._persist_package(package)
+        try:
+            self._persist_package(package, plaintext_export=plaintext_export)
+        finally:
+            with self._lock:
+                if self._index.get(share_id, {}).get("_reserved"):
+                    self._index.pop(share_id, None)
         return package
 
     def list_shared(self, include_expired: bool = False, include_revoked: bool = False) -> list[dict[str, Any]]:
@@ -298,8 +321,12 @@ class SharingManager:
         with self._lock:
             # Wave-29: ленивая чистка истёкших записей (освобождает in-memory content).
             # При include_expired=True не чистим — это режим показа истёкших.
-            if not include_expired and self._prune_expired_locked():
-                self._save_index()
+            if not include_expired:
+                try:
+                    self._prune_expired_locked()
+                except PlaintextExportDenied:
+                    # Read/list остаётся доступным; TTL фильтруется без mutations.
+                    pass
             result = []
             for entry in self._index.values():
                 # W1767 #17: пропускаем временные «reserved» placeholders
@@ -356,7 +383,7 @@ class SharingManager:
             pkg_fields = {k: v for k, v in entry.items() if k != "_reserved"}
             return SharePackage(**pkg_fields)
 
-    def revoke_share(self, token: str) -> bool:
+    def revoke_share(self, token: str, *, plaintext_export=None) -> bool:
         """Отзывает пакет по share_id (токену) и УДАЛЯЕТ файлы с диска.
 
         После отзыва get_shared возвращает None для этого токена.
@@ -376,37 +403,24 @@ class SharingManager:
                 return False
             share_id = entry["share_id"]
 
-            # W1762 HIGH FIX: удаляем файл(ы) пакета с диска перед обновлением индекса.
-            # Если удаление не удалось — сообщаем громко, не помечаем как отозванный.
-            # wave-33 A2 (HIGH): резолвим путь с проверкой containment, чтобы
-            # подделанный filename='../../x' в индексе не удалил произвольный файл.
             filename = entry.get("filename", "")
             file_path = self._resolve_contained_share_path(filename)
-            if file_path is not None:
-                try:
-                    file_path.unlink(missing_ok=True)
-                except Exception as exc:
-                    # Частичный сбой: файл существует, но удалить не удалось.
-                    # НЕ помечаем как отозванный — открытый текст остаётся на диске.
-                    logger.error(
-                        "revoke_share: не удалось удалить файл пакета %s (share_id=%s): %s",
-                        file_path,
-                        share_id,
-                        exc,
-                    )
-                    raise RuntimeError(
-                        f"Не удалось удалить файл пакета '{file_path}' при отзыве "
-                        f"share_id={share_id!r}: {exc}"
-                    ) from exc
+            updated = dict(self._index)
+            tombstone = dict(entry)
+            tombstone["is_revoked"] = True
+            for field_name in ("content", "text", "translated_text"):
+                tombstone.pop(field_name, None)
+            updated[share_id] = tombstone
 
-            self._index[share_id]["is_revoked"] = True
-            # W1767 #15: удаляем чувствительные текстовые поля из записи индекса
-            # после отзыва, чтобы транскрипция не оставалась в shares_index.json.
-            # Метаданные (share_id, filename, created_at, expires_at) сохраняются
-            # как tombstone для аудита.
-            for _sensitive_field in ("content", "text", "translated_text"):
-                self._index[share_id].pop(_sensitive_field, None)
-            self._save_index()
+            def remove_payload():
+                if file_path is not None:
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        raise RuntimeError("Не удалось удалить файл пакета при отзыве") from exc
+
+            self._save_index(plaintext_export=plaintext_export, index=updated, before_write=remove_payload)
+            self._index = updated
             return True
 
     def purge_all(self) -> dict[str, int]:
@@ -449,7 +463,12 @@ class SharingManager:
             self._index.clear()
             cleared = 0
             try:
-                self._save_index()
+                # Privacy purge не создаёт plaintext: только буквальный пустой индекс.
+                if self._shares_dir.exists():
+                    fd = os.open(str(self._index_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                        fh.write("{}")
+                    self._index_path.with_suffix(".tmp").unlink(missing_ok=True)
                 cleared = 1
             except Exception as exc:
                 logger.error("purge_all: не удалось сохранить пустой индекс: %s", exc)
@@ -532,7 +551,13 @@ class SharingManager:
                 format=fmt,
                 include_translation=include_translation,
                 ttl_hours=ttl_hours,
+                plaintext_export=export_context(params),
             )
+        except PlaintextExportDenied as exc:
+            return {"ok": False, "reason": exc.reason, "error": exc.reason}
+        except SharePersistenceError as exc:
+            return {"ok": False, "reason": exc.reason, "error": exc.reason,
+                    "partial": True, "written_file_count": 1}
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
         result = package.to_dict()
@@ -585,7 +610,10 @@ class SharingManager:
         token = str(params.get("token", params.get("share_id", ""))).strip()
         if not token:
             raise RuntimeError("Параметр 'token' (или 'share_id') обязателен")
-        revoked = self.revoke_share(token)
+        try:
+            revoked = self.revoke_share(token, plaintext_export=export_context(params))
+        except PlaintextExportDenied as exc:
+            return {"ok": False, "reason": exc.reason, "error": exc.reason}
         return {"revoked": revoked, "token": token}
 
     # ------------------------------------------------------------------
@@ -733,57 +761,38 @@ class SharingManager:
                     parts.append(f"  Перевод: {translated}")
         return "\n\n".join(parts)
 
-    def _persist_package(self, package: SharePackage) -> None:
-        """Сохраняет пакет на диск и обновляет индекс.
+    def _persist_package(self, package: SharePackage, *, plaintext_export=None) -> None:
+        """Payload и индекс получают раздельную authorization; partial не откатывается."""
+        precheck_export(self._plaintext_export_authorizer, plaintext_export, BackendSink.SHARING)
+        file_path = self._resolve_contained_share_path(package.filename)
+        if file_path is None:
+            raise ValueError("Небезопасный filename пакета")
+        content = package.content
 
-        W1762 MED FIX: гарантирует консистентность «файл ↔ индекс».
-        Алгоритм:
-        1. Записываем файл на диск (вне лока — медленная IO).
-        2. Если запись завершилась с ошибкой — удаляем частичный файл
-           и перебрасываем исключение. В индекс ничего не попадает.
-        3. Только после успешной записи — берём лок и добавляем запись в индекс.
-        Таким образом никогда не возникает «orphan file без index entry».
-        """
-        file_path = self._shares_dir / package.filename
-        # W1767 #16: записываем файл пакета с правами 0o600 через os.open,
-        # чтобы другие процессы на том же хосте не могли прочитать транскрипцию.
-        try:
-            fd = os.open(str(file_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        def write_package():
+            # Cleanup относится только к реально начатой разрешённой записи.
+            self._shares_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(self._shares_dir, 0o700)
             try:
+                fd = os.open(str(file_path), os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                    fh.write(package.content)
-            except Exception:
-                raise
-        except Exception as exc:
-            logger.error(
-                "Не удалось сохранить файл пакета %s: %s",
-                file_path,
-                exc,
-            )
-            # Зачищаем частичный файл, чтобы не оставлять orphan на диске
-            try:
-                file_path.unlink(missing_ok=True)
-            except Exception as cleanup_exc:
-                logger.warning(
-                    "Не удалось удалить частичный файл %s после ошибки записи: %s",
-                    file_path,
-                    cleanup_exc,
-                )
-            # W1767 #17: освобождаем зарезервированный слот в индексе, чтобы
-            # после ошибки записи в индексе не оставался placeholder.
-            with self._lock:
-                self._index.pop(package.share_id, None)
-                self._save_index()
-            raise IpcOperationalError(
-                f"Не удалось записать файл пакета '{file_path}': {exc}"
-            ) from exc
+                    fh.write(content)
+            except Exception as exc:
+                try:
+                    file_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                raise IpcOperationalError("Не удалось записать файл пакета") from exc
 
-        # W1767 #17 (TOCTOU): регистрируем в индексе под тем же локом, который
-        # был захвачен при генерации share_id в prepare_share → check-then-write атомарен.
-        # Запись прошла успешно — добавляем в индекс.
+        run_export_write(self._plaintext_export_authorizer, plaintext_export, BackendSink.SHARING, write_package)
         with self._lock:
             self._index[package.share_id] = package.to_dict()
-            self._save_index()
+            try:
+                self._save_index(plaintext_export=plaintext_export)
+            except PlaintextExportDenied as exc:
+                raise SharePersistenceError(exc.reason) from None
+            except Exception as exc:
+                raise SharePersistenceError("share_index_write_failed") from exc
 
     def _unique_share_id_locked(self) -> str:
         """Генерирует share_id, отсутствующий в индексе. ДОЛЖЕН вызываться под self._lock.

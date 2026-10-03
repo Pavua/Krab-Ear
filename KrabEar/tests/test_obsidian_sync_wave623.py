@@ -9,6 +9,8 @@ Tests:
 """
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import os
 import sys
@@ -34,7 +36,7 @@ class TestObsidianSyncMissingVault(unittest.TestCase):
 
     def test_missing_vault_raises_and_logs(self):
         with tempfile.TemporaryDirectory() as tmpdir:
-            mgr = ObsidianSyncManager(data_dir=Path(tmpdir))
+            mgr = ObsidianSyncManager(data_dir=Path(tmpdir), plaintext_export_authorizer=off_authorizer())
             nonexistent = Path(tmpdir) / "no_such_vault"
             # configure raises ValueError — vault must not exist
             with self.assertRaises(ValueError) as exc_ctx:
@@ -54,7 +56,7 @@ class TestObsidianSyncPermDenied(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             vault = Path(tmpdir) / "vault"
             vault.mkdir()
-            mgr = ObsidianSyncManager(data_dir=Path(tmpdir))
+            mgr = ObsidianSyncManager(data_dir=Path(tmpdir), plaintext_export_authorizer=off_authorizer())
             mgr.configure(str(vault), folder="Transcriptions")
 
             # Make target dir non-writable
@@ -78,7 +80,7 @@ class TestObsidianSyncLockContention(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             vault = Path(tmpdir) / "vault"
             vault.mkdir()
-            mgr = ObsidianSyncManager(data_dir=Path(tmpdir))
+            mgr = ObsidianSyncManager(data_dir=Path(tmpdir), plaintext_export_authorizer=off_authorizer())
             mgr.configure(str(vault), folder="Transcriptions")
 
             results = []
@@ -116,7 +118,7 @@ class TestObsidianSyncMalformedState(unittest.TestCase):
             state_file.write_text("NOT VALID JSON }{", encoding="utf-8")
 
             with self.assertLogs("KrabEar.Backend.ObsidianSync", level="WARNING") as _cm:
-                mgr = ObsidianSyncManager(data_dir=Path(tmpdir))
+                mgr = ObsidianSyncManager(data_dir=Path(tmpdir), plaintext_export_authorizer=off_authorizer())
 
             # After malformed load vault_path should be None (reset)
             status = mgr.get_sync_status()
@@ -131,7 +133,7 @@ class TestObsidianSyncDiskFull(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             vault = Path(tmpdir) / "vault"
             vault.mkdir()
-            mgr = ObsidianSyncManager(data_dir=Path(tmpdir))
+            mgr = ObsidianSyncManager(data_dir=Path(tmpdir), plaintext_export_authorizer=off_authorizer())
             mgr.configure(str(vault), folder="Transcriptions")
 
             ose = OSError(28, "No space left on device")

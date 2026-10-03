@@ -18,11 +18,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from backend.export_scheduler import ExportScheduler
+from _plaintext_export_test_helpers import off_authorizer
 
 
 def _make_scheduler(data_dir: Path, settings_provider=None) -> ExportScheduler:
     """Return an ExportScheduler wired to *data_dir*."""
-    return ExportScheduler(data_dir=data_dir, settings_provider=settings_provider)
+    return ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=data_dir, settings_provider=settings_provider)
 
 
 def _write_schedule(data_dir: Path, entries: list[dict], enabled: bool = True) -> None:

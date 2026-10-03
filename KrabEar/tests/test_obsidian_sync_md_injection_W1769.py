@@ -34,6 +34,8 @@ Tests:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import sys
 import tempfile
 import unittest
@@ -151,7 +153,7 @@ class TestObsidianSyncMdInjectionE2E(unittest.TestCase):
         self._vault.mkdir()
         self._data = Path(self._tmp.name) / "data"
         self._data.mkdir()
-        self._mgr = ObsidianSyncManager(data_dir=self._data)
+        self._mgr = ObsidianSyncManager(data_dir=self._data, plaintext_export_authorizer=off_authorizer())
         # Use configure() directly (not handle_configure) to skip the
         # IPC-level $HOME containment guard — we're testing the .md content
         # sanitization, not the path containment check.

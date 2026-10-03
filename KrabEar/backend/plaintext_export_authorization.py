@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import secrets
 import threading
+import uuid
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -169,6 +170,30 @@ REASON_PLAINTEXT_POLICY_UNAVAILABLE = "plaintext_policy_unavailable"
 
 #: Privacy true: всегда deny, даже при KNOWN_OFF и валидном grant (п.18).
 REASON_PRIVACY_MODE_ACTIVE = "privacy_mode_active"
+
+
+class BackendSink(Enum):
+    """Закрытый серверный набор назначений; клиент не выбирает sink строкой."""
+
+    HISTORY = "history"
+    TIMELINE = "timeline"
+    OBSIDIAN = "obsidian"
+    SHARING = "sharing"
+    SCHEDULER = "scheduler"
+
+
+class PlaintextExportDenied(RuntimeError):
+    """Безопасный отказ без capability, session, пути или текста исключения."""
+
+    def __init__(self, reason: str) -> None:
+        allowed = (
+            REASON_PLAINTEXT_CONFIRMATION_REQUIRED,
+            REASON_PLAINTEXT_SESSION_EXPIRED,
+            REASON_PLAINTEXT_POLICY_UNAVAILABLE,
+            REASON_PRIVACY_MODE_ACTIVE,
+        )
+        self.reason = reason if type(reason) is str and reason in allowed else REASON_PLAINTEXT_POLICY_UNAVAILABLE
+        super().__init__(self.reason)
 
 
 @dataclass(frozen=True)
@@ -508,51 +533,13 @@ class PlaintextExportAuthorizer:
         snapshot = self._fresh_snapshot()
         with self._mu:
             denied = self._denied_validate
-            if self._closed or snapshot.state is PolicyState.UNKNOWN:
-                self._revoke_all_locked()
-                return denied(REASON_PLAINTEXT_POLICY_UNAVAILABLE)
-            if snapshot.fingerprint is None:
-                # Чужой read_snapshot-колбэк: KNOWN с None-fingerprint → UNKNOWN.
-                self._revoke_all_locked()
-                return denied(REASON_PLAINTEXT_POLICY_UNAVAILABLE)
-            if self._profile_mismatch_locked(snapshot.fingerprint):
-                self._revoke_all_locked()
-                return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-            if snapshot.privacy_mode_enabled:
-                self._revoke_all_locked()
-                self._remembered = snapshot.fingerprint
-                return denied(REASON_PRIVACY_MODE_ACTIVE)
-            if (
-                self._remembered is not None
-                and snapshot.fingerprint != self._remembered
-            ):
-                self._revoke_all_locked()
-                self._remembered = snapshot.fingerprint
-                return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-            self._remembered = snapshot.fingerprint
-            if not self._valid_session_id(app_session_id):
-                return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-            if not isinstance(epoch, bytes) or epoch != self._epoch:
-                return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-            if (
-                type(expected_policy_generation) is not int
-                or expected_policy_generation != self._generation
-            ):
-                return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-            if snapshot.state is PolicyState.KNOWN_ON:
-                if capability is None:
-                    return denied(REASON_PLAINTEXT_CONFIRMATION_REQUIRED)
-                if type(capability) is not str:
-                    return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-                grant = self._grants.get(capability)
-                if grant is None or grant.app_session_id != app_session_id:
-                    return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-            elif snapshot.state is PolicyState.KNOWN_OFF:
-                if capability is not None:
-                    return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
-            else:
-                self._revoke_all_locked()
-                return denied(REASON_PLAINTEXT_POLICY_UNAVAILABLE)
+            reason = self._refresh_validation_policy_locked(snapshot)
+            if reason is None:
+                reason = self._validate_session_locked(
+                    snapshot, app_session_id, epoch, capability, expected_policy_generation,
+                )
+            if reason is not None:
+                return denied(reason)
             if type(operation_seq) is not int or operation_seq < 1:
                 return denied(REASON_PLAINTEXT_SESSION_EXPIRED)
             if type(sink_kind) is not str or not sink_kind:
@@ -678,6 +665,114 @@ class PlaintextExportAuthorizer:
             return True
 
     # ── внутреннее ──
+
+    def _refresh_validation_policy_locked(
+        self, snapshot: PolicySnapshot, *, allow_fresh_off: bool = False,
+    ) -> str | None:
+        """Общий Swift/backend snapshot-first revoke. Только под authorizer lock."""
+        if self._closed or snapshot.state is PolicyState.UNKNOWN:
+            self._revoke_all_locked()
+            return REASON_PLAINTEXT_POLICY_UNAVAILABLE
+        if snapshot.fingerprint is None:
+            # Чужой read_snapshot-колбэк: KNOWN с None-fingerprint → UNKNOWN.
+            self._revoke_all_locked()
+            return REASON_PLAINTEXT_POLICY_UNAVAILABLE
+        if self._profile_mismatch_locked(snapshot.fingerprint):
+            self._revoke_all_locked()
+            return REASON_PLAINTEXT_SESSION_EXPIRED
+        if snapshot.privacy_mode_enabled:
+            self._revoke_all_locked()
+            self._remembered = snapshot.fingerprint
+            return REASON_PRIVACY_MODE_ACTIVE
+        if (
+            self._remembered is not None
+            and snapshot.fingerprint != self._remembered
+        ):
+            self._revoke_all_locked()
+            self._remembered = snapshot.fingerprint
+            # Backend без namespace не предъявляет старую сессию. После
+            # отзыва grants свежий OFF достаточен; Swift/contextful остаются strict.
+            if allow_fresh_off and snapshot.state is PolicyState.KNOWN_OFF:
+                return None
+            return REASON_PLAINTEXT_SESSION_EXPIRED
+        self._remembered = snapshot.fingerprint
+        return None
+
+    def _validate_session_locked(
+        self, snapshot: PolicySnapshot, app_session_id: str, epoch: bytes,
+        capability: Optional[str], expected_policy_generation: int,
+    ) -> str | None:
+        """Общая привязка session/grant; sequence остаётся только у Swift."""
+        if not self._valid_session_id(app_session_id):
+            return REASON_PLAINTEXT_SESSION_EXPIRED
+        if not isinstance(epoch, bytes) or epoch != self._epoch:
+            return REASON_PLAINTEXT_SESSION_EXPIRED
+        if (
+            type(expected_policy_generation) is not int
+            or expected_policy_generation != self._generation
+        ):
+            return REASON_PLAINTEXT_SESSION_EXPIRED
+        if snapshot.state is PolicyState.KNOWN_ON:
+            if capability is None:
+                return REASON_PLAINTEXT_CONFIRMATION_REQUIRED
+            if type(capability) is not str:
+                return REASON_PLAINTEXT_SESSION_EXPIRED
+            grant = self._grants.get(capability)
+            if grant is None or grant.app_session_id != app_session_id:
+                return REASON_PLAINTEXT_SESSION_EXPIRED
+        elif snapshot.state is PolicyState.KNOWN_OFF:
+            if capability is not None:
+                return REASON_PLAINTEXT_SESSION_EXPIRED
+        else:
+            self._revoke_all_locked()
+            return REASON_PLAINTEXT_POLICY_UNAVAILABLE
+        return None
+
+    def precheck_backend_export(self, context: object, sink: BackendSink) -> None:
+        """Ранний deny без authority: любой writer обязан проверить снова.
+
+        None означает отсутствие namespace; явный JSON null адаптер заменяет
+        invalid sentinel. Сначала snapshot/revoke, затем форма context.
+        Ни receipts, ни Swift high-water этот путь не создаёт и не потребляет.
+        """
+        snapshot = self._fresh_snapshot()
+        with self._mu:
+            reason = self._refresh_validation_policy_locked(snapshot, allow_fresh_off=context is None)
+            if reason is not None:
+                raise PlaintextExportDenied(reason)
+            if type(sink) is not BackendSink:
+                raise PlaintextExportDenied(REASON_PLAINTEXT_SESSION_EXPIRED)
+            if sink is BackendSink.SCHEDULER and snapshot.state is PolicyState.KNOWN_ON:
+                raise PlaintextExportDenied(REASON_PLAINTEXT_CONFIRMATION_REQUIRED)
+            if context is None:
+                if snapshot.state is PolicyState.KNOWN_OFF:
+                    return
+                raise PlaintextExportDenied(REASON_PLAINTEXT_CONFIRMATION_REQUIRED)
+            if type(context) is not dict or set(context) != {
+                "app_session_id", "epoch", "capability", "expected_policy_generation",
+            }:
+                raise PlaintextExportDenied(REASON_PLAINTEXT_SESSION_EXPIRED)
+            session = context["app_session_id"]
+            epoch = context["epoch"]
+            generation = context["expected_policy_generation"]
+            if (
+                type(session) is not str or len(session) != 36
+                or type(epoch) is not str or len(epoch) != 64
+                or type(generation) is not int or generation < 0
+            ):
+                raise PlaintextExportDenied(REASON_PLAINTEXT_SESSION_EXPIRED)
+            try:
+                canonical_session = str(uuid.UUID(session))
+                decoded_epoch = bytes.fromhex(epoch)
+            except ValueError:
+                raise PlaintextExportDenied(REASON_PLAINTEXT_SESSION_EXPIRED) from None
+            if canonical_session != session or decoded_epoch.hex() != epoch:
+                raise PlaintextExportDenied(REASON_PLAINTEXT_SESSION_EXPIRED)
+            reason = self._validate_session_locked(
+                snapshot, session, decoded_epoch, context["capability"], generation,
+            )
+            if reason is not None:
+                raise PlaintextExportDenied(reason)
 
     def _fresh_snapshot(self) -> PolicySnapshot:
         """Свежий snapshot ВНЕ authorizer lock (порядок п.12).

@@ -104,7 +104,31 @@ lock. Изменение во время sheet требует нового яв�
 `history-stats-report`, `history-pdf`. Неизвестный sink отклоняется. Backend
 file writers получают отдельный namespace:
 `plaintext_export:{app_session_id,epoch,capability,expected_policy_generation}`;
-его внедрение во все writers относится к Card B, не доказывается наличием RPC.
+`operation_seq` в этот namespace не добавляется. Серверные записи не расходуют
+Swift high-water и не возвращают backend receipt. Отсутствующий namespace
+допустим только при свежем KNOWN_OFF; переданный null, неполный, лишний или
+устаревший context отвергается. Имя sink выбирает серверный writer.
+
+Card B подключает этот context к файловым history/selected/SRT/JSON/CSV/HTML
+(включая `generate_html_report`), batch/Obsidian и трём timeline-экспортам,
+`run_obsidian_sync`, `prepare_share` и прямым низкоуровневым writers. Render-only
+и clipboard варианты не требуют файлового consent; их privacy gates сохраняются.
+Автоматический scheduler при ON всегда отказывает, даже при активном ручном grant.
+
+Каждая отдельная запись, включая sharing index с полным content, получает свежую
+проверку. Initial precheck не разрешает следующие файлы. При отзыве во время
+пакета уже разрешённые файлы сохраняются, дальнейшие не создаются; ответ содержит
+`reason` и `partial:true`, если часть выполнена. Batch возвращает точные `files`;
+Obsidian — счётчики записанных файлов и не продвигает cursor поверх ошибок;
+sharing при сохранённом payload и отказе индекса возвращает `written_file_count:1`.
+Scheduler partial сохраняет `path` разрешённого файла, не продолжая pruning или
+запись schedule. Такой partial отличается от первоначального отказа без файлов.
+
+`revoke_share_link` также может переписать индекс с текстом остальных пакетов:
+при ON требуется namespace, при privacy ON он отказывает даже с grant. Отказ
+возвращается явно и не выдаётся за успешный отзыв; TTL продолжает ограничивать
+чтение пакетов. Сохранение отзыва без plaintext-перезаписи требует отдельного
+изменения хранения индекса и не реализовано в Card B.
 
 После SavePanel/renderer callback Swift фиксирует destination + immutable content
 и только затем запрашивает validation. Сервер завершает разрешение в

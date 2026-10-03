@@ -1,5 +1,7 @@
 """Wave 659 — ObsidianSyncManager error-path tests (5 scenarios)."""
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import os
 import stat
@@ -25,13 +27,13 @@ class TestVaultDirMissing(unittest.TestCase):
 
     def test_missing_vault_raises_value_error_on_configure(self):
         with tempfile.TemporaryDirectory() as data_dir:
-            mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+            mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
             with self.assertRaises(ValueError):
                 mgr.configure("/nonexistent/vault/path/xyz123")
 
     def test_sync_without_configure_raises_runtime_error(self):
         with tempfile.TemporaryDirectory() as data_dir:
-            mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+            mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
             with self.assertRaises(RuntimeError):
                 mgr.sync([_item()])
 
@@ -42,7 +44,7 @@ class TestPermDenied(unittest.TestCase):
     def test_perm_denied_write_captured_in_errors(self):
         with tempfile.TemporaryDirectory() as vault_dir:
             with tempfile.TemporaryDirectory() as data_dir:
-                mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+                mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
                 mgr.configure(vault_dir)
                 # Make the target folder read-only
                 target = Path(vault_dir) / "Transcriptions"
@@ -62,7 +64,7 @@ class TestLockContention(unittest.TestCase):
     def test_concurrent_sync_both_complete(self):
         with tempfile.TemporaryDirectory() as vault_dir:
             with tempfile.TemporaryDirectory() as data_dir:
-                mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+                mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
                 mgr.configure(vault_dir)
 
                 results = []
@@ -101,7 +103,7 @@ class TestMalformedStateJson(unittest.TestCase):
 
             import logging
             with self.assertLogs("KrabEar.Backend.ObsidianSync", level=logging.WARNING):
-                mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+                mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
 
             # After malformed load, vault must not be set
             self.assertIsNone(mgr._vault_path)
@@ -112,7 +114,7 @@ class TestMalformedStateJson(unittest.TestCase):
                 state_path = Path(data_dir) / "obsidian_sync.json"
                 state_path.write_text("null", encoding="utf-8")
 
-                mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+                mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
                 result = mgr.configure(vault_dir)
                 self.assertEqual(result["vault_path"], str(Path(vault_dir).resolve()))
 
@@ -123,7 +125,7 @@ class TestDiskFull(unittest.TestCase):
     def test_disk_full_captured_in_errors(self):
         with tempfile.TemporaryDirectory() as vault_dir:
             with tempfile.TemporaryDirectory() as data_dir:
-                mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+                mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
                 mgr.configure(vault_dir)
 
                 import builtins
