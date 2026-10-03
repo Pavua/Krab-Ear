@@ -76,7 +76,7 @@
 ## Команды (исполнителю карточки, не выполнять здесь)
 
 ```bash
-cd native/KrabEarAgent && swift build -c release   # только в свободное окно при ресурсах
+(cd native/KrabEarAgent && swift build -c release)   # только в свободное окно при ресурсах
 PYTHONPATH="$PWD/KrabEar" /Users/pablito/Antigravity_AGENTS/Krab\ Ear/.venv_krab_ear/bin/python -m pytest KrabEar/tests/test_plaintext_export_swift_harness.py -v  # если есть py-сторона harness
 scripts/pre_merge_py312_check.sh KrabEar/tests/test_plaintext_export_swift_harness.py
 make audit-all

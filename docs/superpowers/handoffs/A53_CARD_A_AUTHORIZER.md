@@ -6,8 +6,8 @@
 (FINAL GO, `COUNTER_REVIEW_A53.md`); спека §7
 `docs/superpowers/specs/2026-09-24-a5-history-at-rest-design.md` с
 подразделами 7.1–7.7. Порядок README п.3: сначала §7-уточнения (сделано),
-затем карточки по одной. Только docs в этой задаче; код карточек A–D не
-реализовывать здесь.
+затем карточки по одной. Эта карточка предназначена для реализации и проверки
+кода зоны A в пределах Scope и списка файлов ниже.
 
 ## Scope (входит)
 
@@ -49,8 +49,6 @@
   на весь backend. Отдельный peer-auth/bootstrap дизайн не входит и не
   обещается (будущий BLOCK, не часть A5.3).
 - Не трогать Python sinks карточки B, Swift карточки C, интеграцию D.
-- Не запускать тесты/CI ради этой docs-задачи; не менять
-  `service.py`/`state_store.py`/`history_service.py` здесь.
 
 ## Файлы
 
@@ -75,7 +73,7 @@
    st_ctime_ns, SHA256(raw_bytes), internal_revision)`; JSON flags+revision ИЗ
    ЭТИХ bytes; mismatch → revoke ДО validation, update remembered
    snapshot/generation; valid+старый context → `plaintext_session_expired`;
-   UNKNOWN → `policy_unavailable`; same-bool replacement тоже отзывает.
+   UNKNOWN → `plaintext_policy_unavailable`; same-bool replacement тоже отзывает.
 4. Central commit + revision (§7.3): каждая поддержанная запись генерирует новый
    `uuid4().hex`, входное/backup значение игнорировать; import/restore/reset/
    recovery через этот commit; `:5456` — validated commit без вложенных FD.
@@ -141,7 +139,7 @@
 
 Каждый `BackendService(...)` в тесте ОБЯЗАН `service.close()` в `tearDown`.
 
-## Команды (исполнителю карточки, не выполнять здесь)
+## Команды исполнителю карточки
 
 ```bash
 /Users/pablito/Antigravity_AGENTS/Krab\ Ear/.venv_krab_ear/bin/python --version  # 3.14.6
@@ -156,7 +154,7 @@ make audit-all
   новых нарушений; redaction-sentinel отсутствуют в captured logs/traceback/
   fake-Sentry/diagnostics.
 - Cross-process fixtures 5a–5c детерминированы (barriers/events, не sleep),
-  дети join/cleanup, 0 writes при deny/session_expired/policy_unavailable.
+  дети join/cleanup, 0 writes при deny/session_expired/plaintext_policy_unavailable.
 - Восстановление settings bytes не воскрешает grant; ON→OFF→ON отзывает.
 - Diff ограничен файлами раздела «Файлы»; sinks B / Swift C не тронуты.
 
