@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import history_service_with_off_policy
+
 import sys
 import tempfile
 import unittest
@@ -34,7 +36,7 @@ class ExportSelectedItemsFilterTest(unittest.TestCase):
         self.store = StateStore(Path(self.tmp.name) / "data")
         # Privacy-mode выключен — используем явный флаг
         self._privacy: dict[str, bool] = {"privacy_mode_enabled": False}
-        self.svc = HistoryService(
+        self.svc = history_service_with_off_policy(
             store=self.store,
             cached_settings=lambda: dict(self._privacy),
         )
@@ -133,7 +135,7 @@ class ExportSelectedItemsPrivacyGateTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
         self._privacy: dict[str, bool] = {"privacy_mode_enabled": True}
-        self.svc = HistoryService(
+        self.svc = history_service_with_off_policy(
             store=self.store,
             cached_settings=lambda: dict(self._privacy),
         )
@@ -185,7 +187,7 @@ class ExportSelectedItemsEmptyIdsTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     def test_empty_list_returns_error(self) -> None:
         """Пустой список item_ids возвращает ok=False."""

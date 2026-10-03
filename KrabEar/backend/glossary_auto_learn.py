@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
+
 import logging
 import re
 import threading
@@ -422,7 +424,7 @@ class GlossaryAutoLearnService:
             if applied > 0:
                 settings["translation_glossary"] = glossary
                 try:
-                    saved = self._store.save_settings(settings)
+                    saved = self._store.save_settings(settings, expected_revision=settings.get(POLICY_REVISION_KEY))
                     self._invalidate_settings_cache()
                     total = len(saved.get("translation_glossary") or glossary)
                 except Exception as exc:
@@ -430,7 +432,9 @@ class GlossaryAutoLearnService:
                         "apply_glossary_suggestions: save error: %s", exc,
                         extra={"applied": applied},
                     )
-                    total = len(glossary)
+                    # Ошибка commit не означает применённые термины.
+                    self._invalidate_settings_cache()
+                    raise
             else:
                 total = len(glossary)
 

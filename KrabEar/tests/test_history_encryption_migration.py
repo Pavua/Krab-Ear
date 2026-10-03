@@ -28,6 +28,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
+
 _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
@@ -43,10 +45,30 @@ def _make_fake_crypto():
     return HistoryCrypto(os.urandom(32))
 
 
+def _seed_known_profile(data_dir: Path, *, encryption: bool = False) -> None:
+    """Валидный policy-профиль (оба exact-bool + валидная ревизия) на диске.
+
+    Долговечный guard ``save_settings`` отказывает на отсутствующем или
+    неполном settings.json, поэтому тесты, которые переключают флаг
+    шифрования поддержанной записью, обязаны стартовать с валидного профиля.
+    Инварианты самих тестов (миграция ENC1, гонка OFF во время получения ключа,
+    отчёт о статусе) от сида не меняются.
+    """
+    (data_dir / "settings.json").write_text(
+        json.dumps({
+            "history_encryption_enabled": encryption,
+            "privacy_mode_enabled": False,
+            POLICY_REVISION_KEY: "0123456789abcdef0123456789abcdef",
+        }),
+        encoding="utf-8",
+    )
+
+
 def _inject_crypto(store, crypto=None):
     """Включает шифрование в temp-профиле и подменяет Keychain crypto."""
     if crypto is None:
         crypto = _make_fake_crypto()
+    _seed_known_profile(store.data_dir)
     store.save_settings({"history_encryption_enabled": True})
     store._history_crypto_initialized = True
     store._history_crypto_instance = crypto
@@ -546,9 +568,7 @@ class TestMigrateSettingsRace(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             data_dir = Path(temp_dir)
             settings_path = data_dir / "settings.json"
-            settings_path.write_text(
-                json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
-            )
+            _seed_known_profile(data_dir, encryption=True)
             history_path = data_dir / "history.ndjson"
             _write_plaintext_line(history_path, _make_item_payload("a5", "SYNTHETIC_RACE"))
             original = history_path.read_bytes()
@@ -584,6 +604,7 @@ class TestMigrateCryptoUnavailable(unittest.TestCase):
 
     def test_returns_encryption_unavailable_when_crypto_none(self):
         store = _make_store(self.data_dir)
+        _seed_known_profile(self.data_dir)
         store.save_settings({"history_encryption_enabled": True})
         store._history_crypto_initialized = True
         store._history_crypto_instance = None
@@ -739,6 +760,7 @@ class TestGetHistoryEncryptionStatus(unittest.TestCase):
         self.assertFalse(status["enabled"])
 
         # Включаем через settings.json
+        _seed_known_profile(self.data_dir)
         store.save_settings({"history_encryption_enabled": True})
         status2 = store.get_history_encryption_status()
         self.assertTrue(status2["enabled"])

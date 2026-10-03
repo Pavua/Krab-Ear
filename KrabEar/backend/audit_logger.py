@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend.plaintext_export_redaction import redact_auth
+
 logger = logging.getLogger("KrabEar.Backend.AuditLogger")
 
 # Методы, параметры которых полностью redact-ятся в audit log (чувствительные данные).
@@ -153,6 +155,13 @@ class AuditLogger:
         if client_info:
             entry["client_info"] = client_info
 
+        try:
+            # Даже имя параметра может повторять bearer из соседнего поля.
+            # Сам payload/result по-прежнему никогда не записывается в audit.
+            entry = redact_auth(entry, context={"params": params, "result": result})
+        except Exception:
+            # Сбой redaction не разрешает записать исходные metadata.
+            return
         line = json.dumps(entry, ensure_ascii=False)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 

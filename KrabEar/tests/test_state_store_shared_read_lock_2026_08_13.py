@@ -506,7 +506,11 @@ class TestSafeNestedCombinationsDoNotRaise(unittest.TestCase):
 class TestMigrateHistoryEncryptionWithSharedLoadSettings(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.mkdtemp()
-        self.data_dir = Path(self._tmpdir)
+        # Каталог профиля создаёт сам StateStore: достоверно новый профиль,
+        # чья первая поддержанная запись разрешена. Инвариант теста (shared
+        # load_settings внутри progress_cb не дедлочит) от этого не меняется —
+        # раньше та же запись просто падала бы с отказом по MISSING_SETTINGS.
+        self.data_dir = Path(self._tmpdir) / "profile"
 
     def tearDown(self):
         import shutil

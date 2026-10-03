@@ -16,6 +16,8 @@ import threading
 import time
 from collections import deque
 
+from backend.plaintext_export_redaction import redact_auth
+
 logger = logging.getLogger(__name__)
 
 _sentry_initialized = False
@@ -120,6 +122,14 @@ def _event_signature(event: dict) -> "str | None":
     видимости.
     """
     try:
+        extra = event.get("extra") or {}
+        if isinstance(extra, dict):
+            method = extra.get("ipc_method")
+            error_type = extra.get("ipc_error_type")
+            if isinstance(method, str) and isinstance(error_type, str):
+                # IPC использует sanitized traceback без raw exc_info. Шаблон
+                # logentry.message один, но ошибки методов/типов независимы.
+                return f"ipc:{method}:{error_type}"[:200]
         exception = event.get("exception") or {}
         values = exception.get("values") or []
         if values:
@@ -197,65 +207,24 @@ def _sentry_before_send(event: dict, hint: object) -> dict | None:  # noqa: ARG0
     - ``logentry`` — ``message`` string and ``params`` (F2)
     - ``request`` — ``data``, ``query_string``, ``cookies`` (F2)
 
-    Волна 2026-08-29: перед редакцией работает предохранитель квоты — одна
+    Волна 2026-08-29: после редакции работает предохранитель квоты — одна
     повторяющаяся ошибка не должна выжигать месячный лимит и ослеплять
     мониторинг всей организации (см. _sentry_rate_limit_allows).
     """
     try:
+        # Весь event: exception.value и logentry.formatted тоже несут secrets.
+        # Сначала redaction, затем quota: даже fingerprint-cache не хранит token.
+        event = _redact_value(redact_auth(event))
+        if not isinstance(event, dict):
+            return None
+    except Exception:  # noqa: BLE001
+        # Ошибка sanitizer НЕ разрешает отправить исходный event.
+        return None
+    try:
         if not _sentry_rate_limit_allows(event):
             return None
-    except Exception:  # noqa: BLE001 — предохранитель не смеет ронять телеметрию
+    except Exception:  # noqa: BLE001 — quota failure не раскрывает sanitized event
         pass
-    try:
-        # Walk exception values → stacktrace frames → filename / abs_path / vars.
-        exception = event.get("exception") or {}
-        for exc_value in (exception.get("values") or []):
-            stacktrace = exc_value.get("stacktrace") or {}
-            for frame in (stacktrace.get("frames") or []):
-                for key in ("filename", "abs_path", "module"):
-                    if key in frame and isinstance(frame[key], str):
-                        frame[key] = _redact_string(frame[key])
-                # Redact vars dict (local variables in the frame).
-                if "vars" in frame:
-                    frame["vars"] = _redact_value(frame["vars"])
-
-        # Walk top-level extra / contexts dicts.
-        for top_key in ("extra", "contexts", "tags"):
-            if top_key in event:
-                event[top_key] = _redact_value(event[top_key])
-
-        # Redact message string if present.
-        if "message" in event and isinstance(event["message"], str):
-            event["message"] = _redact_string(event["message"])
-
-        # W1483 F1 — Walk breadcrumbs: each crumb's data dict and message string.
-        breadcrumbs = event.get("breadcrumbs") or {}
-        for crumb in (breadcrumbs.get("values") or []):
-            if isinstance(crumb, dict):
-                if "message" in crumb and isinstance(crumb["message"], str):
-                    crumb["message"] = _redact_string(crumb["message"])
-                if "data" in crumb and isinstance(crumb["data"], dict):
-                    crumb["data"] = _redact_value(crumb["data"])
-
-        # W1483 F2 — Walk logentry: message string and params.
-        logentry = event.get("logentry")
-        if isinstance(logentry, dict):
-            if "message" in logentry and isinstance(logentry["message"], str):
-                logentry["message"] = _redact_string(logentry["message"])
-            if "params" in logentry:
-                logentry["params"] = _redact_value(logentry["params"])
-
-        # W1483 F2 — Walk request: data, query_string, cookies.
-        request = event.get("request")
-        if isinstance(request, dict):
-            for req_key in ("data", "query_string", "cookies"):
-                if req_key in request:
-                    request[req_key] = _redact_value(request[req_key])
-
-    except Exception:  # noqa: BLE001
-        # Never let redaction break crash reporting.
-        pass
-
     return event
 
 

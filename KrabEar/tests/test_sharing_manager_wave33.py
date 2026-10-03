@@ -16,6 +16,8 @@ A4 (MED)  — _render_json экспортировал ПОЛНЫЙ to_dict() (au
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import sys
 import tempfile
@@ -104,6 +106,7 @@ def _make_mgr(tmpdir: str, *, privacy: bool = False) -> SharingManager:
     return SharingManager(
         store=FakeStore(tmpdir),
         privacy_mode_fn=(lambda: privacy),
+        plaintext_export_authorizer=off_authorizer(privacy_provider=lambda: privacy),
     )
 
 
@@ -117,7 +120,7 @@ class InMemoryPurgeTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store._items["i1"] = FakeHistoryItem("i1", "секретная транскрипция")
 
     def test_clear_empties_in_memory_index(self) -> None:

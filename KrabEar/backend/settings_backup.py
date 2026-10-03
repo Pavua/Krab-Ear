@@ -208,18 +208,13 @@ class SettingsBackup:
                 f"({file_size} байт > {_MAX_BACKUP_BYTES}); загрузка отклонена"
             )
 
+        # Общий no-follow/bounded/stability reader не теряет duplicate keys
+        # до explicit-policy validation в SettingsService.
+        from backend.state_store import StateStore, StateStoreSettingsCorruptError
         try:
-            with backup_path.open("r", encoding="utf-8") as fh:
-                data = json.load(fh)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"Невалидный JSON в файле бэкапа '{backup_id}': {exc}"
-            ) from exc
-
-        if not isinstance(data, dict):
-            raise ValueError(
-                f"Файл бэкапа '{backup_id}' должен содержать JSON-объект"
-            )
+            data = StateStore.read_settings_import(backup_path)
+        except StateStoreSettingsCorruptError:
+            raise ValueError("Невалидный JSON или небезопасный файл бэкапа настроек") from None
 
         _log.info(
             "settings_backup: restored %s (%d keys)",

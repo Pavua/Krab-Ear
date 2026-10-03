@@ -195,8 +195,8 @@ class IntegrityChecker:
                 checks.append(CheckResult(
                     name="settings_json",
                     status="error",
-                    message=f"settings.json повреждён: {exc}",
-                    auto_fixable=True,
+                    message=f"settings.json повреждён: {exc}; требуется явное восстановление настроек",
+                    auto_fixable=False,
                 ))
         else:
             checks.append(CheckResult(
@@ -264,20 +264,18 @@ class IntegrityChecker:
                 )
 
             elif check.name == "settings_json":
-                backup = self._repair_settings(
-                    data_dir / "settings.json",
-                    data_dir / "history.lock",
-                )
-                result.fixed += 1
-                if backup:
-                    result.backup_paths.append(backup)
-                result.details.append("settings_json: повреждённый файл сброшен до {}")
+                # Старый/stale report мог считать это auto-fixable. Без явных
+                # privacy/encryption bool нельзя угадывать policy из {}.
+                result.skipped += 1
+                result.details.append("settings_json: требуется явное восстановление настроек")
 
             else:
                 result.skipped += 1
 
         non_fixable = [c for c in report.checks if not c.auto_fixable and c.status != "ok"]
         result.skipped += len(non_fixable)
+        if any(check.name == "settings_json" for check in non_fixable):
+            result.details.append("settings_json: требуется явное восстановление настроек")
         return result
 
     # ------------------------------------------------------------------
@@ -465,36 +463,3 @@ class IntegrityChecker:
         """
         # BUGFIX: The old logic deleted valid tombstones. This check is disabled.
         return 0, "", ""
-
-    def _repair_settings(self, settings_path: Path, lock_path: Path) -> str:
-        """Сбрасывает повреждённый settings.json до пустого объекта.
-
-        Сохраняет бэкап оригинала. Выполняется под flock(lock_path).
-
-        Returns:
-            Путь к бэкапу в виде строки (пустая строка, если файл не существовал).
-        """
-        if not settings_path.exists():
-            return ""
-
-        ts = self._iso_ts()
-        backup_path = settings_path.parent / f"settings.json.corrupt-backup-{ts}"
-
-        lock_fd = self._acquire_lock(lock_path)
-        try:
-            raw_bytes = settings_path.read_bytes()
-            backup_path.write_bytes(raw_bytes)
-            logger.info(
-                "integrity_checker: бэкап settings.json сохранён",
-                extra={"backup": str(backup_path)},
-            )
-            tmp = settings_path.with_suffix(".json.tmp")
-            tmp.write_text("{}", encoding="utf-8")
-            with tmp.open("r+", encoding="utf-8") as fh:
-                fh.flush()
-                os.fsync(fh.fileno())
-            tmp.replace(settings_path)
-            return str(backup_path)
-        finally:
-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-            lock_fd.close()
