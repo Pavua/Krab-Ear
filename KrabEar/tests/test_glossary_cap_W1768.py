@@ -46,7 +46,7 @@ def _make_service(
 
     store = MagicMock()
 
-    def _save(settings: dict[str, Any]) -> dict[str, Any]:
+    def _save(settings: dict[str, Any], **_kwargs) -> dict[str, Any]:
         # Эмулируем персистенцию: обновляем состояние, отражаемое cached_settings.
         state["translation_glossary"] = dict(
             settings.get("translation_glossary", {}) or {}

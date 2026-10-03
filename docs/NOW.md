@@ -1,5 +1,17 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## A5.3, 2026-10-03 — source checkpoint
+
+База разработки: `origin/codex/krab-ear-v2` = `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
+Card A завершён в `codex/ear-a53-completion`: независимый Astra High source PASS,
+Python 3.12 parity 56 файлов PASS, audit-all PASS. Source PR/CI ещё впереди;
+Card B/C/D ещё не реализованы. Деплой и включение шифрования не выполнялись.
+Матрица и существенный риск прежней backup-изоляции тестов:
+[Card A verification](superpowers/handoffs/2026-10-03-a53-card-a-verification.md).
+[Текущий handoff](superpowers/handoffs/2026-10-03-a53-autonomous-progress.md).
+
+Сведения runtime ниже — снимок 30.09, в этой source-сессии не перепроверялись.
+
 ## Cutover 2026-09-30 — текущий runtime
 
 **Backend и REST работают на `1ebd12eb69695296a13c39eac35a9b7af3405ba5`**

@@ -56,7 +56,7 @@ class _FakeStore:
     def get_history_page(self, cursor=None, limit=500):
         return [], None
 
-    def save_settings(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+    def save_settings(self, settings: Dict[str, Any], **_kwargs) -> Dict[str, Any]:
         # Эмулируем персистенцию: обновляем внутреннее состояние
         self._settings = dict(settings)
         self.save_count += 1

@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from _settings_test_helpers import safe_backend_for_settings
+
 import json
 import sys
 import tempfile
@@ -83,7 +85,7 @@ class FakeStore:
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return {}
 
-    def save_settings(self, settings: dict) -> dict:
+    def save_settings(self, settings: dict, **_kwargs) -> dict:
         return settings
 
 
@@ -517,10 +519,9 @@ class BackendServiceW1766WiringTestCase(unittest.TestCase):
     def test_backend_wires_webhook_manager_into_history(self) -> None:
         """BackendService.__init__ должен wire _webhook_manager в _history._webhook_manager."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._webhook_manager,
@@ -532,10 +533,9 @@ class BackendServiceW1766WiringTestCase(unittest.TestCase):
     def test_backend_wires_obsidian_sync_into_history(self) -> None:
         """BackendService.__init__ должен wire _obsidian_sync в _history._obsidian_sync."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._obsidian_sync,

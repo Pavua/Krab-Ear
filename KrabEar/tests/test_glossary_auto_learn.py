@@ -54,7 +54,7 @@ class FakeStore:
     def get_history_page(self, cursor=None, limit=500):
         return list(self._items), None
 
-    def save_settings(self, settings):
+    def save_settings(self, settings, **_kwargs):
         self._settings = dict(settings)
         return self._settings
 
@@ -359,7 +359,7 @@ class TestHandlesCorruptedHistoryEntry(unittest.TestCase):
             def get_history_page(self, **kw):
                 raise RuntimeError("disk error")
 
-            def save_settings(self, s):
+            def save_settings(self, s, **_kwargs):
                 return s
 
         svc = GlossaryAutoLearnService(
