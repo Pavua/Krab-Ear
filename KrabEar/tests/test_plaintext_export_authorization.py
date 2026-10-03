@@ -643,6 +643,32 @@ class TestStartupDoesNotWashUnknownIntoKnown(_StartupPolicyFixture):
     становился KNOWN_OFF — ровно тот UNKNOWN→ON класс, который искало ревью.
     """
 
+    def test_legacy_migration_preserves_user_settings_and_extension_keys(self):
+        """Добавление policy revision не сбрасывает существующий профиль."""
+        original = {
+            ENCRYPTION_KEY: False,
+            PRIVACY_KEY: False,
+            "llm_model": "synthetic-owner-model",
+            "llm_rewriter_enabled": True,
+            "future_extension": {"languages": ["ru", "es"], "enabled": False},
+        }
+        self.seed_settings(original)
+
+        outcome, store = self.startup(new_profile=False)
+
+        self.assertEqual(outcome, STARTUP_POLICY_MIGRATED_LEGACY)
+        persisted = self.on_disk()
+        for key, expected in original.items():
+            with self.subTest(key=key):
+                self.assertEqual(persisted.get(key), expected)
+        self.assert_revision_is_uuid4(persisted[POLICY_REVISION_KEY])
+        before_second_start = store.settings_path.read_bytes()
+        self.assertEqual(
+            store.initialize_startup_plaintext_policy(new_profile=False),
+            STARTUP_POLICY_ALREADY_KNOWN,
+        )
+        self.assertEqual(store.settings_path.read_bytes(), before_second_start)
+
     def test_legacy_valid_bools_without_revision_migrates_to_known(self):
         """п.3: legacy с обоими валидными bool, но без ревизии → KNOWN + ревизия.
 

@@ -1236,13 +1236,11 @@ class StateStore:
 
             if snapshot.reason == REASON_UNKNOWN_MISSING_REVISION:
                 # Legacy: оба флага уже exact-bool (иначе причина была бы
-                # missing-key/non-bool), ревизии нет. Перечитываем флаги из тех
-                # же bytes и сохраняем ИХ, добавив новую ревизию.
-                flags = self._read_policy_flags_unlocked()
-                if flags is None:
+                # missing-key/non-bool), ревизии нет. Сохраняем весь профиль:
+                # миграция ревизии не должна сбрасывать пользовательские ключи.
+                settings = self._read_legacy_policy_settings_unlocked()
+                if settings is None:
                     return STARTUP_POLICY_LEFT_UNKNOWN
-                settings = dict(DEFAULT_SETTINGS)
-                settings.update(flags)
                 self._save_settings_unlocked(settings)
                 return STARTUP_POLICY_MIGRATED_LEGACY
 
@@ -1254,11 +1252,12 @@ class StateStore:
             # невалиден: НЕ пишем, оставляем UNKNOWN до validated repair.
             return STARTUP_POLICY_LEFT_UNKNOWN
 
-    def _read_policy_flags_unlocked(self) -> dict[str, bool] | None:
-        """Перечитать exact-bool флаги из settings.json под удерживаемым локом.
+    def _read_legacy_policy_settings_unlocked(self) -> dict[str, Any] | None:
+        """Перечитать полный legacy-профиль под удерживаемым локом.
 
         Используется только startup-миграцией, где MISSING_REVISION уже доказан
-        предыдущим чтением. Любой сбой → ``None`` (вызывающий оставит UNKNOWN).
+        предыдущим чтением. Флаги повторно проверяются как exact-bool, остальные
+        ключи сохраняются без изменений. Любой сбой → ``None``.
         """
         try:
             raw = self.settings_path.read_bytes()
@@ -1270,12 +1269,10 @@ class StateStore:
             return None
         if not isinstance(payload, dict):
             return None
-        flags: dict[str, bool] = {}
         for key in POLICY_FLAG_KEYS:
             if key not in payload or type(payload[key]) is not bool:
                 return None
-            flags[key] = payload[key]
-        return flags
+        return payload
 
     # ── A5.3 карточка A, slice 1: чтение типизированного policy snapshot ──
 
