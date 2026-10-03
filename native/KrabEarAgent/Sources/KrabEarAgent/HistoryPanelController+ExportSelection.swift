@@ -105,24 +105,27 @@ extension HistoryPanelController {
             return
         }
 
-        let ipcClient = self.ipcClient
-        // AGENT-3: ipcClient.call строго off-main.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                nonisolated(unsafe) let response = try ipcClient.call(
-                    method: "export_selected_items",
-                    params: ["item_ids": ids, "format": "markdown"]
-                )
-                nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
-                DispatchQueue.main.async {
-                    self?.handleExportSelectedResult(result, itemCount: ids.count)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.showInfoAlert(
-                        title: "Экспорт выбранных",
-                        body: "Ошибка IPC: \(error.localizedDescription)"
+        preparePlaintextExport(sink: .historySelected) { [weak self] ticket in
+            guard let self else { return }
+            let ipcClient = self.ipcClient
+            // AGENT-3: ipcClient.call строго off-main.
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                do {
+                    nonisolated(unsafe) let response = try ipcClient.call(
+                        method: "export_selected_items",
+                        params: ["item_ids": ids, "format": "markdown"]
                     )
+                    nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
+                    DispatchQueue.main.async {
+                        self?.handleExportSelectedResult(result, itemCount: ids.count, ticket: ticket)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self?.showInfoAlert(
+                            title: "Экспорт выбранных",
+                            body: "Не удалось получить данные экспорта. Повторите попытку."
+                        )
+                    }
                 }
             }
         }
@@ -286,7 +289,7 @@ extension HistoryPanelController {
 
     // MARK: - Result handler (must be called on main thread)
 
-    private func handleExportSelectedResult(_ result: [String: Any], itemCount: Int) {
+    private func handleExportSelectedResult(_ result: [String: Any], itemCount: Int, ticket: PlaintextExportCoordinator.Ticket) {
         let ok = result["ok"] as? Bool ?? false
         guard ok else {
             let reason = result["reason"] as? String ?? "неизвестная ошибка"
@@ -296,7 +299,7 @@ extension HistoryPanelController {
             } else if reason.contains("item_ids") {
                 body = "Не выбрано ни одной записи для экспорта."
             } else {
-                body = "Не удалось экспортировать: \(reason)"
+                body = "Не удалось подготовить экспорт выбранных записей."
             }
             showInfoAlert(title: "Экспорт выбранных", body: body)
             return
@@ -320,18 +323,9 @@ extension HistoryPanelController {
         panel.prompt = "Сохранить"
 
         presentPanelSheet(panel, for: self.window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                try content.write(to: url, atomically: true, encoding: .utf8)
-                self?.showInfoAlert(
-                    title: "Экспорт выбранных",
-                    body: "Сохранено записей: \(entries)\n\(url.path)"
-                )
-            } catch {
-                self?.showInfoAlert(
-                    title: "Экспорт выбранных",
-                    body: "Не удалось записать файл: \(error.localizedDescription)"
-                )
+            guard let self, response == .OK, let url = panel.url else { return }
+            self.writePlaintextExport(ticket: ticket, content: content, to: url) { [weak self] in
+                self?.showInfoAlert(title: "Экспорт выбранных", body: "Сохранено записей: \(entries)\n\(url.path)")
             }
         }
     }

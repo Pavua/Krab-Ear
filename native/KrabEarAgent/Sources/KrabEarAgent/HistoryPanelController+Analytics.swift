@@ -10,7 +10,8 @@ private enum AnalyticsDashboardAssocKey {
 extension HistoryPanelController {
 
     @objc func openAnalyticsDashboard() {
-        let wc = AnalyticsDashboardWindowController(ipcClient: ipcClient)
+        let wc = AnalyticsDashboardWindowController(
+            ipcClient: ipcClient, plaintextExportCoordinator: plaintextExportCoordinator)
         wc.showWindow(nil)
         objc_setAssociatedObject(self, &AnalyticsDashboardAssocKey.windowController, wc, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }

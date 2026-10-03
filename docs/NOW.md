@@ -1,5 +1,19 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## A5.3 Card C, 2026-10-03 — работа продолжается
+
+Card A [#2077](https://github.com/Pavua/Krab-Ear/pull/2077): source/local PASS,
+полный backend CI FAILED в 29 тестовых файлах; исправления fixtures/docs ведутся
+отдельно. Card B [#2078](https://github.com/Pavua/Krab-Ear/pull/2078): source/local
+PASS, backend CI пока выполняется. Startup #2075 и docs #2076 CI PASS.
+Card C поверх `9358cd78`: Astra High source review, release build, 324 Swift
+tests, 8 зависимых Python-файлов, новый launcher py3.12 parity и audit-all PASS.
+Далее C PR/CI и Card D isolated IPC E2E. Merge/deploy/encryption activation
+не выполнялись.
+[Текущий checkpoint C](superpowers/handoffs/2026-10-03-a53-card-c-progress.md).
+
+Ниже — более ранние checkpoints; их слова «ещё впереди» относятся к их дате.
+
 ## A5.3 Card B, 2026-10-03 — source checkpoint
 
 База main-линии повторно сверена: `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
