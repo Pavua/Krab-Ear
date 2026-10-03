@@ -26,8 +26,14 @@ authorizer стабилен). Контракт SHA256
 - `KrabEar/backend/sharing_manager.py` `_fetch_items`:609 → `prepare_share`:215 →
   `_persist_package`:736/751 — gate direct prepare/persist; grant не разрешает
   внешнюю публикацию (только файловый sink по происхождению из history).
+  Sharing index с содержимым history — отдельный файловый sink со своей fresh
+  authorization, даже если package уже записан.
 - Явный authorizer context до writer на каждом sink; fresh authorization
   непосредственно перед первой связанной mutation каждого файла.
+- Допускается добавление ВНУТРЕННЕГО backend-write API в
+  `plaintext_export_authorization.py` и его regression tests по контракту ниже;
+  существующие сигнатуры карточки A, четыре RPC, namespace/reasons и Swift
+  sequence/receipt semantics сохраняются.
 
 ## Не входит / сохранить как есть
 
@@ -43,7 +49,8 @@ authorizer стабилен). Контракт SHA256
   безопасен.
 - Границы вне narrow scope не расширять молча: CallAssist VG payload,
   Import operational report, glossary/settings/logger/plist writers.
-- Не менять authorizer API из карточки A; не трогать Swift (C) и интеграцию (D).
+- Не менять существующий authorizer API из карточки A; additive internal API
+  ограничен backend-write контрактом ниже. Не трогать Swift (C) и интеграцию (D).
 
 ## Файлы
 
@@ -53,8 +60,34 @@ authorizer стабилен). Контракт SHA256
   (только timeline handlers + прокидка context), по необходимости
   `KrabEar/backend/recording_core_service.py` (только сохранение caller gates,
   без новых manual routes).
+- Править дополнительно: `KrabEar/backend/plaintext_export_authorization.py`
+  (только additive internal backend-write API).
 - Тесты: расширить/добавить `KrabEar/tests/test_plaintext_export_*sinks*.py`
-  (parametrized по route+alias).
+  (parametrized по route+alias), `KrabEar/tests/test_plaintext_export_authorization.py`
+  (регрессии внутреннего backend-write API и сохранности Swift sequence).
+
+## Внутренний backend-write контракт (§7.6–7.7)
+
+- Backend namespace остаётся `plaintext_export: {app_session_id, epoch,
+  capability, expected_policy_generation}`. `operation_seq` относится к Swift
+  validation: не синтезировать backend sequence и не переиспользовать Swift
+  `validate_for_write` с общим high-water для backend sinks.
+- Рекомендуемые внутренние вызовы: `precheck_backend_export` для раннего deny
+  и `run_backend_write(context, fixed_server_sink, closure)` для одной заранее
+  выбранной записи (destination/content фиксированы). Sink выбирает сервер.
+  Precheck не выдаёт и не переносит authority к записи: `run_backend_write`
+  заново читает policy и проверяет grant под StateStore → authorizer locks;
+  после разрешения освобождает locks и вызывает closure ровно один раз.
+  Deny не вызывает closure; ошибки writer не приводят к её повторному запуску.
+- Не возвращать и не хранить новый backend bearer/receipt, не менять Swift
+  high-water. Отзыв до fresh authorization → 0 mutations; после неё можно
+  закончить только этот файл, следующий требует новой проверки.
+- KNOWN_OFF + privacy false разрешает отсутствие namespace; supplied
+  malformed/stale context всё равно отклоняется. Privacy true/UNKNOWN всегда
+  deny; scheduler при ON запрещён даже с действующими grants.
+- Bundle/vault mkdir предпочтительно помещать в closure первой записи, чтобы
+  precheck не становился разрешением на mutation. Каждый следующий файл,
+  включая sharing index, получает отдельную fresh authorization.
 
 ## Шаги
 
@@ -63,7 +96,9 @@ authorizer стабилен). Контракт SHA256
    deny до любого mkdir (batch/Obsidian до bundle/vault mkdir).
 2. Batch/Obsidian: N файлов = N validations; deny-до-mkdir, затем повторные
    проверки по файлам; отзыв посередине → явный partial result без rollback уже
-   разрешённых.
+   разрешённых. Obsidian sync cursor при partial/error не должен продвигаться
+   за ещё не экспортированные записи: повторная sync обязана их подобрать,
+   а не считать всю выборку обработанной.
 3. Direct manager paths (`sync`/`prepare_share`/`_persist_package`/`_do_export`)
    гейтить напрямую; injected authorizer отсутствует/кидает → deny, не OFF
    fallback.
@@ -87,7 +122,16 @@ authorizer стабилен). Контракт SHA256
   отсутствует/кидает → deny, не OFF fallback.
 - п.9: batch/Obsidian: остановить между файлами, revoke, продолжить → первый
   допустим, остальные не созданы; partial result точен. Отдельно deny до
-  bundle/vault mkdir при начальном отсутствии grant.
+  bundle/vault mkdir при начальном отсутствии grant. Obsidian partial/error
+  не теряет оставшиеся записи из-за продвижения cursor; повторная sync их
+  подбирает. Sharing package и index проверять раздельно: отзыв между ними
+  запрещает запись index и даёт точный partial result.
+- Internal API: успешный precheck, затем revoke/privacy/UNKNOWN до
+  `run_backend_write` → 0 mutations; writer запускается максимум один раз и
+  вне обоих locks. Backend writes не меняют Swift high-water: следующая
+  корректная Swift seq принимается, replay по-прежнему отклоняется. В OFF
+  отсутствующий namespace допустим, supplied malformed/stale context запрещён;
+  backend не возвращает/не сохраняет новый bearer/receipt.
 - п.12: таймер scheduler + любой активный чужой grant → ON deny до mkdir/prune;
   auto recorder/import `.md`/archives/versions/backup остаются заблокированы при
   valid session grant.
@@ -114,7 +158,9 @@ make audit-all
 - Batch/Obsidian partial result точен; scheduler/auto writers заблокированы при
   ON независимо от session grant; `confirm`/`force`/`save_to_file` не обходят.
 - Schema parity render-only ответов сохранена; секретов в errors нет.
-- Diff ограничен файлами раздела «Файлы»; authorizer API не менялся.
+- Diff ограничен файлами раздела «Файлы»; существующий authorizer API/четыре
+  RPC/namespace/reasons/Swift sequence semantics не менялись; additive internal
+  backend-write API и partial cursor/index поведение покрыты регрессиями.
 
 ## Gate
 
