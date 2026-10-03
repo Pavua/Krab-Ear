@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
+
 import json
 import logging
 import threading
@@ -747,7 +749,7 @@ class CallAssistService:
             }
         )
         settings["call_quick_templates"] = templates
-        self.store.save_settings(settings)
+        self.store.save_settings(settings, expected_revision=settings.get(POLICY_REVISION_KEY))
         return {"templates": templates}
 
     def handle_remove_template(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -761,7 +763,7 @@ class CallAssistService:
         if len(filtered) == len(templates):
             raise RuntimeError("Шаблон не найден")
         settings["call_quick_templates"] = filtered
-        self.store.save_settings(settings)
+        self.store.save_settings(settings, expected_revision=settings.get(POLICY_REVISION_KEY))
         return {"templates": filtered}
 
     def handle_template(self, params: dict[str, Any]) -> dict[str, Any]:

@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import sys
 import tempfile
@@ -70,7 +72,7 @@ class TestObsidianSyncConfigure(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
 
     def test_configure_valid_vault(self) -> None:
         """configure() с существующим путём возвращает корректный dict."""
@@ -119,7 +121,7 @@ class TestObsidianSyncSync(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.mgr.configure(str(self.vault_dir))
 
     def test_sync_without_configure_raises(self) -> None:
@@ -127,7 +129,7 @@ class TestObsidianSyncSync(unittest.TestCase):
         # Используем отдельную data_dir без сохранённого состояния
         fresh_data_dir = Path(self.tmp.name) / "fresh_data"
         fresh_data_dir.mkdir(parents=True)
-        mgr2 = ObsidianSyncManager(data_dir=fresh_data_dir)
+        mgr2 = ObsidianSyncManager(data_dir=fresh_data_dir, plaintext_export_authorizer=off_authorizer())
         with self.assertRaises(RuntimeError) as ctx:
             mgr2.sync([_make_item()])
         self.assertIn("не настроен", str(ctx.exception))
@@ -221,7 +223,7 @@ class TestObsidianSyncStatus(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         self.data_dir.mkdir(parents=True)
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
 
     def test_status_before_configure(self) -> None:
         """get_sync_status() до configure() возвращает configured=False."""
@@ -251,7 +253,7 @@ class TestObsidianSyncMdFormat(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.mgr.configure(str(self.vault_dir))
 
     def _get_content(self, item: dict) -> str:
@@ -355,7 +357,7 @@ class TestObsidianSyncIpcHandlers(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
 
     def test_handle_configure_valid(self) -> None:
         """handle_configure() с корректными параметрами возвращает dict."""
@@ -412,12 +414,12 @@ class TestObsidianSyncPersistence(unittest.TestCase):
         vault_dir = Path(tmp.name) / "vault"
         vault_dir.mkdir()
 
-        mgr1 = ObsidianSyncManager(data_dir=data_dir)
+        mgr1 = ObsidianSyncManager(data_dir=data_dir, plaintext_export_authorizer=off_authorizer())
         mgr1.configure(str(vault_dir), folder="MyNotes")
         mgr1.sync([_make_item()])
 
         # Создаём новый экземпляр — должен загрузить состояние из файла
-        mgr2 = ObsidianSyncManager(data_dir=data_dir)
+        mgr2 = ObsidianSyncManager(data_dir=data_dir, plaintext_export_authorizer=off_authorizer())
         status = mgr2.get_sync_status()
         self.assertTrue(status["configured"])
         self.assertEqual(status["folder"], "MyNotes")
@@ -432,7 +434,7 @@ class TestObsidianSyncPersistence(unittest.TestCase):
         vault_dir = Path(tmp.name) / "vault"
         vault_dir.mkdir()
 
-        mgr = ObsidianSyncManager(data_dir=data_dir)
+        mgr = ObsidianSyncManager(data_dir=data_dir, plaintext_export_authorizer=off_authorizer())
         state_file = data_dir / "obsidian_sync.json"
         self.assertFalse(state_file.exists())
         mgr.configure(str(vault_dir))
@@ -472,7 +474,7 @@ class TestObsidianSyncEdgeCases(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.mgr.configure(str(self.vault_dir))
 
     def test_sync_empty_history_returns_zero(self) -> None:
@@ -509,7 +511,7 @@ class TestObsidianSyncEdgeCases(unittest.TestCase):
         state_path.write_text("{ NOT VALID JSON !!!", encoding="utf-8")
 
         # Новый экземпляр должен подняться без исключения
-        mgr2 = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr2 = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         # Состояние не загружено — vault не настроен
         status = mgr2.get_sync_status()
         self.assertFalse(status["configured"])
@@ -519,7 +521,7 @@ class TestObsidianSyncEdgeCases(unittest.TestCase):
         state_path = self.data_dir / "obsidian_sync.json"
         state_path.write_text("null", encoding="utf-8")
 
-        mgr2 = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr2 = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         mgr2.configure(str(self.vault_dir))
         result = mgr2.sync([_make_item()])
         self.assertEqual(result.synced_count, 1)
@@ -559,7 +561,7 @@ class TestObsidianSyncFilename(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.mgr.configure(str(self.vault_dir))
 
     def test_filename_has_md_extension(self) -> None:
@@ -621,7 +623,7 @@ class TestObsidianSyncYamlFrontmatter(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.mgr.configure(str(self.vault_dir))
 
     def _parse_frontmatter(self, content: str) -> dict:

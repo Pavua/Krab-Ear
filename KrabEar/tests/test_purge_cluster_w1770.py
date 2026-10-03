@@ -23,6 +23,8 @@
 
 from __future__ import annotations
 
+from _settings_test_helpers import safe_backend_for_settings
+
 import json
 import sys
 import tempfile
@@ -100,7 +102,7 @@ class FakeStore:
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return dict(self._settings)
 
-    def save_settings(self, settings: dict) -> dict:
+    def save_settings(self, settings: dict, **_kwargs) -> dict:
         self._settings = dict(settings)
         return dict(settings)
 
@@ -456,9 +458,8 @@ class BackendServiceW1770WiringTestCase(unittest.TestCase):
 
     def _make_backend(self):
         from backend.state_store import StateStore
-        from backend.service import BackendService
         store = StateStore(data_dir=Path(self._tmpdir))
-        return BackendService(store=store)
+        return safe_backend_for_settings(self, store)
 
     def test_transcript_versions_wired_not_none(self) -> None:
         """ИСПРАВЛЕНИЕ ЛАТЕНТНОГО БАГА: _history._transcript_versions не None и

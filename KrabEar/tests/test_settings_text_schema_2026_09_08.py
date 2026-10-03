@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import json
+import uuid
 
 import pytest
 
 from backend.settings_backup import SettingsBackup
 from backend.settings_service import SettingsService
 from backend.settings_validator import SettingsValidator
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
 from backend.state_store import StateStore
 from core.config import DEFAULT_SETTINGS
 
@@ -113,7 +115,10 @@ def test_bad_backup_restore_preserves_existing_settings(local_settings, key, cap
     backup_id = service._backup.create_backup(corrupt, reason='invalid_type_test')
     with pytest.raises(ValueError) as error:
         service.handle_restore_settings_backup({'backup_id': backup_id})
-    assert json.loads(store.settings_path.read_text()) == before
+    after = json.loads(store.settings_path.read_text())
+    # Невалидный source отклонён до commit: даже revision остаётся прежней.
+    assert after == before
+    assert uuid.UUID(hex=after[POLICY_REVISION_KEY]).version == 4
     assert service.cached_settings()[key] == 'existing-value'
     assert SENTINEL not in str(error.value) and SENTINEL not in caplog.text
 

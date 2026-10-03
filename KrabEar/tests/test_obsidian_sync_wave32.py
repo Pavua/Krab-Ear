@@ -8,6 +8,8 @@ Covers:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import sys
 import tempfile
 import unittest
@@ -54,7 +56,7 @@ class TestVaultPathValidation(unittest.TestCase):
         self._tmp.cleanup()
 
     def _mgr(self) -> ObsidianSyncManager:
-        return ObsidianSyncManager(data_dir=self._data_dir)
+        return ObsidianSyncManager(data_dir=self._data_dir, plaintext_export_authorizer=off_authorizer())
 
     def test_valid_path_under_home(self) -> None:
         """A real directory under $HOME must be accepted by handle_configure()."""
@@ -148,7 +150,7 @@ class TestMaxSyncItemsCap(unittest.TestCase):
         self._tmp.cleanup()
 
     def _mgr(self) -> ObsidianSyncManager:
-        return ObsidianSyncManager(data_dir=self._data_dir)
+        return ObsidianSyncManager(data_dir=self._data_dir, plaintext_export_authorizer=off_authorizer())
 
     def test_max_sync_items_constant_defined(self) -> None:
         """MAX_SYNC_ITEMS must be defined and have a sane value."""
@@ -215,7 +217,7 @@ class TestPurgeDeletesStateFile(unittest.TestCase):
         """After purge_all_synced_files(), obsidian_sync.json must not exist."""
         home = Path.home()
         with tempfile.TemporaryDirectory(dir=home) as vault_dir:
-            mgr = ObsidianSyncManager(data_dir=self._data_dir)
+            mgr = ObsidianSyncManager(data_dir=self._data_dir, plaintext_export_authorizer=off_authorizer())
             mgr.configure(vault_dir)
 
             # Write at least one item so the state file exists.
@@ -238,7 +240,7 @@ class TestPurgeDeletesStateFile(unittest.TestCase):
         but obsidian_sync.json is gone (does not survive restart)."""
         home = Path.home()
         with tempfile.TemporaryDirectory(dir=home) as vault_dir:
-            mgr = ObsidianSyncManager(data_dir=self._data_dir)
+            mgr = ObsidianSyncManager(data_dir=self._data_dir, plaintext_export_authorizer=off_authorizer())
             mgr.configure(vault_dir)
             item = _make_item()
             mgr.sync([item], force=True)
@@ -259,7 +261,7 @@ class TestPurgeDeletesStateFile(unittest.TestCase):
 
     def test_purge_no_vault_configured_is_noop(self) -> None:
         """purge_all_synced_files() with no vault configured must return 0."""
-        mgr = ObsidianSyncManager(data_dir=self._data_dir)
+        mgr = ObsidianSyncManager(data_dir=self._data_dir, plaintext_export_authorizer=off_authorizer())
         result = mgr.purge_all_synced_files()
         self.assertEqual(result, 0)
 
@@ -267,7 +269,7 @@ class TestPurgeDeletesStateFile(unittest.TestCase):
         """purge_all_synced_files() must also delete the .md transcript files."""
         home = Path.home()
         with tempfile.TemporaryDirectory(dir=home) as vault_dir:
-            mgr = ObsidianSyncManager(data_dir=self._data_dir)
+            mgr = ObsidianSyncManager(data_dir=self._data_dir, plaintext_export_authorizer=off_authorizer())
             mgr.configure(vault_dir)
 
             # Use distinct second-resolution timestamps so each item gets a

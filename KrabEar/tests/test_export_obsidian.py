@@ -6,6 +6,8 @@
 """
 
 from __future__ import annotations
+
+from _plaintext_export_test_helpers import history_service_with_off_policy
 from backend.history_service import HistoryService
 from backend.state_store import StateStore
 
@@ -27,7 +29,7 @@ class ExportObsidianTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         data_dir = Path(self.tmp.name) / "data"
         self.store = StateStore(data_dir)
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     # ------------------------------------------------------------------
     # 1. Базовый случай: одна запись, возвращает путь + entries
@@ -222,7 +224,7 @@ class ObsidianContentBuilderTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     def _make_item(self, text: str, **kwargs):
         item = self.store.add_history_item(text=text, paste_status="ok", **kwargs)

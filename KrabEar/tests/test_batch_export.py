@@ -1,6 +1,8 @@
 """Тесты handle_batch_export — пакетный экспорт в нескольких форматах."""
 
 from __future__ import annotations
+
+from _plaintext_export_test_helpers import history_service_with_off_policy
 from backend.history_service import HistoryService
 from backend.state_store import StateStore
 
@@ -21,7 +23,7 @@ class BatchExportEmptyHistoryTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     def test_empty_history_returns_structure(self) -> None:
         """Пустая история: возвращает корректную структуру с total_entries=0."""
@@ -53,7 +55,7 @@ class BatchExportWithDataTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
         self.store.add_history_item(text="Первая запись", paste_status="ok", source_lang="ru")
         self.store.add_history_item(text="Segunda entrada", paste_status="ok", source_lang="es")
 
@@ -132,7 +134,7 @@ class BatchExportBuildSrtTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     def test_empty_items_dicts_returns_empty_string(self) -> None:
         """Пустой список записей → пустой SRT."""
@@ -157,7 +159,7 @@ class BatchExportBuildMarkdownTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     def test_empty_items_returns_empty_placeholder(self) -> None:
         """Пустой список → заглушка с заголовком."""

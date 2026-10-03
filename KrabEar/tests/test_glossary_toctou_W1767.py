@@ -146,7 +146,7 @@ class GlossaryTOCTOWTest(unittest.TestCase):
         store_mock = MagicMock()
         settings_cell: list[dict] = [{"translation_glossary": {}}]
 
-        def save_settings(s: dict) -> dict:
+        def save_settings(s: dict, **_kwargs) -> dict:
             settings_cell[0] = dict(s)
             return dict(s)
 

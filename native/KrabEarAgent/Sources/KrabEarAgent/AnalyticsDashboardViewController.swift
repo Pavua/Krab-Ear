@@ -162,7 +162,7 @@ struct AnalyticsDashboardData {
 @MainActor
 final class AnalyticsDashboardWindowController: NSWindowController {
 
-    convenience init(ipcClient: IPCClient) {
+    convenience init(ipcClient: IPCClient, plaintextExportCoordinator: PlaintextExportCoordinator) {
         let win = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -171,7 +171,8 @@ final class AnalyticsDashboardWindowController: NSWindowController {
         )
         win.title = "Аналитика Krab Ear"
         win.minSize = NSSize(width: 520, height: 500)
-        let vc = AnalyticsDashboardViewController(ipcClient: ipcClient)
+        let vc = AnalyticsDashboardViewController(
+            ipcClient: ipcClient, plaintextExportCoordinator: plaintextExportCoordinator)
         win.contentViewController = vc
         self.init(window: win)
     }
@@ -185,6 +186,7 @@ final class AnalyticsDashboardViewController: NSViewController {
     // MARK: - Injected dependencies
     // internal (не private): доступ из AnalyticsDashboardViewController+PDFExport.swift
     let ipcClient: IPCClient
+    let plaintextExportCoordinator: PlaintextExportCoordinator
 
     // MARK: - State
     private var data = AnalyticsDashboardData()
@@ -238,8 +240,9 @@ final class AnalyticsDashboardViewController: NSViewController {
 
     // MARK: - Init
 
-    init(ipcClient: IPCClient) {
+    init(ipcClient: IPCClient, plaintextExportCoordinator: PlaintextExportCoordinator) {
         self.ipcClient = ipcClient
+        self.plaintextExportCoordinator = plaintextExportCoordinator
         super.init(nibName: nil, bundle: nil)
     }
 

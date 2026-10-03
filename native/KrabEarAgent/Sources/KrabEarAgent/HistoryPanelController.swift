@@ -70,6 +70,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     }
 
     let ipcClient: IPCClient
+    let plaintextExportCoordinator: PlaintextExportCoordinator
     let settingsProvider: () -> AgentSettings
     let settingsUpdater: ([String: Any]) -> AgentSettings
     let onToggleRecording: () -> Void
@@ -526,6 +527,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     init(
         ipcClient: IPCClient,
+        plaintextExportCoordinator: PlaintextExportCoordinator,
         settingsProvider: @escaping () -> AgentSettings,
         settingsUpdater: @escaping ([String: Any]) -> AgentSettings,
         onToggleRecording: @escaping () -> Void,
@@ -535,6 +537,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         onSwapRuEsDirection: @escaping () -> Void
     ) {
         self.ipcClient = ipcClient
+        self.plaintextExportCoordinator = plaintextExportCoordinator
         self.settingsProvider = settingsProvider
         self.settingsUpdater = settingsUpdater
         self.onToggleRecording = onToggleRecording

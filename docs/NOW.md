@@ -1,5 +1,41 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## A5.3 Card C, 2026-10-03 — работа продолжается
+
+Card A [#2077](https://github.com/Pavua/Krab-Ear/pull/2077): source/local PASS,
+полный backend CI FAILED в 29 тестовых файлах; исправления fixtures/docs ведутся
+отдельно. Card B [#2078](https://github.com/Pavua/Krab-Ear/pull/2078): source/local
+PASS, backend CI пока выполняется. Startup #2075 и docs #2076 CI PASS.
+Card C поверх `9358cd78`: Astra High source review, release build, 324 Swift
+tests, 8 зависимых Python-файлов, новый launcher py3.12 parity и audit-all PASS.
+Далее C PR/CI и Card D isolated IPC E2E. Merge/deploy/encryption activation
+не выполнялись.
+[Текущий checkpoint C](superpowers/handoffs/2026-10-03-a53-card-c-progress.md).
+
+Ниже — более ранние checkpoints; их слова «ещё впереди» относятся к их дате.
+
+## A5.3 Card B, 2026-10-03 — source checkpoint
+
+База main-линии повторно сверена: `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
+Card A: [PR #2077](https://github.com/Pavua/Krab-Ear/pull/2077),
+`93c7e0b0d46b730c64c4a924d48b0f124cbce369`, OPEN; основной CI PASS,
+backend chunked CI ещё выполняется. Card B поверх этого SHA:
+Astra High source PASS, Python3.12 parity49files PASS, audit-all PASS.
+Card B PR/CI ещё впереди; C/D код не начат. Merge/deploy не выполнялись.
+[Матрица Card B и ограничения](superpowers/handoffs/2026-10-03-a53-card-b-progress.md).
+
+## A5.3, 2026-10-03 — source checkpoint
+
+База разработки: `origin/codex/krab-ear-v2` = `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
+Card A завершён в `codex/ear-a53-completion`: независимый Astra High source PASS,
+Python 3.12 parity 56 файлов PASS, audit-all PASS. Source PR/CI ещё впереди;
+Card B/C/D ещё не реализованы. Деплой и включение шифрования не выполнялись.
+Матрица и существенный риск прежней backup-изоляции тестов:
+[Card A verification](superpowers/handoffs/2026-10-03-a53-card-a-verification.md).
+[Текущий handoff](superpowers/handoffs/2026-10-03-a53-autonomous-progress.md).
+
+Сведения runtime ниже — снимок 30.09, в этой source-сессии не перепроверялись.
+
 ## Cutover 2026-09-30 — текущий runtime
 
 **Backend и REST работают на `1ebd12eb69695296a13c39eac35a9b7af3405ba5`**

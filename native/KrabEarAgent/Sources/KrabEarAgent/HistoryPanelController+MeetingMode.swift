@@ -42,6 +42,7 @@ final class MeetingReportViewController: NSViewController {
     private let wordCount: Int
     private let ts: String
     private let markdown: String
+    private let plaintextExportCoordinator: PlaintextExportCoordinator
 
     // MARK: Init
 
@@ -55,7 +56,8 @@ final class MeetingReportViewController: NSViewController {
         speakerCount: Int,
         wordCount: Int,
         ts: String,
-        markdown: String
+        markdown: String,
+        plaintextExportCoordinator: PlaintextExportCoordinator
     ) {
         self.summary = summary
         self.summaryIsLLM = summaryIsLLM
@@ -67,6 +69,7 @@ final class MeetingReportViewController: NSViewController {
         self.wordCount = wordCount
         self.ts = ts
         self.markdown = markdown
+        self.plaintextExportCoordinator = plaintextExportCoordinator
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -106,7 +109,7 @@ final class MeetingReportViewController: NSViewController {
         titleRow.orientation = .vertical
         titleRow.spacing = KrabEarTheme.Metrics.tight
         titleRow.alignment = .leading
-        
+
         let titleLabel = makeLabel(
             text: "Отчёт встречи",
             font: KrabEarTheme.Typography.display,
@@ -124,9 +127,9 @@ final class MeetingReportViewController: NSViewController {
             )
             titleRow.addArrangedSubview(metaLabel)
         }
-        
+
         outerStack.addArrangedSubview(titleRow)
-        
+
         let topSep = makeSeparator()
         outerStack.addArrangedSubview(topSep)
 
@@ -231,7 +234,7 @@ final class MeetingReportViewController: NSViewController {
         buttonRow.addArrangedSubview(saveBtn)
 
         outerStack.addArrangedSubview(buttonRow)
-        
+
         for view in [titleRow, topSep, scrollView, bottomSep, buttonRow] {
             view.widthAnchor.constraint(equalToConstant: contentWidth).isActive = true
         }
@@ -247,32 +250,55 @@ final class MeetingReportViewController: NSViewController {
     }
 
     @objc private func onSaveDigest() {
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.allowedContentTypes = [.plainText]
-        panel.title = "Сохранить дайджест встречи"
-        panel.prompt = "Сохранить"
-
-        // Build default filename from ts (ISO-ish string → safe chars).
-        let safeName = ts
-            .replacingOccurrences(of: ":", with: "-")
-            .replacingOccurrences(of: " ", with: "_")
-            .filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
-        let suggestedName = safeName.isEmpty ? "встреча.md" : "встреча-\(safeName).md"
-        panel.nameFieldStringValue = suggestedName
-
-        presentPanelSheet(panel, for: self.view.window) { [weak self] resp in
-            guard resp == .OK, let url = panel.url, let self else { return }
+        Task { [weak self] in
+            guard let self else { return }
             do {
-                try self.markdown.write(to: url, atomically: true, encoding: .utf8)
+                let ticket = try await self.plaintextExportCoordinator.prepare(sink: .historyMeetingReport) { [weak self] in
+                    guard let self else { return false }
+                    return await presentPlaintextExportConsent(for: self.view.window)
+                }
+                let panel = NSSavePanel()
+                panel.canCreateDirectories = true
+                panel.allowedContentTypes = [.plainText]
+                panel.title = "Сохранить дайджест встречи"
+                panel.prompt = "Сохранить"
+
+                // Build default filename from ts (ISO-ish string → safe chars).
+                let safeName = ts
+                    .replacingOccurrences(of: ":", with: "-")
+                    .replacingOccurrences(of: " ", with: "_")
+                    .filter { $0.isLetter || $0.isNumber || $0 == "-" || $0 == "_" }
+                let suggestedName = safeName.isEmpty ? "встреча.md" : "встреча-\(safeName).md"
+                panel.nameFieldStringValue = suggestedName
+
+                let content = self.markdown
+                presentPanelSheet(panel, for: self.view.window) { [weak self] response in
+                    guard let self, response == .OK, let url = panel.url else { return }
+                    Task { [weak self] in
+                        guard let self else { return }
+                        do {
+                            try await self.plaintextExportCoordinator.perform(ticket) {
+                                try content.write(to: url, atomically: true, encoding: .utf8)
+                            }
+                        } catch {
+                            self.showExportFailure(error)
+                        }
+                    }
+                }
+            } catch PlaintextExportCoordinator.Failure.cancelled {
+                return
             } catch {
-                let alert = NSAlert()
-                alert.messageText = "Сохранить дайджест"
-                alert.informativeText = "Не удалось записать файл: \(error.localizedDescription)"
-                alert.addButton(withTitle: "OK")
-                presentAlertSheet(alert, for: self.view.window) { _ in }
+                self.showExportFailure(error)
             }
         }
+    }
+
+    private func showExportFailure(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Сохранить дайджест"
+        alert.informativeText = PlaintextExportCoordinator.errorMessage(error)
+        alert.addButton(withTitle: "OK")
+        presentAlertSheet(alert, for: view.window) { _ in }
     }
 
     @objc private func onClose() {
@@ -308,12 +334,12 @@ final class MeetingReportViewController: NSViewController {
         let card = ThemeCardView()
         card.translatesAutoresizingMaskIntoConstraints = false
         card.widthAnchor.constraint(equalToConstant: width).isActive = true
-        
+
         let headerRow = NSStackView()
         headerRow.orientation = .horizontal
         headerRow.spacing = KrabEarTheme.Metrics.tight
         headerRow.alignment = .centerY
-        
+
         if let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
             let imgView = NSImageView(image: img)
             imgView.contentTintColor = KrabEarTheme.Colors.accent
@@ -322,19 +348,19 @@ final class MeetingReportViewController: NSViewController {
             imgView.heightAnchor.constraint(equalToConstant: 16).isActive = true
             headerRow.addArrangedSubview(imgView)
         }
-        
+
         let lbl = makeLabel(
             text: title,
             font: KrabEarTheme.Typography.sectionTitle,
             color: KrabEarTheme.Colors.textPrimary
         )
         headerRow.addArrangedSubview(lbl)
-        
+
         if let badge = badge {
             let spacer = NSView()
             spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
             headerRow.addArrangedSubview(spacer)
-            
+
             let badgeLabel = makeLabel(
                 text: badge,
                 font: KrabEarTheme.Typography.captionMedium,
@@ -342,16 +368,16 @@ final class MeetingReportViewController: NSViewController {
             )
             headerRow.addArrangedSubview(badgeLabel)
         }
-        
+
         headerRow.translatesAutoresizingMaskIntoConstraints = false
         card.contentStackView.addArrangedSubview(headerRow)
-        
+
         let sep = makeSeparator()
         card.contentStackView.addArrangedSubview(sep)
-        
+
         headerRow.widthAnchor.constraint(equalTo: card.contentStackView.widthAnchor).isActive = true
         sep.widthAnchor.constraint(equalTo: card.contentStackView.widthAnchor).isActive = true
-        
+
         return card
     }
 
@@ -372,7 +398,7 @@ final class MeetingReportViewController: NSViewController {
             row.orientation = .horizontal
             row.spacing = KrabEarTheme.Metrics.tight
             row.alignment = .top
-            
+
             switch style {
             case .check:
                 if let img = NSImage(systemSymbolName: "circle", accessibilityDescription: nil) {
@@ -381,7 +407,7 @@ final class MeetingReportViewController: NSViewController {
                     imgView.translatesAutoresizingMaskIntoConstraints = false
                     imgView.widthAnchor.constraint(equalToConstant: 12).isActive = true
                     imgView.heightAnchor.constraint(equalToConstant: 12).isActive = true
-                    
+
                     let box = NSView()
                     box.translatesAutoresizingMaskIntoConstraints = false
                     box.widthAnchor.constraint(equalToConstant: 16).isActive = true
@@ -442,7 +468,7 @@ final class MeetingReportViewController: NSViewController {
             let mins = Int(durSec) / 60
             let secs = Int(durSec) % 60
             let durString = mins > 0 ? "\(mins)м \(secs)с" : "\(secs)с"
-            
+
             let text = "\(label) — \(turns) реплик, \(durString)"
 
             let row = NSStackView()
@@ -456,7 +482,7 @@ final class MeetingReportViewController: NSViewController {
                 imgView.translatesAutoresizingMaskIntoConstraints = false
                 imgView.widthAnchor.constraint(equalToConstant: 14).isActive = true
                 imgView.heightAnchor.constraint(equalToConstant: 14).isActive = true
-                
+
                 let box = NSView()
                 box.translatesAutoresizingMaskIntoConstraints = false
                 box.widthAnchor.constraint(equalToConstant: 16).isActive = true
@@ -553,7 +579,7 @@ extension HistoryPanelController {
                 DispatchQueue.main.async {
                     self?.showInfoAlert(
                         title: "Встреча",
-                        body: "Ошибка IPC: \(error.localizedDescription)"
+                        body: "Не удалось получить отчёт встречи. Повторите попытку."
                     )
                 }
             }
@@ -574,13 +600,13 @@ extension HistoryPanelController {
             } else if reason.isEmpty {
                 body = "Не удалось сформировать отчёт встречи."
             } else {
-                body = "Не удалось сформировать отчёт: \(reason)"
+                body = "Не удалось сформировать отчёт встречи."
             }
             showInfoAlert(title: "Встреча", body: body)
             return
         }
 
-        guard let vc = HistoryPanelController.makeMeetingReportVC(from: result) else { return }
+        guard let vc = HistoryPanelController.makeMeetingReportVC(from: result, plaintextExportCoordinator: plaintextExportCoordinator) else { return }
 
         let sheetWindow = NSWindow(contentViewController: vc)
         sheetWindow.styleMask = [.titled, .closable, .resizable]
@@ -600,7 +626,7 @@ extension HistoryPanelController {
     /// presentMeetingReport(_:), только вынесена в static. nil при ok=false —
     /// вызывающий код сам решает, как сообщить об ошибке (sheet-путь показывает
     /// alert ДО вызова этого хелпера, см. presentMeetingReport выше).
-    static func makeMeetingReportVC(from result: [String: Any]) -> MeetingReportViewController? {
+    static func makeMeetingReportVC(from result: [String: Any], plaintextExportCoordinator: PlaintextExportCoordinator) -> MeetingReportViewController? {
         guard result["ok"] as? Bool ?? false else { return nil }
 
         let summary        = result["summary"]        as? String        ?? ""
@@ -624,7 +650,8 @@ extension HistoryPanelController {
             speakerCount: speakerCount,
             wordCount: wordCount,
             ts: ts,
-            markdown: markdown
+            markdown: markdown,
+            plaintextExportCoordinator: plaintextExportCoordinator
         )
     }
 
@@ -633,8 +660,8 @@ extension HistoryPanelController {
     /// C2c: отчёт встречи в отдельном titled-окне (панель — не NSWindowController-хост,
     /// поэтому beginSheet недоступен как для sheet-пути onOpenMeeting).
     @MainActor
-    static func presentMeetingReportStandalone(result: [String: Any]) {
-        guard let vc = makeMeetingReportVC(from: result) else { return }
+    static func presentMeetingReportStandalone(result: [String: Any], plaintextExportCoordinator: PlaintextExportCoordinator) {
+        guard let vc = makeMeetingReportVC(from: result, plaintextExportCoordinator: plaintextExportCoordinator) else { return }
         let window = NSWindow(contentViewController: vc)
         window.styleMask = [.titled, .closable, .resizable]
         window.title = "Встреча"

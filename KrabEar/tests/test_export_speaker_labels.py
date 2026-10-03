@@ -13,6 +13,8 @@
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import history_service_with_off_policy
+
 import json
 import sys
 import tempfile
@@ -60,7 +62,7 @@ class TestMarkdownTwoSpeakers(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = _make_store(self.tmp.name)
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
         turns = [
             {"speaker": "SPEAKER_00", "text": "Привет", "start": 0.0, "end": 1.0},
@@ -100,7 +102,7 @@ class TestSRTLabels(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = _make_store(self.tmp.name)
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
         turns = [
             {"speaker": "SPEAKER_00", "text": "Монолог спикера", "start": 0.0, "end": 5.0},
@@ -141,7 +143,7 @@ class TestJSONThreeSpeakers(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = _make_store(self.tmp.name)
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
         turns = [
             {"speaker": "SPEAKER_00", "text": "А", "start": 0.0, "end": 1.0},
@@ -189,7 +191,7 @@ class TestCSVSpeakerColumn(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = _make_store(self.tmp.name)
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
         turns = [
             {"speaker": "SPEAKER_00", "text": "текст", "start": 0.0, "end": 5.0},
@@ -245,7 +247,7 @@ class TestSpeakerManagerAlias(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.svc = HistoryService(store=_make_store(self.tmp.name))
+        self.svc = history_service_with_off_policy(store=_make_store(self.tmp.name))
         self.svc._speaker_manager = FakeSpeakerManager(
             {"SPEAKER_00": "Анна", "SPEAKER_01": "Иван"}
         )
@@ -274,7 +276,7 @@ class TestNoDiarizationPlainText(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = _make_store(self.tmp.name)
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
         self.store.add_history_item(
             text="Обычный текст без спикеров",
@@ -302,7 +304,7 @@ class TestFlagDisabledDefaultBehavior(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = _make_store(self.tmp.name)
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
         turns = [
             {"speaker": "SPEAKER_00", "text": "Раз", "start": 0.0, "end": 1.0},
@@ -333,7 +335,7 @@ class TestLocaleRU(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.svc = HistoryService(store=_make_store(self.tmp.name))
+        self.svc = history_service_with_off_policy(store=_make_store(self.tmp.name))
 
     def test_ru_prefix(self) -> None:
         name = self.svc._resolve_speaker_name("SPEAKER_00", lang="ru")
@@ -352,7 +354,7 @@ class TestLocaleES(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.svc = HistoryService(store=_make_store(self.tmp.name))
+        self.svc = history_service_with_off_policy(store=_make_store(self.tmp.name))
 
     def test_es_prefix(self) -> None:
         name = self.svc._resolve_speaker_name("SPEAKER_00", lang="es")
@@ -371,7 +373,7 @@ class TestLocaleEN(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.svc = HistoryService(store=_make_store(self.tmp.name))
+        self.svc = history_service_with_off_policy(store=_make_store(self.tmp.name))
 
     def test_en_prefix(self) -> None:
         name = self.svc._resolve_speaker_name("SPEAKER_00", lang="en")

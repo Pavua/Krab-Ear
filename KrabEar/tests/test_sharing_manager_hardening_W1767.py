@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import os
 import stat
 import sys
@@ -74,7 +76,7 @@ class RevokeShareScrubsContentW1767TestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = _FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True)
+        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer())
         self._store.add("i1", "секретный текст транскрипции", translated_text="texto secreto")
 
     def test_revoke_removes_content_from_index(self) -> None:
@@ -123,7 +125,7 @@ class FileModeW1767TestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = _FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True)
+        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer())
         self._store.add("m1", "текст для проверки прав доступа")
 
     def _get_mode(self, path: Path) -> int:
@@ -133,7 +135,9 @@ class FileModeW1767TestCase(unittest.TestCase):
     def test_shares_dir_is_0o700(self) -> None:
         """Директория shares/ должна иметь права 0o700."""
         shares_dir = Path(self._tmpdir) / "shares"
-        self.assertTrue(shares_dir.exists(), "shares/ должна существовать")
+        self.assertFalse(shares_dir.exists(), "Конструктор не создаёт каталог")
+        self._mgr.prepare_share(["m1"])
+        self.assertTrue(shares_dir.exists(), "shares/ должна существовать после разрешённой записи")
         mode = self._get_mode(shares_dir)
         self.assertEqual(
             mode, 0o700,
@@ -173,7 +177,7 @@ class ToctouUniqueIdW1767TestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = _FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True)
+        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer())
         for i in range(20):
             self._store.add(f"p{i}", f"текст {i}")
 

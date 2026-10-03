@@ -1,6 +1,8 @@
 """Тесты handle_export_history_csv — экспорт транскрипций в CSV."""
 
 from __future__ import annotations
+
+from _plaintext_export_test_helpers import history_service_with_off_policy
 from backend.history_service import HistoryService
 from backend.state_store import StateStore
 
@@ -23,7 +25,7 @@ class CsvExportBasicTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     def _parse_csv(self, result: dict, delimiter: str = ",") -> list[list[str]]:
         """Вспомогательный метод для парсинга CSV из HistoryService."""

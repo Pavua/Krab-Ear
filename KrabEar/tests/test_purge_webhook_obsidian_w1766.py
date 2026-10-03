@@ -11,6 +11,10 @@
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
+from _settings_test_helpers import safe_backend_for_settings
+
 import json
 import sys
 import tempfile
@@ -83,7 +87,7 @@ class FakeStore:
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return {}
 
-    def save_settings(self, settings: dict) -> dict:
+    def save_settings(self, settings: dict, **_kwargs) -> dict:
         return settings
 
 
@@ -247,7 +251,7 @@ class ObsidianPurgeAllSyncedFilesTestCase(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
 
     def _make_mgr(self) -> ObsidianSyncManager:
-        return ObsidianSyncManager(data_dir=self._tmpdir)
+        return ObsidianSyncManager(data_dir=self._tmpdir, plaintext_export_authorizer=off_authorizer())
 
     def _configure_and_create_files(self, mgr: ObsidianSyncManager) -> Path:
         """Настраивает vault, создаёт тестовые .md файлы, возвращает target_dir."""
@@ -395,7 +399,7 @@ class PurgeAllDataE2EW1766TestCase(unittest.TestCase):
         # #10: Obsidian vault с .md
         vault_dir = Path(self._tmpdir) / "vault"
         vault_dir.mkdir(parents=True, exist_ok=True)
-        obs_mgr = ObsidianSyncManager(data_dir=self._tmpdir)
+        obs_mgr = ObsidianSyncManager(data_dir=self._tmpdir, plaintext_export_authorizer=off_authorizer())
         obs_mgr.configure(str(vault_dir), folder="Transcriptions")
         target_dir = vault_dir / "Transcriptions"
         vault_md = target_dir / "transcript_2026-06-01_10-00-00_cafe0000.md"
@@ -517,10 +521,9 @@ class BackendServiceW1766WiringTestCase(unittest.TestCase):
     def test_backend_wires_webhook_manager_into_history(self) -> None:
         """BackendService.__init__ должен wire _webhook_manager в _history._webhook_manager."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._webhook_manager,
@@ -532,10 +535,9 @@ class BackendServiceW1766WiringTestCase(unittest.TestCase):
     def test_backend_wires_obsidian_sync_into_history(self) -> None:
         """BackendService.__init__ должен wire _obsidian_sync в _history._obsidian_sync."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._obsidian_sync,

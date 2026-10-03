@@ -17,6 +17,8 @@ This test asserts:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import sys
 import tempfile
 import unittest
@@ -62,6 +64,7 @@ class ObsidianSyncPrivacyGateTest(unittest.TestCase):
         mgr = ObsidianSyncManager(
             data_dir=self._data_dir,
             settings_get=lambda key, default: privacy_mode if key == "privacy_mode_enabled" else default,
+            plaintext_export_authorizer=off_authorizer(privacy_provider=lambda: privacy_mode),
         )
         mgr.configure(str(self._vault_dir))
         return mgr
@@ -96,7 +99,7 @@ class ObsidianSyncPrivacyGateTest(unittest.TestCase):
         """Same fallback contract as AppleIntegrationService: missing settings_get
         must not silently block sync (default=False, matches existing callers that
         don't wire a settings provider, e.g. ad-hoc scripts/tests)."""
-        mgr = ObsidianSyncManager(data_dir=self._data_dir)
+        mgr = ObsidianSyncManager(data_dir=self._data_dir, plaintext_export_authorizer=off_authorizer())
         mgr.configure(str(self._vault_dir))
         result = mgr.handle_sync({"items": [_make_item()], "force": True})
 

@@ -19,6 +19,7 @@ for p in (str(PROJECT_ROOT), str(PACKAGE_ROOT)):
         sys.path.insert(0, p)
 
 from backend.export_scheduler import ExportScheduler  # noqa: E402
+from _plaintext_export_test_helpers import off_authorizer
 
 
 class TestOutputDirTraversalGuard(unittest.TestCase):
@@ -27,7 +28,7 @@ class TestOutputDirTraversalGuard(unittest.TestCase):
     def setUp(self) -> None:
         self._td = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._td.name)
-        self.scheduler = ExportScheduler(self.data_dir)
+        self.scheduler = ExportScheduler(self.data_dir, plaintext_export_authorizer=off_authorizer())
 
     def tearDown(self) -> None:
         self._td.cleanup()
