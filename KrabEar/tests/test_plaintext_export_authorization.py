@@ -74,6 +74,30 @@ PRIVACY_KEY = "privacy_mode_enabled"
 
 _OMIT = object()
 
+
+def _build_service_without_audio(data_dir):
+    """Настоящий startup/dispatcher без запуска моделей, устройств и LLM ping."""
+    from backend.service import build_service
+
+    def transcriber(**kwargs):
+        engine = types.SimpleNamespace(
+            quality_profile="balanced", current_model="fixture-model",
+            _llm_rewriter=None, _settings_get=None,
+            _resolve_diarization_device=lambda: "cpu", warmup=lambda: None,
+        )
+        return types.SimpleNamespace(engine=engine, _error_bus=None)
+
+    with (
+        mock.patch("backend.service.Transcriber", side_effect=transcriber),
+        mock.patch("backend.service.AudioRecorder", return_value=types.SimpleNamespace(
+            is_recording=False, start=lambda: None, stop=lambda: b"",
+        )),
+        mock.patch("backend.service.Translator", return_value=types.SimpleNamespace()),
+        mock.patch("backend.service.settings.LLM_ENABLED", False),
+    ):
+        return build_service(data_dir)
+
+
 #: Валидная по контракту ревизия = ``uuid4().hex``: ровно 32 lowercase-hex символа
 #: (единственный формат, который пишет центральный commit).
 VALID_REVISION = "0123456789abcdef0123456789abcdef"
@@ -875,9 +899,7 @@ class TestBuildServiceStartupWiring(_StartupPolicyFixture):
     """
 
     def _run_build_service(self):
-        from backend.service import build_service
-
-        svc = build_service(self.data_dir)
+        svc = _build_service_without_audio(self.data_dir)
         try:
             return StateStore(self.data_dir).read_plaintext_policy_snapshot()
         finally:
@@ -1324,9 +1346,7 @@ class TestHotwordsAutoSeedPolicyGate(_StartupPolicyFixture):
     """
 
     def _build(self):
-        from backend.service import build_service
-
-        service = build_service(self.data_dir)
+        service = _build_service_without_audio(self.data_dir)
         self.addCleanup(service.close)
         return service
 
@@ -1359,7 +1379,8 @@ class TestValidatedRepairIsTheOnlyExitFromUnknown(_ForeignSupportedWriteFixture)
             with self.subTest(case=case):
                 self.seed_profile(payload)
                 saved = self.store.save_settings(
-                    {"cloud_rewriter_enabled": True},
+                    {"cloud_rewriter_enabled": True,
+                     ENCRYPTION_KEY: False, PRIVACY_KEY: False},
                     validated_repair=True,
                 )
                 snapshot = self.store.read_plaintext_policy_snapshot()
@@ -2050,10 +2071,8 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
     """Wiring slice 2: создание в __init__ (БЕЗ IPC), новый epoch на сервис."""
 
     def _build(self, name):
-        from backend.service import build_service
-
         target = Path(self._tmp.name) / name
-        service = build_service(target)
+        service = _build_service_without_audio(target)
         self.addCleanup(service.close)
         return service
 
@@ -2077,13 +2096,11 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
     def test_constructor_does_no_policy_io_on_known_profile(self):
         """Конструктор не делает policy-I/O сверх существующего: байты settings
         известного профиля не меняются (авто-сид пропускается — hotwords уже есть)."""
-        from backend.service import build_service
-
         payload = _profile(False, False, VALID_REVISION)
         payload["stt_hotwords"] = ["seeded"]
         self.write_settings(payload)
         before = (self.data_dir / "settings.json").read_bytes()
-        service = build_service(self.data_dir)
+        service = _build_service_without_audio(self.data_dir)
         self.addCleanup(service.close)
         self.assertEqual((self.data_dir / "settings.json").read_bytes(), before)
         snapshot = self.store.read_plaintext_policy_snapshot()
@@ -2091,10 +2108,8 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
 
     def test_read_history_show_settings_status_create_no_grants(self):
         """Read/show/settings-status НЕ создают grants и НЕ мешают живому grant."""
-        from backend.service import build_service
-
         self.seed_on()
-        service = build_service(self.data_dir)
+        service = _build_service_without_audio(self.data_dir)
         self.addCleanup(service.close)
         authorizer = service._plaintext_export_authorizer
         grant = authorizer.issue_grant(self.SESSION_A)

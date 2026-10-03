@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.socket_ownership import SocketOwnershipClaim
+from backend.plaintext_export_redaction import safe_error, safe_request_id
 from backend.ipc_constants import (
     IPC_MAX_MESSAGE_BYTES,
     IPC_SOCKET_BACKLOG,
@@ -344,27 +345,31 @@ class IPCServer:
                         IPC_CONN_RECV_TIMEOUT_SEC,
                     )
                     return
-                except Exception as exc:
+                except Exception:
                     response = {
                         "id": None,
                         "ok": False,
-                        "error": {"code": "invalid_json", "message": str(exc)},
+                        "error": {"code": "invalid_json", "message": "Некорректный JSON-запрос"},
                     }
                     try:
                         conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
-                    except (BrokenPipeError, ConnectionResetError, OSError) as send_exc:
+                    except (BrokenPipeError, ConnectionResetError, OSError):
                         # Swift client disconnected before response sent — normal during
                         # crash/quit mid-call.  Log at debug, not error.
-                        logger.debug(
-                            "IPC client disconnected before invalid_json response: %s", send_exc
-                        )
+                        logger.debug("IPC client disconnected before invalid_json response")
                     except Exception:
-                        logger.exception("Ошибка отправки invalid_json-ответа")
+                        # Неразобранный input не даёт доверенного auth context.
+                        logger.error("Ошибка отправки invalid_json-ответа")
                     return
 
                 try:
                     response = self._call_handle_request_bounded(payload)
                 except concurrent.futures.TimeoutError:
+                    # Имя берём только из реальной таблицы, а не отражаем input.
+                    method = payload.get("method")
+                    dispatch = getattr(self.service, "_dispatch_table", {})
+                    if not isinstance(method, str) or not isinstance(dispatch, dict) or method not in dispatch:
+                        method = "<unknown>"
                     # Живой инцидент 2026-08-04: зависшая бизнес-логика (deadlock)
                     # без этого backstop'а держит семафор-слот НАВСЕГДА — не
                     # symptom-фикс, а страховка независимо от конкретной причины
@@ -375,10 +380,10 @@ class IPCServer:
                         "handle_request завис дольше %.0fс (method=%s) — "
                         "backstop-таймаут, слот освобождён, рабочий поток абандонен",
                         self._request_timeout_sec,
-                        payload.get("method", "?"),
+                        method,
                     )
                     response = {
-                        "id": payload.get("id"),
+                        "id": safe_request_id(payload),
                         "ok": False,
                         "error": {
                             "code": "internal_error",
@@ -386,11 +391,12 @@ class IPCServer:
                         },
                     }
                 except Exception as exc:
-                    logger.exception("Непойманная ошибка в handle_request")
+                    message, trace = safe_error(exc, context=payload, with_traceback=True)
+                    logger.error("Непойманная ошибка в handle_request: %s\n%s", message, trace)
                     response = {
-                        "id": payload.get("id"),
+                        "id": safe_request_id(payload),
                         "ok": False,
-                        "error": {"code": "internal_error", "message": str(exc)},
+                        "error": {"code": "internal_error", "message": message},
                     }
                 try:
                     conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -398,10 +404,14 @@ class IPCServer:
                     # Swift client disconnected before response sent — common when the
                     # agent crashes or quits mid-call.  Log at debug, not error.
                     logger.debug(
-                        "IPC client disconnected before response: %s", exc
+                        "IPC client disconnected before response: %s",
+                        safe_error(exc, context={"request": payload, "response": response})[0],
                     )
-                except Exception:
-                    logger.exception("Ошибка отправки ответа клиенту")
+                except Exception as exc:
+                    message, trace = safe_error(
+                        exc, context={"request": payload, "response": response}, with_traceback=True,
+                    )
+                    logger.error("Ошибка отправки ответа клиенту: %s\n%s", message, trace)
         finally:
             # W1767 #1 (HIGH): освобождаем семафор в любом случае,
             # в том числе при socket.timeout (slow-loris guard).

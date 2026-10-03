@@ -147,6 +147,7 @@ from backend.audit_logger import AuditLogger
 from backend.bulk_reprocess import BulkReprocessor
 from backend.privacy_audit import get_privacy_audit_logger
 from backend.ipc_errors import IpcOperationalError
+from backend.plaintext_export_ipc import PlaintextExportIPC
 import backend.cloud_stt as cloud_stt
 import backend.cloud_rewriter as cloud_rewriter
 
@@ -477,14 +478,14 @@ class BackendService:
         # для честной startup-диагностики (без них — прежний data_dir-фоллбэк).
         self._socket_path_cfg = socket_path
         self._socket_ownership_snapshot_getter = socket_ownership_snapshot_getter
-        # A5.3 карточка A, slice 2: authorizer plaintext-export capability —
-        # ТОЛЬКО создание, БЕЗ IPC (IPC-методы и namespace придут в slice 4).
+        # A5.3: authorizer и IPC-адаптер создаются до запуска фоновых потоков.
         # Epoch генерируется внутри authorizer (32 bytes); конструктор не делает
         # I/O (read_snapshot вызывается лениво, на issue/validate).
         self._plaintext_export_authorizer = PlaintextExportAuthorizer(
             read_snapshot=self.store.read_plaintext_policy_snapshot,
             profile_identity=str(self.store.data_dir),
         )
+        self._plaintext_export_ipc = PlaintextExportIPC(self._plaintext_export_authorizer)
         self.vocabulary = VocabularyStore(data_dir=store.data_dir)
         self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
         self._phonetic_vocab_svc = PhoneticVocabService(data_dir=store.data_dir)
@@ -2475,6 +2476,9 @@ class BackendService:
         signal handler run_server() и в finally serve_forever(). Возвращает
         False, когда любой нативный/audio worker не подтвердил завершение.
         """
+        authorizer = getattr(self, "_plaintext_export_authorizer", None)
+        if authorizer is not None:
+            authorizer.close()
         call_stt = getattr(self, "_call_stt", None)
         call_stt_stopped = True
         if call_stt is not None:
@@ -2839,6 +2843,10 @@ class BackendService:
         """
         return {
             "ping": self._handle_ping,  # VERIFIED: called from Swift (BackendSupervisor)
+            "get_plaintext_export_policy": self._plaintext_export_ipc.handle_get_policy,
+            "grant_plaintext_export_session": self._plaintext_export_ipc.handle_grant,
+            "revoke_plaintext_export_session": self._plaintext_export_ipc.handle_revoke,
+            "validate_plaintext_export": self._plaintext_export_ipc.handle_validate,
             "start_recording": self._handle_start_recording,  # VERIFIED: called from Swift (main)
             "stop_recording": self._handle_stop_recording,  # VERIFIED: called from Swift (main)
             "get_recording_state": self._handle_get_recording_state,  # VERIFIED: called from Swift (main, HistoryPanel)
@@ -3266,15 +3274,20 @@ class BackendService:
         Таблица диспетчеризации строится один раз в ``__init__``
         (``self._dispatch_table``) — здесь только O(1) lookup, без перестройки.
         """
-        request_id = payload.get("id")
-        method = str(payload.get("method", "")).strip()
+        from backend.plaintext_export_redaction import safe_error, safe_error_metadata, safe_request_id
+
+        if not isinstance(payload, dict):
+            return self._error(None, "invalid_request", "Запрос должен быть объектом")
+        request_id = safe_request_id(payload)
+        raw_method = payload.get("method", "")
+        method = raw_method.strip() if isinstance(raw_method, str) else ""
         params = payload.get("params", {})
         if not isinstance(params, dict):
             return self._error(request_id, "invalid_params", "Параметр params должен быть объектом")
 
         handler = self._dispatch_table.get(method)
         if handler is None:
-            return self._error(request_id, "unknown_method", f"Неизвестный метод: {method}")
+            return self._error(request_id, "unknown_method", "Неизвестный метод")
 
         # IPC signing: верифицируем HMAC-SHA256 подпись если включено
         if self._request_signer is not None:
@@ -3340,8 +3353,12 @@ class BackendService:
         except IpcOperationalError as exc:
             # Genuine operational failure (remote service down, disk/IO error) —
             # stays loud (internal_error + Sentry), not downgraded to invalid_request.
-            logger.exception("Операционный сбой метода %s", method)
-            response = self._error(request_id, "internal_error", str(exc))
+            message, trace = safe_error(exc, context=payload, with_traceback=True)
+            logger.error(
+                "Операционный сбой метода %s: %s\n%s", method, message, trace,
+                extra=safe_error_metadata(exc, method=method, context=payload),
+            )
+            response = self._error(request_id, "internal_error", message)
         except (ValueError, RuntimeError) as exc:
             # Handlers deliberately raise ValueError/RuntimeError for EXPECTED
             # conditions — a missing/invalid param or a not-found item
@@ -3355,11 +3372,16 @@ class BackendService:
             # raise AttributeError/KeyError/TypeError/IndexError/... (e.g. the
             # HistoryItem-vs-dict crash raised AttributeError) and still fall through
             # to the internal_error path below — they remain loud (ERROR + Sentry).
-            logger.warning("Метод %s отклонён (invalid_request): %s", method, exc)
-            response = self._error(request_id, "invalid_request", str(exc))
+            message, _ = safe_error(exc, context=payload)
+            logger.warning("Метод %s отклонён (invalid_request): %s", method, message)
+            response = self._error(request_id, "invalid_request", message)
         except Exception as exc:
-            logger.exception("Ошибка метода %s", method)
-            response = self._error(request_id, "internal_error", str(exc))
+            message, trace = safe_error(exc, context=payload, with_traceback=True)
+            logger.error(
+                "Ошибка метода %s: %s\n%s", method, message, trace,
+                extra=safe_error_metadata(exc, method=method, context=payload),
+            )
+            response = self._error(request_id, "internal_error", message)
 
         # Audit log — пропускаем в privacy_mode (настройка считывается из кэша)
         try:
@@ -6171,13 +6193,29 @@ def build_service(
     валидными bool мигрирует (те же флаги + новая ревизия, без grant);
     неполный/битый остаётся UNKNOWN до validated repair.
 
-    ``None`` означает «определить автоматически»: каталога до старта не было.
+    ``None`` означает «использовать результат атомарного создания StateStore».
     Явный флаг нужен ``main()``, где ``configure_logging`` уже создал каталог.
     """
     data_dir = Path(data_dir)
+    startup_owned_lock_path = None
+    if socket_path is not None and socket_ownership_snapshot_getter is not None:
+        from backend.socket_ownership import (
+            SocketOwnershipSnapshot, SocketOwnershipState, canonical_socket_path,
+        )
+        try:
+            claim = socket_ownership_snapshot_getter()
+            if (
+                isinstance(claim, SocketOwnershipSnapshot)
+                and claim.state is SocketOwnershipState.CLAIMED
+                and claim.socket_path == canonical_socket_path(socket_path)
+            ):
+                startup_owned_lock_path = Path(str(claim.socket_path) + ".lock")
+        except Exception:
+            # Недоступное подтверждение ownership не расширяет inventory.
+            pass
+    store = StateStore(data_dir=data_dir, startup_owned_lock_path=startup_owned_lock_path)
     if profile_created_by_this_startup is None:
-        profile_created_by_this_startup = not data_dir.exists()
-    store = StateStore(data_dir=data_dir)
+        profile_created_by_this_startup = store._created_data_dir
     # Гарантируем наличие полного набора дефолтных настроек — но только там,
     # где это доказанно новый профиль, иначе legacy/битый профиль не отмывается.
     startup_policy_outcome = store.initialize_startup_plaintext_policy(
@@ -6282,7 +6320,12 @@ def main() -> None:
     # (он сам делает data_dir.mkdir(exist_ok=True)), иначе факт создания каталога
     # этим startup потерялся бы и первый запуск существующего каталога выглядел
     # бы как инициализация нового профиля.
-    profile_created_by_this_startup = not data_dir.exists()
+    try:
+        data_dir.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        profile_created_by_this_startup = False
+    else:
+        profile_created_by_this_startup = True
 
     configure_logging(data_dir)
 

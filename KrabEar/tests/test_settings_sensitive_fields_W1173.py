@@ -66,7 +66,7 @@ def _make_store_with_secrets() -> MagicMock:
         "language": "ru",
     }
     store.load_settings.return_value = dict(settings)
-    store.save_settings.side_effect = lambda s: s
+    store.save_settings.side_effect = lambda s, **_kwargs: s
     return store
 
 

@@ -66,6 +66,7 @@ def test_enabling_encryption_invalidates_plaintext_writer_cache() -> None:
         # MISSING_SETTINGS — инвариант теста про crypto-кэш этим не меняется.
         data_dir = Path(temp_dir) / "data"
         store = StateStore(data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         store.add_history_item(text="SYNTHETIC_BEFORE_ENABLE")
         store.save_settings({"history_encryption_enabled": True})
 

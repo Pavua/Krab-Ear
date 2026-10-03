@@ -32,12 +32,14 @@ if PROJECT_ROOT not in sys.path:
 from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.ipc_errors import IpcOperationalError
+from _settings_test_helpers import safe_backend_for_settings
 
 
-def _make_service() -> BackendService:
-    tmp = Path(tempfile.mkdtemp())
-    store = StateStore(data_dir=tmp / "data")
-    return BackendService(store=store)
+def _make_service(owner: unittest.TestCase) -> BackendService:
+    tmp = tempfile.TemporaryDirectory(prefix="ear-dispatch-contract-")
+    owner.addCleanup(tmp.cleanup)
+    store = StateStore(data_dir=Path(tmp.name) / "data")
+    return safe_backend_for_settings(owner, store)
 
 
 class DispatchErrorContractTest(unittest.TestCase):
@@ -57,7 +59,7 @@ class DispatchErrorContractTest(unittest.TestCase):
         gigaam_patcher = patch("core.config.settings.STT_GIGAAM_ENABLED", False)
         gigaam_patcher.start()
         self.addCleanup(gigaam_patcher.stop)
-        self.service = _make_service()
+        self.service = _make_service(self)
 
     def tearDown(self) -> None:
         self.service.close()

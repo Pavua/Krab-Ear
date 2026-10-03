@@ -83,6 +83,7 @@ logger = logging.getLogger("KrabEar.Backend.Store")
 _LOCK_SLOW_WARN_SEC = 2.0
 _LOCK_ACQUIRE_TIMEOUT_SEC = 30.0
 _LOCK_POLL_INTERVAL_SEC = 0.05
+_UNCONDITIONAL_SETTINGS_COMMIT = object()
 
 
 class StateStoreLockTimeout(IpcOperationalError):
@@ -117,6 +118,10 @@ class StateStoreLockUpgradeError(IpcOperationalError):
 
 class HistoryEncryptionUnavailable(IpcOperationalError):
     """Нельзя сохранить новую запись, когда обязательное шифрование недоступно."""
+
+
+class StateStoreSettingsConflictError(IpcOperationalError):
+    """Устаревший RMW не может затереть настройки другого процесса."""
 
 
 class StateStoreSettingsCorruptError(IpcOperationalError):
@@ -431,8 +436,14 @@ class StateStore:
         data_dir: Path,
         compact_threshold_bytes: int = 25 * 1024 * 1024,
         lock_acquire_timeout_sec: float = _LOCK_ACQUIRE_TIMEOUT_SEC,
+        *,
+        startup_owned_lock_path: Path | None = None,
     ) -> None:
         self.data_dir = data_dir
+        self._startup_owned_lock_path = (
+            Path(startup_owned_lock_path).parent.resolve(strict=False) / Path(startup_owned_lock_path).name
+            if startup_owned_lock_path is not None else None
+        )
         self.compact_threshold_bytes = compact_threshold_bytes
         self._lock_acquire_timeout_sec = lock_acquire_timeout_sec
 
@@ -453,20 +464,16 @@ class StateStore:
         self.calendar_links_path = self.data_dir / "history_calendar_links.ndjson"
         self.lock_path = self.data_dir / "history.lock"
 
-        # A5.3 карточка A, slice 2 (BLOCKER-1): признак «профиль создан ЭТИМ
-        # startup'ом» решает судьбу записи при ОТСУТСТВУЮЩЕМ settings.json.
-        # Признак доказанно нового профиля (контракт п.7), и он доказан РОВНО
-        # здесь: ДО ``mkdir``. После mkdir «каталог пуст» уже ничего не значит
-        # (settings.json мог быть удалён уже после создания каталога), поэтому
-        # спрашивать позже — значит отмывать «удалённый settings.json у
-        # существующего профиля» обратно в KNOWN_* дефолтами.
-        #
-        # Соответствует ``build_service(profile_created_by_this_startup=...)``,
-        # который решает ровно то же до конструкции стора, и
-        # ``initialize_startup_plaintext_policy(new_profile=...)``.
-        self._created_data_dir = not self.data_dir.exists()
+        # Только победитель atomic mkdir имеет доказательство нового профиля.
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=False)
+        except FileExistsError:
+            self._created_data_dir = False
+        else:
+            self._created_data_dir = True
+        self._fresh_settings_pending = self._created_data_dir
+        self._startup_initialization_consumed = False
 
-        self.data_dir.mkdir(parents=True, exist_ok=True)
         for path in (
                 self.history_path,
                 self.tombstones_path,
@@ -1012,11 +1019,14 @@ class StateStore:
             if not self.settings_path.exists():
                 return dict(DEFAULT_SETTINGS)
 
-            payload = safe_json_loads(
-                self.settings_path.read_text(encoding="utf-8"),
-                default=None,
-                context="settings.json",
-            )
+            # IO/decode errors сохраняют прежнюю exception semantics.
+            # Только JSON ambiguity/parse error получают прежние UI-defaults;
+            # authorizer и write guard независимо сохраняют UNKNOWN.
+            raw_text = self.settings_path.read_text(encoding="utf-8")
+            try:
+                payload = json.loads(raw_text, object_pairs_hook=_reject_duplicate_keys)
+            except (_DuplicateKeyError, ValueError, TypeError):
+                payload = None
             if payload is None:
                 logger.warning("Файл настроек поврежден, возвращены дефолты")
                 return dict(DEFAULT_SETTINGS)
@@ -1031,161 +1041,175 @@ class StateStore:
         new_settings: dict[str, Any],
         *,
         validated_repair: bool = False,
+        expected_revision: object = _UNCONDITIONAL_SETTINGS_COMMIT,
     ) -> dict[str, Any]:
-        """Сохраняет настройки атомарно и возвращает нормализованный результат.
-
-        Сигнатура и семантика публичного метода НЕ изменены: ``(dict) -> dict``
-        вызывается ровно как раньше, позиционно. Все A5 write-guards остаются
-        здесь, ДО записи, и на reject-пути settings.json не меняется НИ БАЙТОМ.
-        Само тело записи вынесено в ``_save_settings_unlocked`` — это центральный
-        settings commit спеки §7.3.
-
-        🔴 ДОЛГОВЕЧНЫЙ CHOKE POINT (карточка A, slice 2 — BLOCKER-1). Именно здесь,
-        а не в точечных проверках, решается «эта запись вообще поддержанная?»:
-        состояние policy-триплета читается НА ДИСКЕ под уже удерживаемым
-        эксклюзивным локом, и fail-closed правила применяются ДО merge с
-        ``DEFAULT_SETTINGS``. Без этого любой посторонний поддержанный писатель
-        (``ipc.call("set_settings", …)`` от Swift-агента на каждом старте,
-        preset-ы, авто-сид hotwords, глоссарий) мержил дефолты поверх неполного
-        профиля, минтил ревизию и САМ делал UNKNOWN известным — без единого
-        действия владельца.
-
-        ``validated_repair`` — keyword-only, по умолчанию ``False``. Это
-        ЕДИНСТВЕННЫЙ выход из UNKNOWN: «обычный validated settings repair/save»
-        из контракта п.8. Включать его обязан вызывающий, который САМ проверил и
-        починил значения (validated repair-пути import/restore подключает
-        следующий slice). Флаг НЕ ослабляет остальные A5 write-guards
-        (нечитаемый текущий файл, не-bool ``history_encryption_enabled``,
-        запрет выключения шифрования при наличии ENC1) — он пропускает только
-        проверку полноты policy-триплета.
-
-        🔴 ТОЧНОСТЬ ФОРМУЛИРОВКИ: import/restore/reset/recovery ОБЯЗАНЫ идти
-        через этот commit, но СЕЙЧАС идут через него не все. На момент slice 2
-        центральный commit обслуживает ``save_settings`` и startup-миграцию
-        легаси-профиля; ``integrity_checker._repair_settings`` пишет
-        settings.json собственным ``with_suffix(".json.tmp")`` + ``replace()``,
-        минуя и этот guard, и минтинг ревизии (tracked bypass — следующий
-        slice), а ``SettingsService`` имеет пути отката, которые проходят через
-        ``save_settings``. Никаких «уже идут» здесь не утверждается.
-        """
+        """Все supported writes: общий lock, guards, новая durable revision."""
         with self._lock():
-            self._guard_supported_write_unlocked(
-                validated_repair=validated_repair,
+            return self._save_settings_unlocked(
+                new_settings, validated_repair=validated_repair,
+                expected_revision=expected_revision,
             )
-            if (
-                not self.settings_path.exists()
-                and new_settings.get("history_encryption_enabled") is not True
-                and self._read_encryption_flag_unlocked()
-            ):
-                raise StateStoreSettingsCorruptError(
-                    "settings missing beside encrypted history; restore encryption flag"
-                )
-            if self.settings_path.exists():
-                current = safe_json_loads(
-                    self.settings_path.read_text(encoding="utf-8"),
-                    default=None,
-                    context="settings.json (write guard)",
-                )
-                if not isinstance(current, dict):
-                    raise StateStoreSettingsCorruptError(
-                        "settings.json unreadable; restore before saving"
-                    )
-                if (
-                    "history_encryption_enabled" in current
-                    and not isinstance(current["history_encryption_enabled"], bool)
-                ):
-                    raise StateStoreSettingsCorruptError(
-                        "history encryption flag invalid; restore before saving"
-                    )
-                if (
-                    new_settings.get("history_encryption_enabled") is not True
-                    and self._has_encrypted_history_unlocked()
-                ):
-                    raise StateStoreSettingsCorruptError(
-                        "cannot disable encryption while ENC1 history remains"
-                    )
-            return self._save_settings_unlocked(new_settings)
 
-    def _guard_supported_write_unlocked(
-        self,
-        *,
-        validated_repair: bool,
-    ) -> None:
-        """Долговечный guard поддержанной записи. ТОЛЬКО под ``self._lock()``.
+    @staticmethod
+    def has_explicit_policy_flags(payload: Any) -> bool:
+        """Repair требует обоих exact-bool ДО merge/defaults/validator fixes."""
+        return isinstance(payload, dict) and all(
+            type(payload.get(key)) is bool for key in POLICY_FLAG_KEYS
+        )
 
-        Решает по СОСТОЯНИЮ policy-триплета НА ДИСКЕ (тот же hardened-reader,
-        что и у публичного snapshot — без отдельного «мягкого» чтения):
+    @staticmethod
+    def validate_raw_policy_flags(payload: Any, *, require_pair: bool = False) -> None:
+        """Normalizer не вправе превращать ошибочный raw bool в разрешение."""
+        if not isinstance(payload, dict) or any(
+            key in payload and type(payload[key]) is not bool for key in POLICY_FLAG_KEYS
+        ):
+            raise StateStoreSettingsCorruptError("settings policy flags must be exact bool")
+        if require_pair and not StateStore.has_explicit_policy_flags(payload):
+            raise StateStoreSettingsCorruptError("restore requires explicit policy flags")
 
-        * ``KNOWN_OFF``/``KNOWN_ON`` (оба exact-bool + валидная ревизия) →
-          обычная запись, новая ревизия минтится как обычно;
-        * ``MISSING_REVISION`` (оба флага уже exact-bool, ревизии нет) →
-          разрешена обычная startup-migration семантика п.8: те же флаги + новая
-          ревизия. Такой профиль после записи становится KNOWN_* — это РАЗРЕШЕНО
-          контрактом, потому что намерение владельца уже зафиксировано флагами;
-        * ``MISSING_SETTINGS`` → запись разрешена ТОЛЬКО для доказанно нового
-          профиля (``_created_data_dir``, п.7). У существующего профиля
-          отсутствующий settings.json означает «файл удалён/потерян» — такой
-          профиль НЕ должен самопочиниться дефолтами;
-        * любой другой UNKNOWN (missing-key, non-bool, duplicate keys,
-          not-object, corrupt, unreadable, oversize, non-regular, unstable,
-          invalid-revision) → ГРОМКИЙ отказ. Молча дописывать дефолты здесь
-          нельзя: это ровно тот путь, которым UNKNOWN превращался в KNOWN_OFF.
+    def _is_startup_owned_lock_tree(self, entry: Path) -> bool:
+        """Только точная пустая цепочка каталогов к уже захваченному lock."""
+        if self._startup_owned_lock_path is None:
+            return False
+        try:
+            parts = self._startup_owned_lock_path.relative_to(
+                self.data_dir.resolve(strict=False)
+            ).parts
+            if not parts or entry.name != parts[0]:
+                return False
+            node = entry
+            for index, part in enumerate(parts):
+                if index:
+                    node = node / part
+                st = node.lstat()
+                if index == len(parts) - 1:
+                    return stat.S_ISREG(st.st_mode) and st.st_size == 0
+                if not stat.S_ISDIR(st.st_mode):
+                    return False
+                children = list(node.iterdir())
+                if len(children) != 1 or children[0].name != parts[index + 1]:
+                    return False
+        except (OSError, ValueError):
+            return False
+        return False
 
-        Отказ fail-LOUD: ``StateStoreSettingsCorruptError`` (→ ``IpcOperationalError``,
-        не ``ValueError``), в тексте — только машинный reason-код, без значений
-        флагов, payload и путей. ``validated_repair=True`` пропускает эту
-        проверку целиком (единственный выход из UNKNOWN, контракт п.8).
-        """
+    def _profile_has_no_inherited_state_unlocked(self) -> bool:
+        """Пустые журналы конструктора и служебные locks/logs — не restore."""
+        empty_files = {
+            path.name for path in (
+                self.history_path, self.tombstones_path, self.purged_ids_path,
+                self.status_path, self.tags_path, self.favorites_path,
+                self.annotations_path, self.vocabulary_path, self.text_updates_path,
+                self.action_items_path, self.calendar_links_path,
+            )
+        }
+        try:
+            for path in self.data_dir.iterdir():
+                if path.name in {"history.lock", "backend.log"}:
+                    continue
+                if self._is_startup_owned_lock_tree(path):
+                    continue
+                st = path.lstat()
+                if path.name not in empty_files or not stat.S_ISREG(st.st_mode) or st.st_size:
+                    return False
+        except OSError:
+            return False
+        return True
+
+    def _guard_supported_write_unlocked(self, *, validated_repair: bool) -> None:
+        """UNKNOWN никогда не исправляется неявным merge с дефолтами."""
         if validated_repair:
             return
-        # Reader exception-total: внутренний сбой → UNKNOWN/PROVIDER_ERROR →
-        # fail-closed отказ, а не запись вслепую.
         snapshot = self._read_plaintext_policy_snapshot_unlocked()
+        if snapshot.reason != REASON_UNKNOWN_MISSING_SETTINGS:
+            self._fresh_settings_pending = False
         if snapshot.state in (PolicyState.KNOWN_OFF, PolicyState.KNOWN_ON):
             return
         reason = snapshot.reason or REASON_UNKNOWN_PROVIDER_ERROR
         if reason == REASON_UNKNOWN_MISSING_REVISION:
             return
-        if reason == REASON_UNKNOWN_MISSING_SETTINGS and self._created_data_dir:
+        if (
+            reason == REASON_UNKNOWN_MISSING_SETTINGS
+            and self._fresh_settings_pending
+            and self._profile_has_no_inherited_state_unlocked()
+        ):
             return
-        logger.warning(
-            "save_settings: отказ — policy UNKNOWN (%s); нужна validated repair",
-            reason,
-        )
+        self._fresh_settings_pending = False
         raise StateStoreSettingsCorruptError(
             f"settings policy UNKNOWN ({reason}); validated repair required"
         )
 
-    def _save_settings_unlocked(self, new_settings: dict[str, Any]) -> dict[str, Any]:
-        """Тело центрального settings commit (§7.3). ТОЛЬКО под ``self._lock()``.
+    def _prepare_settings_commit_unlocked(
+        self, new_settings: dict[str, Any], *, validated_repair: bool = False,
+        expected_revision: object = _UNCONDITIONAL_SETTINGS_COMMIT,
+        history_paths: tuple[Path, ...] | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Общая проверка commit ДО mutation; caller держит store EX-lock.
 
-        Порядок обязателен: сначала merge с ``DEFAULT_SETTINGS`` (не менять),
-        затем отбрасывание ВХОДНОГО значения ревизии и только ПОСЛЕ этого —
-        генерация новой ``uuid4().hex``. Ревизия приходит от authorizer-контракта
-        как durable-версия против ON→OFF→ON между процессами: входное или
-        backup-значение сохранять нельзя никогда, а генерировать надо на КАЖДОЙ
-        поддержанной записи — даже если значения флагов не изменились.
-
-        Запись атомарная: ``core.atomic_io.atomic_write_text`` (уникальный temp
-        + fsync + ``os.replace``) вместо прежнего ``with_suffix(".json.tmp")``,
-        который был общим temp-именем и создавал гонку двух писателей.
-
-        🔴 ``POLICY_REVISION_KEY`` НЕ объявляется в ``DEFAULT_SETTINGS``: ключ
-        появляется только в записанном файле, поэтому exact-dict схема
-        настроек (tests, глоссарий) не меняется.
+        Restore подаёт будущий набор журналов: запрет ENC1→OFF обязан пройти
+        до copy2, а не обнаруживаться после частичного восстановления.
         """
+        if expected_revision is not _UNCONDITIONAL_SETTINGS_COMMIT:
+            # UNKNOWN policy может иметь raw revision (например missing flag).
+            # Сравнение версии не делает этот объект известной policy.
+            try:
+                current_raw = self.read_settings_import(self.settings_path)
+                current_revision = current_raw.get(POLICY_REVISION_KEY)
+            except StateStoreSettingsCorruptError:
+                current_revision = None
+            if current_revision != expected_revision:
+                raise StateStoreSettingsConflictError("settings changed; reload before retry")
+        self.validate_raw_policy_flags(new_settings)
+        if validated_repair and not self.has_explicit_policy_flags(new_settings):
+            raise StateStoreSettingsCorruptError("repair requires explicit policy flags")
+        self._guard_supported_write_unlocked(validated_repair=validated_repair)
+        settings = dict(DEFAULT_SETTINGS)
+        # Частичный direct save не сбрасывает действующую policy через defaults.
+        # Чтение и merge находятся под тем же EX-lock, что и commit.
+        if not self._fresh_settings_pending and any(key not in new_settings for key in POLICY_FLAG_KEYS):
+            current = self.read_settings_import(self.settings_path)
+            for key in POLICY_FLAG_KEYS:
+                if key not in new_settings:
+                    settings[key] = current[key]
+        settings.update(new_settings)
+        if not self.has_explicit_policy_flags(settings):
+            raise StateStoreSettingsCorruptError("settings policy flags must be exact bool")
+        if (
+            settings["history_encryption_enabled"] is not True
+            and has_encrypted_history_in(
+                self._history_journal_paths() if history_paths is None else history_paths
+            )
+        ):
+            raise StateStoreSettingsCorruptError(
+                "cannot disable encryption while ENC1 history remains"
+            )
+        settings.pop(POLICY_REVISION_KEY, None)
+        settings[POLICY_REVISION_KEY] = uuid.uuid4().hex
+        serialized = json.dumps(settings, ensure_ascii=False, indent=2)
+        if len(serialized.encode("utf-8")) > MAX_POLICY_BYTES:
+            raise StateStoreSettingsCorruptError("serialized settings too large")
+        return settings, serialized
+
+    def _save_settings_unlocked(
+        self, new_settings: dict[str, Any], *, validated_repair: bool = False,
+        expected_revision: object = _UNCONDITIONAL_SETTINGS_COMMIT,
+    ) -> dict[str, Any]:
+        """Central commit: guards, свежая revision, atomic file+directory fsync."""
         from core.atomic_io import atomic_write_text
 
-        settings = dict(DEFAULT_SETTINGS)
-        settings.update(new_settings)
-        # Входной/backup revision никогда не сохраняется.
-        settings.pop(POLICY_REVISION_KEY, None)
-        # Новая ревизия на КАЖДОЙ поддержанной записи, даже при тех же флагах.
-        settings[POLICY_REVISION_KEY] = uuid.uuid4().hex
-        atomic_write_text(
-            self.settings_path,
-            json.dumps(settings, ensure_ascii=False, indent=2),
+        settings, serialized = self._prepare_settings_commit_unlocked(
+            new_settings, validated_repair=validated_repair,
+            expected_revision=expected_revision,
         )
+        atomic_write_text(self.settings_path, serialized)
+        # После replace даже ошибка directory fsync не делает профиль новым.
+        self._fresh_settings_pending = False
+        self._startup_initialization_consumed = True
+        dir_fd = os.open(self.data_dir, os.O_RDONLY | os.O_CLOEXEC)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
         return settings
 
     def initialize_startup_plaintext_policy(self, *, new_profile: bool) -> str:
@@ -1222,15 +1246,19 @@ class StateStore:
             # Читаем ПОСЛЕ захвата эксклюзивного лока: никакого pre-reacquire
             # снимка (запрет контракта п.7).
             snapshot = self._read_plaintext_policy_snapshot_unlocked()
+            may_initialize = new_profile and not self._startup_initialization_consumed
+            self._startup_initialization_consumed = True
 
             if (
-                new_profile
+                may_initialize
                 and snapshot.reason == REASON_UNKNOWN_MISSING_SETTINGS
+                and self._profile_has_no_inherited_state_unlocked()
             ):
                 # settings.json на диске отсутствует ВООБЩЕ, а каталог создан
                 # этим startup → достоверно новый профиль: явная инициализация.
                 # Для непустого/битого settings.json сюда не попасть: у него
                 # причина не missing_settings, и дефолты не дописываются.
+                self._fresh_settings_pending = True
                 self._save_settings_unlocked(dict(DEFAULT_SETTINGS))
                 return STARTUP_POLICY_INITIALIZED
 
@@ -1245,11 +1273,13 @@ class StateStore:
                 return STARTUP_POLICY_MIGRATED_LEGACY
 
             if snapshot.state in (PolicyState.KNOWN_OFF, PolicyState.KNOWN_ON):
+                self._fresh_settings_pending = False
                 return STARTUP_POLICY_ALREADY_KNOWN
 
             # Любой другой UNKNOWN (missing/unreadable/not-object/non-bool/
             # duplicate/oversize/non-regular/unstable) — профиль неполон или
             # невалиден: НЕ пишем, оставляем UNKNOWN до validated repair.
+            self._fresh_settings_pending = False
             return STARTUP_POLICY_LEFT_UNKNOWN
 
     def _read_legacy_policy_settings_unlocked(self) -> dict[str, Any] | None:
@@ -1260,18 +1290,17 @@ class StateStore:
         ключи сохраняются без изменений. Любой сбой → ``None``.
         """
         try:
-            raw = self.settings_path.read_bytes()
-        except OSError:
-            return None
-        try:
+            result = self._read_settings_bytes_unlocked()
+            if isinstance(result, PolicySnapshot):
+                return None
+            raw, _ = result
             payload = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
-        except (_DuplicateKeyError, ValueError, TypeError):
+        except (_DuplicateKeyError, OSError, ValueError, TypeError):
             return None
         if not isinstance(payload, dict):
             return None
-        for key in POLICY_FLAG_KEYS:
-            if key not in payload or type(payload[key]) is not bool:
-                return None
+        if not self.has_explicit_policy_flags(payload) or POLICY_REVISION_KEY in payload:
+            return None
         return payload
 
     # ── A5.3 карточка A, slice 1: чтение типизированного policy snapshot ──
@@ -1332,8 +1361,19 @@ class StateStore:
             return unknown_snapshot(REASON_UNKNOWN_PROVIDER_ERROR)
 
     def _plaintext_policy_snapshot_locked(self) -> PolicySnapshot:
-        """Дескрипторная часть чтения (regularity → cap → stability)."""
-        path = self.settings_path
+        result = self._read_settings_bytes_unlocked()
+        if isinstance(result, PolicySnapshot):
+            return result
+        raw, st_before = result
+        return self._plaintext_policy_snapshot_from_bytes(raw, st_before)
+
+    def _read_settings_bytes_unlocked(self, path: Path | None = None):
+        """Один bounded/no-follow reader для snapshot, legacy и restore source."""
+        return self._read_settings_file(self.settings_path if path is None else path)
+
+    @staticmethod
+    def _read_settings_file(path: Path):
+        """Дескрипторная часть, независимая от экземпляра/профиля."""
         # 🔴 O_NOFOLLOW — HARD-REQUIRE, а не ``getattr(os, "O_NOFOLLOW", 0)``:
         # деградация «флага нет» обязана давать UNKNOWN (fail-closed), а не
         # молча пройти по симлинку. То же для O_NONBLOCK: без него FIFO на пути
@@ -1410,7 +1450,22 @@ class StateStore:
             except OSError:
                 pass
 
-        return self._plaintext_policy_snapshot_from_bytes(raw, st_before)
+        return raw, st_before
+
+    @staticmethod
+    def read_settings_import(path: Path) -> dict[str, Any]:
+        """Строгий разбор raw import: без default merge и неоднозначных ключей."""
+        result = StateStore._read_settings_file(path)
+        if isinstance(result, PolicySnapshot):
+            raise StateStoreSettingsCorruptError("settings source unavailable")
+        raw, _ = result
+        try:
+            payload = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
+        except (_DuplicateKeyError, ValueError, TypeError) as exc:
+            raise StateStoreSettingsCorruptError("settings source invalid") from exc
+        if not isinstance(payload, dict):
+            raise StateStoreSettingsCorruptError("settings source must be object")
+        return payload
 
     def _plaintext_policy_snapshot_from_bytes(self, raw: bytes, st) -> PolicySnapshot:
         """Разбор policy ИЗ ОДНИХ тех bytes, что ушли в SHA256 (§7.3).

@@ -23,10 +23,11 @@ from typing import Any
 from urllib.parse import urlparse
 
 from backend.models import DEFAULT_SETTINGS
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
 from backend.observability import add_breadcrumb
 from backend.settings_backup import SENSITIVE_FIELDS as _SENSITIVE_FIELDS_BACKUP, SettingsBackup
 from backend.settings_validator import CURRENT_SCHEMA_VERSION, SettingsValidator
-from backend.state_store import StateStoreLockTimeout
+from backend.state_store import StateStore, StateStoreLockTimeout, StateStoreSettingsCorruptError
 
 _log = logging.getLogger(__name__)
 
@@ -415,6 +416,7 @@ class SettingsService:
                 )
 
     def _handle_set_settings_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+        StateStore.validate_raw_policy_flags(params)
         old_settings = self.cached_settings()
 
         # A2: refuse to overwrite env-pinned security settings via IPC.
@@ -629,7 +631,7 @@ class SettingsService:
                 _log.warning("settings save: %s", w)
         settings = vr.fixed
 
-        result = self.store.save_settings(settings)
+        result = self._save_partial_settings(settings, old_settings, raw_input=params)
         self.invalidate_cache()
         add_breadcrumb(
             category="settings",
@@ -663,7 +665,7 @@ class SettingsService:
             settings = dict(old_settings)
             settings.update(preset)
             settings["active_preset"] = profile
-            result = self.store.save_settings(settings)
+            result = self._save_partial_settings(settings, old_settings)
             self.invalidate_cache()
             add_breadcrumb(
                 category="settings",
@@ -809,7 +811,7 @@ class SettingsService:
             merged = dict(old_settings)
             for item in applied:
                 merged[item["key"]] = item["new_value"]
-            self.store.save_settings(merged)
+            self._save_partial_settings(merged, old_settings)
             self.invalidate_cache()
             try:
                 import backend.event_bus as _ebus  # noqa: PLC0415
@@ -925,7 +927,7 @@ class SettingsService:
                     max_value=1.0,
                 )
 
-            result = self.store.save_settings(settings)
+            result = self._save_partial_settings(settings, old_settings)
             self.invalidate_cache()
             # W1308/W1341/W1436: reload pydantic settings and fire hooks
             self._reload_and_fire_hooks(old_settings, settings)
@@ -980,6 +982,29 @@ class SettingsService:
         _log.info("export_settings: %d settings → %s", len(safe), out_path)
         return {"file": str(out_path), "settings_count": len(safe)}
 
+    def _save_partial_settings(
+        self, settings: dict, previous: dict, *, raw_input: dict | None = None,
+    ) -> dict:
+        """CAS под store lock: cache/probe не может откатить чужую новую policy.
+
+        Не удерживаем store lock на время сетевых probes/hooks; конфликт требует
+        перечитать настройки, а не молча повторять устаревшее решение.
+        """
+        try:
+            return self.store.save_settings(
+                settings,
+                validated_repair=StateStore.has_explicit_policy_flags(raw_input),
+                expected_revision=previous.get(POLICY_REVISION_KEY),
+            )
+        finally:
+            self.invalidate_cache()
+
+    def _save_validated_settings(self, settings: dict, *, raw_input: dict) -> dict:
+        """Repair — только явная пара bool, никогда validator-added defaults."""
+        if StateStore.has_explicit_policy_flags(raw_input):
+            return self.store.save_settings(settings, validated_repair=True)
+        return self.store.save_settings(settings)
+
     def handle_import_settings(self, params: dict[str, Any]) -> dict[str, Any]:
         """Импортирует настройки из JSON-файла.
 
@@ -1001,13 +1026,10 @@ class SettingsService:
             raise FileNotFoundError(f"Файл настроек не найден: {src}")
 
         try:
-            with src.open("r", encoding="utf-8") as fh:
-                incoming: dict[str, Any] = json.load(fh)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Невалидный JSON в файле настроек: {exc}") from exc
-
-        if not isinstance(incoming, dict):
-            raise ValueError("Файл настроек должен содержать JSON-объект")
+            incoming = StateStore.read_settings_import(src)
+            StateStore.validate_raw_policy_flags(incoming)
+        except StateStoreSettingsCorruptError:
+            raise ValueError("Невалидный JSON или небезопасный файл настроек") from None
 
         with self._save_lock:  # W1437
             errors: list[str] = []
@@ -1036,7 +1058,7 @@ class SettingsService:
             merged = vr.fixed
 
             imported = len(incoming) - skipped
-            self.store.save_settings(merged)
+            self._save_partial_settings(merged, old_settings, raw_input=incoming)
             self.invalidate_cache()
             add_breadcrumb(
                 category="settings",
@@ -1093,7 +1115,7 @@ class SettingsService:
     def handle_restore_settings_backup(self, params: dict[str, Any]) -> dict[str, Any]:
         """Восстанавливает настройки из указанного бэкапа и сохраняет их.
 
-        W1178: pre-restore backup + validate + ValueError on failure + rollback.
+        Pre-restore backup + validate; invalid input leaves settings unchanged.
         W1337 F2: preserve credential fields missing from backup.
         W1435: migrate old-schema backups before validate.
         W1437: RLock around save path.
@@ -1111,13 +1133,16 @@ class SettingsService:
         with self._save_lock:  # W1437
             old_settings = self.cached_settings()
 
-            # W1178: take a pre-restore snapshot so restore can be undone on failure
+            restored = self._backup.restore_backup(backup_id)
+            # Полный restore требует исходное решение, до migrations/defaults.
+            StateStore.validate_raw_policy_flags(restored, require_pair=True)
+            raw_policy_input = dict(restored)
+
+            # W1178: snapshot only after raw input validation.
             try:
                 self._backup.create_backup(old_settings, reason="before_restore")
             except Exception as exc:  # noqa: BLE001
                 _log.warning("handle_restore_settings_backup: pre-restore backup failed: %s", exc)
-
-            restored = self._backup.restore_backup(backup_id)
 
             # W1337 F2: preserve credential fields missing from backup.
             current = self.cached_settings()
@@ -1136,26 +1161,20 @@ class SettingsService:
             # W1435: migrate old schema before validate
             restored = self._maybe_migrate(restored)
 
-            # W1178/W1435: validate restored settings — rollback and raise on hard errors
+            # Validate до единственной записи; отказ не требует rollback.
             vr = self._validator.validate(restored)
             if not vr.valid:
                 _log.warning("handle_restore_settings_backup: corrupt backup %s rejected: %s",
                              backup_id, vr.errors)
-                # W1178: rollback to pre-restore state
-                try:
-                    self.store.save_settings(old_settings)
-                    self.invalidate_cache()
-                except Exception as rollback_exc:  # noqa: BLE001
-                    _log.error(
-                        "handle_restore_settings_backup: rollback failed: %s", rollback_exc
-                    )
+                # restore_backup лишь читает: записи ещё не было. Откат здесь
+                # сам менял revision и мог записать cache вместо текущей policy.
                 raise ValueError(
                     f"Восстановление отклонено — бэкап содержит невалидные настройки: "
                     f"{'; '.join(vr.errors)}"
                 )
             restored = vr.fixed
 
-            self.store.save_settings(restored)
+            self._save_validated_settings(restored, raw_input=raw_policy_input)
             self.invalidate_cache()
 
             _log.info("handle_restore_settings_backup: restored from %s", backup_id)

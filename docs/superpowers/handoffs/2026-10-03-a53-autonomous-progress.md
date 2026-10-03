@@ -1,5 +1,54 @@
 # A5.3 — автономное продолжение, 2026-10-03
 
+## Актуальный фронт, 2026-10-03 — Card A готов к source PR
+
+Goal ACTIVE. Основная модель Sol High; независимое whole-diff review Astra High
+завершилось PASS после исправления всех подтверждённых замечаний. Card B/C/D
+ещё не реализованы. Merge, deploy/restart, включение шифрования, Keychain,
+живые экспорты, ротация и соседние репозитории не входят в выполненную работу.
+
+- Свежая удалённая база `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
+- PR #2076: `0af3c67cf1f3ee88739179e5640e640921330b7b`, exact-head checks
+  SUCCESS, Swift штатно SKIPPED, OPEN. Startup #2075 остаётся отдельным PR.
+- Card A: четыре RPC; свежая policy/epoch/generation; terminal close;
+  центральный durable commit и CAS; raw exact-bool до нормализаторов;
+  безопасный PREPARE restore до мутаций; строгая startup ownership;
+  redaction dispatcher/socket/audit/Sentry, в том числе encoded echoes.
+- Локально: authorizer 138, protocol 12 + 9 subtests, IPC 5, settings 78,
+  redaction 14; 47 зависимых файлов — 1266 passed, все per-file exit 0.
+- Python 3.12 parity без MLX: **50 + 6 файлов, ALL GREEN**, оба harness exit 0.
+  Полный `make audit-all` PASS, CI-style flake8 PASS, diff-check PASS.
+- Независимый source PASS и hashes: см. соседний
+  `2026-10-03-a53-card-a-verification.md`. Это не CI и не live acceptance.
+- Новый source PR/exact-SHA CI — следующий шаг; все source-файлы заморожены
+  после source-review, последние изменения только fixtures/docs.
+
+### Следующий блок B
+
+Read-only recon выявил прямые writers history/timeline, Obsidian, scheduler,
+SharingManager. В sharing индекс тоже содержит полный content и является
+отдельным plaintext sink; constructor/list/revoke могут его переписывать.
+При partial Obsidian нельзя продвигать cursor поверх недописанных записей.
+Backend namespace содержит четыре поля без operation_seq; требуется внутренний
+per-file authorize path, не конфликтующий с Swift high-water. Публичный IPC
+контракт сохраняется; дизайн проверяется независимо до реализации.
+
+### Риск прежней изоляции тестов
+
+`SettingsService` без injected backup создавал домашний `SettingsBackup()`;
+set-settings вызывает create_backup и rolling prune. Ранее выполненные тесты
+имели этот путь. Read-only проверены только метаданные: в default-каталоге
+четыре JSON reason before_set с mtime 15:26:39–40 CEST. Начального inventory
+нет; происхождение конкретных файлов и потеря старых копий не доказаны.
+Содержимое не читали, живые backups не удаляли и не пытались исправлять.
+Нельзя утверждать, что прежние тесты точно не затронули живой каталог.
+
+Исправлено в conftest: принудительный throwaway backup-каталог до app imports,
+с удалением только собственного tmp после тестов; явные test backup_dir
+сохранены. Все финальные parity-проверки выполнены после этого исправления.
+
+Ниже — исторический снимок первых коммитов, не текущая очередь.
+
 ## Scope и рабочая база
 
 Цель активна в Codex: завершить A–D до проверенных PR и решения владельца о

@@ -30,6 +30,8 @@ from backend.settings_service import SettingsService  # noqa: E402
 # ---------------------------------------------------------------------------
 
 _BASE_SETTINGS: dict = {
+    "history_encryption_enabled": False,
+    "privacy_mode_enabled": False,
     "quality_profile": "balanced",
     "cleanup_profile": "soft",
     "translation_mode": "off",
@@ -98,7 +100,7 @@ def _make_store(settings: dict | None = None) -> MagicMock:
     s = dict(settings or _BASE_SETTINGS)
     store = MagicMock()
     store.load_settings.return_value = dict(s)
-    store.save_settings.side_effect = lambda d: d
+    store.save_settings.side_effect = lambda d, **_kwargs: d
     return store
 
 

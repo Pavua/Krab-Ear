@@ -4,8 +4,8 @@ Slice 1: типы и машинные причины policy snapshot (ниже).
 ``backend.state_store`` (``StateStore._read_plaintext_policy_snapshot_unlocked``),
 поэтому этот модуль НЕ импортирует ``state_store`` — иначе циклический импорт.
 
-Slice 2 (этот код): ``PlaintextExportAuthorizer`` — только Python API, БЕЗ IPC
-(IPC-методы и namespace — slice 4). Выдаёт session capability и одноразовые
+``PlaintextExportAuthorizer`` предоставляет Python API; IPC-адаптер живёт
+в ``backend.plaintext_export_ipc``. Выдаёт session capability и одноразовые
 operation receipt'ы, хранит high-water operation_seq, отзывает grants при смене
 policy/UNKNOWN/privacy.
 
@@ -295,6 +295,7 @@ class PlaintextExportAuthorizer:
         self._receipts: dict[str, _ReceiptRecord] = {}
         self._consumed: set[str] = set()
         self._high_water: dict[str, int] = {}
+        self._closed = False
 
     def __repr__(self) -> str:  # noqa: D105 — только счётчики, без секретов
         with self._mu:
@@ -337,9 +338,65 @@ class PlaintextExportAuthorizer:
         with self._mu:
             return len(self._receipts)
 
+    def get_policy(self) -> dict:
+        """Свежий статус для UI; чтение не выдаёт grant и отзывает устаревшие."""
+        snapshot = self._fresh_snapshot()
+        with self._mu:
+            reason = None
+            known = (
+                not self._closed
+                and snapshot.state in (PolicyState.KNOWN_OFF, PolicyState.KNOWN_ON)
+                and snapshot.fingerprint is not None
+                and type(snapshot.privacy_mode_enabled) is bool
+            )
+            if not known:
+                self._revoke_all_locked()
+                reason = REASON_PLAINTEXT_POLICY_UNAVAILABLE
+            elif self._profile_mismatch_locked(snapshot.fingerprint):
+                self._revoke_all_locked()
+                reason = REASON_PLAINTEXT_SESSION_EXPIRED
+                known = False
+            else:
+                if (
+                    self._remembered is not None
+                    and self._remembered != snapshot.fingerprint
+                ):
+                    self._revoke_all_locked()
+                self._remembered = snapshot.fingerprint
+                if snapshot.privacy_mode_enabled:
+                    self._revoke_all_locked()
+                    self._remembered = snapshot.fingerprint
+                    reason = REASON_PRIVACY_MODE_ACTIVE
+            return {
+                "ok": reason is None,
+                "epoch": self._epoch.hex(),
+                "policy_generation": self._generation,
+                "encryption_enabled": (
+                    snapshot.state is PolicyState.KNOWN_ON if known else None
+                ),
+                "privacy_mode_enabled": snapshot.privacy_mode_enabled if known else None,
+                "allowed_without_grant": (
+                    reason is None and snapshot.state is PolicyState.KNOWN_OFF
+                ),
+                **({"reason": reason} if reason is not None else {}),
+            }
+
+    def close(self) -> None:
+        """Закрытый сервис больше не выдаёт разрешения; очищается вся RAM."""
+        with self._mu:
+            if not self._closed:
+                self._closed = True
+                self._revoke_all_locked()
+
     # ── issue / validate / revoke / consume ──
 
-    def issue_grant(self, app_session_id: str) -> GrantResult:
+    def issue_grant(
+        self,
+        app_session_id: str,
+        *,
+        expected_epoch: bytes | None = None,
+        expected_policy_generation: int | None = None,
+    ) -> GrantResult:
         """Выдать session capability при KNOWN_ON + privacy false.
 
         UNKNOWN → отказ ``plaintext_policy_unavailable`` + очистка всего RAM
@@ -355,7 +412,7 @@ class PlaintextExportAuthorizer:
         """
         snapshot = self._fresh_snapshot()
         with self._mu:
-            if snapshot.state is PolicyState.UNKNOWN:
+            if self._closed or snapshot.state is PolicyState.UNKNOWN:
                 self._revoke_all_locked()
                 return self._denied_grant(REASON_PLAINTEXT_POLICY_UNAVAILABLE)
             if snapshot.fingerprint is None:
@@ -380,6 +437,16 @@ class PlaintextExportAuthorizer:
                 # невалидная сессия после revoke всё равно получит отказ ниже.
                 self._revoke_all_locked()
             self._remembered = snapshot.fingerprint
+            # IPC передаёт ОБА значения, увиденные до consent sheet. Проверка
+            # внутри того же lock, что refresh/generation и создание grant.
+            if expected_epoch is not None or expected_policy_generation is not None:
+                if (
+                    type(expected_epoch) is not bytes
+                    or expected_epoch != self._epoch
+                    or type(expected_policy_generation) is not int
+                    or expected_policy_generation != self._generation
+                ):
+                    return self._denied_grant(REASON_PLAINTEXT_SESSION_EXPIRED)
             if not self._valid_session_id(app_session_id):
                 return self._denied_grant(REASON_PLAINTEXT_SESSION_EXPIRED)
             if snapshot.state is PolicyState.KNOWN_OFF:
@@ -415,6 +482,8 @@ class PlaintextExportAuthorizer:
         expected_policy_generation: int,
         operation_seq: int,
         sink_kind: str,
+        *,
+        _complete: bool = False,
     ) -> ValidateResult:
         """Проверить операцию и выдать одноразовый receipt для одной записи.
 
@@ -439,7 +508,7 @@ class PlaintextExportAuthorizer:
         snapshot = self._fresh_snapshot()
         with self._mu:
             denied = self._denied_validate
-            if snapshot.state is PolicyState.UNKNOWN:
+            if self._closed or snapshot.state is PolicyState.UNKNOWN:
                 self._revoke_all_locked()
                 return denied(REASON_PLAINTEXT_POLICY_UNAVAILABLE)
             if snapshot.fingerprint is None:
@@ -495,18 +564,36 @@ class PlaintextExportAuthorizer:
             receipt = secrets.token_urlsafe(32)
             while receipt in self._receipts or receipt in self._consumed:
                 receipt = secrets.token_urlsafe(32)
-            self._receipts[receipt] = _ReceiptRecord(
-                app_session_id=app_session_id,
-                generation=self._generation,
-                operation_seq=operation_seq,
-                sink_kind=sink_kind,
-            )
+            # Завершённое RPC-разрешение потребляет только Swift. Сервер не
+            # удерживает его объект; replay RPC закрыт sequence high-water.
+            if not _complete:
+                self._receipts[receipt] = _ReceiptRecord(
+                    app_session_id=app_session_id,
+                    generation=self._generation,
+                    operation_seq=operation_seq,
+                    sink_kind=sink_kind,
+                )
             return ValidateResult(
                 ok=True,
                 receipt=receipt,
                 policy_generation=self._generation,
                 reason=None,
             )
+
+    def validate_for_write(
+        self,
+        app_session_id: str,
+        epoch: bytes,
+        capability: Optional[str],
+        expected_policy_generation: int,
+        operation_seq: int,
+        sink_kind: str,
+    ) -> ValidateResult:
+        """Линеаризация одной записи до ответа: revoke влияет на следующие."""
+        return self.validate(
+            app_session_id, epoch, capability, expected_policy_generation,
+            operation_seq, sink_kind, _complete=True,
+        )
 
     def revoke(self, app_session_id: str, epoch: bytes, capability: str) -> bool:
         """Идемпотентный revoke ЭТОЙ сессии; чужие не трогает (п.19, §7.6).
@@ -554,7 +641,7 @@ class PlaintextExportAuthorizer:
         """
         snapshot = self._fresh_snapshot()
         with self._mu:
-            if snapshot.state is PolicyState.UNKNOWN:
+            if self._closed or snapshot.state is PolicyState.UNKNOWN:
                 self._revoke_all_locked()
                 return False
             if snapshot.fingerprint is None:
@@ -598,11 +685,24 @@ class PlaintextExportAuthorizer:
         Колбэк уже ходит под ``StateStore._lock`` сам; исключение/не-тип
         колбэка — fail-closed UNKNOWN/provider-error, БЕЗ cache fallback.
         """
+        with self._mu:
+            if self._closed:
+                return unknown_snapshot(REASON_UNKNOWN_PROVIDER_ERROR)
         try:
             snapshot = self._read_snapshot()
         except Exception:  # noqa: BLE001 — fail-closed, payload наружу не идёт
             return unknown_snapshot(REASON_UNKNOWN_PROVIDER_ERROR)
         if not isinstance(snapshot, PolicySnapshot):
+            return unknown_snapshot(REASON_UNKNOWN_PROVIDER_ERROR)
+        if snapshot.state in (PolicyState.KNOWN_OFF, PolicyState.KNOWN_ON):
+            if (
+                type(snapshot.privacy_mode_enabled) is not bool
+                or not isinstance(snapshot.fingerprint, PolicyFingerprint)
+                or not is_valid_policy_revision(snapshot.internal_revision)
+                or snapshot.fingerprint.internal_revision != snapshot.internal_revision
+            ):
+                return unknown_snapshot(REASON_UNKNOWN_PROVIDER_ERROR)
+        elif snapshot.state is not PolicyState.UNKNOWN:
             return unknown_snapshot(REASON_UNKNOWN_PROVIDER_ERROR)
         return snapshot
 

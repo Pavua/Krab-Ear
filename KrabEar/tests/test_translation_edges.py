@@ -64,7 +64,7 @@ def _make_ts(
 
     store = MagicMock()
     store.get_history_page.return_value = (history_items or [], None)
-    store.save_settings.side_effect = lambda s: s
+    store.save_settings.side_effect = lambda s, **_kwargs: s
     store.load_vocabulary.return_value = vocabulary or []
 
     settings_cell = [dict(effective)]
@@ -134,7 +134,7 @@ def _make_ss(settings: dict | None = None) -> tuple[SettingsService, MagicMock]:
     store = MagicMock()
     store.load_settings.return_value = dict(current)
 
-    def _save(s: dict) -> dict:
+    def _save(s: dict, **_kwargs) -> dict:
         current.clear()
         current.update(s)
         store.load_settings.return_value = dict(current)
