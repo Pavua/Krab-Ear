@@ -228,46 +228,46 @@ extension HistoryPanelController {
     /// Загружает страницу истории через `get_history_page` (item-уровневые поля
     /// уже включают `action_items`/`decisions`/`questions` если их извлекали ранее).
     @objc func exportAllActionItemsAction() {
-        actionItemsStatusLabel.stringValue = "Загружаю историю…"
-        let ipcClient = self.ipcClient
+        preparePlaintextExport(sink: .historyActionItems) { [weak self] ticket in
+            guard let self else { return }
+            actionItemsStatusLabel.stringValue = "Загружаю историю…"
+            let ipcClient = self.ipcClient
 
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let response = try? ipcClient.call(
-                method: "get_history_page",
-                params: ["limit": 500]
-            ),
-            let result = response["result"] as? [String: Any],
-            let rawItems = result["items"] as? [[String: Any]] else {
-                DispatchQueue.main.async {
-                    self?.actionItemsStatusLabel.stringValue = "Ошибка: не удалось загрузить историю."
-                }
-                return
-            }
-
-            let markdown = HistoryPanelController.formatHistoryItemsAsMarkdown(items: rawItems)
-            let withContent = HistoryPanelController.countItemsWithActionContent(items: rawItems)
-
-            DispatchQueue.main.async {
-                guard let self = self else { return }
-                if withContent == 0 {
-                    self.actionItemsStatusLabel.stringValue = "Нет записей с action items / решениями / вопросами. Сначала «Извлечь»."
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                guard let response = try? ipcClient.call(
+                    method: "get_history_page",
+                    params: ["limit": 500]
+                ),
+                let result = response["result"] as? [String: Any],
+                let rawItems = result["items"] as? [[String: Any]] else {
+                    DispatchQueue.main.async {
+                        self?.actionItemsStatusLabel.stringValue = "Ошибка: не удалось загрузить историю."
+                    }
                     return
                 }
-                self.actionItemsStatusLabel.stringValue = "Загружено \(rawItems.count) записей; с action data: \(withContent)."
 
-                let panel = NSSavePanel()
-                let formatter = DateFormatter()
-                formatter.dateFormat = "yyyyMMdd_HHmmss"
-                panel.nameFieldStringValue = "krab_action_items_\(formatter.string(from: Date())).md"
-                panel.canCreateDirectories = true
-                presentPanelSheet(panel, for: self.window) { resp in
-                    guard resp == .OK, let url = panel.url else { return }
-                    do {
-                        try markdown.write(to: url, atomically: true, encoding: .utf8)
-                        self.actionItemsStatusLabel.stringValue = "Сохранено: \(url.path)"
-                        NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
-                    } catch {
-                        self.actionItemsStatusLabel.stringValue = "Ошибка записи: \(error.localizedDescription)"
+                let markdown = HistoryPanelController.formatHistoryItemsAsMarkdown(items: rawItems)
+                let withContent = HistoryPanelController.countItemsWithActionContent(items: rawItems)
+
+                DispatchQueue.main.async {
+                    guard let self = self else { return }
+                    if withContent == 0 {
+                        self.actionItemsStatusLabel.stringValue = "Нет записей с action items / решениями / вопросами. Сначала «Извлечь»."
+                        return
+                    }
+                    self.actionItemsStatusLabel.stringValue = "Загружено \(rawItems.count) записей; с action data: \(withContent)."
+
+                    let panel = NSSavePanel()
+                    let formatter = DateFormatter()
+                    formatter.dateFormat = "yyyyMMdd_HHmmss"
+                    panel.nameFieldStringValue = "krab_action_items_\(formatter.string(from: Date())).md"
+                    panel.canCreateDirectories = true
+                    presentPanelSheet(panel, for: self.window) { [weak self] response in
+                        guard let self, response == .OK, let url = panel.url else { return }
+                        self.writePlaintextExport(ticket: ticket, content: markdown, to: url) { [weak self] in
+                            self?.actionItemsStatusLabel.stringValue = "Сохранено: \(url.path)"
+                            NSWorkspace.shared.selectFile(url.path, inFileViewerRootedAtPath: "")
+                        }
                     }
                 }
             }

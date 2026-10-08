@@ -36,24 +36,27 @@ extension HistoryPanelController {
     @objc func onGenerateStatsReport() {
         let days = 30
 
-        let ipcClient = self.ipcClient
-        // AGENT-3: ipcClient.call строго off-main.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                nonisolated(unsafe) let response = try ipcClient.call(
-                    method: "generate_stats_report",
-                    params: ["days": days]
-                )
-                nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
-                DispatchQueue.main.async {
-                    self?.handleStatsReportResult(result, days: days)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self?.showInfoAlert(
-                        title: "Статистический отчёт",
-                        body: "Ошибка IPC: \(error.localizedDescription)"
+        preparePlaintextExport(sink: .historyStatsReport) { [weak self] ticket in
+            guard let self else { return }
+            let ipcClient = self.ipcClient
+            // AGENT-3: ipcClient.call строго off-main.
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                do {
+                    nonisolated(unsafe) let response = try ipcClient.call(
+                        method: "generate_stats_report",
+                        params: ["days": days]
                     )
+                    nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
+                    DispatchQueue.main.async {
+                        self?.handleStatsReportResult(result, days: days, ticket: ticket)
+                    }
+                } catch {
+                    DispatchQueue.main.async {
+                        self?.showInfoAlert(
+                            title: "Статистический отчёт",
+                            body: "Не удалось получить статистический отчёт. Повторите попытку."
+                        )
+                    }
                 }
             }
         }
@@ -61,7 +64,7 @@ extension HistoryPanelController {
 
     // MARK: - Result handler (must be called on main thread)
 
-    private func handleStatsReportResult(_ result: [String: Any], days: Int) {
+    private func handleStatsReportResult(_ result: [String: Any], days: Int, ticket: PlaintextExportCoordinator.Ticket) {
         // Privacy-mode branch: backend returns {ok: false, reason: "privacy_mode_active"}.
         if let ok = result["ok"] as? Bool, !ok {
             let reason = result["reason"] as? String ?? "неизвестная ошибка"
@@ -69,7 +72,7 @@ extension HistoryPanelController {
             if reason.contains("privacy") {
                 body = "Статистический отчёт недоступен в режиме приватности. Отключите режим приватности и повторите."
             } else {
-                body = "Не удалось сгенерировать отчёт: \(reason)"
+                body = "Не удалось сгенерировать статистический отчёт."
             }
             showInfoAlert(title: "Статистический отчёт", body: body)
             return
@@ -93,18 +96,9 @@ extension HistoryPanelController {
         panel.prompt = "Сохранить"
 
         presentPanelSheet(panel, for: self.window) { [weak self] response in
-            guard response == .OK, let url = panel.url else { return }
-            do {
-                try markdown.write(to: url, atomically: true, encoding: .utf8)
-                self?.showInfoAlert(
-                    title: "Статистический отчёт",
-                    body: "Отчёт за \(days) дней сохранён:\n\(url.path)"
-                )
-            } catch {
-                self?.showInfoAlert(
-                    title: "Статистический отчёт",
-                    body: "Не удалось записать файл: \(error.localizedDescription)"
-                )
+            guard let self, response == .OK, let url = panel.url else { return }
+            self.writePlaintextExport(ticket: ticket, content: markdown, to: url) { [weak self] in
+                self?.showInfoAlert(title: "Статистический отчёт", body: "Отчёт за \(days) дней сохранён:\n\(url.path)")
             }
         }
     }

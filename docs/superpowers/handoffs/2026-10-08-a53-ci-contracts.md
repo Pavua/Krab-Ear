@@ -67,6 +67,11 @@ B: тот же 30-file набор GREEN (731 passed, 37 subtests, 1 skipped). Д
 повторены с разрешением только на собственные fixture endpoints и прошли.
 Проверка C и GitHub CI всех новых HEAD выполняются отдельно.
 
+C: 30-file targeted Python 3.12 CPU-only набор также GREEN: 731 passed,
+37 subtests, 1 skipped. Swift production sources не менялись этим repair;
+новый local Swift build не запускался при высоком swap. Прежний Card C
+Swift PASS остаётся историческим, новый exact-SHA build/CI проверяется отдельно.
+
 ## Полный CI B/C: ещё четыре legacy-контракта
 
 A `00ba3300`: все 27 checks GREEN, оба backend jobs SUCCESS. Полный failed C
@@ -85,3 +90,15 @@ Timeline resolver возвращает проверенный путь без mk
 Ultra source delta PASS; patch SHA256
 `06c4035fef1aa9b128e29d137a0ac6bc52321440a8aef970c3fa302d97c67b56`.
 Новые exact-SHA CI B/C проверяются отдельно; этот локальный PASS их не заменяет.
+
+## Повторная проверка C и текущий CI gate
+
+Дополнительные четыре файла после переноса в C также GREEN: 108 passed.
+Вместе с неизменённым 30-file набором: 34 файла, 839 passed, 37 subtests,
+1 skipped. A `00ba3300` полный CI GREEN; B `d24f001a` опубликован; C —
+этот docs checkpoint поверх `a883a162`. Новые B/C CI ещё pending.
+На C `55aec038` три Swift build jobs SUCCESS; backend fixture failures
+исправлены новыми test-only commits, их exact-SHA CI ещё требуется.
+Card D старый WIP не исполнялся: review нашёл ошибки seed и изоляции native
+audio collection, неполную проверку dynamic secrets и fault branches.
+План исправления review PASS; перед первым E2E нужен отдельный gate изоляции.

@@ -282,10 +282,13 @@ extension AgentAppDelegate {
                     method: "get_meeting_report", params: ["id": itemID])
                 nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
                 DispatchQueue.main.async { [weak self] in
-                    self?.meetingPanelController?.resetToIdleAfterFinished(
+                    guard let self else { return }
+                    self.meetingPanelController?.resetToIdleAfterFinished(
                         expectedGenerationToken: expectedGenerationToken
                     )
-                    HistoryPanelController.presentMeetingReportStandalone(result: result)
+                    HistoryPanelController.presentMeetingReportStandalone(
+                        result: result, plaintextExportCoordinator: self.plaintextExportCoordinator
+                    )
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
@@ -298,7 +301,7 @@ extension AgentAppDelegate {
                         return
                     }
                     controller.showTransientError(
-                        "Отчёт не построился: \(error.localizedDescription)")
+                        "Не удалось получить отчёт встречи. Повторите попытку.")
                     controller.resetToIdle()
                 }
             }

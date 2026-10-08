@@ -1,5 +1,45 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-08 — CI repair A5.3 и исправление Accessibility
+
+Свежая база линии: `origin/codex/krab-ear-v2` =
+`efecb801aae3f3c62fa03314ba4f5b142ac8e906`. A/B/C остаются открытыми PR.
+A #2077 `00ba3300`: полный exact-SHA CI GREEN (27 checks, оба backend jobs).
+B #2078 `d24f001a`, C #2079 — этот checkpoint поверх `a883a162`:
+ещё четыре legacy fixtures исправлены после полного C CI. Targeted Python 3.12
+CPU-only проверка B/C: 34 файла, 839 passed, 37 subtests, 1 skipped;
+независимый Astra Ultra review обоих fixture delta PASS. Новые exact-SHA
+GitHub CI B/C ещё проверяются; их GREEN не объявлен.
+[Проверка и границы](superpowers/handoffs/2026-10-08-a53-ci-contracts.md).
+
+Card D: старый harness существует как незакоммиченный WIP и до первого
+запуска проходит read-only review изоляции; isolated E2E ещё не выполнен.
+До исполнения — отдельные GREEN A/B/C и сверка перенесённого harness.
+A5.3 не смержен/не выкачен, шифрование не активировано. Main/Gateway и старые
+worktree WIP сохранены. Исторические runtime PID ниже не применять как текущие.
+
+Accessibility repair #2080 `2290b528`: полный CI GREEN, PR ready for review.
+Ранее по отдельному разрешению владельца исправлена только подпись живого
+Swift-агента и выполнен его управляемый рестарт. Owner подтвердил вставку
+диктовки в Codex без Cmd-V; Backend/REST были сохранены. Это отдельная приёмка
+подписи, не deployment A5.3 и не новый restart GO.
+
+Ниже сохранены более ранние checkpoints, актуальные только на их дату.
+
+## A5.3 Card C, 2026-10-03 — работа продолжается
+
+Card A [#2077](https://github.com/Pavua/Krab-Ear/pull/2077): source/local PASS,
+полный backend CI FAILED в 29 тестовых файлах; исправления fixtures/docs ведутся
+отдельно. Card B [#2078](https://github.com/Pavua/Krab-Ear/pull/2078): source/local
+PASS, backend CI пока выполняется. Startup #2075 и docs #2076 CI PASS.
+Card C поверх `9358cd78`: Astra High source review, release build, 324 Swift
+tests, 8 зависимых Python-файлов, новый launcher py3.12 parity и audit-all PASS.
+Далее C PR/CI и Card D isolated IPC E2E. Merge/deploy/encryption activation
+не выполнялись.
+[Текущий checkpoint C](superpowers/handoffs/2026-10-03-a53-card-c-progress.md).
+
+Ниже — более ранние checkpoints; их слова «ещё впереди» относятся к их дате.
+
 ## A5.3 Card B, 2026-10-03 — source checkpoint
 
 База main-линии повторно сверена: `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.

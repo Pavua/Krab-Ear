@@ -25,6 +25,7 @@ final class HTMLToPDFRenderer: NSObject, WKNavigationDelegate {
     func render(html: String, completion: @escaping (Data?) -> Void) {
         // Лист ~US Letter при 72 dpi (612×792 pt). createPDF снимает весь контент.
         let config = WKWebViewConfiguration()
+        config.websiteDataStore = .nonPersistent()
         let wv = WKWebView(frame: NSRect(x: 0, y: 0, width: 612, height: 792), configuration: config)
         wv.navigationDelegate = self
         self.webView = wv
@@ -87,7 +88,7 @@ extension AnalyticsDashboardViewController {
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self?.statusLabel.stringValue = "Ошибка PDF: \(error.localizedDescription)"
+                    self?.statusLabel.stringValue = "Не удалось получить данные для PDF"
                 }
             }
         }
@@ -95,23 +96,39 @@ extension AnalyticsDashboardViewController {
 
     @MainActor
     private func renderAndOpenPDF(html: String) {
-        statusLabel.stringValue = "Рендерим PDF…"
-        let renderer = HTMLToPDFRenderer()
-        renderer.render(html: html) { [weak self] data in
-            guard let self = self else { return }
-            guard let data = data, !data.isEmpty else {
-                self.statusLabel.stringValue = "Не удалось создать PDF"
-                return
-            }
-            let stamp = Self.pdfTimestamp()
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent("KrabEar_Report_\(stamp).pdf")
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
-                try data.write(to: url, options: .atomic)
-                self.statusLabel.stringValue = "PDF готов"
-                NSWorkspace.shared.open(url)
+                // Один ticket принадлежит всему рендеру. Повтор callback не может
+                // получить новое разрешение и выполнить вторую запись.
+                let ticket = try await plaintextExportCoordinator.prepare(
+                    sink: .historyPDF, presenting: view.window)
+                statusLabel.stringValue = "Рендерим PDF…"
+                let renderer = HTMLToPDFRenderer()
+                renderer.render(html: html) { [weak self] data in
+                    guard let self else { return }
+                    guard let data, !data.isEmpty else {
+                        self.statusLabel.stringValue = "Не удалось создать PDF"
+                        return
+                    }
+                    // Данные и destination зафиксированы после renderer callback,
+                    // но до fresh validation; временный PDF тоже plaintext sink.
+                    let url = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("KrabEar_Report_\(Self.pdfTimestamp())_\(UUID().uuidString).pdf")
+                    Task { @MainActor in
+                        do {
+                            try await self.plaintextExportCoordinator.perform(ticket) {
+                                try data.write(to: url, options: .atomic)
+                            }
+                            self.statusLabel.stringValue = "PDF готов"
+                            NSWorkspace.shared.open(url)
+                        } catch {
+                            self.statusLabel.stringValue = PlaintextExportCoordinator.errorMessage(error)
+                        }
+                    }
+                }
             } catch {
-                self.statusLabel.stringValue = "Не удалось сохранить PDF: \(error.localizedDescription)"
+                statusLabel.stringValue = PlaintextExportCoordinator.errorMessage(error)
             }
         }
     }
