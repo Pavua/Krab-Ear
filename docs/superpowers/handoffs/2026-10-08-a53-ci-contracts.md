@@ -71,3 +71,22 @@ C: 30-file targeted Python 3.12 CPU-only набор также GREEN: 731 passed
 37 subtests, 1 skipped. Swift production sources не менялись этим repair;
 новый local Swift build не запускался при высоком swap. Прежний Card C
 Swift PASS остаётся историческим, новый exact-SHA build/CI проверяется отдельно.
+
+## Полный CI B/C: ещё четыре legacy-контракта
+
+A `00ba3300`: все 27 checks GREEN, оба backend jobs SUCCESS. Полный failed C
+run 37717746118 на `55aec038` выявил ещё четыре test-файла: backwards_compat,
+full_workflow, timeline_export_traversal_w19, wave37_obsidian_backup_privacy.
+JSON/Obsidian fixtures теперь явно инициализируют synthetic policy и подключают
+существующий реальный authorizer; workflow закрывает BackendService до cleanup.
+Timeline resolver возвращает проверенный путь без mkdir до authorization:
+тест проверяет точный путь и отсутствие mutation. Sibling-path тест получает
+явный synthetic home вне /tmp, чтобы redirected home не оказался в другом
+разрешённом корне. Production-код не изменён.
+
+Изолированный RED воспроизвёл CI assertions; GREEN всех четырёх файлов:
+44 + 49 + 7 + 8 = **108 passed**. В дополнительном runner native sounddevice
+подавлен до pytest collection; общий conftest не изменён. Independent Astra
+Ultra source delta PASS; patch SHA256
+`06c4035fef1aa9b128e29d137a0ac6bc52321440a8aef970c3fa302d97c67b56`.
+Новые exact-SHA CI B/C проверяются отдельно; этот локальный PASS их не заменяет.
