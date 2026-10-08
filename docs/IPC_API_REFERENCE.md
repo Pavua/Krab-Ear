@@ -80,12 +80,26 @@ transport authentication, может вызвать grant напрямую: RPC 
 Причины: `plaintext_confirmation_required`, `plaintext_session_expired`,
 `plaintext_policy_unavailable`, `privacy_mode_active`.
 
-| Метод | Params | Result при успехе |
-|---|---|---|
-| `get_plaintext_export_policy` | `{}` | `{ok:true, epoch, policy_generation, encryption_enabled, privacy_mode_enabled, allowed_without_grant}` |
-| `grant_plaintext_export_session` | `{app_session_id, expected_epoch, expected_policy_generation}` | `{ok:true, capability, epoch, policy_generation}` |
-| `revoke_plaintext_export_session` | `{app_session_id, epoch, capability}` | `{ok:true}`; неизвестная/чужая capability — no-op |
-| `validate_plaintext_export` | `{app_session_id, epoch, capability?, expected_policy_generation, operation_seq, sink_kind}` | `{ok:true, receipt, epoch, policy_generation, operation_seq, sink_kind}` |
+### `get_plaintext_export_policy`
+
+Params: `{}`. Result: `{ok:true, epoch, policy_generation, encryption_enabled,
+privacy_mode_enabled, allowed_without_grant}`.
+
+### `grant_plaintext_export_session`
+
+Params: `{app_session_id, expected_epoch, expected_policy_generation}`.
+Result: `{ok:true, capability, epoch, policy_generation}`.
+
+### `revoke_plaintext_export_session`
+
+Params: `{app_session_id, epoch, capability}`. Result: `{ok:true}`;
+неизвестная/чужая capability — no-op.
+
+### `validate_plaintext_export`
+
+Params: `{app_session_id, epoch, capability?, expected_policy_generation,
+operation_seq, sink_kind}`. Result: `{ok:true, receipt, epoch,
+policy_generation, operation_seq, sink_kind}`.
 
 `app_session_id` — canonical lowercase UUID на запуск Swift, `epoch` — 64
 lowercase hex символа (32 случайных bytes на BackendService), generation —

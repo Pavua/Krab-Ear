@@ -81,6 +81,7 @@ class _PrivacyDashboardBase(unittest.TestCase):
         self.addCleanup(self.tmpdir.cleanup)
         self.data_dir = Path(self.tmpdir.name) / "data"
         store = StateStore(self.data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         # Изолированный audit log в temp dir
         self.audit_log_path = Path(self.tmpdir.name) / "privacy_audit.log"
         PrivacyAuditLogger.reset_instance()
@@ -302,6 +303,7 @@ class TestPrivacyDashboardRetention(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmpdir.cleanup)
         store = StateStore(Path(self.tmpdir.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
         PrivacyAuditLogger.reset_instance()
         self._audit = PrivacyAuditLogger(
             log_path=Path(self.tmpdir.name) / "audit.log"

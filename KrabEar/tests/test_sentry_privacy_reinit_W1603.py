@@ -109,7 +109,8 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
     def test_sentry_reinitialized_when_privacy_off_after_on(self):
         """W1603: _on_privacy_mode_off hook calls init_sentry when privacy_mode FALSE→TRUE→FALSE."""
         import backend.observability as obs  # noqa: PLC0415
-        from backend.service import BackendService  # noqa: PLC0415
+        from _settings_test_helpers import safe_backend_for_settings  # noqa: PLC0415
+        from contextlib import closing  # noqa: PLC0415
         from backend.state_store import StateStore  # noqa: PLC0415
 
         fake_sdk = _make_fake_sentry_sdk()
@@ -119,22 +120,23 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
         import tempfile  # noqa: PLC0415
         with tempfile.TemporaryDirectory() as tmpdir:
             store = StateStore(data_dir=Path(tmpdir))
+            store.initialize_startup_plaintext_policy(new_profile=True)
             # Start with privacy_mode=True (Sentry was disabled).
             initial = {**_BASE_SETTINGS, "privacy_mode_enabled": True}
             store.save_settings(initial)
             obs._sentry_initialized = False  # flag already cleared (W1601 did this)
 
-            svc = BackendService(store=store)
+            with closing(safe_backend_for_settings(self, store)) as svc:
 
-            with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
-                with patch("core.config.reload_settings_from_json", return_value=0, create=True):
-                    # Toggle privacy OFF — the hook should call init_sentry.
-                    svc._settings_svc.handle_set_settings({"privacy_mode_enabled": False})
+                with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+                    with patch("core.config.reload_settings_from_json", return_value=0, create=True):
+                        # Toggle privacy OFF — the hook should call init_sentry.
+                        svc._settings_svc.handle_set_settings({"privacy_mode_enabled": False})
 
-            # SDK.init must have been called once (re-initialization).
-            fake_sdk.init.assert_called_once()
-            # _sentry_initialized must be True now.
-            self.assertTrue(obs._sentry_initialized)
+                # SDK.init must have been called once (re-initialization).
+                fake_sdk.init.assert_called_once()
+                # _sentry_initialized must be True now.
+                self.assertTrue(obs._sentry_initialized)
 
     # -----------------------------------------------------------------------
     # Test 2: Idempotent — no double-init when already initialized
@@ -143,7 +145,8 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
     def test_sentry_idempotent_when_already_initialized(self):
         """W1603: If _sentry_initialized is already True, privacy OFF toggle does not call sdk.init again."""
         import backend.observability as obs  # noqa: PLC0415
-        from backend.service import BackendService  # noqa: PLC0415
+        from _settings_test_helpers import safe_backend_for_settings  # noqa: PLC0415
+        from contextlib import closing  # noqa: PLC0415
         from backend.state_store import StateStore  # noqa: PLC0415
 
         fake_sdk = _make_fake_sentry_sdk()
@@ -151,22 +154,23 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
         import tempfile  # noqa: PLC0415
         with tempfile.TemporaryDirectory() as tmpdir:
             store = StateStore(data_dir=Path(tmpdir))
+            store.initialize_startup_plaintext_policy(new_profile=True)
             initial = {**_BASE_SETTINGS, "privacy_mode_enabled": True}
             store.save_settings(initial)
 
-            svc = BackendService(store=store)
+            with closing(safe_backend_for_settings(self, store)) as svc:
 
-            # Simulate Sentry already initialized (e.g. re-init happened earlier).
-            obs._sentry_initialized = True
+                # Simulate Sentry already initialized (e.g. re-init happened earlier).
+                obs._sentry_initialized = True
 
-            with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
-                with patch("core.config.reload_settings_from_json", return_value=0, create=True):
-                    svc._settings_svc.handle_set_settings({"privacy_mode_enabled": False})
+                with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+                    with patch("core.config.reload_settings_from_json", return_value=0, create=True):
+                        svc._settings_svc.handle_set_settings({"privacy_mode_enabled": False})
 
-            # SDK.init must NOT be called — flag was already True (idempotency).
-            fake_sdk.init.assert_not_called()
-            # Flag stays True.
-            self.assertTrue(obs._sentry_initialized)
+                # SDK.init must NOT be called — flag was already True (idempotency).
+                fake_sdk.init.assert_not_called()
+                # Flag stays True.
+                self.assertTrue(obs._sentry_initialized)
 
     # -----------------------------------------------------------------------
     # Test 3: No re-init when DSN is absent
@@ -175,7 +179,8 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
     def test_sentry_skipped_when_no_dsn(self):
         """W1603: If sentry_dsn is empty, re-init is skipped even when privacy toggles OFF."""
         import backend.observability as obs  # noqa: PLC0415
-        from backend.service import BackendService  # noqa: PLC0415
+        from _settings_test_helpers import safe_backend_for_settings  # noqa: PLC0415
+        from contextlib import closing  # noqa: PLC0415
         from backend.state_store import StateStore  # noqa: PLC0415
 
         fake_sdk = _make_fake_sentry_sdk()
@@ -183,20 +188,21 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
         import tempfile  # noqa: PLC0415
         with tempfile.TemporaryDirectory() as tmpdir:
             store = StateStore(data_dir=Path(tmpdir))
+            store.initialize_startup_plaintext_policy(new_profile=True)
             # Start with privacy ON and no DSN.
             initial = {**_BASE_SETTINGS, "privacy_mode_enabled": True, "sentry_dsn": ""}
             store.save_settings(initial)
             obs._sentry_initialized = False
 
-            svc = BackendService(store=store)
+            with closing(safe_backend_for_settings(self, store)) as svc:
 
-            with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
-                with patch("core.config.reload_settings_from_json", return_value=0, create=True):
-                    svc._settings_svc.handle_set_settings({"privacy_mode_enabled": False})
+                with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+                    with patch("core.config.reload_settings_from_json", return_value=0, create=True):
+                        svc._settings_svc.handle_set_settings({"privacy_mode_enabled": False})
 
-            # No DSN → no init.
-            fake_sdk.init.assert_not_called()
-            self.assertFalse(obs._sentry_initialized)
+                # No DSN → no init.
+                fake_sdk.init.assert_not_called()
+                self.assertFalse(obs._sentry_initialized)
 
     # -----------------------------------------------------------------------
     # Test 4: No re-init when privacy stays OFF (no transition)
@@ -205,7 +211,8 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
     def test_no_reinit_when_privacy_was_already_off(self):
         """W1603: Hook is a no-op when privacy_mode was already False (no transition)."""
         import backend.observability as obs  # noqa: PLC0415
-        from backend.service import BackendService  # noqa: PLC0415
+        from _settings_test_helpers import safe_backend_for_settings  # noqa: PLC0415
+        from contextlib import closing  # noqa: PLC0415
         from backend.state_store import StateStore  # noqa: PLC0415
 
         fake_sdk = _make_fake_sentry_sdk()
@@ -213,20 +220,21 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
         import tempfile  # noqa: PLC0415
         with tempfile.TemporaryDirectory() as tmpdir:
             store = StateStore(data_dir=Path(tmpdir))
+            store.initialize_startup_plaintext_policy(new_profile=True)
             # Privacy already OFF — no transition should occur.
             initial = {**_BASE_SETTINGS, "privacy_mode_enabled": False}
             store.save_settings(initial)
             obs._sentry_initialized = False
 
-            svc = BackendService(store=store)
+            with closing(safe_backend_for_settings(self, store)) as svc:
 
-            with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
-                with patch("core.config.reload_settings_from_json", return_value=0, create=True):
-                    # Set some unrelated setting — privacy stays OFF.
-                    svc._settings_svc.handle_set_settings({"quality_profile": "balanced"})
+                with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+                    with patch("core.config.reload_settings_from_json", return_value=0, create=True):
+                        # Set some unrelated setting — privacy stays OFF.
+                        svc._settings_svc.handle_set_settings({"quality_profile": "balanced"})
 
-            # No transition TRUE→FALSE → no re-init.
-            fake_sdk.init.assert_not_called()
+                # No transition TRUE→FALSE → no re-init.
+                fake_sdk.init.assert_not_called()
 
     # -----------------------------------------------------------------------
     # Test 5: Unit-level hook logic (pure, no BackendService)

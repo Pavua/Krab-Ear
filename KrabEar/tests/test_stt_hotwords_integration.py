@@ -139,6 +139,7 @@ class FakeTranslator:
 def make_service(test_case, tmp_dir: str, transcriber=None) -> BackendService:
     """Создать сервис и зарегистрировать закрытие раньше очистки каталога."""
     store = StateStore(Path(tmp_dir) / "data")
+    store.initialize_startup_plaintext_policy(new_profile=True)
     service = BackendService(
         store=store,
         recorder=FakeRecorder(),

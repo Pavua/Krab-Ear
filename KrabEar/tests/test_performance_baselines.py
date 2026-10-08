@@ -222,6 +222,7 @@ class LoadSettingsBaseline(unittest.TestCase):
         """load_settings with existing settings.json must not regress."""
         with tempfile.TemporaryDirectory() as tmp:
             store = self.StateStore(pathlib.Path(tmp))
+            store.initialize_startup_plaintext_policy(new_profile=True)
             store.save_settings({"stt_model": "balanced", "language": "ru"})
 
             elapsed_ms = _median_ms(

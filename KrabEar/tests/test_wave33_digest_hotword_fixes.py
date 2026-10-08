@@ -29,6 +29,7 @@ def _make_backend_service(tmp_dir: str):
 
     from backend.service import BackendService
     store = StateStore(Path(tmp_dir) / "data")
+    store.initialize_startup_plaintext_policy(new_profile=True)
     svc = BackendService(
         store=store,
         recorder=recorder,
@@ -45,6 +46,7 @@ class TestGenerateDailyDigestPrivacyGate(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.svc, self.store = _make_backend_service(self.tmp.name)
+        self.addCleanup(self.svc.close)
 
     def _set_privacy(self, enabled: bool) -> None:
         """Helper: persist privacy setting and invalidate cache."""

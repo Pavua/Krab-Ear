@@ -107,11 +107,13 @@ class TestInitSentryCalledWithSettingsDictAtStartup(unittest.TestCase):
             # privacy_mode_enabled so we can confirm it's passed through.
             from backend.state_store import StateStore  # noqa: PLC0415
             store = StateStore(data_dir=Path(tmp))
+            store.initialize_startup_plaintext_policy(new_profile=True)
             store.save_settings({"privacy_mode_enabled": False, "sentry_dsn": ""})
 
             with (
                 patch.object(svc_mod, "init_sentry", side_effect=_fake_init_sentry),
                 patch.object(svc_mod, "configure_logging"),
+                patch.object(svc_mod, "build_service", return_value=MagicMock()),
                 patch.object(svc_mod, "install_signal_handlers"),
                 patch.object(svc_mod, "default_data_dir", return_value=Path(tmp)),
                 patch.object(svc_mod, "default_socket_path", return_value=Path(tmp) / "test.sock"),
@@ -186,6 +188,7 @@ class TestSentrySkippedWhenSettingsHasPrivacyModeEnabled(unittest.TestCase):
             # Without the fix, Sentry would still be initialized (settings= absent).
             from backend.state_store import StateStore  # noqa: PLC0415
             store = StateStore(data_dir=Path(tmp))
+            store.initialize_startup_plaintext_policy(new_profile=True)
             store.save_settings({
                 "privacy_mode_enabled": True,
                 "sentry_dsn": "https://fake@sentry.io/123",
@@ -197,6 +200,7 @@ class TestSentrySkippedWhenSettingsHasPrivacyModeEnabled(unittest.TestCase):
             with (
                 patch.dict(sys.modules, {"sentry_sdk": fake_sdk}),
                 patch.object(svc_mod, "configure_logging"),
+                patch.object(svc_mod, "build_service", return_value=MagicMock()),
                 patch.object(svc_mod, "install_signal_handlers"),
                 patch.object(svc_mod, "default_data_dir", return_value=Path(tmp)),
                 patch.object(svc_mod, "default_socket_path", return_value=Path(tmp) / "test.sock"),
