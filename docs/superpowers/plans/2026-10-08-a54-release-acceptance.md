@@ -8,15 +8,16 @@ activation, удаление/ротацию, Main/Gateway или отправк�
 
 Уточнение подготовки 08.10: обнаружен отсутствующий original release-root.
 [Карточка candidate/rollback и recovery](2026-10-08-a54-prepare-candidate-rollback.md)
-фиксирует подготовленные source-копии, independent Astra PASS и APPLY/CUTOVER HOLD.
-Следующий шаг — отдельно разрешённый возврат старого root; не bypass staging helper.
+фиксирует exact старый source-tree, independent Astra PASS, разрешённое
+восстановление с postcheck PASS и private bundle prepare/verify(before) PASS.
+Cutover остаётся HOLD по resource/Swift package/qualification/release gates.
 
 ## Состояние и обязательные доказательства
 
 | Этап | Состояние на дату плана | Условие закрытия |
 | --- | --- | --- |
 | A5.3 source integration | PASS, 7/7 merged | Exact `9fee1ef4` и оба post-merge CI; ссылки в source report |
-| Подготовка кандидата/rollback | Source-копии готовы; bundle HOLD из-за отсутствующего original root | Свежие runtime metadata, совместимые old/new roots, проверенный private bundle |
+| Подготовка кандидата/rollback | Source-копии и private config bundle PASS; Swift package ещё не готов | Свежие runtime metadata, совместимые old/new roots, проверенный private bundle |
 | Production cutover | Не разрешён, не выполнен | Конкретный bundle/review, окно простоя и явный owner scope |
 | Live UI при OFF | Не выполнена | Реальные затронутые handlers и безопасные owner-approved fixtures |
 | Encrypted acceptance | Не доказана | Отдельный crypto fixture E2E, затем отдельно разрешённая live qualification |

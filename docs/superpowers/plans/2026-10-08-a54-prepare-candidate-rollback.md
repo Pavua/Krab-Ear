@@ -2,10 +2,21 @@
 
 ## Результат и scope, 2026-10-08
 
-**CUTOVER HOLD. RECOVERY SOURCE STAGED — Astra PASS. APPLY HOLD.**
+**RECOVERY APPLIED / POSTCHECK PASS. A5.4 CUTOVER HOLD.**
+
+После явного owner разрешения 23:48 CEST восстановление выполнено в 23:54:01 CEST.
+2644 tracked blobs/modes, Git HEAD/tree/status, fsync обоих parents и postcheck PASS;
+Backend3957/REST3924/Swift2800 PID/start time/config не менялись, idle0/health200ok.
+Никаких рестартов. SHA на диске — прежний registered pin; in-memory SHA UNKNOWN.
+Затем существующий helper прошёл prepare+verify(before) приватного bundle1ebd→9fee,
+config не применена. Swap вырос до ~27.9 GiB; build/restart пока отложены.
+
+**Разделы ниже фиксируют первоначальную подготовку до применения.** Слова
+«root отсутствует», «APPLY HOLD», «bundle отсутствует» относятся к этому checkpoint.
+
 Работа этой карточки: metadata-only проверки, отдельные source-копии,
 приватные копии plist и synthetic проверка атомарного переноса.
-Записей в отсутствующий live-root/LaunchAgents, restart/build-install, активации
+В первоначальной подготовке записей в отсутствующий live-root/LaunchAgents, restart/build-install, активации
 шифрования, чтения live истории/Keychain, действий Main/Gateway не было.
 [Общий план A5.4](2026-10-08-a54-release-acceptance.md) сохраняет отдельные gates.
 
@@ -91,3 +102,33 @@ loaded config/plist hashes, разрешённый metadata-only idle/REST healt
 Resource, supervisor/REST quiet, совместимость Swift/Backend, exact review/CI,
 owner cutover, UI/crypto/activation gates остаются отдельными условиями.
 Восстановление прежних исходников не означает выкладку A5.3 или A5.4 GO.
+
+## Выполнено после разрешения владельца
+
+Применение: same-filesystem `renamex_np(..., RENAME_EXCL)`, без fallback.
+Повторены frozen payload/extras/modes, original gitdir/HEAD/mapping, root absence,
+PID/start time/loaded paths, byte-exact original plist и idle. Ear5005 TCP clients
+в момент commit — собственный Swift и REST; соседям направлено quiet-window
+сообщение, после postcheck окно закрыто. Не заявлять TCP count доказательством
+отсутствия всех возможных запросов; recording/meeting snapshot также не lock.
+
+Private receipt: `restoration-result.json` в `/private/tmp/ear-a54-preparation-20261008/`;
+постоянная копия receipt включена в private `cutover-prepared-evidence.json` в staging root.
+Исходный frozen manifest сохраняет APPLIED=false как историческую запись подготовки,
+актуальный receipt сообщает APPLIED=true/POSTCHECK=PASS. Не применять payload повторно:
+staged_restore был перенесён и сейчас находится на original root.
+
+Bundle: `/Users/pablito/.codex/ear-release-staging/20261008/cutover-1ebd-to-9fee`.
+`prepare`/`verify(before)` exit0; old/new exact SHA и четыре private plist проверены.
+Ни loaded launchd config, ни новые PID/код этими helper-проверками не меняются.
+Готовность — **CONFIG STAGING PASS**, не A5.4 RELEASE GO. Далее resource window,
+совместимый Swift package, supervisor/Sentry qualification, whole release gate
+и свежее окно lifecycle. Новых live exports/Keychain/encryption действий не было.
+
+Дополнительная qualification: startup marker `2026-10-08 03:39:12.765` в
+AgentLogger sink совпал с start time Swift PID2800 и сообщает passive (Variant B).
+Упорядочивать markers по времени: последняя прочитанная ротация может быть старее
+основного файла. Gateway подтвердил, что в recovery окно дополнительных Ear REST/
+STT/TTS запросов и Ear lifecycle/config изменений не делал; clone5105 отдельный.
+Sentry freshness UNKNOWN: remote MCP настроен, но callable tools/read token в
+этом harness не доступны. Отсутствие проверки не означает отсутствие ошибок.

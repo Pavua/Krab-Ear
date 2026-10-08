@@ -1,17 +1,23 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-08 — A5.4 preparation: исчезнувший release-root, CUTOVER HOLD
+## 2026-10-08 — old release восстановлен; A5.4 bundle подготовлен
 
-Backend/REST живы, но их loaded entrypoints указывают на отсутствующий
-`ear-release-1ebd12eb/Krab Ear`. Registered old SHA `1ebd12eb…` сохранён в Git;
-loaded module SHA UNKNOWN. Причина исчезновения не установлена.
-Отдельные rollback/candidate source-копии и exact old-tree recovery payload
-подготовлены, Astra provenance/proposal PASS; live-root не восстановлен.
-[Конкретная карточка, evidence и owner scope](superpowers/plans/2026-10-08-a54-prepare-candidate-rollback.md).
-Cutover helper правильно отказал; bundle не создан. Рестарт сейчас не выполнять:
-сначала отдельно разрешённый возврат прежнего root и postcheck.
-Swap ~19.8 GiB used — full Swift build отложен. Idle/health snapshot не является
-restart GO; шифрование/история/Keychain/Main/Gateway не менялись.
+По явному owner разрешению 23:48 CEST прежний root `ear-release-1ebd12eb/Krab Ear`
+восстановлен атомарно в **23:54:01 CEST**; все 2644 blobs/modes совпали с old Git tree,
+HEAD/status чисты, fsync/postcheck PASS. Backend `3957`, REST `3924`, Swift `2800`
+сохранили PID/start time; plist не менялись, restart не выполнялся, health OK.
+Actual in-memory module SHA остаётся UNKNOWN; причина исчезновения root не установлена.
+[Recovery evidence и конкретная карточка](superpowers/plans/2026-10-08-a54-prepare-candidate-rollback.md).
+
+Существующий helper теперь прошёл **prepare + verify(before)** для приватного
+bundle `1ebd12eb` → `9fee1ef4` (0700/0600). Конфигурация не применена.
+При повторной ресурсной пробе swap уже ~27.9 GiB used: full Swift build/restart отложены;
+Swift package, Sentry qualification, независимый release gate
+и свежее maintenance window остаются необходимыми. A5.4 deploy/live/crypto не закрыт.
+Текущий Swift supervisor подтверждён passive: marker 03:39:12.765 совпал со
+start time PID2800. Sentry freshness UNKNOWN: callable MCP/read token в этом
+harness отсутствуют; настроенный remote server сам по себе не доказывает auth/ingress.
+Main/Gateway/WIP сохранены; quiet window соседям закрыто после recovery.
 
 ## 2026-10-08 — A5.3 source завершён; следующий этап A5.4
 
