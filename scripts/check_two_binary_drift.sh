@@ -33,6 +33,11 @@ for arg in "$@"; do
   esac
 done
 
+if [ "$FIX" = true ]; then
+  source "$ROOT_DIR/scripts/agent_signing_identity.sh"
+  SIGN_ID="$(resolve_agent_signing_identity)" || exit 2
+fi
+
 get_uuid() {
   local path="$1"
   if [ ! -f "$path" ]; then
@@ -61,12 +66,10 @@ if [ "$bundle_uuid" != "$runtime_uuid" ]; then
   fi
   echo "Fixing: cp bundle → runtime + codesign…"
   cp -f "$BUNDLE_BIN" "$RUNTIME_BIN"
-  if codesign -s "$SIGN_IDENTITY" -f "$RUNTIME_BIN" 2>/dev/null; then
-    echo "Signed with '$SIGN_IDENTITY'."
-  else
-    echo "Warning: '$SIGN_IDENTITY' not found, falling back to ad-hoc sign."
-    codesign -s - -f "$RUNTIME_BIN"
-  fi
+  codesign --force --sign "$SIGN_ID" --timestamp=none \
+    --identifier com.antigravity.krab-ear "$RUNTIME_BIN"
+  codesign --verify --strict "$RUNTIME_BIN"
+  echo "Signed with '$SIGN_ID'."
   new_uuid="$(get_uuid "$RUNTIME_BIN")"
   echo "OK: both binaries now UUID=$new_uuid"
   exit 0
