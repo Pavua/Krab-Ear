@@ -114,6 +114,10 @@ Production lifecycle, включение шифрования, Main/Gateway, liv
 
 Независимый final D/matrix review PASS (source freeze SHA256
 `3bce9475555ef174696b642b800f994c34c76e0a7ffb56fa19650fe4e90204e9`).
-Далее отдельный PR D поверх C → exact-SHA GitHub CI. Локальный PASS и прежний SHA не заменяют новый CI. Merge/deploy не разрешены
+Открыт [D #2081](https://github.com/Pavua/Krab-Ear/pull/2081).
+Git ancestry — поверх C; база PR — `codex/krab-ear-v2`, чтобы workflow CI
+запускал полный набор guards (фильтр ci.yml привязан к этой базе).
+[Отдельная дельта D относительно C](https://github.com/Pavua/Krab-Ear/compare/886f061a5c5b2ab97f3b43afd7bcfd2867cdebee...codex/ear-a53-d-20261008).
+Следующий gate — полный exact-SHA GitHub CI. Локальный PASS и прежний SHA не заменяют новый CI. Merge/deploy не разрешены
 этой приёмкой. Endor package-risk остаётся UNKNOWN из-за отсутствия авторизации;
 новых dependencies для D не устанавливали.
