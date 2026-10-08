@@ -1,33 +1,48 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-08 — разрешённое source-only объединение A5.3
+## 2026-10-08 — old release восстановлен; A5.4 bundle подготовлен
 
-Владелец разрешил source merge семи проверенных PR в `codex/krab-ear-v2`
-с CI итогового точного SHA. Live deploy/build-install/restart, включение
-шифрования, реальные история/Keychain, Main/Gateway в этот scope не входят.
+По явному owner разрешению 23:48 CEST прежний root `ear-release-1ebd12eb/Krab Ear`
+восстановлен атомарно в **23:54:01 CEST**; все 2644 blobs/modes совпали с old Git tree,
+HEAD/status чисты, fsync/postcheck PASS. Backend `3957`, REST `3924`, Swift `2800`
+сохранили PID/start time; plist не менялись, restart не выполнялся, health OK.
+Actual in-memory module SHA остаётся UNKNOWN; причина исчезновения root не установлена.
+[Recovery evidence и конкретная карточка](superpowers/plans/2026-10-08-a54-prepare-candidate-rollback.md).
 
-Источник текущего source-статуса — [основная ветка](https://github.com/Pavua/Krab-Ear/tree/codex/krab-ear-v2)
-и состояния [#2076](https://github.com/Pavua/Krab-Ear/pull/2076),
-[#2075](https://github.com/Pavua/Krab-Ear/pull/2075),
-[A #2077](https://github.com/Pavua/Krab-Ear/pull/2077),
-[B #2078](https://github.com/Pavua/Krab-Ear/pull/2078),
-[C #2079](https://github.com/Pavua/Krab-Ear/pull/2079),
-[D #2081](https://github.com/Pavua/Krab-Ear/pull/2081),
-[signing #2080](https://github.com/Pavua/Krab-Ear/pull/2080).
-Порядок объединения: именно этот список. Исходный зелёный CI не заменяет
-проверку обновлённых heads и финального merge SHA.
+Существующий helper теперь прошёл **prepare + verify(before)** для приватного
+bundle `1ebd12eb` → `9fee1ef4` (0700/0600). Конфигурация не применена.
+При повторной ресурсной пробе swap уже ~27.9 GiB used: full Swift build/restart отложены;
+Swift package, Sentry qualification, независимый release gate
+и свежее maintenance window остаются необходимыми. A5.4 deploy/live/crypto не закрыт.
+Текущий Swift supervisor подтверждён passive: marker 03:39:12.765 совпал со
+start time PID2800. Sentry freshness UNKNOWN: callable MCP/read token в этом
+harness отсутствуют; настроенный remote server сам по себе не доказывает auth/ingress.
+Main/Gateway/WIP сохранены; quiet window соседям закрыто после recovery.
 
-Подготовленная совместная модель прошла independent Astra Ultra source/
-pre-execution gate и 121 test + 38 subtests на Python 3.12 в синтетических
-профилях. Startup logging hunk сохранён из #2075, A/B/C authorization gates
-побайтно сохранены; signing code соответствует #2080. Известные конфликты
-CSV fixture и CI journal сохраняют проверенные B/C bytes; NOW сохраняет
-актуальный D checkpoint и добавляет этот source-status указатель.
+## 2026-10-08 — A5.3 source завершён; следующий этап A5.4
 
-Timeline UI при ON остаётся documented LIMIT. Production UI/live/
-encrypted-history E2E и актуальные runtime PID этим source-этапом не доказываются.
-Шифрование в рамках этой работы не включается. Ранее выполненная owner-confirmed
-автовставка диктовки в Codex — отдельная приёмка подписи живого Swift-агента.
+**7/7 PR MERGED**, база `origin/codex/krab-ear-v2`:
+`9fee1ef4c2f5540636fd4faae1e53c93142054a5`. Оба post-merge workflow SUCCESS
+на этом SHA: [CI](https://github.com/Pavua/Krab-Ear/actions/runs/37833572070),
+[krab-ear-ci](https://github.com/Pavua/Krab-Ear/actions/runs/37833572064).
+21 check: 19 SUCCESS, 2 Swift SKIPPED по changed-path filter; три Swift CI jobs
+на signing head с идентичным tree прошли до merge. Full backend: 1091 файлов,
+все 16 chunks. Combined Python 3.12: 121 passed, 38 subtests passed;
+независимый Astra Ultra **SOURCE COMPOSITION PASS**.
+
+Порядок PR: #2076 → #2075 → A #2077 → B #2078 → C #2079 → D #2081 → signing #2080.
+[Точная таблица heads/merge SHA и границы доказательства](superpowers/handoffs/2026-10-08-a53-source-merged.md).
+Source-блок завершён на 100%; этот процент не описывает live A5.4 или весь A5.
+
+**Дальше:** [план A5.4 release/acceptance](superpowers/plans/2026-10-08-a54-release-acceptance.md).
+Сначала конкретная карточка подготовки candidate/rollback с разрешёнными probes;
+cutover — отдельное owner окно после проверяемого результата.
+Production package A5.3 не применён; в source-этапе нет новых build-install/restart,
+encryption activation или чтения реальной истории/Keychain. Main/Gateway сохранены.
+Текущие runtime PID/loaded SHA/флаг не проверялись. Timeline ON остаётся
+fail-closed UI LIMIT; crypto-deny plaintext fixture D не доказывает encrypted E2E.
+Ранее owner-confirmed автоматическая вставка в Codex — отдельная live-приёмка
+Swift signing repair, без нового restart GO.
 
 **Ниже — исторические checkpoints на их дату.** Их слова «открыт», «pending»,
 «не смержен» и старые SHA/PID не использовать как текущую merge/runtime картину.
