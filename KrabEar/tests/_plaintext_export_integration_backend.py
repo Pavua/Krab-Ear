@@ -1,4 +1,6 @@
 """Изолированный child для A5.3; до run_child импортируется только stdlib."""
+import base64
+
 from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import json
 import logging
@@ -43,7 +45,72 @@ def cpu_only_optional_imports():
         sys.meta_path.remove(finder)
 
 
-def run_child(connection, root_string, source_string):
+def scan_synthetic_secrets(value, secrets, raw_keys=()):
+    """Bounded scanner реальных fixture sinks, а не набора escaped variants.
+
+    Dict keys/values, list/tuple и exception args проверяются до сериализации.
+    Текст: literal, затем полное JSON или JSON-строки NDJSON; JSON strings
+    повторно декодируются в том же общем бюджете. Bounds: depth <=32,
+    <=4096 nodes, <=1MiB bytes/1Mi characters str в общем бюджете на вызов. Превышение = suspect
+    (не clean). Бинарные файлы: raw bytes/literals до strict UTF-8 decode.
+    """
+    nodes = 0
+    size = 0
+
+    class ScanLimit(Exception):
+        pass
+
+    def visit(current, depth):
+        nonlocal nodes, size
+        nodes += 1
+        if depth > 32 or nodes > 4096:
+            raise ScanLimit
+        if isinstance(current, bytes):
+            size += len(current)
+            if size > 1024 * 1024:
+                raise ScanLimit
+            if any(key in current for key in raw_keys) or any(
+                    secret.encode() in current for secret in secrets):
+                return True
+            try:
+                current = current.decode("utf-8")
+            except UnicodeDecodeError:
+                return False
+            # bytes уже учтены; ниже считаем только дополнительные decode layers.
+            size -= len(current)
+        if isinstance(current, str):
+            size += len(current)
+            if size > 1024 * 1024:
+                raise ScanLimit
+            if any(secret in current for secret in secrets):
+                return True
+            try:
+                decoded = json.loads(current)
+            except RecursionError:
+                raise ScanLimit from None
+            except ValueError:
+                # Child logs / journals бывают NDJSON, а не одним JSON document.
+                lines = current.splitlines()
+                if len(lines) <= 1:
+                    return False
+                return any(visit(line, depth + 1) for line in lines)
+            return visit(decoded, depth + 1)
+        if isinstance(current, dict):
+            return any(visit(key, depth + 1) or visit(item, depth + 1)
+                       for key, item in current.items())
+        if isinstance(current, (list, tuple)):
+            return any(visit(item, depth + 1) for item in current)
+        if isinstance(current, BaseException):
+            return visit(current.args, depth + 1)
+        return False
+
+    try:
+        return visit(value, 0)
+    except (ScanLimit, RecursionError):
+        return True
+
+
+def run_child(connection, root_string, source_string, crypto_key=None):
     """Настоящий IPCServer; control Pipe не пишет auth context в stdout/файлы."""
     root = Path(root_string).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -169,7 +236,20 @@ def run_child(connection, root_string, source_string):
             stack.enter_context(cpu_only_optional_imports())
             from backend import crypto_keystore, history_crypto, memory_ledger
             stack.enter_context(mock.patch.object(crypto_keystore, "_run_security", forbidden_provider))
-            stack.enter_context(mock.patch.object(history_crypto, "build_history_crypto", forbidden_provider))
+            key_reads = []
+            if crypto_key is None:
+                stack.enter_context(mock.patch.object(history_crypto, "build_history_crypto", forbidden_provider))
+            else:
+                # Источник synthetic key единственная crypto-подмена: production
+                # build_history_crypto/HistoryCrypto/AESGCM не заменяются.
+                if not isinstance(crypto_key, bytes) or len(crypto_key) != 32:
+                    raise AssertionError("fixture requires 32-byte synthetic key")
+
+                def memory_key():
+                    key_reads.append(True)
+                    return crypto_key
+
+                stack.enter_context(mock.patch.object(crypto_keystore, "get_or_create_history_key", memory_key))
             memory_ledger._TEST_PATH_OVERRIDE = root / "ledger"
             from backend.service import BackendService
             from backend.state_store import StateStore
@@ -181,13 +261,18 @@ def run_child(connection, root_string, source_string):
             from sentry_sdk.integrations.logging import LoggingIntegration
             from sentry_sdk.transport import Transport
 
-            captured_logs, events, secrets = [], [], set(SENTINELS)
+            captured_logs, captured_records, captured_audits, events, secrets = [], [], [], [], set(SENTINELS)
+            key_encodings = set()
+            if crypto_key is not None:
+                key_encodings = {crypto_key.hex(), base64.b64encode(crypto_key).decode("ascii"), repr(crypto_key)}
+                secrets.update(key_encodings)
             auth_values = {key: set() for key in ("capability", "receipt", "app_session_id")}
 
             class Capture(logging.Handler):
                 def emit(self, record):
                     captured_logs.append(self.format(record))
                     captured_logs.append(repr(vars(record)))
+                    captured_records.append(dict(vars(record)))
 
             class LocalTransport(Transport):
                 def capture_envelope(self, envelope):
@@ -210,11 +295,16 @@ def run_child(connection, root_string, source_string):
             fresh_profile = not (root / "profile").exists()
             store = StateStore(root / "profile")
             store.initialize_startup_plaintext_policy(new_profile=fresh_profile)
-            store.save_settings({"history_encryption_enabled": False, "privacy_mode_enabled": False})
-            # Constructor уже создал пустой journal: existence не равен seed.
-            active_items, _cursor = store.get_history_page(None, 2)
-            if not active_items:
-                store.add_history_item(text=MARKER, paste_status="ok")
+            if crypto_key is None:
+                store.save_settings({"history_encryption_enabled": False, "privacy_mode_enabled": False})
+                # Default D сохраняет ровно один plaintext seed/provider-deny.
+                active_items, _cursor = store.get_history_page(None, 2)
+                if not active_items:
+                    store.add_history_item(text=MARKER, paste_status="ok")
+            elif fresh_profile:
+                store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+            # Encrypted reopen: никакого pre-ready чтения journal/seed/reset
+            # settings, которое могло бы маскировать ошибку production IPC.
             engine = SimpleNamespace(quality_profile="balanced", current_model="fixture-model",
                                      _llm_rewriter=None, _settings_get=None,
                                      _resolve_diarization_device=lambda: "cpu", warmup=lambda: None)
@@ -231,7 +321,8 @@ def run_child(connection, root_string, source_string):
                     recorder=SimpleNamespace(is_recording=False, start=lambda: None, stop=lambda: b""),
                     transcriber=SimpleNamespace(engine=engine, _error_bus=None), translator=mock.Mock(),
                 )
-            store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+            if crypto_key is None:
+                store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
             service._settings_svc.invalidate_cache()
             original_dispatch = service.handle_request
             reached = threading.Event()
@@ -252,6 +343,90 @@ def run_child(connection, root_string, source_string):
                 elif isinstance(values, list):
                     for value in values:
                         retain_auth(value)
+
+            def contains_secret(value):
+                return scan_synthetic_secrets(value, secrets, (crypto_key,) if crypto_key is not None else ())
+
+            def inspect_state():
+                leaked_files = 0
+                marker_paths = []
+                for path in root.rglob("*"):
+                    if not path.is_file() or path.is_symlink():
+                        continue
+                    data = path.read_bytes()
+                    leaked_files += contains_secret(data)
+                    if MARKER.encode() in data:
+                        marker_paths.append(str(path.relative_to(root)))
+                audit = service._audit_logger.get_audit_log()
+                # Structured fields до json.dumps: escaped repr(key) не может
+                # исчезнуть из проверки LocalTransport/audit/logging extras.
+                clean = not any(contains_secret(value) for value in (
+                    captured_logs, captured_records, captured_audits, events, audit))
+                return {"leaked_files": leaked_files, "logs_clean": clean,
+                        "events": len(events),
+                        "fault_events": sum(event.get("extra", {}).get("ipc_method") == "fixture_error" for event in events),
+                        "marker_paths": sorted(marker_paths), "guard_violations": len(violations)}
+
+            def crypto_sink_probe(sink):
+                if crypto_key is None or sink not in {"file", "event", "audit", "logging"}:
+                    raise AssertionError("invalid synthetic key probe")
+                before = inspect_state()
+                probe = root / "crypto-scanner-probe.json"
+                audit_dir = root / "crypto-scanner-audit"
+                if probe.exists() or audit_dir.exists():
+                    raise AssertionError("synthetic probe destination already exists")
+                counts = len(captured_logs), len(captured_records), len(events), len(captured_audits)
+                payload = {"fixture_probe": {"key": repr(crypto_key)}}
+                audit_probe = None
+                try:
+                    if sink == "file":
+                        probe.write_text(json.dumps(payload), encoding="utf-8")
+                        reached = json.loads(probe.read_text()) == payload
+                    elif sink == "event":
+                        sentry_sdk.capture_event({"message": "fixture scanner probe", "extra": payload})
+                        reached = any(event.get("extra", {}).get("fixture_probe") == payload["fixture_probe"]
+                                      for event in events[counts[2]:])
+                    elif sink == "audit":
+                        # Настоящий AuditLogger, отдельный owned sink: сервисный
+                        # audit не обрезаем и не подменяем ради positive control.
+                        from backend.audit_logger import AuditLogger
+                        audit_probe = AuditLogger(audit_dir)
+                        audit_probe.log_request("fixture_crypto_probe", {}, {"ok": True}, 0, client_info=payload)
+                        entries = audit_probe.get_audit_log()
+                        captured_audits.extend(entries)
+                        reached = any(entry.get("client_info") == payload for entry in entries)
+                    else:
+                        # Только owned Capture handler: propagation к console/
+                        # service/global logfile запрещена для намеренного key.
+                        probe_logger = logging.getLogger("KrabEar.Fixture.CryptoProbe")
+                        previous = probe_logger.handlers[:], probe_logger.propagate, probe_logger.level
+                        probe_logger.handlers = [capture]
+                        probe_logger.propagate = False
+                        probe_logger.setLevel(logging.ERROR)
+                        try:
+                            probe_logger.error("fixture scanner probe", extra=payload)
+                        finally:
+                            probe_logger.handlers, probe_logger.propagate, probe_logger.level = previous
+                        reached = any(record.get("fixture_probe") == payload["fixture_probe"]
+                                      for record in captured_records[counts[1]:])
+                    inspected = inspect_state()
+                    rejected = inspected["leaked_files"] > 0 if sink in {"file", "audit"} else not inspected["logs_clean"]
+                finally:
+                    del captured_logs[counts[0]:]
+                    del captured_records[counts[1]:]
+                    del events[counts[2]:]
+                    del captured_audits[counts[3]:]
+                    if audit_probe is not None:
+                        audit_probe.close()
+                        for path in audit_dir.glob("audit_*.ndjson"):
+                            path.unlink()
+                        audit_dir.rmdir()
+                    probe.unlink(missing_ok=True)
+                    payload.clear()
+                after = inspect_state()
+                return {"sink_reached": reached, "scanner_rejected": rejected,
+                        "clean_before": before["leaked_files"] == 0 and before["logs_clean"],
+                        "clean_after": after["leaked_files"] == 0 and after["logs_clean"]}
 
             def revoke(context):
                 return original_dispatch({"id": "control-revoke", "method": "revoke_plaintext_export_session", "params": {
@@ -380,11 +555,18 @@ def run_child(connection, root_string, source_string):
                     blob = command["blob"]
                     current_auth = state["run_auth"] or auth_values
                     issued = set().union(*current_auth.values())
-                    def contains_secret(text):
-                        return any(secret in text for secret in secrets)
                     reply = {"clean": not contains_secret(blob),
                              "positive_control": bool(issued) and all(contains_secret(value) for value in issued),
                              "auth_kinds": {key: bool(values - set(SENTINELS)) for key, values in current_auth.items()}}
+                elif name == "crypto_sink_probe":
+                    reply = crypto_sink_probe(command["sink"])
+                elif name == "crypto_metadata":
+                    # Только count/boolean: ни key bytes, ни представления ключа
+                    # не пересекают диагностическую Pipe-границу.
+                    reply = {"provider_reads": len(key_reads),
+                             "key_registered": bool(key_encodings) and key_encodings <= secrets,
+                             "positive_control": bool(key_encodings) and all(
+                                 contains_secret(value) for value in key_encodings)}
                 elif name == "metrics":
                     reply = {"writes": state["writes"], "gates": state["gates"]}
                 elif name == "signing":
@@ -393,22 +575,7 @@ def run_child(connection, root_string, source_string):
                         service._request_signer.verify_request.return_value = False
                     reply = True
                 elif name == "inspect":
-                    leaked_files = 0
-                    marker_paths = []
-                    for path in root.rglob("*"):
-                        if not path.is_file() or path.is_symlink():
-                            continue
-                        data = path.read_bytes()
-                        leaked_files += any(secret.encode() in data for secret in secrets)
-                        if MARKER.encode() in data:
-                            marker_paths.append(str(path.relative_to(root)))
-                    audit = service._audit_logger.get_audit_log()
-                    log_blob = "\n".join(captured_logs) + json.dumps(events, default=str) + json.dumps(audit, default=str)
-                    reply = {"leaked_files": leaked_files, "logs_clean": not any(s in log_blob for s in secrets),
-                             "events": len(events),
-                             "fault_events": sum(event.get("extra", {}).get("ipc_method") == "fixture_error" for event in events),
-                             "marker_paths": sorted(marker_paths),
-                             "guard_violations": len(violations)}
+                    reply = inspect_state()
                 else:
                     raise AssertionError("unknown control command")
                 connection.send({"result": reply})

@@ -1,5 +1,38 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-09 — A5.4 synthetic crypto IPC проверен; release HOLD
+
+Тестовый блок завершён локально: **109 checks**, независимый Astra recheck
+**PASS**. Настоящие production AES-GCM, StateStore и Unix IPC выполняются на
+изолированном synthetic профиле; заменён только источник случайного ключа.
+Restart сохраняет историю/статус/аннотацию; неверный ключ и повреждённый tag
+дают fail-closed read/compact, protected journals/settings остаются byte-exact.
+Export проверен без grant, с grant и со stale grant после restart.
+Исправлен test-scanner P2 для JSON-escaped key representations через RED→GREEN
+и positive controls в actual owned sinks. Production sources не менялись.
+[Матрица и границы приёмки](superpowers/handoffs/2026-10-09-a54-synthetic-crypto-ipc.md).
+[Точная карточка](superpowers/plans/2026-10-09-a54-synthetic-crypto-ipc.md).
+Тестовый source-блок — 100%; весь A5.4 release этим результатом не закрыт.
+
+Docs [#2082](https://github.com/Pavua/Krab-Ear/pull/2082) MERGED по отдельному
+owner разрешению: `c106199f25d0be63d6d548cf9f3836277ebcff0e`.
+Post-merge CI этого SHA: основной CI SUCCESS, krab-ear-ci ещё IN_PROGRESS
+на снимке 00:45 CEST. У нового test PR exact-SHA CI проверяется отдельно.
+
+Byte-exact rollback текущего Swift .app/runtime подготовлен; strict/deep
+codesign verify PASS, live bytes/PID неизменны. Старый consent binary имеет
+совпадающие executable inputs, но source→binary provenance UNKNOWN;
+CI artifacts отсутствуют, reuse HOLD. Новый пакет ещё не собран/применён.
+Sentry по явному read-only scope: auth/API PASS, organization errors за24h
+108 accepted/0 rate_limited. Свежий ingress именно Ear UNKNOWN: latest backend
+issue 07.10 17:48 UTC, agent issues пусты; это не доказательство live health.
+Ресурсный снимок 00:32–00:33 CEST: четыре пробы pressure level2,
+free RAM87–408MiB и активный paging при уменьшающемся swap. Full Swift build
+и cutover HOLD до стабильного окна, package provenance и release gate.
+Keychain/UI/live encrypted-history acceptance и activation не выполнялись.
+Main/Gateway/shared WIP сохранены. Для механики — Sol6.1High;
+для конкретного package/release gate — Astra точечно.
+
 ## 2026-10-08 — old release восстановлен; A5.4 bundle подготовлен
 
 По явному owner разрешению 23:48 CEST прежний root `ear-release-1ebd12eb/Krab Ear`

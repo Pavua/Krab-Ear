@@ -18,8 +18,9 @@ pytestmark = pytest.mark.timeout(150)
 
 
 class IsolatedBackend:
-    def __init__(self, root):
+    def __init__(self, root, *, crypto_key=None):
         self.root = Path(root)
+        self.crypto_key = crypto_key
         self.process = self.connection = None
         self.ready = False
 
@@ -28,7 +29,7 @@ class IsolatedBackend:
         parent, child = context.Pipe()
         self.connection = parent
         source = Path(__file__).resolve().parents[1]
-        self.process = context.Process(target=run_child, args=(child, str(self.root), str(source)))
+        self.process = context.Process(target=run_child, args=(child, str(self.root), str(source), self.crypto_key))
         self.process.start()
         child.close()
         ready = self.receive()

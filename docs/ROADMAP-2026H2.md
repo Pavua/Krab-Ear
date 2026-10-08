@@ -6,6 +6,20 @@
 
 **Оперативный фронт для агентов: [`docs/NOW.md`](NOW.md)** — одна страница «что делать сейчас». Этот файл — журнал волн и история решений, не очередь задач. Как работать слабым исполнителям: [`docs/EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md). Карточки: `docs/superpowers/plans/`. Не брать в работу C2/C3 из handoff 2026-08-15 — обе волны закрыты в июле.
 
+## Запись 2026-10-09 — A5.4 synthetic crypto IPC source checkpoint
+
+Actual AES-GCM/StateStore/Unix IPC на synthetic профиле: локально109 checks,
+Astra independent recheck PASS. Restart/persistence, wrong-key/tag fail-closed,
+export capability epoch и actual-sink secret scanner controls проверены.
+Production sources не менялись; отдельная test ветка
+`codex/ear-a54-crypto-ipc-20261009` поверх docs merge `c106199f`;
+новый exact-SHA CI и merge — отдельные gates.
+[Матрица и ограничения](superpowers/handoffs/2026-10-09-a54-synthetic-crypto-ipc.md).
+Swift rollback byte-exact PASS; build/cutover HOLD при pressure2/active paging.
+Sentry auth/API PASS, свежий Ear ingress UNKNOWN. Source→existing binary
+provenance UNKNOWN, reuse HOLD. Это не Keychain/UI/live activation приёмка;
+оперативный фронт — NOW, существующий release plan сохраняется.
+
 ## Запись 2026-10-08 — A5.3 source integration завершена
 
 Семь PR (#2076, #2075, #2077–#2079, #2081, #2080) MERGED;
