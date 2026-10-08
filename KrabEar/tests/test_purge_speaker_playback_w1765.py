@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+from _settings_test_helpers import safe_backend_for_settings
+
 import json
 import sys
 import tempfile
@@ -94,7 +96,7 @@ class FakeStore:
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return {}
 
-    def save_settings(self, settings: dict) -> dict:
+    def save_settings(self, settings: dict, **_kwargs) -> dict:
         return settings
 
 
@@ -496,10 +498,9 @@ class BackendServiceW1765WiringTestCase(unittest.TestCase):
     def test_backend_wires_speaker_manager_into_history(self) -> None:
         """BackendService.__init__ должен wire _speaker_manager в _history._speaker_manager."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._speaker_manager,
@@ -514,10 +515,9 @@ class BackendServiceW1765WiringTestCase(unittest.TestCase):
     def test_backend_wires_playback_tracker_into_history(self) -> None:
         """BackendService.__init__ должен wire _playback_tracker в _history._playback_tracker."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._playback_tracker,
@@ -532,10 +532,9 @@ class BackendServiceW1765WiringTestCase(unittest.TestCase):
     def test_e2e_backend_service_purge_clears_speaker_and_playback(self) -> None:
         """E2E через handle_request: данные спикера и воспроизведения стёрты после purge."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         # Добавляем запись в историю
         store.add_history_item(text="тестовая запись для purge E2E")

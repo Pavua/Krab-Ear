@@ -69,7 +69,7 @@ def _make_service(
 
     store = MagicMock()
     store.get_history_page.return_value = (history_items or [], None)
-    store.save_settings.side_effect = lambda s: s
+    store.save_settings.side_effect = lambda s, **_kwargs: s
     store.load_vocabulary.return_value = vocabulary or []
 
     settings_cache = [dict(effective_settings)]  # mutable cell
@@ -226,7 +226,7 @@ class HandleGlossaryTestCase(unittest.TestCase):
 
         svc = TranslationService(
             translator=MagicMock(),
-            store=MagicMock(save_settings=lambda s: s),
+            store=MagicMock(save_settings=lambda s, **_kwargs: s),
             cached_settings=lambda: {"translation_glossary": {}},
             invalidate_settings_cache=invalidate,
         )

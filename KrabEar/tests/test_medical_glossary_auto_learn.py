@@ -237,7 +237,7 @@ class FakeStore:
     def get_history_page(self, cursor=None, limit=500):
         return self._items, None
 
-    def save_settings(self, settings):
+    def save_settings(self, settings, **_kwargs):
         self._settings = dict(settings)
         return self._settings
 

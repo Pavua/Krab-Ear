@@ -243,16 +243,16 @@ class DiskFullSimulationTestCase(unittest.TestCase):
         self.data_dir = Path(self.tmp.name) / "data"
 
     def test_save_settings_oserror_propagates_cleanly(self) -> None:
-        """OSError при записи настроек не ломает state store навсегда."""
+        """Неудачный atomic replace сохраняет предыдущие настройки и чистит temp."""
         store = StateStore(self.data_dir)
-
-        with patch.object(Path, "write_text", side_effect=OSError("No space left on device")):
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        before = store.settings_path.read_bytes()
+        with patch("core.atomic_io.os.replace", side_effect=OSError("No space left on device")):
             with self.assertRaises(OSError):
                 store.save_settings({"translation_mode": "off"})
-
-        # После ошибки — load_settings должен работать (файл не повреждён)
-        loaded = store.load_settings()
-        self.assertIsNotNone(loaded)
+        self.assertEqual(store.settings_path.read_bytes(), before)
+        self.assertEqual(list(self.data_dir.glob("settings.json-*.tmp")), [])
+        self.assertIsNotNone(store.load_settings())
 
     def test_add_history_oserror_propagates(self) -> None:
         """OSError при добавлении записи в историю проброшена наружу."""

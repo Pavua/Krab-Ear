@@ -16,6 +16,8 @@ Regen: Wave 745 (2026-05-26) — replaces 840-line stub doc with ~58% drift. Doc
 
 ## Категории / Categories
 
+- [A5.3 — согласие на файловый plaintext export](#a53--согласие-на-файловый-plaintext-export)
+
 1. [Recording](#recording)
 2. [History — CRUD](#history--crud)
 3. [History — Search & Filter](#history--search--filter)
@@ -64,6 +66,73 @@ Regen: Wave 745 (2026-05-26) — replaces 840-line stub doc with ~58% drift. Doc
 46. [Misc](#misc)
 
 ---
+
+## A5.3 — согласие на файловый plaintext export
+
+Это trusted-client consent protocol для файловых производных истории и явно
+включённого Quick Capture → Obsidian. Same-UID клиент, прошедший существующую
+transport authentication, может вызвать grant напрямую: RPC не доказывает
+клик человека. Supported Swift вызывает grant только после async sheet;
+скрипты не получают grant автоматически. Clipboard и диктовка — отдельная policy.
+
+Все результаты ниже находятся в обычном IPC `result`. Отказ политики имеет
+`{ok:false, reason}` без `capability`, `receipt`, успешного `path` или `file`.
+Причины: `plaintext_confirmation_required`, `plaintext_session_expired`,
+`plaintext_policy_unavailable`, `privacy_mode_active`.
+
+### `get_plaintext_export_policy`
+
+Params: `{}`. Result: `{ok:true, epoch, policy_generation, encryption_enabled,
+privacy_mode_enabled, allowed_without_grant}`.
+
+### `grant_plaintext_export_session`
+
+Params: `{app_session_id, expected_epoch, expected_policy_generation}`.
+Result: `{ok:true, capability, epoch, policy_generation}`.
+
+### `revoke_plaintext_export_session`
+
+Params: `{app_session_id, epoch, capability}`. Result: `{ok:true}`;
+неизвестная/чужая capability — no-op.
+
+### `validate_plaintext_export`
+
+Params: `{app_session_id, epoch, capability?, expected_policy_generation,
+operation_seq, sink_kind}`. Result: `{ok:true, receipt, epoch,
+policy_generation, operation_seq, sink_kind}`.
+
+`app_session_id` — canonical lowercase UUID на запуск Swift, `epoch` — 64
+lowercase hex символа (32 случайных bytes на BackendService), generation —
+неотрицательное целое, sequence — положительное целое. Bool вместо целого
+не принимается. Capability и receipt — opaque RAM-only bearer strings.
+
+Policy читается заново из согласованного дискового снимка. Любая supported
+settings запись получает новую revision, даже при неизменных bool; старое
+согласие отзывается. UNKNOWN возвращает явный отказ и `encryption_enabled:null`,
+`privacy_mode_enabled:null`, `allowed_without_grant:false`, никогда ложный OFF.
+Grant проверяет ожидаемые epoch/generation после refresh под тем же authorizer
+lock. Изменение во время sheet требует нового явного подтверждения.
+
+Допустимые локальные `sink_kind`: `history-md`, `history-ndjson`,
+`history-selected`, `history-action-items`, `history-meeting-report`,
+`history-stats-report`, `history-pdf`. Неизвестный sink отклоняется. Backend
+file writers получают отдельный namespace:
+`plaintext_export:{app_session_id,epoch,capability,expected_policy_generation}`;
+его внедрение во все writers относится к Card B, не доказывается наличием RPC.
+
+После SavePanel/renderer callback Swift фиксирует destination + immutable content
+и только затем запрашивает validation. Сервер завершает разрешение в
+`validate_for_write` до отправки ответа: revoke до validation запрещает запись,
+после validation позволяет закончить ровно эту одну запись. Повторный/меньший
+sequence отклоняется и при OFF. Receipt потребляется локальным coordinator
+ровно один раз, не передаётся следующему writer и не является session grant.
+Неопределённый результат IPC означает отсутствие локальной записи.
+
+Чтение policy/history/settings не создаёт grants. Privacy ON запрещает выдачу
+и validation даже при encryption OFF. Закрытие BackendService очищает RAM и
+запрещает повторную выдачу. Grant/receipt/session ID не должны попадать в
+настройки, бэкапы, diagnostics или логи; internal policy revision не secret.
+Это source-контракт, а не подтверждение rollout, live E2E или encryption ON.
 
 ## Recording
 
@@ -562,11 +631,18 @@ Returns (legacy, OFF-профиль): `{restored_entries, backup_date}` либо
 
 **Два пути, выбираются по текущей `history_encryption_enabled`.**
 
-**1) OFF-профиль — legacy `copy2` (поведение не менялось).** Принимает **только
+**1) OFF-профиль — legacy `copy2`.** Принимает **только
 legacy-бэкапы** (`backup_*`, `auto_backup_*`). Каталоги encrypted snapshot'ов,
 dot-prefixed (в т.ч. `backups/.staging/`) и любые другие имена отклоняются с
 `reason: "unsupported_backup_format"` **до первой копии** — legacy `copy2` поверх
 живой истории затирал бы её шифротекстом.
+
+A5.3: если `restore_settings: true` и в бэкапе есть `settings.json`, исходный
+файл обязан содержать оба флага `history_encryption_enabled` и
+`privacy_mode_enabled` как JSON boolean. Неполная/некорректная пара отклоняется
+до копирования истории. До первой записи также проверяются размер конечного
+JSON и запрет OFF при наличии ENC1 в будущем наборе журналов. Настройки
+сохраняются общим commit с новой внутренней ревизией.
 
 **2) ON-профиль — A5.2b2, восстановление из encrypted-снимка.** Принимает **только**
 каталоги снимков (`classify_backup_dir` → `snapshot`). Перед первой заменой
@@ -931,7 +1007,12 @@ Returns: `{settings: {...}}` — полный словарь настроек
 *(settings_service.py)*  
 Обновляет одно или несколько полей настроек. Принимает любое подмножество.  
 Params: `{key: value, ...}`  
-Returns: `{ok, updated_keys: [...]}`
+Returns: сохранённый словарь настроек с редактированными секретами.
+
+A5.3: переданные privacy/encryption-флаги принимаются только как JSON boolean;
+строки и числа не нормализуются в разрешающий `false`. Непереданные флаги
+сохраняются. Для восстановления неизвестной policy нужна явная пара обоих
+флагов. Конфликт ревизии означает отказ без записи: сначала перечитать настройки.
 
 ### `apply_profile_preset`
 *(settings_service.py)*  
@@ -965,9 +1046,12 @@ Returns: `{ok, path, excluded_fields: [...]}`
 
 ### `import_settings`
 *(settings_service.py)*  
-Импортирует настройки из JSON-файла.  
-Params: `{path}` (str)  
-Returns: `{ok, imported_keys: [...]}`
+Импортирует настройки из JSON-файла, объединяя с текущими.
+Params: `{file}` (str)
+Returns: `{imported, skipped, errors}`
+
+Требования A5.3 к исходным policy-флагам и конфликтам ревизии те же, что у
+`set_settings`; неоднозначный JSON с повторяющимися ключами отклоняется.
 
 ### `list_settings_backups`
 *(settings_service.py)*  
@@ -978,8 +1062,14 @@ Returns: `{backups: [{name, ts, reason}, ...]}`
 ### `restore_settings_backup`
 *(settings_service.py)*  
 Восстанавливает настройки из указанного бэкапа и сохраняет их.  
-Params: `{backup_name}` (str)  
-Returns: `{ok, backup_name}`
+Params: `{backup_id}` (str)
+Returns: `{restored_settings, backup_id, warning?, dropped_fields?}`;
+секреты в `restored_settings` редактируются.
+
+A5.3: полный restore требует обоих исходных policy-флагов типа JSON boolean
+до миграции/нормализации. Отсутствующий или некорректный флаг означает отказ,
+а не восстановление значения по умолчанию. Успешная запись получает новую
+внутреннюю ревизию; ревизия из бэкапа не переносится.
 
 ### `create_manual_settings_backup`
 *(settings_service.py)*  

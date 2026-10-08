@@ -102,6 +102,7 @@ class TestProgressCbCallingLoadSettingsDoesNotDeadlock(unittest.TestCase):
 
     def test_progress_cb_calling_load_settings_does_not_deadlock(self):
         store = _make_store(self.data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         _inject_crypto(store)
 
         # Non-empty history.ndjson with plaintext lines so migration actually runs.

@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
+
 import json
 import os
 import stat
@@ -3031,7 +3033,7 @@ class HistoryService:
             _current_settings = self.store.load_settings()
             if _current_settings.get("translation_glossary"):
                 _current_settings["translation_glossary"] = {}
-                self.store.save_settings(_current_settings)
+                self.store.save_settings(_current_settings, expected_revision=_current_settings.get(POLICY_REVISION_KEY))
                 # Инвалидируем TTL-кэш настроек, если доступен
                 if self._settings_svc is not None:
                     try:
@@ -5441,6 +5443,32 @@ class HistoryService:
                     _ENC_OP_UNAVAILABLE,
                 )
                 return refusal
+            # Настройки проверяются ДО первой mutation истории: ошибка source
+            # не должна оставлять частично применённый legacy restore.
+            settings_to_restore = None
+            settings_repair = False
+            if restore_settings:
+                settings_backup = backup_dir / "settings.json"
+                if settings_backup.exists():
+                    restored_settings = self.store.read_settings_import(settings_backup)
+                    self.store.validate_raw_policy_flags(restored_settings, require_pair=True)
+                    from backend.settings_validator import SettingsValidator
+                    checked = SettingsValidator().validate(restored_settings)
+                    if not checked.valid:
+                        raise ValueError("Невалидные настройки в резервной копии")
+                    settings_repair = self.store.has_explicit_policy_flags(restored_settings)
+                    prospective_paths = tuple(
+                        backup_dir / live_path.name
+                        if live_path.name in {"history.ndjson", "history_tombstones.ndjson", "history_status.ndjson"}
+                        and (backup_dir / live_path.name).exists()
+                        else live_path
+                        for live_path in self.store._history_journal_paths()
+                    )
+                    settings_to_restore, _ = self.store._prepare_settings_commit_unlocked(
+                        checked.fixed,
+                        validated_repair=settings_repair,
+                        history_paths=prospective_paths,
+                    )
             if history_backup.exists():
                 shutil.copy2(history_backup, self.store.history_path)
 
@@ -5450,10 +5478,11 @@ class HistoryService:
                     dst = self.store.data_dir / aux_name
                     shutil.copy2(src, dst)
 
-            if restore_settings:
-                settings_backup = backup_dir / "settings.json"
-                if settings_backup.exists():
-                    shutil.copy2(settings_backup, self.store.settings_path)
+            if settings_to_restore is not None:
+                # Уже держим store EX-lock, нового flock FD здесь нет.
+                self.store._save_settings_unlocked(
+                    settings_to_restore, validated_repair=settings_repair,
+                )
 
         restored_entries = self.store.count_active_items()
         logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)

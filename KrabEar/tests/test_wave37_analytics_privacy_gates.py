@@ -81,7 +81,9 @@ class GetRecordingStatsPrivacyGateTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.service = BackendService(store=self.store)
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
+        from _settings_test_helpers import safe_backend_for_settings
+        self.service = safe_backend_for_settings(self, self.store)
 
     def _request(self, method: str, params: dict | None = None) -> dict:
         resp = self.service.handle_request({"id": "t", "method": method, "params": params or {}})

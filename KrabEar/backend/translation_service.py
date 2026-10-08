@@ -8,6 +8,8 @@ get_glossary_suggestions, get_vocabulary_suggestions.
 
 from __future__ import annotations
 
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
+
 import logging
 import re
 import time
@@ -393,15 +395,18 @@ class TranslationService:
                 if isinstance(saved_glossary, dict):
                     return len(saved_glossary)
                 return len(glossary)
-        # Fallback: прежнее поведение (без lock-защиты)
-        settings = self._cached_settings()
+        # Fallback: CAS защищает чужую policy; cache не мутируется до commit.
+        settings = dict(self._cached_settings())
         glossary = settings.get("translation_glossary", {})
-        if not isinstance(glossary, dict):
-            glossary = {}
+        glossary = dict(glossary) if isinstance(glossary, dict) else {}
         glossary[source] = target
         settings["translation_glossary"] = glossary
-        saved = self.store.save_settings(settings)
-        self._invalidate_settings_cache()
+        try:
+            saved = self.store.save_settings(
+                settings, expected_revision=settings.get(POLICY_REVISION_KEY),
+            )
+        finally:
+            self._invalidate_settings_cache()
         return len(saved.get("translation_glossary", {}))
 
     def _locked_remove_glossary_item(self, source: str) -> int:
@@ -422,15 +427,18 @@ class TranslationService:
                 if isinstance(saved_glossary, dict):
                     return len(saved_glossary)
                 return len(glossary)
-        # Fallback: прежнее поведение (без lock-защиты)
-        settings = self._cached_settings()
+        # Fallback: CAS защищает чужую policy; cache не мутируется до commit.
+        settings = dict(self._cached_settings())
         glossary = settings.get("translation_glossary", {})
-        if not isinstance(glossary, dict):
-            glossary = {}
+        glossary = dict(glossary) if isinstance(glossary, dict) else {}
         glossary.pop(source, None)
         settings["translation_glossary"] = glossary
-        saved = self.store.save_settings(settings)
-        self._invalidate_settings_cache()
+        try:
+            saved = self.store.save_settings(
+                settings, expected_revision=settings.get(POLICY_REVISION_KEY),
+            )
+        finally:
+            self._invalidate_settings_cache()
         return len(saved.get("translation_glossary", {}))
 
     def handle_set_translation_glossary_item(self, params: dict[str, Any]) -> dict[str, Any]:

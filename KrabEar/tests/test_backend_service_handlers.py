@@ -95,6 +95,7 @@ class _BaseHandlersTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
         self.service = BackendService(
             store=store,
             recorder=FakeRecorder(),

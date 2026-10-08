@@ -37,6 +37,8 @@ from backend.settings_service import SettingsService
 # ---------------------------------------------------------------------------
 
 _BASE_SETTINGS: dict = {
+    "history_encryption_enabled": False,
+    "privacy_mode_enabled": False,
     "quality_profile": "balanced",
     "cleanup_profile": "soft",
     "translation_mode": "off",
@@ -94,7 +96,7 @@ def _make_store(settings: dict | None = None) -> MagicMock:
     def load_settings(lock_timeout_sec: float | None = None, nowait: bool = False):
         return dict(current)
 
-    def save_settings(new_settings):
+    def save_settings(new_settings, **_kwargs):
         current.clear()
         current.update(new_settings)
         return dict(current)
