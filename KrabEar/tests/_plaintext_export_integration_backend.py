@@ -1,5 +1,5 @@
 """Изолированный child для A5.3; до run_child импортируется только stdlib."""
-from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from contextlib import ExitStack, contextmanager, redirect_stderr, redirect_stdout
 import json
 import logging
 import os
@@ -8,12 +8,39 @@ import socket
 import sys
 import threading
 import tempfile
+from importlib.abc import MetaPathFinder
 from importlib.machinery import ModuleSpec
 from types import ModuleType, SimpleNamespace
 from unittest import mock
 
 MARKER = "A53_INTEGRATION_SYNTHETIC_TEXT"
 SENTINELS = ("A53_CAPABILITY_SENTINEL", "A53_RECEIPT_SENTINEL", "A53_SESSION_SENTINEL")
+
+
+@contextmanager
+def cpu_only_optional_imports():
+    """Optional ML отсутствует в CPU-only fixture независимо от CI dependencies."""
+    prefixes = ("torch", "mlx", "mlx_whisper", "pyannote", "numba", "cuda")
+
+    def is_native_ml(name):
+        return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+
+    # sys.modules обходит finder: уже загруженный SDK нельзя считать изоляцией.
+    if any(is_native_ml(name) for name in tuple(sys.modules)):
+        raise AssertionError("fixture native ML loaded before isolation")
+
+    class MissingNativeML(MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if is_native_ml(fullname):
+                raise ModuleNotFoundError("native ML excluded from CPU-only IPC fixture", name=fullname)
+            return None
+
+    finder = MissingNativeML()
+    sys.meta_path.insert(0, finder)
+    try:
+        yield
+    finally:
+        sys.meta_path.remove(finder)
 
 
 def run_child(connection, root_string, source_string):
@@ -66,7 +93,7 @@ def run_child(connection, root_string, source_string):
             site.append({"file": Path(frame.f_code.co_filename).name,
                          "function": frame.f_code.co_name, "line": frame.f_lineno})
             frame = frame.f_back
-        violation_sites.append({"kind": kind, "site": site})
+        violation_sites.append({"kind": kind, "stage": stage, "site": site})
     fixture_root = root.resolve()
 
     def audit_isolation(event, args):
@@ -139,6 +166,7 @@ def run_child(connection, root_string, source_string):
         stack.enter_context(mock.patch.object(socket, "has_ipv6", False))
         try:
             stage = "imports"
+            stack.enter_context(cpu_only_optional_imports())
             from backend import crypto_keystore, history_crypto, memory_ledger
             stack.enter_context(mock.patch.object(crypto_keystore, "_run_security", forbidden_provider))
             stack.enter_context(mock.patch.object(history_crypto, "build_history_crypto", forbidden_provider))

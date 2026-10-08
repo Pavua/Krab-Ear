@@ -419,3 +419,77 @@ def test_ipc_transport_failure_traceback_does_not_expose_auth(monkeypatch, tmp_p
     secret = ""
     assert exposed, "transport formatter positive control was not exercised"
     assert clean, "IPC transport failure exposed an auth-bearing argument"
+
+
+def _exercise_ml_import_guard(connection, prefix, submodule):
+    """Fresh child: installed-like loader только считает marker, без native SDK."""
+    import importlib
+    from importlib.abc import MetaPathFinder, Loader
+    from importlib.machinery import ModuleSpec
+    from _plaintext_export_integration_backend import cpu_only_optional_imports
+
+    loaded = []
+
+    class InstalledLoader(Loader):
+        def create_module(self, spec):
+            return None
+
+        def exec_module(self, module):
+            loaded.append(module.__name__)
+
+    class InstalledFinder(MetaPathFinder):
+        def find_spec(self, fullname, path=None, target=None):
+            if fullname == prefix or fullname.startswith(prefix + "."):
+                return ModuleSpec(fullname, InstalledLoader(), is_package=True)
+            return None
+
+    finder = InstalledFinder()
+    sys.meta_path.insert(0, finder)
+    name = prefix + ".a53_probe" if submodule else prefix
+    try:
+        before = 0
+        blocked = False
+        with cpu_only_optional_imports():
+            try:
+                importlib.import_module(name)
+            except ModuleNotFoundError:
+                blocked = True
+            before = len(loaded)
+        # Positive control: тот же настоящий import проходит installed-like loader.
+        importlib.import_module(name)
+        positive = len(loaded) > 0
+        cached_blocked = False
+        try:
+            with cpu_only_optional_imports():
+                importlib.import_module(name)
+        except (AssertionError, ModuleNotFoundError):
+            cached_blocked = True
+        connection.send({"blocked": blocked, "loader_runs_under_guard": before,
+                         "positive_control": positive, "cached_blocked": cached_blocked})
+    except BaseException as error:
+        connection.send({"error_type": type(error).__name__})
+    finally:
+        sys.meta_path.remove(finder)
+        connection.close()
+
+
+@pytest.mark.parametrize("prefix", ["torch", "mlx", "mlx_whisper", "pyannote", "numba", "cuda"])
+@pytest.mark.parametrize("submodule", [False, True])
+def test_cpu_fixture_blocks_installed_optional_ml_imports(prefix, submodule):
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    process = context.Process(target=_exercise_ml_import_guard, args=(child, prefix, submodule))
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(30), "native import probe deadline"
+        result = parent.recv()
+        process.join(timeout=5)
+        assert process.exitcode == 0
+        assert result == {"blocked": True, "loader_runs_under_guard": 0,
+                          "positive_control": True, "cached_blocked": True}
+    finally:
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+        parent.close()

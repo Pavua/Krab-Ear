@@ -1,7 +1,8 @@
 # A5.3 Card D — verification checkpoint, 2026-10-08
 
-Статус: LOCAL GREEN; final independent Astra Ultra whole-D/matrix review PASS.
-Новый exact-SHA CI ещё PENDING. Это не merge/deploy GO. Cumulative A/B/C base:
+Статус: LOCAL GREEN после Linux fixture fix; independent Astra Ultra final
+Linux delta + whole-D/matrix review PASS. Exact-SHA CI — в PR Checks.
+Это не merge/deploy GO. Cumulative A/B/C base:
 `886f061a5c5b2ab97f3b43afd7bcfd2867cdebee`; main:
 `efecb801aae3f3c62fa03314ba4f5b142ac8e906` (повторный fetch выполнен).
 Собственный D worktree; исходный чужой WIP сохранён по manifest, не изменён.
@@ -18,7 +19,8 @@ Production sources A/B/C (34 файла) побайтно совпадают с 
   Один новый P2 committed fixture isolation был BLOCK и закрыт ниже в D.
 - D pre-execution isolation и successive guard/dynamic-secret delta review PASS
   для CPU-only Python 3.12.11 launcher. Audio stub до parent pytest collection и
-  повторно до child backend imports; MLX/torch/pyannote/gigaam отсутствуют.
+  повторно до child backend imports; MLX/torch/pyannote/gigaam отсутствуют локально. Новый import guard ниже
+  делает fixture CPU-only также при установленных optional ML dependencies в CI.
 
 ## Выполненная матрица
 
@@ -32,11 +34,12 @@ Production sources A/B/C (34 файла) побайтно совпадают с 
 | Obsidian | Deny до mkdir; full 2 writes/2 gates; partial 1 write/1 gate и точный результат | PASS |
 | Error/redaction/persistence | TypeError/internal_error, RuntimeError/invalid_request; socket/malformed/unknown/signing; actual logger→fake Sentry; settings/backup без auth | PASS |
 | Swift raw-error envelope | После real validate: 0 writes, 1 validation, no retry, actual dynamic secrets вне streams | PASS |
+| CPU-only imports | 6 ML roots и подмодули запрещены до loader; positive control работает, cached imports отклонены | PASS; 12 cases RED→GREEN |
 | Formatter failure | Реальный pytest long/funcargs: stream helper и raw/call при EOF/timeout/decode; dynamic-token positive control | PASS; 6 transport cases RED→GREEN |
 
 Integration первоначально: 8 passed после canonical-root fix; затем новый
 formatter test PASS; затем 6 transport failure cases RED→GREEN. Требуемый `scripts/pre_merge_py312_check.sh` выполнялся для
-обоих новых test-файлов: **15 integration + 1 isolation regression, ALL GREEN**.
+обоих новых test-файлов: **27 integration + 1 isolation regression, ALL GREEN**.
 Тот же собственный CPU-only venv, temporary pre-import noaudio hook удалён в
 finally. Backend imports предварительно проверены: rebuild/install не запускались.
 Это targeted Python 3.12 qualification, не полная Ubuntu/ML environment parity.
@@ -64,6 +67,28 @@ finally. Backend imports предварительно проверены: rebuil
   после очистки args и безопасного исключения вне except без исходной цепочки.
   Полный D project parity повторён: 15 + 1 GREEN.
 
+## Linux CI import-side-effect: исправлена изоляция D
+
+У head `68a05ae9507669b2515be0ccda0cd2dc13618d4f` 25 checks прошли,
+оба backend jobs упали только на новом D fixture. Установленные в Linux CI
+optional ML dependencies выполняли import-time library discovery:
+`ctypes.util.find_library` → `ldconfig`/`/dev/null`. Guard отказал до запуска
+процесса; broad optional-import except сохранял violation до final assert.
+Пакет верхнего уровня по ограниченному diagnostic stack точно не установлен.
+
+Fixture теперь до первого backend import и до завершения child запрещает
+`torch`, `mlx`, `mlx_whisper`, `pyannote`, `numba`, `cuda` и все подмодули.
+`ModuleNotFoundError` включает существующий optional-dependency путь; cached
+SDK в `sys.modules` вызывает явный отказ, без выгрузки native extensions.
+Filesystem/process/network guard и final violation assert сохранены.
+
+12 fresh-child behavioral cases: реальный import до installed-like stdlib
+loader, root/submodule × 6 packages. RED: loader исполнялся; GREEN: 0 loader
+runs. Positive control без fence исполняет тот же loader; повторный fence
+отклоняет cached package. Реальные ML/GPU dependencies не устанавливались.
+Новый project py312 gate: **27 + 1 GREEN**. Текущий CI status — в PR Checks;
+результат прошлого SHA не засчитывается новой дельте.
+
 ## Закрытие P2 settings fixture isolation
 
 Astra whole-diff audit выявил: helper отключал только LLM, а при free<5 GiB
@@ -86,7 +111,7 @@ synthetic профиль. Unix socket 0600; connect/connect_ex/bind ограни
 endpoint; datagrams/process spawning запрещены. HOME/temp/cache/outputs свои;
 Keychain/crypto traps активны. Python guards — bounded defense,
 **не герметичный OS/native sandbox**. При любой guard violation запуск/teardown
-падает. Diagnostic metadata содержит только module/function/line/категорию;
+падает. Diagnostic metadata содержит только module/function/line/категорию/stage;
 request/raw exception/settings values не выводятся.
 
 Swift executable включает production IPCClient/coordinator и counting writer,
@@ -112,8 +137,9 @@ Production lifecycle, включение шифрования, Main/Gateway, liv
 
 ## Оставшийся gate
 
-Независимый final D/matrix review PASS (source freeze SHA256
-`3bce9475555ef174696b642b800f994c34c76e0a7ffb56fa19650fe4e90204e9`).
+Final independent Astra Ultra Linux delta + whole-D/matrix review PASS
+на source freeze SHA256
+`e4d8a3c511e0b68747848379abd7bc81c06372ec884c6b5d7bc6ca54fac46617`.
 Открыт [D #2081](https://github.com/Pavua/Krab-Ear/pull/2081).
 Git ancestry — поверх C; база PR — `codex/krab-ear-v2`, чтобы workflow CI
 запускал полный набор guards (фильтр ci.yml привязан к этой базе).

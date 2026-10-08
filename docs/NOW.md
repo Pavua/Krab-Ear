@@ -11,10 +11,12 @@ C три Swift build jobs SUCCESS. Local B/C fixture repair: 34 файла,
 [CI repair](superpowers/handoffs/2026-10-08-a53-ci-contracts.md).
 
 Card D: isolated real IPC + production Swift IPC/coordinator harness LOCAL GREEN.
-15 integration tests + 1 low-disk isolation regression прошли project py312
-harness; audit-all PASS. Independent final Astra Ultra whole-D/matrix review
+27 integration tests + 1 low-disk isolation regression прошли project py312
+harness. Final independent Astra Ultra Linux delta + whole-D/matrix review
 PASS; [D #2081](https://github.com/Pavua/Krab-Ear/pull/2081) открыт,
-полный exact-SHA CI pending. База PR — основная линия, чтобы запускались все
+CI `68a05ae` выявил optional-ML import-side-effect только в D fixture;
+CPU-only import fence закрыт 12 RED→GREEN cases без ослабления guard.
+Текущий exact-SHA CI статус — PR Checks. База PR — основная линия, чтобы запускались все
 guards; отдельная D-дельта — поверх C `886f061a`. Production sources A/B/C не менялись; дополнительный test helper P2
 закрыт в D. Transport failure-output P2 также закрыт: 6 RED→GREEN cases.
 Full local Swift build пропущен при высоком swap; малый harness
