@@ -24,15 +24,18 @@ reset-tcc:
 	@tccutil reset Microphone $(BUNDLE_ID) 2>/dev/null || true
 	@echo "✓ TCC reset done. You need to re-grant Accessibility next time app requests it."
 
-sign: build
-	cp -f $(SWIFT_DIR)/.build/release/KrabEarAgent native/runtime/KrabEarAgent
-	cp -f $(SWIFT_DIR)/.build/release/KrabEarAgent "Krab Ear.app/Contents/MacOS/KrabEarAgent"
-	codesign -s - -f --identifier $(BUNDLE_ID) native/runtime/KrabEarAgent
-	codesign -s - -f "Krab Ear.app"
-	@echo ""
-	@echo "⚠  Note: после каждого rebuild cdhash меняется. Если Accessibility снова"
-	@echo "   запрашивает разрешение — запустите: make reset-tcc"
-	@echo "   Или откройте: Repair Krab Ear Permissions.command"
+# Без $(MAKE) в compound recipe: make -n иначе исполняет также cp/codesign.
+sign:
+	@set -e; . ./scripts/agent_signing_identity.sh; \
+	SIGN_ID="$$(resolve_agent_signing_identity)"; \
+	make build; \
+	cp -f $(SWIFT_DIR)/.build/release/KrabEarAgent native/runtime/KrabEarAgent; \
+	cp -f $(SWIFT_DIR)/.build/release/KrabEarAgent "Krab Ear.app/Contents/MacOS/KrabEarAgent"; \
+	codesign --force --sign "$$SIGN_ID" --timestamp=none --identifier $(BUNDLE_ID) native/runtime/KrabEarAgent; \
+	codesign --force --sign "$$SIGN_ID" --timestamp=none --identifier $(BUNDLE_ID) "Krab Ear.app"; \
+	codesign --verify --strict native/runtime/KrabEarAgent; \
+	codesign --verify --strict "Krab Ear.app"; \
+	echo "✓ Runtime и .app подписаны одной стабильной identity"
 
 run:
 	$(PYTHON) KrabEar/main.py --data-dir ~/.krab_ear_data
@@ -52,11 +55,8 @@ clean:
 schemas:
 	cd KrabEar && $(PYTHON) -m contracts.export
 
-# Update .app bundle binary
+# sign уже обновляет и подписывает bundle; повторный ad-hoc codesign ломал TCC.
 app: sign
-	cp -f "Krab Ear.app/Contents/MacOS/KrabEarAgent" "Krab Ear.app/Contents/MacOS/KrabEarAgent.bak" 2>/dev/null || true
-	cp -f native/runtime/KrabEarAgent "Krab Ear.app/Contents/MacOS/KrabEarAgent"
-	codesign -s - -f "Krab Ear.app"
 	@echo "✓ App bundle updated"
 
 # Verify everything

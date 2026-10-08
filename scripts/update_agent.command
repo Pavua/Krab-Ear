@@ -32,10 +32,10 @@ require_cmd() {
 }
 
 check_free_space_mb() {
-  local path="$1"
+  local file_path="$1"
   local min_mb="$2"
   local free_kb
-  free_kb="$(/bin/df -k "$path" | /usr/bin/awk 'NR==2 {print $4}')"
+  free_kb="$(/bin/df -k "$file_path" | /usr/bin/awk 'NR==2 {print $4}')"
   [ -n "$free_kb" ] || preflight_fail "не удалось определить свободное место"
   local free_mb=$((free_kb / 1024))
   if [ "$free_mb" -lt "$min_mb" ]; then
@@ -47,6 +47,9 @@ require_cmd swift
 require_cmd pgrep
 require_cmd codesign
 require_cmd open
+# Недоступный/отозванный сертификат не должен остановить живой агент.
+source "$ROOT_DIR/scripts/agent_signing_identity.sh"
+SIGN_ID="$(resolve_agent_signing_identity)" || exit 1
 [ -x "$VENV_PY" ] || preflight_fail "не найден python venv: $VENV_PY"
 [ -d "$ROOT_DIR/native/runtime" ] || mkdir -p "$ROOT_DIR/native/runtime"
 [ -w "$ROOT_DIR/native/runtime" ] || preflight_fail "нет прав записи в $ROOT_DIR/native/runtime"
@@ -101,22 +104,11 @@ chmod +x "$RUNTIME_BIN"
 cp -f "$BUILD_BIN" "$APP_BUNDLE_BIN"
 chmod +x "$APP_BUNDLE_BIN"
 
-# Выбираем signing identity:
-#   Если в login Keychain есть self-signed identity "Krab Ear Dev Local",
-#   используем её — cdhash стабилен → TCC не сбрасывает permissions при rebuild.
-#   Fallback: ad-hoc (-s -) — backward-compatible, но TCC revoke при каждой сборке.
-#   Для создания identity: ./scripts/create_local_signing_identity.command
-LOCAL_IDENTITY="Krab Ear Dev Local"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$LOCAL_IDENTITY"; then
-  SIGN_ID="$LOCAL_IDENTITY"
-  echo "Подписываю с identity: \"$SIGN_ID\" (stable cdhash, TCC-safe)"
-else
-  SIGN_ID="-"
-  echo "Подписываю ad-hoc (TCC revoke при rebuild; запустите scripts/create_local_signing_identity.command)"
-fi
-
-codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN" >/dev/null 2>&1 || true
-codesign --force --sign "$SIGN_ID" "$APP_BUNDLE" >/dev/null 2>&1 || true
+echo "Подписываю стабильным сертификатом: $SIGN_ID"
+codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN"
+codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$APP_BUNDLE"
+codesign --verify --strict "$RUNTIME_BIN"
+codesign --verify --strict "$APP_BUNDLE"
 
 # Запускаем через LaunchServices (`open`) — macOS создаёт управляемый
 # application.com.antigravity.krab-ear.* job, тот же самый, что появляется при

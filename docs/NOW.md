@@ -1,6 +1,29 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## Cutover 2026-09-30 — текущий runtime
+## Автовставка 2026-10-08 — source-исправление, live-применение ожидает разрешения
+
+Диктовка скопировалась в clipboard, но не вставилась в Codex. Живой журнал
+03:16 CEST подтвердил `AX=false`, ошибку System Events 1002 и
+`accessibility_not_granted`. Сохранённый Accessibility grant требует сертификат
+`Krab Ear Dev Local`, а работающий `.app` подписан ad-hoc и этому requirement
+не соответствует. Переключение разрешений само по себе это несоответствие
+подписи не устраняет. Какой скрипт последним записал живой бинарник, не установлено.
+
+Ветка `codex/ear-paste-signing-20261008` от `efecb801` исправляет локальные пути
+подписи: один selector существующего сертификата, отказ до сборки/копирования/
+остановки при его недоступности, без ad-hoc fallback и скрытых signing errors.
+Карточка: [agent signing identity](superpowers/plans/2026-10-08-agent-signing-identity.md).
+Это не делает старые установщики транзакционными при ошибке после копирования.
+
+Копия текущего `.app`, подписанная прежним сертификатом, прошла strict/deep
+проверку и сохранённый TCC requirement в штатном контексте Keychain; код и
+ресурсы совпадают с текущей сборкой. Rollback подготовлен. Живое приложение,
+TCC, Keychain и процессы не менялись. Соответствие подписи не доказывает живую
+вставку: после отдельного owner approval нужны idle-gate, управляемый agent-only
+`bootout`/swap/`bootstrap` (KeepAlive) и фактическая диктовка в Codex. Backend/REST
+не перезапускать; перед relaunch повторно проверить passive supervision и PID.
+
+## Cutover 2026-09-30 — исторический снимок
 
 **Backend и REST работают на `1ebd12eb69695296a13c39eac35a9b7af3405ba5`**
 ([#2072](https://github.com/Pavua/Krab-Ear/pull/2072)) с 03:37 CEST:
