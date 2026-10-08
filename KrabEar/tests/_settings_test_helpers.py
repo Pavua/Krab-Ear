@@ -12,7 +12,9 @@ def safe_backend_for_settings(owner, store):
         _llm_rewriter=None, _settings_get=None,
         _resolve_diarization_device=lambda: "cpu", warmup=lambda: None,
     )
-    with patch("backend.service.settings.LLM_ENABLED", False):
+    with patch("backend.service.settings.LLM_ENABLED", False), \
+            patch("backend.service.settings.EVENT_BRIDGE_ENABLED", False), \
+            patch("backend.service.settings.DISK_MONITOR_ENABLED", False):
         service = BackendService(
             store=store,
             recorder=SimpleNamespace(is_recording=False, start=lambda: None, stop=lambda: b""),
