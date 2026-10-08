@@ -1,27 +1,39 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## Автовставка 2026-10-08 — source-исправление, live-применение ожидает разрешения
+## Автовставка 2026-10-08 — живая проверка PASS, source PR отдельно
 
 Диктовка скопировалась в clipboard, но не вставилась в Codex. Живой журнал
 03:16 CEST подтвердил `AX=false`, ошибку System Events 1002 и
 `accessibility_not_granted`. Сохранённый Accessibility grant требует сертификат
-`Krab Ear Dev Local`, а работающий `.app` подписан ad-hoc и этому requirement
-не соответствует. Переключение разрешений само по себе это несоответствие
+`Krab Ear Dev Local`. На момент сбоя работавший `.app` был подписан ad-hoc
+и не соответствовал этому requirement. Переключение разрешений само по себе это несоответствие
 подписи не устраняет. Какой скрипт последним записал живой бинарник, не установлено.
 
-Ветка `codex/ear-paste-signing-20261008` от `efecb801` исправляет локальные пути
+Draft [PR #2080](https://github.com/Pavua/Krab-Ear/pull/2080), ветка
+`codex/ear-paste-signing-20261008` от `efecb801`, исправляет локальные пути
 подписи: один selector существующего сертификата, отказ до сборки/копирования/
 остановки при его недоступности, без ad-hoc fallback и скрытых signing errors.
 Карточка: [agent signing identity](superpowers/plans/2026-10-08-agent-signing-identity.md).
 Это не делает старые установщики транзакционными при ошибке после копирования.
 
-Копия текущего `.app`, подписанная прежним сертификатом, прошла strict/deep
-проверку и сохранённый TCC requirement в штатном контексте Keychain; код и
-ресурсы совпадают с текущей сборкой. Rollback подготовлен. Живое приложение,
-TCC, Keychain и процессы не менялись. Соответствие подписи не доказывает живую
-вставку: после отдельного owner approval нужны idle-gate, управляемый agent-only
-`bootout`/swap/`bootstrap` (KeepAlive) и фактическая диктовка в Codex. Backend/REST
-не перезапускать; перед relaunch повторно проверить passive supervision и PID.
+По отдельному разрешению владельца копия текущей сборки подписана прежним
+сертификатом и применена в 03:39 CEST: три idle-пробы и финальная IPC-проверка,
+agent-only `bootout`, подтверждение исчезновения старых job/PID, атомарная
+замена только executable внутри `.app`, strict/deep и сохранённый TCC requirement,
+`bootstrap` прежнего plist. Код и ресурсы прежней сборки; Swift не пересобирался.
+Rollback сохранён приватно. TCC, Keychain и настройки не менялись.
+
+Новый Swift PID **2800**, `runs=1`, BackendSupervisor **passive**; свежий лог:
+`Accessibility AX trusted at startup: true` вместо прежнего false. Backend
+**3957** / REST **3924**, оба `runs=1`, сохранены. IPC ping и REST health HTTP 200.
+В 03:40 владелец подтвердил реальную автоматическую вставку диктовки в Codex
+без Cmd+V. Это доказывает проверенный маршрут Codex; другие приложения,
+аудиодвижки и встречи не проверялись.
+
+Source-тесты: 13 PASS на Python 3.12 и 3.14; независимый Astra Ultra whole-diff
+review и отдельный прогон PASS. Защита установщиков находится в draft PR:
+не смержена и в shared checkout не перенесена. GitHub CI проверяется по точному
+head отдельно; source/CI не подменяют подтверждённую выше live-проверку.
 
 ## Cutover 2026-09-30 — исторический снимок
 

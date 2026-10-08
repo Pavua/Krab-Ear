@@ -71,3 +71,17 @@ agent-only `bootout` → подтвердить исчезновение job/PID
 - Независимый review PASS; локальные тесты и exact-SHA PR CI указаны раздельно.
 - Живые binaries, настройки и процессы не изменены до owner approval.
 - Успех диктовки заявляется только после её фактического live E2E.
+
+## Выполнение 08.10
+
+- Source `6f690270902a821211a01427080ef902ca64c94a`: 13 behavioral tests PASS
+  на Python 3.12/3.14, независимое whole-diff Astra Ultra review PASS. Стандартный
+  Ubuntu harness не создан; прямой Python 3.12 не считается Ubuntu CI.
+- Draft PR: https://github.com/Pavua/Krab-Ear/pull/2080. GitHub CI и merge
+  учитываются отдельно от исправления текущей подписи.
+- Владелец явно разрешил agent-only repair. В 03:39 применён прежний бинарник
+  с подписью существующего сертификата: новый агент PID 2800, AX trusted=true,
+  passive supervision; backend 3957 / REST 3924 не перезапускались. IPC ping и
+  HTTP health PASS. TCC/Keychain/settings не изменялись, rollback сохранён.
+- В 03:40 владелец подтвердил автоматическую вставку продиктованного текста
+  в поле сообщения Codex без ручного Cmd+V. Другие UI/voice маршруты не заявлены.
