@@ -66,3 +66,8 @@ B: тот же 30-file набор GREEN (731 passed, 37 subtests, 1 skipped). Д
 файла сначала получили sandbox PermissionError на bind временного Unix-сокета;
 повторены с разрешением только на собственные fixture endpoints и прошли.
 Проверка C и GitHub CI всех новых HEAD выполняются отдельно.
+
+C: 30-file targeted Python 3.12 CPU-only набор также GREEN: 731 passed,
+37 subtests, 1 skipped. Swift production sources не менялись этим repair;
+новый local Swift build не запускался при высоком swap. Прежний Card C
+Swift PASS остаётся историческим, новый exact-SHA build/CI проверяется отдельно.

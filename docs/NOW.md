@@ -1,5 +1,30 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-08 — CI repair A5.3 и исправление Accessibility
+
+Свежая база линии: `origin/codex/krab-ear-v2` =
+`efecb801aae3f3c62fa03314ba4f5b142ac8e906`. A/B/C остаются открытыми PR.
+Проверенные test/docs fixes опубликованы: A #2077 `00ba3300`, B #2078
+`217bc16a`, C #2079 — этот checkpoint поверх `2f9652a2`.
+На каждой ветке targeted 30-file Python 3.12 CPU-only набор: 731 passed,
+37 subtests, 1 skipped; независимый Astra Ultra fixture delta review PASS.
+Полный exact-SHA GitHub CI новых HEAD ещё выполняется; GREEN не объявлен.
+[Проверка и границы](superpowers/handoffs/2026-10-08-a53-ci-contracts.md).
+
+Card D: старый harness существует как незакоммиченный WIP и до первого
+запуска проходит read-only review изоляции; isolated E2E ещё не выполнен.
+До исполнения — отдельные GREEN A/B/C и сверка перенесённого harness.
+A5.3 не смержен/не выкачен, шифрование не активировано. Main/Gateway и старые
+worktree WIP сохранены. Исторические runtime PID ниже не применять как текущие.
+
+Accessibility repair #2080 `2290b528`: полный CI GREEN, PR ready for review.
+Ранее по отдельному разрешению владельца исправлена только подпись живого
+Swift-агента и выполнен его управляемый рестарт. Owner подтвердил вставку
+диктовки в Codex без Cmd-V; Backend/REST были сохранены. Это отдельная приёмка
+подписи, не deployment A5.3 и не новый restart GO.
+
+Ниже сохранены более ранние checkpoints, актуальные только на их дату.
+
 ## A5.3 Card C, 2026-10-03 — работа продолжается
 
 Card A [#2077](https://github.com/Pavua/Krab-Ear/pull/2077): source/local PASS,
