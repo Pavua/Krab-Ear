@@ -29,6 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
 try:
     from backend.history_service import HistoryService
     from backend.state_store import StateStore
+    from _plaintext_export_test_helpers import history_service_with_off_policy
     _SKIP = False
 except ImportError:
     _SKIP = True
@@ -37,7 +38,7 @@ except ImportError:
 def _make_service(tmp_dir: str) -> tuple[HistoryService, StateStore]:
     store = StateStore(Path(tmp_dir) / "data")
     store.initialize_startup_plaintext_policy(new_profile=True)
-    svc = HistoryService(store=store)
+    svc = history_service_with_off_policy(store)
     return svc, store
 
 

@@ -148,6 +148,9 @@ from backend.bulk_reprocess import BulkReprocessor
 from backend.privacy_audit import get_privacy_audit_logger
 from backend.ipc_errors import IpcOperationalError
 from backend.plaintext_export_ipc import PlaintextExportIPC
+from backend.plaintext_export_sinks import (
+    BackendSink, PlaintextExportDenied, export_context, precheck_export, run_export_write,
+)
 import backend.cloud_stt as cloud_stt
 import backend.cloud_rewriter as cloud_rewriter
 
@@ -823,6 +826,7 @@ class BackendService:
             store=self.store,
             clipboard_history=self._clipboard_history,
             llm_rewriter=self._llm_rewriter,
+            plaintext_export_authorizer=self._plaintext_export_authorizer,
         )
         self._call_assist = CallAssistService(
             store=self.store,
@@ -894,6 +898,7 @@ class BackendService:
         self._export_scheduler = ExportScheduler(
             data_dir=self.store.data_dir,
             settings_provider=self._settings_svc.cached_settings,
+            plaintext_export_authorizer=self._plaintext_export_authorizer,
         )
         # W1687 F6 MED: wire settings_provider so privacy-mode guard in
         # check_and_export() and runtime schedule changes are honoured.
@@ -1193,6 +1198,7 @@ class BackendService:
         self._sharing = SharingManager(
             store=self.store,
             privacy_mode_fn=lambda: self._get_runtime_setting("privacy_mode_enabled", False),
+            plaintext_export_authorizer=self._plaintext_export_authorizer,
         )
         # wave-33 A1: wire SharingManager into HistoryService so handle_purge_all_data
         # can clear SharingManager._index — a RAM copy of share packages holding full
@@ -1289,6 +1295,7 @@ class BackendService:
             data_dir=self.store.data_dir,
             event_bus=event_bus,
             settings_get=self._get_runtime_setting,
+            plaintext_export_authorizer=self._plaintext_export_authorizer,
         )
         self._speaker_manager = SpeakerManager(
             data_dir=self.store.data_dir,
@@ -2454,7 +2461,7 @@ class BackendService:
         while not stop.is_set():
             try:
                 result = self._export_scheduler.check_and_export(self.store)
-                if result is not None:
+                if result is not None and result.get("path") and not result.get("partial"):
                     logger.info(
                         "export_scheduler: авто-экспорт выполнен",
                         extra={
@@ -5505,7 +5512,6 @@ class BackendService:
 
         if output_dir is None:
             out = Path(self.store.data_dir) / "exports" / "timeline"
-            out.mkdir(parents=True, exist_ok=True)
             return out
 
         resolved = Path(output_dir).expanduser().resolve()
@@ -5525,8 +5531,24 @@ class BackendService:
             raise ValueError(
                 f"output_dir вне разрешённых директорий: {resolved}"
             )
-        resolved.mkdir(parents=True, exist_ok=True)
         return resolved
+
+    def _write_timeline_export(self, context: object, file_path: Path, content: str) -> None:
+        """Одна свежая авторизация включает mkdir и запись выбранного файла."""
+        def write_once() -> None:
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_text(content, encoding="utf-8")
+
+        run_export_write(
+            getattr(self, "_plaintext_export_authorizer", None), context,
+            BackendSink.TIMELINE, write_once,
+        )
+
+    @staticmethod
+    def _timeline_export_denied(reason: str) -> dict[str, Any]:
+        """Стабильный отказ без context, capability или содержимого истории."""
+        return {"ok": False, "reason": reason, "path": None,
+                "error": {"code": reason, "message": reason}}
 
     def _handle_analyze_speech_pace(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует темп речи по тексту и длительности аудио.
@@ -5640,9 +5662,17 @@ class BackendService:
             path        (str): абсолютный путь к сохранённому SVG-файлу.
             blocks      (int): количество временных блоков.
         """
+        context = export_context(params)
+        try:
+            precheck_export(
+                getattr(self, "_plaintext_export_authorizer", None), context, BackendSink.TIMELINE,
+            )
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
         settings = self._cached_settings()
         if settings.get("privacy_mode_enabled"):
-            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+            return {"ok": False, "reason": "privacy_mode_active",
+                    "error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
 
         from pathlib import Path
         from datetime import datetime, timezone
@@ -5676,7 +5706,10 @@ class BackendService:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"timeline_{ts}.svg"
         file_path = Path(out_dir) / filename
-        file_path.write_text(svg_content, encoding="utf-8")
+        try:
+            self._write_timeline_export(context, file_path, svg_content)
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
 
         return {"path": str(file_path), "blocks": len(blocks)}
 
@@ -5692,9 +5725,17 @@ class BackendService:
             path        (str): абсолютный путь к сохранённому JSON-файлу.
             blocks      (int): количество временных блоков.
         """
+        context = export_context(params)
+        try:
+            precheck_export(
+                getattr(self, "_plaintext_export_authorizer", None), context, BackendSink.TIMELINE,
+            )
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
         settings = self._cached_settings()
         if settings.get("privacy_mode_enabled"):
-            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+            return {"ok": False, "reason": "privacy_mode_active",
+                    "error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
 
         from pathlib import Path
         from datetime import datetime, timezone
@@ -5725,7 +5766,10 @@ class BackendService:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"timeline_{ts}.json"
         file_path = Path(out_dir) / filename
-        file_path.write_text(json_content, encoding="utf-8")
+        try:
+            self._write_timeline_export(context, file_path, json_content)
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
 
         return {"path": str(file_path), "blocks": len(blocks)}
 
@@ -5741,9 +5785,17 @@ class BackendService:
             path        (str): абсолютный путь к сохранённому .ics-файлу.
             blocks      (int): количество временных блоков (VEVENT в файле).
         """
+        context = export_context(params)
+        try:
+            precheck_export(
+                getattr(self, "_plaintext_export_authorizer", None), context, BackendSink.TIMELINE,
+            )
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
         settings = self._cached_settings()
         if settings.get("privacy_mode_enabled"):
-            return {"error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
+            return {"ok": False, "reason": "privacy_mode_active",
+                    "error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
 
         from pathlib import Path
         from datetime import datetime, timezone
@@ -5774,7 +5826,10 @@ class BackendService:
         ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         filename = f"timeline_{ts}.ics"
         file_path = Path(out_dir) / filename
-        file_path.write_text(ical_content, encoding="utf-8")
+        try:
+            self._write_timeline_export(context, file_path, ical_content)
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
 
         return {"path": str(file_path), "blocks": len(blocks)}
 

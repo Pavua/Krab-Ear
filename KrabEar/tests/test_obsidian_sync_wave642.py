@@ -9,6 +9,8 @@ Covers:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import os
 import sys
@@ -30,7 +32,7 @@ class TestObsidianSyncMissingVault(unittest.TestCase):
 
     def test_configure_missing_vault_raises(self):
         with tempfile.TemporaryDirectory() as tmp:
-            mgr = ObsidianSyncManager(data_dir=Path(tmp))
+            mgr = ObsidianSyncManager(data_dir=Path(tmp), plaintext_export_authorizer=off_authorizer())
             non_existent = Path(tmp) / "no_such_vault"
             with self.assertRaises(ValueError) as ctx:
                 mgr.configure(str(non_existent))
@@ -38,7 +40,7 @@ class TestObsidianSyncMissingVault(unittest.TestCase):
 
     def test_sync_without_configure_raises_runtime_error(self):
         with tempfile.TemporaryDirectory() as tmp:
-            mgr = ObsidianSyncManager(data_dir=Path(tmp))
+            mgr = ObsidianSyncManager(data_dir=Path(tmp), plaintext_export_authorizer=off_authorizer())
             # vault not configured → RuntimeError
             with self.assertRaises(RuntimeError) as ctx:
                 mgr.sync([])
@@ -57,7 +59,7 @@ class TestObsidianSyncPermDenied(unittest.TestCase):
             )
             # Simulate PermissionError during read_text
             with patch.object(Path, "read_text", side_effect=PermissionError("denied")):
-                mgr = ObsidianSyncManager(data_dir=Path(tmp))
+                mgr = ObsidianSyncManager(data_dir=Path(tmp), plaintext_export_authorizer=off_authorizer())
             # Should fall back to defaults without crashing
             self.assertIsNone(mgr._vault_path)
             self.assertEqual(mgr._folder, _DEFAULT_FOLDER)
@@ -71,7 +73,7 @@ class TestObsidianSyncMalformedState(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             state_path = Path(tmp) / "obsidian_sync.json"
             state_path.write_text("{this is not: valid json}", encoding="utf-8")
-            mgr = ObsidianSyncManager(data_dir=Path(tmp))
+            mgr = ObsidianSyncManager(data_dir=Path(tmp), plaintext_export_authorizer=off_authorizer())
             # Malformed JSON should not crash; defaults remain
             self.assertIsNone(mgr._vault_path)
             self.assertEqual(mgr._folder, _DEFAULT_FOLDER)
@@ -88,7 +90,7 @@ class TestObsidianSyncMalformedState(unittest.TestCase):
                 }),
                 encoding="utf-8",
             )
-            mgr = ObsidianSyncManager(data_dir=Path(tmp))
+            mgr = ObsidianSyncManager(data_dir=Path(tmp), plaintext_export_authorizer=off_authorizer())
             # vault_path that doesn't exist should be skipped
             self.assertIsNone(mgr._vault_path)
             # other fields still loaded
@@ -115,7 +117,7 @@ class TestObsidianSyncMdWriteFail(unittest.TestCase):
 
     def test_write_fail_disk_full_records_error(self):
         with tempfile.TemporaryDirectory() as tmp_data, tempfile.TemporaryDirectory() as tmp_vault:
-            mgr = ObsidianSyncManager(data_dir=Path(tmp_data))
+            mgr = ObsidianSyncManager(data_dir=Path(tmp_data), plaintext_export_authorizer=off_authorizer())
             mgr.configure(str(tmp_vault))
 
             items = [self._make_item(i) for i in range(3)]
@@ -133,7 +135,7 @@ class TestObsidianSyncMdWriteFail(unittest.TestCase):
     def test_partial_write_fail_continues_remaining_items(self):
         """If one item fails, the rest are still attempted."""
         with tempfile.TemporaryDirectory() as tmp_data, tempfile.TemporaryDirectory() as tmp_vault:
-            mgr = ObsidianSyncManager(data_dir=Path(tmp_data))
+            mgr = ObsidianSyncManager(data_dir=Path(tmp_data), plaintext_export_authorizer=off_authorizer())
             mgr.configure(str(tmp_vault))
 
             items = [self._make_item(i) for i in range(4)]

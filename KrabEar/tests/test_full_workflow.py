@@ -168,6 +168,7 @@ class FullWorkflowTestCase(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls._tmp = tempfile.TemporaryDirectory()
         store = StateStore(Path(cls._tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
         cls.service = BackendService(
             store=store,
             recorder=FakeRecorder(),
@@ -179,7 +180,10 @@ class FullWorkflowTestCase(unittest.TestCase):
 
     @classmethod
     def tearDownClass(cls) -> None:
-        cls._tmp.cleanup()
+        try:
+            cls.service.close()
+        finally:
+            cls._tmp.cleanup()
 
     # ---- helper ----------------------------------------------------------
 

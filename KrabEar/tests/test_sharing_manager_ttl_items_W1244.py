@@ -6,6 +6,8 @@ F5 LOW: empty content (all item_ids missing) returns warning: "no_items_found".
 """
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import math
 import os
 import sys
@@ -50,7 +52,7 @@ class _FakeStore:
 
 def _make_manager(tmp_dir: str, items: dict | None = None) -> SharingManager:
     store = _FakeStore(data_dir=tmp_dir, items=items)
-    return SharingManager(store=store)
+    return SharingManager(store=store, plaintext_export_authorizer=off_authorizer())
 
 
 # ---------------------------------------------------------------------------

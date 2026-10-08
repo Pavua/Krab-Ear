@@ -1,5 +1,15 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## A5.3 Card B, 2026-10-03 — source checkpoint
+
+База main-линии повторно сверена: `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
+Card A: [PR #2077](https://github.com/Pavua/Krab-Ear/pull/2077),
+`93c7e0b0d46b730c64c4a924d48b0f124cbce369`, OPEN; основной CI PASS,
+backend chunked CI ещё выполняется. Card B поверх этого SHA:
+Astra High source PASS, Python3.12 parity49files PASS, audit-all PASS.
+Card B PR/CI ещё впереди; C/D код не начат. Merge/deploy не выполнялись.
+[Матрица Card B и ограничения](superpowers/handoffs/2026-10-03-a53-card-b-progress.md).
+
 ## A5.3, 2026-10-03 — source checkpoint
 
 База разработки: `origin/codex/krab-ear-v2` = `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.

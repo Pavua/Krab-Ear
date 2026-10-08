@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import sys
 import tempfile
 import threading
@@ -68,6 +70,7 @@ def make_mgr(
         store=store,
         default_share_ttl_hours=default_ttl,
         share_no_default_ttl=no_default_ttl,
+        plaintext_export_authorizer=off_authorizer(),
     )
     store.add_item("i1", "текст один")
     store.add_item("i2", "текст два")
@@ -233,11 +236,11 @@ class RevokeTestCase(unittest.TestCase):
         """Отзыв сохраняется после перезагрузки менеджера."""
         store = FakeStore(data_dir=self._tmpdir)
         store.add_item("i1", "текст")
-        mgr = SharingManager(store=store, default_share_ttl_hours=168)
+        mgr = SharingManager(store=store, default_share_ttl_hours=168, plaintext_export_authorizer=off_authorizer())
         pkg = mgr.prepare_share(["i1"], ttl_hours=24.0)
         mgr.revoke_share(pkg.share_id)
 
-        mgr2 = SharingManager(store=store, default_share_ttl_hours=168)
+        mgr2 = SharingManager(store=store, default_share_ttl_hours=168, plaintext_export_authorizer=off_authorizer())
         found = mgr2.get_shared(pkg.share_id)
         self.assertIsNone(found)
 

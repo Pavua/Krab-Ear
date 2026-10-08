@@ -390,7 +390,9 @@ class TestExportFormatBackwardsCompat(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        from _plaintext_export_test_helpers import history_service_with_off_policy
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
+        self.svc = history_service_with_off_policy(self.store)
 
     def test_markdown_export_contains_header(self):
         """Экспорт Markdown всегда начинается с фиксированного заголовка."""

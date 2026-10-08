@@ -23,6 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "KrabEar"))
 
 from backend.export_scheduler import ExportScheduler  # noqa: E402
+from _plaintext_export_test_helpers import off_authorizer
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +40,7 @@ def _make_store(items=None):
 
 
 def _make_scheduler(data_dir):
-    return ExportScheduler(data_dir=data_dir, max_exports=10)
+    return ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=data_dir, max_exports=10)
 
 
 # ---------------------------------------------------------------------------

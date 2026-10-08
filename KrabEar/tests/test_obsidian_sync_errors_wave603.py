@@ -10,6 +10,8 @@ Covers:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import os
 import stat
@@ -42,7 +44,7 @@ class TestObsidianSyncErrors(unittest.TestCase):
     def test_vault_dir_missing_raises_and_logs(self):
         """configure() with non-existent path raises ValueError; sync is never attempted."""
         with tempfile.TemporaryDirectory() as data_dir:
-            mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+            mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
             missing = Path(data_dir) / "does_not_exist"
 
             with self.assertRaises(ValueError) as ctx:
@@ -68,7 +70,7 @@ class TestObsidianSyncErrors(unittest.TestCase):
             locked_dir.mkdir()
             os.chmod(locked_dir, stat.S_IWUSR)  # write-only → mkdir inside will fail
 
-            mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+            mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
 
             try:
                 # configure may raise ValueError (not a dir) or PermissionError
@@ -89,7 +91,7 @@ class TestObsidianSyncErrors(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir, \
                 tempfile.TemporaryDirectory() as vault_dir:
 
-            mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+            mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
             mgr.configure(vault_dir, folder="Transcriptions")
 
             items_a = [_make_item("id1", "2026-01-01T10:00:00+00:00", "Alpha")]
@@ -128,7 +130,7 @@ class TestObsidianSyncErrors(unittest.TestCase):
             state_path.write_text("{NOT VALID JSON", encoding="utf-8")
 
             with self.assertLogs("KrabEar.Backend.ObsidianSync", level="WARNING") as cm:
-                mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+                mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
 
             # Should have logged a warning
             self.assertTrue(
@@ -147,7 +149,7 @@ class TestObsidianSyncErrors(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data_dir, \
                 tempfile.TemporaryDirectory() as vault_dir:
 
-            mgr = ObsidianSyncManager(data_dir=Path(data_dir))
+            mgr = ObsidianSyncManager(data_dir=Path(data_dir), plaintext_export_authorizer=off_authorizer())
             mgr.configure(vault_dir, folder="Transcriptions")
 
             item = _make_item("deadbeef", "2026-01-02T09:00:00+00:00", "Ошибка диска")

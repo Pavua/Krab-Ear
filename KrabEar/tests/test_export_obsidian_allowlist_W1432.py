@@ -11,6 +11,8 @@ key scenarios from the W1432 spec.
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import history_service_with_off_policy
+
 import sys
 import tempfile
 import unittest
@@ -34,7 +36,7 @@ from backend.state_store import StateStore
 
 def _make_service(data_dir: Path) -> HistoryService:
     store = StateStore(data_dir)
-    return HistoryService(store=store)
+    return history_service_with_off_policy(store=store)
 
 
 def _add_item(svc: HistoryService, text: str = "test transcription") -> str:

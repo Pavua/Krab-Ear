@@ -12,6 +12,8 @@ Covers:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import history_service_with_off_policy
+
 import sys
 import tempfile
 import unittest
@@ -89,7 +91,7 @@ class TestHandleExportObsidianAllowlist(unittest.TestCase):
         store = StateStore(tmp_dir)
         # Seed one history item so the handler doesn't error on empty store
         store.add_history_item(text="Test transcript", paste_status="ok")
-        return HistoryService(store=store)
+        return history_service_with_off_policy(store=store)
 
     def test_export_obsidian_outside_allowed_root_raises(self) -> None:
         """handle_export_obsidian must raise ValueError for paths outside allowed roots.
@@ -131,7 +133,7 @@ class TestHandleBatchExportAllowlist(unittest.TestCase):
 
         store = StateStore(tmp_dir)
         store.add_history_item(text="Batch export test", paste_status="ok")
-        return HistoryService(store=store)
+        return history_service_with_off_policy(store=store)
 
     def test_batch_export_outside_allowed_root_raises(self) -> None:
         """handle_batch_export must raise ValueError for paths outside allowed roots.
