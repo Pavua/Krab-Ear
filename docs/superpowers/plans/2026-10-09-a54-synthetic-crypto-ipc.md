@@ -94,7 +94,8 @@ ruff check KrabEar/tests/_plaintext_export_integration_backend.py KrabEar/tests/
 git diff --check
 ```
 
-- [x] Step5: независимый Astra adversarial diff gate, затем явные paths commit/PR без live deploy. Документировать bounded Python isolation (не OS sandbox), actual crypto IPC PASS отдельно от SwiftUI/Keychain/live activation.
+- [x] Step5: независимый Astra adversarial diff gate PASS; source commit `a0cc704e` готов, documented bounded isolation и границы приёмки.
+- [ ] Publication gate: отдельный PR, exact-SHA CI и merge; live deploy этим gate не разрешается. Документировать bounded Python isolation (не OS sandbox), actual crypto IPC PASS отдельно от SwiftUI/Keychain/live activation.
 
 ## Local result, 09.10 CEST
 
