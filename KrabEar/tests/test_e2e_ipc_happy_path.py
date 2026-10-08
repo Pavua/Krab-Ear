@@ -132,6 +132,7 @@ class _E2EBase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         self.store = StateStore(self.data_dir)
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         self.recorder = FakeRecorder()
         self.transcriber = FakeTranscriber()
         self.translator = FakeTranslator()
@@ -141,6 +142,7 @@ class _E2EBase(unittest.TestCase):
             transcriber=self.transcriber,
             translator=self.translator,
         )
+        self.addCleanup(self.service.close)
 
     # ------------------------------------------------------------------
     # Helpers

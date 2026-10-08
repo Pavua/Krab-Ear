@@ -128,6 +128,7 @@ class _IPCBase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         self.store = StateStore(self.data_dir)
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         self.recorder = FakeRecorder()
         self.transcriber = FakeTranscriber()
         self.translator = FakeTranslator()
@@ -137,6 +138,7 @@ class _IPCBase(unittest.TestCase):
             transcriber=self.transcriber,
             translator=self.translator,
         )
+        self.addCleanup(self.service.close)
 
     def call(
         self,
@@ -399,6 +401,7 @@ class TestSettingsPersistence(_IPCBase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+        self.addCleanup(new_service.close)
         resp = new_service.handle_request(
             {"id": "r1", "method": "get_settings", "params": {}}
         )
@@ -425,6 +428,7 @@ class TestSettingsPersistence(_IPCBase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+        self.addCleanup(new_service.close)
         result = new_service.handle_request(
             {"id": "r2", "method": "get_settings", "params": {}}
         )["result"]
@@ -451,6 +455,7 @@ class TestIPCThrottle(_IPCBase):
             transcriber=FakeTranscriber(),
             translator=FakeTranslator(),
         )
+        self.addCleanup(svc.close)
         svc._ipc_throttle = throttle
         return svc
 

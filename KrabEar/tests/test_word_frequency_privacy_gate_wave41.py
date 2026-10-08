@@ -44,6 +44,7 @@ class WordFrequencyPrivacyGateTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         # Construct WITHOUT passing cached_settings — this is the code path where the
         # dead inline gate `self._cached_settings is not None and ...` was always False.
         self.svc = HistoryService(store=self.store)

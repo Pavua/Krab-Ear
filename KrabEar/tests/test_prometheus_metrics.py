@@ -6,6 +6,8 @@ import os
 import re
 import types
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
@@ -75,7 +77,9 @@ _orig_StateStore = getattr(_state_store_mod, "StateStore", None)
 
 class _FakeStateStore:
     def __init__(self, *a, **kw):
-        pass
+        # REST подключает phonetic vocabulary; фикстура не наследует live data_dir.
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="ear-prometheus-store-")
+        self.data_dir = Path(self._temp_dir.name)
 
     def is_idempotent(self, *a, **kw):
         return False
