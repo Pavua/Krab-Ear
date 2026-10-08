@@ -1251,15 +1251,26 @@ class BackendService:
                 _plan = self._data_migrator.get_migration_plan(self.store.data_dir)
                 logger.info("data_migrator: migration needed — plan: %s", _plan)
                 _mig_result = self._data_migrator.migrate(self.store.data_dir)
-                logger.info(
-                    "data_migrator: migration complete %s → %s "
-                    "(migrated=%d skipped=%d backup=%s)",
-                    _mig_result.from_version,
-                    _mig_result.to_version,
-                    _mig_result.items_migrated,
-                    _mig_result.items_skipped,
-                    _mig_result.backup_path,
-                )
+                if _mig_result.reason is None:
+                    logger.info(
+                        "data_migrator: migration complete %s → %s "
+                        "(migrated=%d skipped=%d backup=%s)",
+                        _mig_result.from_version,
+                        _mig_result.to_version,
+                        _mig_result.items_migrated,
+                        _mig_result.items_skipped,
+                        _mig_result.backup_path,
+                    )
+                else:
+                    logger.warning(
+                        "data_migrator: migration refused (%s) "
+                        "(from=%s to=%s migrated=%d skipped=%d)",
+                        _mig_result.reason,
+                        _mig_result.from_version,
+                        _mig_result.to_version,
+                        _mig_result.items_migrated,
+                        _mig_result.items_skipped,
+                    )
             else:
                 logger.debug("data_migrator: schema up-to-date, no migration needed")
         except Exception:
