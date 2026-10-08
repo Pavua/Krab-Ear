@@ -53,3 +53,16 @@ Endor package-risk для pytest 9.1.1: UNKNOWN — отсутствует Endor
 Чужой незакоммиченный A/D WIP сохранён; копия подготовленного A patch сверена
 по SHA256 и применена только в новом worktree. Старые handoff-проценты и
 runtime PID не являются текущими доказательствами.
+
+## Перенос в B/C
+
+В Card B старые Wave-31 CSV tests дополнительно требуют существующий
+`history_service_with_off_policy`: он подключает реальный authorizer к snapshot
+синтетического StateStore. Двухстрочный fixture delta: independent Astra Ultra
+source PASS; RED 13 failures (включая 6 subtests), GREEN 12 passed + 6 subtests.
+Assertions и production denial без authorizer сохранены.
+
+B: тот же 30-file набор GREEN (731 passed, 37 subtests, 1 skipped). Два IPC
+файла сначала получили sandbox PermissionError на bind временного Unix-сокета;
+повторены с разрешением только на собственные fixture endpoints и прошли.
+Проверка C и GitHub CI всех новых HEAD выполняются отдельно.
