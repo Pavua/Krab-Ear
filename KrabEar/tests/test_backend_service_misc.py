@@ -93,6 +93,7 @@ class _ServiceFixture(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         store = StateStore(self.data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         self.service = BackendService(
             store=store,
             recorder=_FakeRecorder(),

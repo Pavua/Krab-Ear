@@ -8,6 +8,8 @@
    _index (they carried full transcript content → memory + privacy leak; list_shared
    used to only filter them).
 """
+
+from _plaintext_export_test_helpers import off_authorizer
 import sys
 import time
 import types
@@ -64,7 +66,7 @@ class AutoDedupJobEvictionTest(unittest.TestCase):
 class SharingPruneExpiredTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="krab_share_test_")
-        self.mgr = SharingManager(store=types.SimpleNamespace(data_dir=Path(self.tmp)))
+        self.mgr = SharingManager(store=types.SimpleNamespace(data_dir=Path(self.tmp)), plaintext_export_authorizer=off_authorizer())
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)

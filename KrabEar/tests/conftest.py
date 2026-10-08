@@ -61,6 +61,11 @@ _PRIVACY_AUDIT_TMPDIR = tempfile.mkdtemp(prefix="krab_ear_privacy_audit_")
 os.environ["KRAB_EAR_PRIVACY_AUDIT_DIR"] = _PRIVACY_AUDIT_TMPDIR
 atexit.register(shutil.rmtree, _PRIVACY_AUDIT_TMPDIR, True)
 
+# SettingsBackup default также пишет и удаляет rolling backups: только throwaway.
+_SETTINGS_BACKUP_TMPDIR = tempfile.mkdtemp(prefix="krab_ear_settings_backup_")
+os.environ["KRAB_EAR_SETTINGS_BACKUP_DIR"] = _SETTINGS_BACKUP_TMPDIR
+atexit.register(shutil.rmtree, _SETTINGS_BACKUP_TMPDIR, True)
+
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "0.0.0.0", "localhost"})
 _ORIGINAL_SOCKET_CONNECT = socket.socket.connect
 

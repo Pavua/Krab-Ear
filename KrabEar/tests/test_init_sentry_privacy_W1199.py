@@ -211,7 +211,7 @@ class TestRuntimeEnablePrivacyDisablesSentry(unittest.TestCase):
                             "voice_gateway_api_key": ""}
 
         store = self._make_minimal_store(initial_settings)
-        store.save_settings.side_effect = lambda s: dict(s)
+        store.save_settings.side_effect = lambda s, **kwargs: dict(s)
 
         backup = MagicMock(spec=SettingsBackup)
         backup.create_backup.return_value = "backup_id_1"
@@ -260,7 +260,7 @@ class TestRuntimeEnablePrivacyDisablesSentry(unittest.TestCase):
                             "voice_gateway_api_key": ""}
 
         store = self._make_minimal_store(initial_settings)
-        store.save_settings.side_effect = lambda s: dict(s)
+        store.save_settings.side_effect = lambda s, **kwargs: dict(s)
 
         backup = MagicMock(spec=SettingsBackup)
         backup.create_backup.return_value = "backup_id_2"
@@ -304,7 +304,7 @@ class TestRuntimeEnablePrivacyDisablesSentry(unittest.TestCase):
                             "voice_gateway_api_key": ""}
 
         store = self._make_minimal_store(initial_settings)
-        store.save_settings.side_effect = lambda s: dict(s)
+        store.save_settings.side_effect = lambda s, **kwargs: dict(s)
 
         backup = MagicMock(spec=SettingsBackup)
         backup.create_backup.return_value = "backup_id_3"

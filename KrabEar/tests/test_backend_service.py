@@ -242,6 +242,7 @@ class BackendServiceTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
         self.service = BackendService(
             store=store,
             recorder=FakeRecorder(),
@@ -1917,6 +1918,7 @@ class GlossarySuggestionsTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         self.service = BackendService(
             store=self.store,
             recorder=FakeRecorder(),
@@ -2265,7 +2267,7 @@ class BackendServiceErrorHandlingTestCase(unittest.TestCase):
         self._is_valid_response(resp)
         self.assertFalse(resp["ok"])
         self.assertEqual(resp["error"]["code"], "unknown_method")
-        self.assertIn("nonexistent_method", resp["error"]["message"])
+        self.assertEqual("Неизвестный метод", resp["error"]["message"])
 
     def test_ipc_resilience_params_list_instead_of_dict(self) -> None:
         """params в виде списка вместо dict возвращает error response, не крашится."""

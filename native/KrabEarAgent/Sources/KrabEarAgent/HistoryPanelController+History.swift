@@ -116,53 +116,101 @@ extension HistoryPanelController {
 
     // MARK: - Export / Import
 
+    /// Контекст фиксируется до рендера/SavePanel, а запись проверяется после callback.
+    func preparePlaintextExport(
+        sink: PlaintextExportSink,
+        then: @escaping (PlaintextExportCoordinator.Ticket) -> Void
+    ) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let ticket = try await self.plaintextExportCoordinator.prepare(sink: sink) { [weak self] in
+                    guard let self else { return false }
+                    return await presentPlaintextExportConsent(for: self.window)
+                }
+                then(ticket)
+            } catch PlaintextExportCoordinator.Failure.cancelled {
+                return
+            } catch {
+                self.showInfoAlert(title: "Экспорт", body: PlaintextExportCoordinator.errorMessage(error))
+            }
+        }
+    }
+
+    /// Одна неизменяемая строка и один путь на одноразовый ticket; внутри writer нет await.
+    func writePlaintextExport(
+        ticket: PlaintextExportCoordinator.Ticket,
+        content: String,
+        to url: URL,
+        didSave: @escaping () -> Void
+    ) {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await self.plaintextExportCoordinator.perform(ticket) {
+                    try content.write(to: url, atomically: true, encoding: .utf8)
+                }
+                didSave()
+            } catch {
+                self.showInfoAlert(title: "Экспорт", body: PlaintextExportCoordinator.errorMessage(error))
+            }
+        }
+    }
+
     @objc func onExportHistory() {
         guard !items.isEmpty else {
             showInfoAlert(title: "Экспорт истории", body: "История пуста, экспортировать нечего.")
             return
         }
-
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let suggestedName = "krab_ear_history_\(formatter.string(from: Date())).md"
-
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = suggestedName
-        panel.allowedContentTypes = [.plainText]
-        panel.title = "Сохранить экспорт истории"
-        panel.prompt = "Сохранить"
-
-        presentPanelSheet(panel, for: self.window) { [weak self] resp in
-            guard let self, resp == .OK, let outputURL = panel.url else { return }
-
+        preparePlaintextExport(sink: .historyMarkdown) { [weak self] ticket in
+            guard let self else { return }
             let content = self.buildHistoryMarkdownExport()
+            let count = self.items.count
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd_HHmmss"
+            let panel = NSSavePanel()
+            panel.canCreateDirectories = true
+            panel.nameFieldStringValue = "krab_ear_history_\(formatter.string(from: Date())).md"
+            panel.allowedContentTypes = [.plainText]
+            panel.title = "Сохранить экспорт истории"
+            panel.prompt = "Сохранить"
+
+            // Вторая операция удерживает тот же контекст, но требует своей проверки.
+            let backendTicket: PlaintextExportCoordinator.BackendTicket
             do {
-                try content.write(to: outputURL, atomically: true, encoding: .utf8)
-                self.showInfoAlert(
-                    title: "Экспорт истории",
-                    body: "Сохранено записей: \(self.items.count)\n\(outputURL.path)"
+                backendTicket = try self.plaintextExportCoordinator.deriveBackendTicket(
+                    from: ticket, method: .exportHistoryMarkdown
                 )
             } catch {
-                self.showInfoAlert(
-                    title: "Экспорт истории",
-                    body: "Не удалось сохранить файл: \(error.localizedDescription)"
-                )
+                self.showInfoAlert(title: "Экспорт истории", body: PlaintextExportCoordinator.errorMessage(error))
+                return
             }
-            // Также сохраняем копию через IPC (export_history) в transcripts/.
-            // Off-main-thread чтобы не блокировать UI пока backend пишет файл (AppHang risk).
-            let ipc = self.ipcClient
-            DispatchQueue.global(qos: .utility).async { [weak self] in
-                guard
-                    let ipcResponse = try? ipc.call(
-                        method: "export_history",
-                        params: ["format": "md", "save_to_file": true]
-                    ),
-                    let ipcResult = ipcResponse["result"] as? [String: Any],
-                    let serverPath = ipcResult["path"] as? String
-                else { return }
-                DispatchQueue.main.async {
-                    self?.notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
+            presentPanelSheet(panel, for: self.window) { [weak self] response in
+                guard let self, response == .OK, let outputURL = panel.url else { return }
+                self.writePlaintextExport(ticket: ticket, content: content, to: outputURL) { [weak self] in
+                    guard let self else { return }
+                    self.showInfoAlert(
+                        title: "Экспорт истории",
+                        body: "Сохранено записей: \(count)\n\(outputURL.path)"
+                    )
+                    Task { [weak self] in
+                        guard let self else { return }
+                        do {
+                            let result = try await self.plaintextExportCoordinator.performBackend(
+                                backendTicket, params: ["format": "md", "save_to_file": true]
+                            )
+                            guard let serverPath = result["path"] as? String else {
+                                self.showInfoAlert(title: "Экспорт истории", body: "Локальный файл сохранён. Серверная копия не подтверждена.")
+                                return
+                            }
+                            self.notificationService.notify(title: "Krab Ear", body: "Серверная копия: \(serverPath)")
+                        } catch {
+                            self.showInfoAlert(
+                                title: "Экспорт истории",
+                                body: "Локальный файл сохранён. Серверная копия не подтверждена. " + PlaintextExportCoordinator.errorMessage(error)
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -173,32 +221,23 @@ extension HistoryPanelController {
             showInfoAlert(title: "Экспорт NDJSON", body: "История пуста, экспортировать нечего.")
             return
         }
-
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd_HHmmss"
-        let suggestedName = "krab_ear_history_\(formatter.string(from: Date())).ndjson"
-
-        let panel = NSSavePanel()
-        panel.canCreateDirectories = true
-        panel.nameFieldStringValue = suggestedName
-        panel.allowedContentTypes = [.json]
-        panel.title = "Сохранить экспорт NDJSON"
-        panel.prompt = "Сохранить"
-
-        presentPanelSheet(panel, for: self.window) { [weak self] resp in
-            guard let self, resp == .OK, let outputURL = panel.url else { return }
+        preparePlaintextExport(sink: .historyNDJSON) { [weak self] ticket in
+            guard let self else { return }
             let content = self.buildHistoryNdjsonExport()
-            do {
-                try content.write(to: outputURL, atomically: true, encoding: .utf8)
-                self.showInfoAlert(
-                    title: "Экспорт NDJSON",
-                    body: "Сохранено записей: \(self.items.count)\n\(outputURL.path)"
-                )
-            } catch {
-                self.showInfoAlert(
-                    title: "Экспорт NDJSON",
-                    body: "Не удалось сохранить файл: \(error.localizedDescription)"
-                )
+            let count = self.items.count
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyyMMdd_HHmmss"
+            let panel = NSSavePanel()
+            panel.canCreateDirectories = true
+            panel.nameFieldStringValue = "krab_ear_history_\(formatter.string(from: Date())).ndjson"
+            panel.allowedContentTypes = [.json]
+            panel.title = "Сохранить экспорт NDJSON"
+            panel.prompt = "Сохранить"
+            presentPanelSheet(panel, for: self.window) { [weak self] response in
+                guard let self, response == .OK, let outputURL = panel.url else { return }
+                self.writePlaintextExport(ticket: ticket, content: content, to: outputURL) { [weak self] in
+                    self?.showInfoAlert(title: "Экспорт NDJSON", body: "Сохранено записей: \(count)\n\(outputURL.path)")
+                }
             }
         }
     }

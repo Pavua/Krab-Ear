@@ -17,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT / "KrabEar"))
 
 from backend.export_scheduler import ExportScheduler  # noqa: E402
+from _plaintext_export_test_helpers import off_authorizer
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +51,7 @@ class TestExportAtomicNoPartialFileOnCrash(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
-        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
         self.store = _make_store()
 
     def tearDown(self):
@@ -143,7 +144,7 @@ class TestExportSkipsInPrivacyMode(unittest.TestCase):
     2. When settings_provider returns privacy_mode_enabled=False, export proceeds.
     3. Return value contains {"exported": False, "reason": "privacy_mode_active"}.
     4. No history data is loaded from store while privacy mode is active.
-    5. If settings_provider raises, export proceeds (fail-open for data safety).
+    5. If settings_provider raises, export is blocked (fail-closed).
     """
 
     def setUp(self):
@@ -157,6 +158,7 @@ class TestExportSkipsInPrivacyMode(unittest.TestCase):
     def _make_scheduler(self, privacy_on: bool) -> ExportScheduler:
         settings = {"privacy_mode_enabled": privacy_on}
         sched = ExportScheduler(
+            plaintext_export_authorizer=off_authorizer(),
             data_dir=self.data_dir,
             settings_provider=lambda: settings,
         )
@@ -206,9 +208,9 @@ class TestExportSkipsInPrivacyMode(unittest.TestCase):
         self.assertIn("path", result, "Normal export should contain 'path'")
         self.assertTrue(Path(result["path"]).exists())
 
-    def test_export_proceeds_without_settings_provider(self):
-        """When no settings_provider is given, export proceeds normally (legacy compat)."""
-        sched = ExportScheduler(data_dir=self.data_dir)
+    def test_export_proceeds_with_explicit_off_policy_without_settings_provider(self):
+        """Explicit known-OFF authorizer permits export without legacy settings_provider."""
+        sched = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
         sched.configure(fmt="json", enabled=True)
 
         result = sched.check_and_export(self.store)
@@ -226,6 +228,7 @@ class TestExportSkipsInPrivacyMode(unittest.TestCase):
             raise RuntimeError("settings unavailable")
 
         sched = ExportScheduler(
+            plaintext_export_authorizer=off_authorizer(),
             data_dir=self.data_dir,
             settings_provider=bad_provider,
         )
@@ -243,6 +246,7 @@ class TestExportSkipsInPrivacyMode(unittest.TestCase):
         state = {"privacy_mode_enabled": True}
 
         sched = ExportScheduler(
+            plaintext_export_authorizer=off_authorizer(),
             data_dir=self.data_dir,
             settings_provider=lambda: dict(state),
         )

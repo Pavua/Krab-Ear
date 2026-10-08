@@ -643,39 +643,59 @@ extension AgentAppDelegate {
         _ = try? await ipcClient.callAsync(
             method: "set_paste_status",
             params: ["id": historyId, "paste_status": "skipped"], timeoutSec: 10)
-        await sendQuickCaptureCopies(text: result["text"] as? String ?? "", historyId: historyId)
+        let copyWarnings = await sendQuickCaptureCopies(
+            text: result["text"] as? String ?? "", historyId: historyId)
         // Свежая заметка должна появиться в списке панели, если она открыта.
         if quickCapturePanelController?.window?.isVisible == true {
             refreshQuickCapturePanelNotes()
         }
-        await MainActor.run { BackendToast.shared.show("Заметка сохранена") }
+        let message = (["Заметка сохранена"] + copyWarnings).joined(separator: "; ")
+        await MainActor.run { BackendToast.shared.show(message) }
     }
 
     /// C3a Task 3 (спека §3.3): opt-in дублирование сохранённой заметки в Apple
     /// Notes / Obsidian. Настройки читаются ЖИВЬЁМ через get_settings (НЕ кэш
     /// агента `settings`) — чекбокс в Settings должен действовать сразу после
     /// переключения, без ожидания следующего цикла обновления кэша.
-    func sendQuickCaptureCopies(text: String, historyId: String) async {
-        var liveSettings: [String: Any] = [:]
-        if let resp = try? await ipcClient.callAsync(method: "get_settings", params: [:], timeoutSec: 10),
-           let result = resp["result"] as? [String: Any] {
-            liveSettings = result
+    func sendQuickCaptureCopies(text: String, historyId: String) async -> [String] {
+        var warnings: [String] = []
+        let unavailable = "Настройки копирования недоступны; копии не созданы"
+        let copyToNotes: Bool
+        let copyToObsidian: Bool
+        do {
+            let response = try await ipcClient.callAsync(
+                method: "get_settings", params: [:], timeoutSec: 10)
+            guard response["error"] == nil,
+                  let settings = response["result"] as? [String: Any],
+                  let notes = settings["quick_capture_send_to_notes"] as? Bool,
+                  let obsidian = settings["quick_capture_obsidian_sync"] as? Bool else {
+                return [unavailable]
+            }
+            copyToNotes = notes
+            copyToObsidian = obsidian
+        } catch {
+            return [unavailable]
         }
 
-        if (liveSettings["quick_capture_send_to_notes"] as? Bool) == true {
-            await sendQuickCaptureNoteToAppleNotes(text: text)
+        if copyToNotes {
+            if let warning = await sendQuickCaptureNoteToAppleNotes(text: text) {
+                warnings.append(warning)
+            }
         }
-        if (liveSettings["quick_capture_obsidian_sync"] as? Bool) == true {
-            await syncQuickCaptureNoteToObsidian(text: text, historyId: historyId)
+        if copyToObsidian {
+            if let warning = await syncQuickCaptureNoteToObsidian(text: text, historyId: historyId) {
+                warnings.append(warning)
+            }
         }
+        return warnings
     }
 
     /// title — первые ~60 символов ПЕРВОЙ строки текста (не всего текста целиком —
     /// длинная заметка без переводов строк не должна порождать гигантский заголовок).
     /// Приватный режим и сам осечка osascript уже гейтятся внутри
     /// handle_create_apple_note (apple_integration_service.py) — здесь только
-    /// разворачиваем ok:false в toast с текстом ответа backend'а.
-    private func sendQuickCaptureNoteToAppleNotes(text: String) async {
+    /// возвращаем безопасное предупреждение для единого итогового toast.
+    private func sendQuickCaptureNoteToAppleNotes(text: String) async -> String? {
         let firstLine = text.split(separator: "\n", maxSplits: 1, omittingEmptySubsequences: false)
             .first.map(String.init) ?? text
         let trimmedFirstLine = firstLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -687,35 +707,30 @@ extension AgentAppDelegate {
             params: ["title": title.isEmpty ? "Быстрая заметка" : title, "body": text, "folder": "Krab Ear"],
             timeoutSec: 15
         ), let result = resp["result"] as? [String: Any] else {
-            await MainActor.run { BackendToast.shared.show("Не удалось сохранить заметку в Notes") }
-            return
+            return "Не удалось сохранить копию в Notes"
         }
-        if (result["ok"] as? Bool) != true {
-            // Ответ backend'а несёт user_msg (человекочитаемо, напр. privacy-гейт)
-            // либо error (техническое сообщение osascript) — сверено с
-            // apple_integration_service.py::handle_create_apple_note.
-            let message = (result["user_msg"] as? String)
-                ?? (result["error"] as? String)
-                ?? "Не удалось сохранить заметку в Notes"
-            await MainActor.run { BackendToast.shared.show(message) }
-        }
+        return (result["ok"] as? Bool) == true
+            ? nil : "Не удалось сохранить копию в Notes"
     }
 
-    /// Obsidian: per-item IPC-метода НЕТ — ObsidianSyncManager.sync(items, force)
-    /// (backend/obsidian_sync.py) принимает СПИСОК items, поэтому форс-синк
-    /// заметки собирает минимальный item-словарь {id, ts, text} из данных, уже
-    /// имеющихся в этом флоу (см. NOTES отчёта Task 3 — точное имя IPC-метода:
-    /// run_obsidian_sync → ObsidianSyncManager.handle_sync). Нет настроенного
-    /// vault → sync() кидает RuntimeError → IPC-диспетчер отдаёт тихий
-    /// invalid_request (ok:false) — здесь молча игнорируем (спека §3.3: "иначе
-    /// чекбокс disabled с подсказкой"; v1 упрощение — тихий no-op, без тоста).
-    private func syncQuickCaptureNoteToObsidian(text: String, historyId: String) async {
+    /// run_obsidian_sync получает scoped RAM session от общего coordinator.
+    /// force управляет обновлением файла, но не заменяет согласие на plaintext.
+    /// История уже сохранена; отказ и частичный экспорт отражаются отдельно.
+    private func syncQuickCaptureNoteToObsidian(text: String, historyId: String) async -> String? {
         let ts = ISO8601DateFormatter().string(from: Date())
-        _ = try? await ipcClient.callAsync(
-            method: "run_obsidian_sync",
-            params: ["items": [["id": historyId, "ts": ts, "text": text]], "force": true],
-            timeoutSec: 15
-        )
+        let params: [String: Any] = [
+            "items": [["id": historyId, "ts": ts, "text": text]], "force": true,
+        ]
+        let parentWindow = [quickCapturePanelController?.window, historyPanel?.window]
+            .compactMap { $0 }.first { $0.isVisible }
+        do {
+            let ticket = try await plaintextExportCoordinator.prepareBackend(
+                method: .runObsidianSync, presenting: parentWindow)
+            _ = try await plaintextExportCoordinator.performBackend(ticket, params: params)
+            return nil
+        } catch {
+            return "Obsidian: " + PlaintextExportCoordinator.errorMessage(error)
+        }
     }
 
     // MARK: - C3b Task 2: панель-скретчпад (QuickCapturePanelController)

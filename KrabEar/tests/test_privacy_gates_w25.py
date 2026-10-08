@@ -9,6 +9,8 @@ Covers:
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import os
 import sys
@@ -169,6 +171,7 @@ class TestSharingManagerPrivacyGate(unittest.TestCase):
         mgr = SharingManager(
             store=store,
             privacy_mode_fn=lambda: True,
+            plaintext_export_authorizer=off_authorizer(privacy_provider=lambda: True),
         )
         result = mgr.handle_prepare_share({"item_ids": ["id1"]})
         self.assertFalse(result["ok"])
@@ -181,6 +184,7 @@ class TestSharingManagerPrivacyGate(unittest.TestCase):
         mgr = SharingManager(
             store=store,
             privacy_mode_fn=lambda: True,
+            plaintext_export_authorizer=off_authorizer(privacy_provider=lambda: True),
         )
         shares_dir = Path(store.data_dir) / "shares"
         before = set(os.listdir(shares_dir)) if shares_dir.exists() else set()
@@ -199,6 +203,7 @@ class TestSharingManagerPrivacyGate(unittest.TestCase):
         mgr = SharingManager(
             store=store,
             privacy_mode_fn=lambda: False,
+            plaintext_export_authorizer=off_authorizer(privacy_provider=lambda: False),
         )
         result = mgr.handle_prepare_share({"item_ids": ["id1"]})
         # Should not return privacy_mode_active
@@ -210,7 +215,7 @@ class TestSharingManagerPrivacyGate(unittest.TestCase):
         """Without a privacy_mode_fn (None), sharing is allowed."""
         store = self._make_store()
         store.get_history_item_by_id = MagicMock(return_value=None)
-        mgr = SharingManager(store=store)  # privacy_mode_fn=None
+        mgr = SharingManager(store=store, plaintext_export_authorizer=off_authorizer())  # privacy_mode_fn=None
         result = mgr.handle_prepare_share({"item_ids": ["id1"]})
         self.assertNotEqual(result.get("reason"), "privacy_mode_active")
 
@@ -221,6 +226,7 @@ class TestSharingManagerPrivacyGate(unittest.TestCase):
         mgr = SharingManager(
             store=store,
             privacy_mode_fn=lambda: privacy_on[0],
+            plaintext_export_authorizer=off_authorizer(privacy_provider=lambda: privacy_on[0]),
         )
         store.get_history_item_by_id = MagicMock(return_value=None)
         # Off → allowed

@@ -6,6 +6,8 @@ _find_share_by_token_constant_time instead of plain dict lookup.
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import ast
 import hmac
 import sys
@@ -63,7 +65,7 @@ class FakeStore:
 def _make_manager(data_dir: str) -> SharingManager:
     store = FakeStore(data_dir)
     store.add_fake_item("item-1", "Test transcript")
-    return SharingManager(store, share_no_default_ttl=True), store
+    return SharingManager(store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer()), store
 
 
 # ---------------------------------------------------------------------------

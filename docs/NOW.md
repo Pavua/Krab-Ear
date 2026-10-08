@@ -1,41 +1,78 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## Автовставка 2026-10-08 — живая проверка PASS, source PR отдельно
+## 2026-10-08 — CI repair A5.3 и исправление Accessibility
 
-Диктовка скопировалась в clipboard, но не вставилась в Codex. Живой журнал
-03:16 CEST подтвердил `AX=false`, ошибку System Events 1002 и
-`accessibility_not_granted`. Сохранённый Accessibility grant требует сертификат
-`Krab Ear Dev Local`. На момент сбоя работавший `.app` был подписан ad-hoc
-и не соответствовал этому requirement. Переключение разрешений само по себе это несоответствие
-подписи не устраняет. Какой скрипт последним записал живой бинарник, не установлено.
+Свежая база линии: `origin/codex/krab-ear-v2` =
+`efecb801aae3f3c62fa03314ba4f5b142ac8e906`. A/B/C остаются открытыми PR.
+A #2077 `00ba3300`, B #2078 `d24f001a`, C #2079 `886f061a`:
+полный exact-SHA CI GREEN (по 27 checks, оба backend jobs SUCCESS).
+C три Swift build jobs SUCCESS. Local B/C fixture repair: 34 файла,
+839 passed, 37 subtests, 1 skipped; independent fixture delta review PASS.
+[CI repair](superpowers/handoffs/2026-10-08-a53-ci-contracts.md).
 
-Draft [PR #2080](https://github.com/Pavua/Krab-Ear/pull/2080), ветка
-`codex/ear-paste-signing-20261008` от `efecb801`, исправляет локальные пути
-подписи: один selector существующего сертификата, отказ до сборки/копирования/
-остановки при его недоступности, без ad-hoc fallback и скрытых signing errors.
-Карточка: [agent signing identity](superpowers/plans/2026-10-08-agent-signing-identity.md).
-Это не делает старые установщики транзакционными при ошибке после копирования.
+Card D: isolated real IPC + production Swift IPC/coordinator harness LOCAL GREEN.
+27 integration tests + 1 low-disk isolation regression прошли project py312
+harness. Final independent Astra Ultra Linux delta + whole-D/matrix review
+PASS; [D #2081](https://github.com/Pavua/Krab-Ear/pull/2081) открыт,
+CI `68a05ae` выявил optional-ML import-side-effect только в D fixture;
+CPU-only import fence закрыт 12 RED→GREEN cases без ослабления guard.
+Текущий exact-SHA CI статус — PR Checks. База PR — основная линия, чтобы запускались все
+guards; отдельная D-дельта — поверх C `886f061a`. Production sources A/B/C не менялись; дополнительный test helper P2
+закрыт в D. Transport failure-output P2 также закрыт: 6 RED→GREEN cases.
+Full local Swift build пропущен при высоком swap; малый harness
+скомпилирован и выполнен, новый D exact-SHA CI ещё требуется.
+[Матрица D и ограничения](superpowers/handoffs/2026-10-08-a53-card-d-verification.md).
 
-По отдельному разрешению владельца копия текущей сборки подписана прежним
-сертификатом и применена в 03:39 CEST: три idle-пробы и финальная IPC-проверка,
-agent-only `bootout`, подтверждение исчезновения старых job/PID, атомарная
-замена только executable внутри `.app`, strict/deep и сохранённый TCC requirement,
-`bootstrap` прежнего plist. Код и ресурсы прежней сборки; Swift не пересобирался.
-Rollback сохранён приватно. TCC, Keychain и настройки не менялись.
+A5.3 не смержен/не выкачен, шифрование не активировано. Timeline UI при ON
+остаётся documented narrow-C LIMIT; production UI/live/encrypted-history E2E
+не заявляются. Main/Gateway и старые worktree WIP сохранены. Исторические
+runtime PID ниже не применять как текущие.
 
-Новый Swift PID **2800**, `runs=1`, BackendSupervisor **passive**; свежий лог:
-`Accessibility AX trusted at startup: true` вместо прежнего false. Backend
-**3957** / REST **3924**, оба `runs=1`, сохранены. IPC ping и REST health HTTP 200.
-В 03:40 владелец подтвердил реальную автоматическую вставку диктовки в Codex
-без Cmd+V. Это доказывает проверенный маршрут Codex; другие приложения,
-аудиодвижки и встречи не проверялись.
+Accessibility repair #2080 `2290b528`: полный CI GREEN, PR ready for review.
+Ранее по отдельному разрешению владельца исправлена только подпись живого
+Swift-агента и выполнен его управляемый рестарт. Owner подтвердил вставку
+диктовки в Codex без Cmd-V; Backend/REST были сохранены. Это отдельная приёмка
+подписи, не deployment A5.3 и не новый restart GO.
 
-Source-тесты: 13 PASS на Python 3.12 и 3.14; независимый Astra Ultra whole-diff
-review и отдельный прогон PASS. Защита установщиков находится в draft PR:
-не смержена и в shared checkout не перенесена. GitHub CI проверяется по точному
-head отдельно; source/CI не подменяют подтверждённую выше live-проверку.
+Ниже сохранены более ранние checkpoints, актуальные только на их дату.
 
-## Cutover 2026-09-30 — исторический снимок
+## A5.3 Card C, 2026-10-03 — работа продолжается
+
+Card A [#2077](https://github.com/Pavua/Krab-Ear/pull/2077): source/local PASS,
+полный backend CI FAILED в 29 тестовых файлах; исправления fixtures/docs ведутся
+отдельно. Card B [#2078](https://github.com/Pavua/Krab-Ear/pull/2078): source/local
+PASS, backend CI пока выполняется. Startup #2075 и docs #2076 CI PASS.
+Card C поверх `9358cd78`: Astra High source review, release build, 324 Swift
+tests, 8 зависимых Python-файлов, новый launcher py3.12 parity и audit-all PASS.
+Далее C PR/CI и Card D isolated IPC E2E. Merge/deploy/encryption activation
+не выполнялись.
+[Текущий checkpoint C](superpowers/handoffs/2026-10-03-a53-card-c-progress.md).
+
+Ниже — более ранние checkpoints; их слова «ещё впереди» относятся к их дате.
+
+## A5.3 Card B, 2026-10-03 — source checkpoint
+
+База main-линии повторно сверена: `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
+Card A: [PR #2077](https://github.com/Pavua/Krab-Ear/pull/2077),
+`93c7e0b0d46b730c64c4a924d48b0f124cbce369`, OPEN; основной CI PASS,
+backend chunked CI ещё выполняется. Card B поверх этого SHA:
+Astra High source PASS, Python3.12 parity49files PASS, audit-all PASS.
+Card B PR/CI ещё впереди; C/D код не начат. Merge/deploy не выполнялись.
+[Матрица Card B и ограничения](superpowers/handoffs/2026-10-03-a53-card-b-progress.md).
+
+## A5.3, 2026-10-03 — source checkpoint
+
+База разработки: `origin/codex/krab-ear-v2` = `efecb801aae3f3c62fa03314ba4f5b142ac8e906`.
+Card A завершён в `codex/ear-a53-completion`: независимый Astra High source PASS,
+Python 3.12 parity 56 файлов PASS, audit-all PASS. Source PR/CI ещё впереди;
+Card B/C/D ещё не реализованы. Деплой и включение шифрования не выполнялись.
+Матрица и существенный риск прежней backup-изоляции тестов:
+[Card A verification](superpowers/handoffs/2026-10-03-a53-card-a-verification.md).
+[Текущий handoff](superpowers/handoffs/2026-10-03-a53-autonomous-progress.md).
+
+Сведения runtime ниже — снимок 30.09, в этой source-сессии не перепроверялись.
+
+## Cutover 2026-09-30 — текущий runtime
 
 **Backend и REST работают на `1ebd12eb69695296a13c39eac35a9b7af3405ba5`**
 ([#2072](https://github.com/Pavua/Krab-Ear/pull/2072)) с 03:37 CEST:

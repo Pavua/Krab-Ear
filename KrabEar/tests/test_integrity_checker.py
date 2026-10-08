@@ -171,17 +171,17 @@ class IntegrityCheckerTestCase(unittest.TestCase):
         )
         self.assertIsNotNone(settings_check)
         self.assertEqual(settings_check.status, "error")
-        self.assertTrue(settings_check.auto_fixable)
+        self.assertFalse(settings_check.auto_fixable)
 
-    def test_repair_fixes_corrupted_settings_json(self) -> None:
-        """repair() восстанавливает повреждённый settings.json до {}."""
+    def test_repair_leaves_corrupted_policy_for_explicit_settings_repair(self) -> None:
+        """generic repair не знает желаемые privacy/encryption и оставляет UNKNOWN."""
         settings_path = self.data_dir / "settings.json"
         settings_path.write_text('{"broken json', encoding="utf-8")
         report = self.checker.check_integrity(self.data_dir)
         result = self.checker.repair(self.data_dir, report)
-        self.assertGreaterEqual(result.fixed, 0)
-        repaired = json.loads(settings_path.read_text(encoding="utf-8"))
-        self.assertIsInstance(repaired, dict)
+        self.assertEqual(result.fixed, 0)
+        self.assertGreaterEqual(result.skipped, 1)
+        self.assertEqual(settings_path.read_text(encoding="utf-8"), '{"broken json')
 
     def test_check_integrity_timestamp_format_validation(self) -> None:
         """Items с неправильным форматом timestamp обнаруживаются."""

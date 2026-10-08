@@ -224,20 +224,31 @@ class TestSetSettingsInvalidJsonRollback(unittest.TestCase):
         from unittest.mock import patch
 
         with tempfile.TemporaryDirectory() as tmp:
-            store = _make_store(tmp)
+            # Профиль создаёт сам StateStore (достоверно новый), поэтому первая
+            # поддержанная запись разрешена: долговечный guard отказывает только
+            # на неполном/отсутствующем settings.json существующего профиля.
+            # Инвариант теста (сорванный atomic swap не бьёт settings.json) от
+            # этого не меняется.
+            profile_dir = Path(tmp) / "profile"
+            store = _make_store(str(profile_dir))
             # Write initial good state
             store.save_settings({"volume": 75})
-            original_raw = (Path(tmp) / "settings.json").read_text(encoding="utf-8")
+            original_raw = (profile_dir / "settings.json").read_text(encoding="utf-8")
             original = json.loads(original_raw)
             self.assertEqual(original["volume"], 75)
 
-            # Now mock Path.replace to raise so the atomic swap fails
-            with patch("pathlib.Path.replace", side_effect=OSError("disk full")):
+            # Now mock the atomic swap to fail.
+            # A5.3: save_settings теперь пишет через core.atomic_io.atomic_write_text
+            # (уникальный temp + fsync + os.replace) вместо прежнего
+            # `Path.with_suffix(".json.tmp")` + `Path.replace`. Мокается поэтому
+            # os.replace — именно та точка, где обмен атомарен. Инвариант теста
+            # прежний: сорванная подмена не должна оставить settings.json битым.
+            with patch("os.replace", side_effect=OSError("disk full")):
                 with self.assertRaises(OSError):
                     store.save_settings({"volume": 99})
 
             # settings.json must still be parseable and contain the old value
-            after_raw = (Path(tmp) / "settings.json").read_text(encoding="utf-8")
+            after_raw = (profile_dir / "settings.json").read_text(encoding="utf-8")
             try:
                 after = json.loads(after_raw)
             except json.JSONDecodeError as exc:

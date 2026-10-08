@@ -21,6 +21,8 @@ handlers ``configure_obsidian_sync`` / ``run_obsidian_sync`` (Unix socket).
 
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import sys
 import tempfile
@@ -69,7 +71,7 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
         self.vault_dir.mkdir()
         # Директория-«жертва» ВНЕ vault, в которую атакующий пытается записать.
         self.outside_dir = self.root / "outside"
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
 
     # ------------------------------------------------------------------
     # configure() — абсолютный folder
@@ -189,7 +191,7 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
         state_path = self.data_dir / "obsidian_sync.json"
         state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        mgr2 = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr2 = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         # vault загружен, но небезопасный folder заменён на _DEFAULT_FOLDER.
         self.assertEqual(mgr2.get_sync_status()["folder"], _DEFAULT_FOLDER)
 
@@ -201,7 +203,7 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
     def test_load_state_keeps_valid_folder(self) -> None:
         """Валидный folder из state-файла сохраняется без изменений."""
         self.mgr.configure(str(self.vault_dir), folder="MyNotes")
-        mgr2 = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr2 = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.assertEqual(mgr2.get_sync_status()["folder"], "MyNotes")
 
     # ------------------------------------------------------------------

@@ -17,6 +17,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.plaintext_export_sinks import (
+    BackendSink, PlaintextExportDenied, precheck_export, run_export_write,
+)
+
 logger = logging.getLogger("KrabEar.Backend.ExportScheduler")
 
 # Форматы, поддерживаемые планировщиком
@@ -40,6 +44,8 @@ class ExportScheduler:
         data_dir: Path | str,
         max_exports: int = MAX_EXPORTS_DEFAULT,
         settings_provider: Callable[[], dict] | None = None,
+        *,
+        plaintext_export_authorizer: Any = None,
     ) -> None:
         """
         Args:
@@ -51,6 +57,7 @@ class ExportScheduler:
         self.data_dir = Path(data_dir)
         self.max_exports = max_exports
         self._settings_provider = settings_provider
+        self._plaintext_export_authorizer = plaintext_export_authorizer
         self._lock = threading.Lock()
 
     # ------------------------------------------------------------------
@@ -128,6 +135,7 @@ class ExportScheduler:
 
         Обновляет список exports в расписании и возвращает обновлённый dict.
         """
+        precheck_export(self._plaintext_export_authorizer, None, BackendSink.SCHEDULER)
         exports: list[dict] = schedule.get("exports", [])
 
         # Удаляем записи с несуществующими файлами
@@ -153,8 +161,13 @@ class ExportScheduler:
             try:
                 # Еще раз проверим перед удалением (защита от race conditions/symlinks)
                 if p.resolve().is_relative_to(data_dir_resolved):
-                    p.unlink(missing_ok=True)
+                    run_export_write(
+                        self._plaintext_export_authorizer, None, BackendSink.SCHEDULER,
+                        lambda: p.unlink(missing_ok=True),
+                    )
                     logger.info("Удалён старый авто-экспорт: %s", p)
+            except PlaintextExportDenied:
+                raise
             except Exception as exc:
                 logger.warning("Не удалось удалить авто-экспорт %s: %s", p, exc)
 
@@ -163,7 +176,7 @@ class ExportScheduler:
 
     def _do_export(self, store: Any, fmt: str, output_dir: Path) -> dict:
         """Выполняет один экспорт и возвращает метаданные файла."""
-        output_dir.mkdir(parents=True, exist_ok=True)
+        precheck_export(self._plaintext_export_authorizer, None, BackendSink.SCHEDULER)
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         ext_map = {
             "srt": "srt",
@@ -181,16 +194,21 @@ class ExportScheduler:
         # Атомарная запись: пишем во временный файл, делаем fsync, затем rename.
         # Это предотвращает усечённый файл при падении в середине записи.
         tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
-        try:
-            with open(tmp_path, "w", encoding="utf-8") as fh:
-                fh.write(content)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_path, file_path)
-        except Exception:
-            # Убираем временный файл при ошибке, не оставляем мусор
-            tmp_path.unlink(missing_ok=True)
-            raise
+
+        def write_once() -> None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            try:
+                with open(tmp_path, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                os.replace(tmp_path, file_path)
+            except Exception:
+                # Убираем временный файл при ошибке, не оставляем мусор
+                tmp_path.unlink(missing_ok=True)
+                raise
+
+        run_export_write(self._plaintext_export_authorizer, None, BackendSink.SCHEDULER, write_once)
         size_bytes = file_path.stat().st_size
 
         logger.info("Авто-экспорт создан: %s (%d байт)", file_path, size_bytes)
@@ -459,14 +477,26 @@ class ExportScheduler:
             fmt = str(schedule.get("format", "json"))
             output_dir = self._effective_output_dir(schedule)
 
-            entry = self._do_export(store, fmt, output_dir)
+            try:
+                entry = self._do_export(store, fmt, output_dir)
+            except PlaintextExportDenied as exc:
+                return {"exported": False, "reason": exc.reason}
 
-            schedule["last_export_ts"] = datetime.now(timezone.utc).isoformat()
-            exports: list[dict] = schedule.get("exports", [])
-            exports.append(entry)
-            schedule["exports"] = exports
-            schedule = self._prune_old_exports(schedule)
-            self._save_schedule(schedule)
+            # Файл уже разрешён и сохранён. Отзыв не удаляет его и не даёт
+            # права продолжать pruning или записывать новый checkpoint.
+            try:
+                precheck_export(self._plaintext_export_authorizer, None, BackendSink.SCHEDULER)
+                schedule["last_export_ts"] = datetime.now(timezone.utc).isoformat()
+                exports: list[dict] = schedule.get("exports", [])
+                exports.append(entry)
+                schedule["exports"] = exports
+                schedule = self._prune_old_exports(schedule)
+                run_export_write(
+                    self._plaintext_export_authorizer, None, BackendSink.SCHEDULER,
+                    lambda: self._save_schedule(schedule),
+                )
+            except PlaintextExportDenied as exc:
+                return {**entry, "exported": True, "partial": True, "reason": exc.reason}
 
             return entry
 

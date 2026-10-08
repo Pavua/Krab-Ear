@@ -139,19 +139,17 @@ class TestBackupAndQuarantineOnRepair(unittest.TestCase):
         self.assertIsInstance(result.quarantine_paths, list)
         self.assertTrue(len(result.quarantine_paths) >= 1)
 
-    def test_settings_backup_created_on_corrupt_settings(self) -> None:
-        """repair() creates a backup of corrupted settings.json."""
+    def test_corrupt_settings_require_explicit_repair_without_mutation(self) -> None:
+        """Generic repair не подменяет UNKNOWN пустыми настройками и не копирует их."""
         settings_path = self.data_dir / "settings.json"
         original_content = b'{"broken json'
         settings_path.write_bytes(original_content)
-
         report = self.checker.check_integrity(self.data_dir)
         result = self.checker.repair(self.data_dir, report)
-
-        self.assertTrue(result.backup_paths, "Backup must be created for corrupted settings")
-        backup = Path(result.backup_paths[0])
-        self.assertTrue(backup.exists())
-        self.assertEqual(backup.read_bytes(), original_content)
+        self.assertEqual(result.fixed, 0)
+        self.assertEqual(result.backup_paths, [])
+        self.assertEqual(settings_path.read_bytes(), original_content)
+        self.assertTrue(any("явное восстановление" in detail for detail in result.details))
 
     def test_tombstones_not_modified_by_repair(self) -> None:
         """W1776 fix: repair() must not touch the tombstones file at all.
@@ -420,12 +418,10 @@ class TestDetailMessageNoExtraBrace(unittest.TestCase):
             (d for d in result.details if "settings_json" in d), None
         )
         self.assertIsNotNone(settings_detail, "settings_json detail must exist")
-        # Must end with '{}'  (no trailing extra brace)
-        self.assertTrue(
-            settings_detail.rstrip().endswith("{}"),
-            f"Detail must end with '{{}}', got: {settings_detail!r}",
-        )
+        self.assertIn("явное восстановление", settings_detail)
         self.assertNotIn("{}}", settings_detail)
+        self.assertEqual((self.data_dir / "settings.json").read_text(), "BAD JSON")
+
 
 
 class TestHandleRepairDataExposesBackupPaths(unittest.TestCase):

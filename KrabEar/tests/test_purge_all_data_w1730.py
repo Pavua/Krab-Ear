@@ -23,6 +23,8 @@ Covers:
 
 from __future__ import annotations
 
+from _settings_test_helpers import safe_backend_for_settings
+
 import json
 import sys
 import tempfile
@@ -99,7 +101,7 @@ class FakeStore:
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return {}
 
-    def save_settings(self, settings: dict) -> dict:
+    def save_settings(self, settings: dict, **_kwargs) -> dict:
         return settings
 
 
@@ -629,10 +631,9 @@ class PurgeAllDataWiringTestCase(unittest.TestCase):
         """BackendService.__init__ must set history._recording_chain_mgr = self._chains."""
         import tempfile as _tmpfile
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(_tmpfile.mkdtemp()))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._recording_chain_mgr,
@@ -644,10 +645,9 @@ class PurgeAllDataWiringTestCase(unittest.TestCase):
         """BackendService.__init__ must wire _archive_manager into _history._archive_manager."""
         import tempfile as _tmpfile
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(_tmpfile.mkdtemp()))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._archive_manager,
@@ -659,10 +659,9 @@ class PurgeAllDataWiringTestCase(unittest.TestCase):
         """BackendService.__init__ must wire _bookmarks into _history._bookmarks."""
         import tempfile as _tmpfile
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(_tmpfile.mkdtemp()))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._bookmarks,
@@ -674,10 +673,9 @@ class PurgeAllDataWiringTestCase(unittest.TestCase):
         """BackendService.__init__ must wire _call_session_store into _history."""
         import tempfile as _tmpfile
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(_tmpfile.mkdtemp()))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._call_session_store,
@@ -691,8 +689,9 @@ class PurgeAllDataWiringTestCase(unittest.TestCase):
         W1769: dispatch table consolidated inline in service.py (single source of
         truth); ipc_dispatch.py removed.
         """
-        from backend.service import BackendService
         import inspect
+        from backend.service import BackendService
+
         source = inspect.getsource(BackendService._build_dispatch_table)
         self.assertIn(
             '"purge_all_data"',
@@ -712,10 +711,9 @@ class PurgeAllDataWiringTestCase(unittest.TestCase):
         """handle_delete_history_item removes item from its chain (chain wire functional)."""
         import tempfile as _tmpfile
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(_tmpfile.mkdtemp()))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         # Create an item and add it to a chain
         item = store.add_history_item(text="hello world")
@@ -925,10 +923,9 @@ class PurgeAllDataE2EBackendServiceTestCase(unittest.TestCase):
     def test_purge_all_data_via_handle_request_succeeds(self) -> None:
         """handle_request({'method': 'purge_all_data', 'params': {'confirm': True}}) → ok."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         store.add_history_item(text="e2e test transcript")
 
@@ -946,10 +943,9 @@ class PurgeAllDataE2EBackendServiceTestCase(unittest.TestCase):
     def test_purge_all_data_via_handle_request_confirm_required(self) -> None:
         """handle_request without confirm → confirmation_required, zero tombstones."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
         store.add_history_item(text="must not be deleted")
 
         response = svc.handle_request({

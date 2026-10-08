@@ -78,6 +78,7 @@ class _Base(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.data_dir = Path(self.tmp.name) / "data"
         self.store = StateStore(self.data_dir)
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         self.service = BackendService(
             store=self.store,
             recorder=_FakeRecorder(),

@@ -41,7 +41,7 @@ class _FakeStore:
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False):
         return dict(self._settings)
 
-    def save_settings(self, settings):
+    def save_settings(self, settings, **_kwargs):
         self._settings = dict(settings)
         return dict(settings)
 
@@ -249,6 +249,7 @@ class SnapshotRoundTripTestCase(unittest.TestCase):
 
     def test_apply_then_restore_returns_to_original_settings(self):
         svc = _make_svc(self._tmp)
+        svc.store.save_settings({"history_encryption_enabled": False, "privacy_mode_enabled": False})
         original = svc.cached_settings()
         result = svc.handle_apply_recommended_setup(
             {"dry_run": False}, probe_llm_fn=lambda: {"reachable": False},

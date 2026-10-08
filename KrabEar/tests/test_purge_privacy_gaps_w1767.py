@@ -19,6 +19,8 @@ translation glossary, vocabulary, settings backups.
 
 from __future__ import annotations
 
+from _settings_test_helpers import safe_backend_for_settings
+
 import json
 import os
 import sys
@@ -93,7 +95,7 @@ class FakeStore:
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return dict(self._settings)
 
-    def save_settings(self, settings: dict) -> dict:
+    def save_settings(self, settings: dict, **_kwargs) -> dict:
         self._settings = dict(settings)
         return dict(settings)
 
@@ -832,10 +834,9 @@ class BackendServiceW1767WiringTestCase(unittest.TestCase):
     def test_backend_wires_translation_cache_into_history(self) -> None:
         """BackendService.__init__ должен wire _translation_cache в _history._translation_cache."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._translation_cache,
@@ -847,10 +848,9 @@ class BackendServiceW1767WiringTestCase(unittest.TestCase):
     def test_backend_wires_vocabulary_into_history(self) -> None:
         """BackendService.__init__ должен wire vocabulary в _history._vocabulary_store."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._vocabulary_store,
@@ -862,10 +862,9 @@ class BackendServiceW1767WiringTestCase(unittest.TestCase):
     def test_backend_wires_settings_svc_into_history(self) -> None:
         """BackendService.__init__ должен wire _settings_svc в _history._settings_svc."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._settings_svc,
@@ -877,10 +876,9 @@ class BackendServiceW1767WiringTestCase(unittest.TestCase):
     def test_backend_wires_settings_backup_into_history(self) -> None:
         """BackendService.__init__ должен wire _settings_svc._backup в _history._settings_backup."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._settings_backup,
@@ -896,10 +894,9 @@ class BackendServiceW1767WiringTestCase(unittest.TestCase):
         leaving in-memory share index populated with stale PII after a purge.
         """
         from backend.state_store import StateStore
-        from backend.service import BackendService
 
         store = StateStore(data_dir=Path(self._tmpdir))
-        svc = BackendService(store=store)
+        svc = safe_backend_for_settings(self, store)
 
         self.assertIs(
             svc._history._sharing_manager,

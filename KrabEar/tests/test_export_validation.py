@@ -13,6 +13,8 @@
 """
 
 from __future__ import annotations
+
+from _plaintext_export_test_helpers import history_service_with_off_policy
 from backend.rest_server import _build_prometheus_text
 from backend.timeline_export import TimelineExporter
 from backend.history_service import HistoryService
@@ -41,7 +43,7 @@ def _make_store(tmp_dir: Path) -> StateStore:
 
 
 def _make_svc(store: StateStore) -> HistoryService:
-    return HistoryService(store=store)
+    return history_service_with_off_policy(store=store)
 
 
 def _make_block(
