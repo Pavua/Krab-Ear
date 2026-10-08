@@ -4,11 +4,12 @@
 
 Свежая база линии: `origin/codex/krab-ear-v2` =
 `efecb801aae3f3c62fa03314ba4f5b142ac8e906`. A/B/C остаются открытыми PR.
-Проверенные test/docs fixes опубликованы: A #2077 `00ba3300`, B #2078
-`217bc16a`, C #2079 — этот checkpoint поверх `2f9652a2`.
-На каждой ветке targeted 30-file Python 3.12 CPU-only набор: 731 passed,
-37 subtests, 1 skipped; независимый Astra Ultra fixture delta review PASS.
-Полный exact-SHA GitHub CI новых HEAD ещё выполняется; GREEN не объявлен.
+A #2077 `00ba3300`: полный exact-SHA CI GREEN (27 checks, оба backend jobs).
+B #2078 `d24f001a`, C #2079 — этот checkpoint поверх `a883a162`:
+ещё четыре legacy fixtures исправлены после полного C CI. Targeted Python 3.12
+CPU-only проверка B/C: 34 файла, 839 passed, 37 subtests, 1 skipped;
+независимый Astra Ultra review обоих fixture delta PASS. Новые exact-SHA
+GitHub CI B/C ещё проверяются; их GREEN не объявлен.
 [Проверка и границы](superpowers/handoffs/2026-10-08-a53-ci-contracts.md).
 
 Card D: старый harness существует как незакоммиченный WIP и до первого

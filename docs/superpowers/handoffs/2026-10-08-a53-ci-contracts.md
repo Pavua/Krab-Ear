@@ -90,3 +90,15 @@ Timeline resolver возвращает проверенный путь без mk
 Ultra source delta PASS; patch SHA256
 `06c4035fef1aa9b128e29d137a0ac6bc52321440a8aef970c3fa302d97c67b56`.
 Новые exact-SHA CI B/C проверяются отдельно; этот локальный PASS их не заменяет.
+
+## Повторная проверка C и текущий CI gate
+
+Дополнительные четыре файла после переноса в C также GREEN: 108 passed.
+Вместе с неизменённым 30-file набором: 34 файла, 839 passed, 37 subtests,
+1 skipped. A `00ba3300` полный CI GREEN; B `d24f001a` опубликован; C —
+этот docs checkpoint поверх `a883a162`. Новые B/C CI ещё pending.
+На C `55aec038` три Swift build jobs SUCCESS; backend fixture failures
+исправлены новыми test-only commits, их exact-SHA CI ещё требуется.
+Card D старый WIP не исполнялся: review нашёл ошибки seed и изоляции native
+audio collection, неполную проверку dynamic secrets и fault branches.
+План исправления review PASS; перед первым E2E нужен отдельный gate изоляции.
