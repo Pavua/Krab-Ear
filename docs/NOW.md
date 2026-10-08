@@ -1,5 +1,37 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-08 — разрешённое source-only объединение A5.3
+
+Владелец разрешил source merge семи проверенных PR в `codex/krab-ear-v2`
+с CI итогового точного SHA. Live deploy/build-install/restart, включение
+шифрования, реальные история/Keychain, Main/Gateway в этот scope не входят.
+
+Источник текущего source-статуса — [основная ветка](https://github.com/Pavua/Krab-Ear/tree/codex/krab-ear-v2)
+и состояния [#2076](https://github.com/Pavua/Krab-Ear/pull/2076),
+[#2075](https://github.com/Pavua/Krab-Ear/pull/2075),
+[A #2077](https://github.com/Pavua/Krab-Ear/pull/2077),
+[B #2078](https://github.com/Pavua/Krab-Ear/pull/2078),
+[C #2079](https://github.com/Pavua/Krab-Ear/pull/2079),
+[D #2081](https://github.com/Pavua/Krab-Ear/pull/2081),
+[signing #2080](https://github.com/Pavua/Krab-Ear/pull/2080).
+Порядок объединения: именно этот список. Исходный зелёный CI не заменяет
+проверку обновлённых heads и финального merge SHA.
+
+Подготовленная совместная модель прошла independent Astra Ultra source/
+pre-execution gate и 121 test + 38 subtests на Python 3.12 в синтетических
+профилях. Startup logging hunk сохранён из #2075, A/B/C authorization gates
+побайтно сохранены; signing code соответствует #2080. Известные конфликты
+CSV fixture и CI journal сохраняют проверенные B/C bytes; NOW сохраняет
+актуальный D checkpoint и добавляет этот source-status указатель.
+
+Timeline UI при ON остаётся documented LIMIT. Production UI/live/
+encrypted-history E2E и актуальные runtime PID этим source-этапом не доказываются.
+Шифрование в рамках этой работы не включается. Ранее выполненная owner-confirmed
+автовставка диктовки в Codex — отдельная приёмка подписи живого Swift-агента.
+
+**Ниже — исторические checkpoints на их дату.** Их слова «открыт», «pending»,
+«не смержен» и старые SHA/PID не использовать как текущую merge/runtime картину.
+
 ## 2026-10-08 — CI repair A5.3 и исправление Accessibility
 
 Свежая база линии: `origin/codex/krab-ear-v2` =
