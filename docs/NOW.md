@@ -1,5 +1,18 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-08 — A5.4 preparation: исчезнувший release-root, CUTOVER HOLD
+
+Backend/REST живы, но их loaded entrypoints указывают на отсутствующий
+`ear-release-1ebd12eb/Krab Ear`. Registered old SHA `1ebd12eb…` сохранён в Git;
+loaded module SHA UNKNOWN. Причина исчезновения не установлена.
+Отдельные rollback/candidate source-копии и exact old-tree recovery payload
+подготовлены, Astra provenance/proposal PASS; live-root не восстановлен.
+[Конкретная карточка, evidence и owner scope](superpowers/plans/2026-10-08-a54-prepare-candidate-rollback.md).
+Cutover helper правильно отказал; bundle не создан. Рестарт сейчас не выполнять:
+сначала отдельно разрешённый возврат прежнего root и postcheck.
+Swap ~19.8 GiB used — full Swift build отложен. Idle/health snapshot не является
+restart GO; шифрование/история/Keychain/Main/Gateway не менялись.
+
 ## 2026-10-08 — A5.3 source завершён; следующий этап A5.4
 
 **7/7 PR MERGED**, база `origin/codex/krab-ear-v2`:
