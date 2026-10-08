@@ -36,6 +36,7 @@ except ImportError:
 
 def _make_service(tmp_dir: str) -> tuple[HistoryService, StateStore]:
     store = StateStore(Path(tmp_dir) / "data")
+    store.initialize_startup_plaintext_policy(new_profile=True)
     svc = HistoryService(store=store)
     return svc, store
 

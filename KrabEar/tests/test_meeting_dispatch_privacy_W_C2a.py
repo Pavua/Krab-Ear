@@ -50,6 +50,7 @@ class MeetingBackendIntegrationTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmp.cleanup)
         store = StateStore(Path(self.tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
         self.service = BackendService(
             store=store, recorder=FakeRecorder(),
             transcriber=FakeTranscriber(), translator=FakeTranslator(),
