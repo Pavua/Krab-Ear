@@ -17,6 +17,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.plaintext_export_sinks import (
+    BackendSink, PlaintextExportDenied, export_context, precheck_export, run_export_write,
+)
+
 
 def _sanitize_md_body_text(text: str) -> str:
     """Sanitize a string before inserting it into a Markdown body.
@@ -213,6 +217,8 @@ class SyncResult:
     errors: list[str] = field(default_factory=list)
     new_files: list[str] = field(default_factory=list)
     updated_files: list[str] = field(default_factory=list)
+    partial: bool = False
+    reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -235,6 +241,8 @@ class ObsidianSyncManager:
         data_dir: Path | None = None,
         event_bus=None,
         settings_get: Callable[[str, Any], Any] | None = None,
+        *,
+        plaintext_export_authorizer=None,
     ) -> None:
         self._data_dir: Path | None = Path(data_dir) if data_dir is not None else None
         self._vault_path: Path | None = None
@@ -242,6 +250,7 @@ class ObsidianSyncManager:
         self._last_sync_ts: str | None = None
         self._lock = threading.Lock()
         self._event_bus = event_bus
+        self._plaintext_export_authorizer = plaintext_export_authorizer
         # Optional runtime settings provider (e.g. BackendService._get_runtime_setting).
         # Falls back to always returning the default when not provided (same
         # pattern as AppleIntegrationService).
@@ -316,7 +325,7 @@ class ObsidianSyncManager:
     # Синхронизация
     # ------------------------------------------------------------------
 
-    def sync(self, items: list[Any], force: bool = False) -> SyncResult:
+    def sync(self, items: list[Any], force: bool = False, *, plaintext_export=None) -> SyncResult:
         """Синхронизировать записи истории с Obsidian vault.
 
         Создаёт или обновляет .md файлы в формате Obsidian.
@@ -339,12 +348,15 @@ class ObsidianSyncManager:
             folder = self._folder
             last_sync_ts = self._last_sync_ts
 
+        precheck_export(self._plaintext_export_authorizer, plaintext_export, BackendSink.OBSIDIAN)
+
         import time as _time
 
         # wave-32 MED DoS: cap items to prevent disk-fill on large histories.
         # Truncate BEFORE the path-traversal check so the cap is applied even on
         # force-sync. Log a warning so operators notice the truncation.
-        if len(items) > MAX_SYNC_ITEMS:
+        truncated = len(items) > MAX_SYNC_ITEMS
+        if truncated:
             logger.warning(
                 "ObsidianSync.sync: items truncated %d → %d (MAX_SYNC_ITEMS cap)",
                 len(items),
@@ -358,7 +370,7 @@ class ObsidianSyncManager:
         # ТОТ ЖЕ инвариант контейнмента перед mkdir/write. Если состояние было
         # подделано (folder='../../etc'), sync() откажет вместо записи вне vault.
         target_dir = _validate_and_resolve_folder(vault_path, folder)
-        target_dir.mkdir(parents=True, exist_ok=True)
+        # mkdir входит в fresh-authorized запись первого файла.
 
         if self._event_bus is not None:
             self._event_bus.emit("app.status", {
@@ -395,7 +407,14 @@ class ObsidianSyncManager:
                 existed = md_path.exists()
 
                 content = self._build_md_content(item)
-                md_path.write_text(content, encoding="utf-8")
+
+                def write_note():
+                    target_dir.mkdir(parents=True, exist_ok=True)
+                    md_path.write_text(content, encoding="utf-8")
+
+                run_export_write(
+                    self._plaintext_export_authorizer, plaintext_export, BackendSink.OBSIDIAN, write_note,
+                )
 
                 if existed:
                     result.updated_files.append(str(md_path))
@@ -403,6 +422,11 @@ class ObsidianSyncManager:
                     result.new_files.append(str(md_path))
                 result.synced_count += 1
 
+            except PlaintextExportDenied as exc:
+                result.reason = exc.reason
+                result.errors.append(exc.reason)
+                result.partial = result.synced_count > 0
+                break
             except Exception as exc:
                 item_repr = self._get_item_attr(item, "id", repr(item))
                 logger.error("Ошибка синхронизации записи %s: %s", item_repr, exc)
@@ -420,9 +444,12 @@ class ObsidianSyncManager:
 
         # Обновляем timestamp последней синхронизации
         now_ts = datetime.now(timezone.utc).isoformat()
-        with self._lock:
-            self._last_sync_ts = now_ts
-            self._save_state()
+        # Ошибка/отзыв/лимит не должны прятать ещё не записанные записи.
+        result.partial = bool(result.synced_count and (result.errors or truncated))
+        if not result.errors and not truncated:
+            with self._lock:
+                self._last_sync_ts = now_ts
+                self._save_state()
 
         if self._event_bus is not None:
             self._event_bus.emit("app.status", {
@@ -563,7 +590,10 @@ class ObsidianSyncManager:
         if raw_items is None or not isinstance(raw_items, list):
             raise ValueError("Параметр items (список) обязателен")
         force = bool(params.get("force", False))
-        result = self.sync(raw_items, force=force)
+        try:
+            result = self.sync(raw_items, force=force, plaintext_export=export_context(params))
+        except PlaintextExportDenied as exc:
+            return {"ok": False, "reason": exc.reason, "error": exc.reason}
         return result.to_dict()
 
     def handle_get_status(self, _params: dict[str, Any]) -> dict[str, Any]:

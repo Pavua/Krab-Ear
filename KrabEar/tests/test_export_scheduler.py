@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from backend.export_scheduler import ExportScheduler, SUPPORTED_FORMATS, MAX_EXPORTS_DEFAULT
+from _plaintext_export_test_helpers import off_authorizer
 
 import json
 import sys
@@ -44,7 +45,7 @@ class TestExportSchedulerConfigure(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
-        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -102,7 +103,7 @@ class TestCheckAndExport(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
-        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
         self.store = _make_store()
 
     def tearDown(self):
@@ -167,7 +168,7 @@ class TestExportFormats(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
-        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
         self.store = _make_store()
 
     def tearDown(self):
@@ -246,7 +247,7 @@ class TestGetScheduleStatus(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
-        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
 
     def tearDown(self):
         self._tmpdir.cleanup()
@@ -296,7 +297,7 @@ class TestListExports(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
-        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
         self.store = _make_store()
 
     def tearDown(self):
@@ -354,7 +355,7 @@ class TestPruneOldExports(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def test_prune_keeps_max_exports(self):
-        scheduler = ExportScheduler(data_dir=self.data_dir, max_exports=3)
+        scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir, max_exports=3)
         scheduler.configure(fmt="json", enabled=True)
         for _ in range(5):
             schedule = scheduler._load_schedule()
@@ -366,7 +367,7 @@ class TestPruneOldExports(unittest.TestCase):
         self.assertLessEqual(len(exports), 3)
 
     def test_prune_removes_files_from_disk(self):
-        scheduler = ExportScheduler(data_dir=self.data_dir, max_exports=2)
+        scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir, max_exports=2)
         scheduler.configure(fmt="json", enabled=True)
         paths = []
         for _ in range(4):
@@ -391,7 +392,7 @@ class TestCancel(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
-        self.scheduler = ExportScheduler(data_dir=self.data_dir)
+        self.scheduler = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
         self.store = _make_store()
 
     def tearDown(self):
@@ -413,7 +414,7 @@ class TestCancel(unittest.TestCase):
         self.scheduler.configure(fmt="json", enabled=True)
         self.scheduler.cancel()
         # Reload scheduler from disk — state must persist
-        new_sched = ExportScheduler(data_dir=self.data_dir)
+        new_sched = ExportScheduler(plaintext_export_authorizer=off_authorizer(), data_dir=self.data_dir)
         self.assertFalse(new_sched.get_schedule_status()["enabled"])
 
 
@@ -454,31 +455,16 @@ class TestIpcIntegration(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _make_service(self):
-        """Создаёт BackendService с фейковыми зависимостями."""
+        """Настоящие dispatcher/authorizer, но без аудио/ML constructors."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
+        from _settings_test_helpers import safe_backend_for_settings
         from unittest.mock import patch
 
-        store = StateStore(data_dir=self.data_dir)
-
-        with patch("backend.service.AudioRecorder"), \
-                patch("backend.service.Transcriber"), \
-                patch("backend.service.Translator"), \
-                patch("backend.service.settings") as mock_settings:
-            mock_settings.LLM_ENABLED = False
-            mock_settings.AUTO_BACKUP_ENABLED = False
-            mock_settings.AUTO_EXPORT_ENABLED = False
-            mock_settings.IPC_THROTTLE_ENABLED = False
-            mock_settings.IPC_SIGNING_ENABLED = False
-            mock_settings.PIPELINE_V2 = False
-            mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
-            # Recording-duration watchdog (2026-08-05): __init__ compares these
-            # two numerically — real defaults from core/config.py, not just any
-            # placeholder, so the mock behaves like the actual settings object.
-            mock_settings.RECORDING_DURATION_WARN_SEC = 600.0
-            mock_settings.MAX_DICTATION_DURATION_SEC = 2700.0
-            svc = BackendService(store=store)
-        return svc
+        store = StateStore(data_dir=self.data_dir / "profile")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        with patch("backend.service.settings.IPC_THROTTLE_ENABLED", False), \
+                patch("backend.service.settings.IPC_SIGNING_ENABLED", False):
+            return safe_backend_for_settings(self, store)
 
     def test_configure_auto_export_ipc_method(self):
         svc = self._make_service()
@@ -549,29 +535,16 @@ class TestExportSchedulerPeriodicWorker(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _make_service(self):
+        """Настоящие dispatcher/authorizer, но без аудио/ML constructors."""
         from backend.state_store import StateStore
-        from backend.service import BackendService
+        from _settings_test_helpers import safe_backend_for_settings
         from unittest.mock import patch
 
-        store = StateStore(data_dir=self.data_dir)
-        with patch("backend.service.AudioRecorder"), \
-                patch("backend.service.Transcriber"), \
-                patch("backend.service.Translator"), \
-                patch("backend.service.settings") as mock_settings:
-            mock_settings.LLM_ENABLED = False
-            mock_settings.AUTO_BACKUP_ENABLED = False
-            mock_settings.AUTO_EXPORT_ENABLED = False
-            mock_settings.IPC_THROTTLE_ENABLED = False
-            mock_settings.IPC_SIGNING_ENABLED = False
-            mock_settings.PIPELINE_V2 = False
-            mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
-            # Recording-duration watchdog (2026-08-05): __init__ compares these
-            # two numerically — real defaults from core/config.py, not just any
-            # placeholder, so the mock behaves like the actual settings object.
-            mock_settings.RECORDING_DURATION_WARN_SEC = 600.0
-            mock_settings.MAX_DICTATION_DURATION_SEC = 2700.0
-            svc = BackendService(store=store)
-        return svc
+        store = StateStore(data_dir=self.data_dir / "profile")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        with patch("backend.service.settings.IPC_THROTTLE_ENABLED", False), \
+                patch("backend.service.settings.IPC_SIGNING_ENABLED", False):
+            return safe_backend_for_settings(self, store)
 
     def test_export_scheduler_thread_is_started(self):
         """BackendService.__init__ должен запустить поток 'export-scheduler'."""
@@ -609,28 +582,9 @@ class TestExportSchedulerPeriodicWorker(unittest.TestCase):
         Тест подменяет check_and_export на Mock, заменяет _EXPORT_SCHEDULER_INTERVAL_SEC=0
         и использует side_effect чтобы выйти из цикла после первого вызова.
         """
-        from backend.state_store import StateStore
-        from backend.service import BackendService
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import MagicMock
 
-        store = StateStore(data_dir=self.data_dir)
-        with patch("backend.service.AudioRecorder"), \
-                patch("backend.service.Transcriber"), \
-                patch("backend.service.Translator"), \
-                patch("backend.service.settings") as mock_settings:
-            mock_settings.LLM_ENABLED = False
-            mock_settings.AUTO_BACKUP_ENABLED = False
-            mock_settings.AUTO_EXPORT_ENABLED = False
-            mock_settings.IPC_THROTTLE_ENABLED = False
-            mock_settings.IPC_SIGNING_ENABLED = False
-            mock_settings.PIPELINE_V2 = False
-            mock_settings.TELEGRAM_BRIDGE_URL = "http://localhost:8080"
-            # Recording-duration watchdog (2026-08-05): __init__ compares these
-            # two numerically — real defaults from core/config.py, not just any
-            # placeholder, so the mock behaves like the actual settings object.
-            mock_settings.RECORDING_DURATION_WARN_SEC = 600.0
-            mock_settings.MAX_DICTATION_DURATION_SEC = 2700.0
-            svc = BackendService(store=store)
+        svc = self._make_service()
 
         # Stop the background thread immediately so it doesn't race.
         svc._export_scheduler_stop.set()

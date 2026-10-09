@@ -5,6 +5,8 @@
 """
 
 from __future__ import annotations
+
+from _plaintext_export_test_helpers import history_service_with_off_policy
 from backend.state_store import StateStore
 
 from pathlib import Path
@@ -31,7 +33,7 @@ class HistoryServiceTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
-        self.svc = HistoryService(store=self.store)
+        self.svc = history_service_with_off_policy(store=self.store)
 
     # ------------------------------------------------------------------
     # 1. get_history_page — пустое хранилище

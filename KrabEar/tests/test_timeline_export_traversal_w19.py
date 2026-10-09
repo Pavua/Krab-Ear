@@ -95,7 +95,8 @@ class TestTimelineExportDirContainment(unittest.TestCase):
         """A path inside data_dir must be accepted."""
         subpath = str(Path(self._tmp) / "sub" / "export")
         out = self._svc._resolve_timeline_export_dir(subpath)
-        self.assertTrue(out.is_dir())
+        self.assertEqual(out, Path(subpath).resolve())
+        self.assertFalse(out.exists(), "resolver не создаёт каталог до authorization")
 
     def test_rejects_sibling_dir_bypass(self):
         """A sibling directory that shares a prefix must be rejected.
@@ -104,7 +105,8 @@ class TestTimelineExportDirContainment(unittest.TestCase):
         evil=/Users/pablito_evil/sub — passes startswith but not relative_to.
         We only patch mkdir so the containment check runs without hitting disk.
         """
-        home_str = str(Path.home())
+        # Явный home вне /tmp: redirected test home может лежать в разрешённом tmp.
+        home_str = "/synthetic-ear-home"
         # Construct a path that starts with the home string but is NOT under it.
         evil_base = home_str + "_evil"
         evil_path = os.path.join(evil_base, "sub")
@@ -116,13 +118,13 @@ class TestTimelineExportDirContainment(unittest.TestCase):
         )
         # Verify it is NOT inside home (confirms the test is non-trivial).
         try:
-            Path(evil_path).relative_to(Path.home())
+            Path(evil_path).relative_to(Path(home_str))
             self.fail("Pre-condition failed: evil path is inside home tree")
         except ValueError:
             pass
 
         # The function should reject this via the relative_to containment check.
-        with patch("pathlib.Path.mkdir"):  # avoid disk I/O for non-existent dirs
+        with patch("pathlib.Path.home", return_value=Path(home_str)), patch("pathlib.Path.mkdir"):
             with self.assertRaises(ValueError) as ctx:
                 self._svc._resolve_timeline_export_dir(evil_path)
         self.assertIn("вне разрешённых", str(ctx.exception))
@@ -137,7 +139,7 @@ class TestTimelineExportDirContainment(unittest.TestCase):
         out = self._svc._resolve_timeline_export_dir(None)
         expected = Path(self._tmp) / "exports" / "timeline"
         self.assertEqual(out, expected)
-        self.assertTrue(out.is_dir())
+        self.assertFalse(out.exists(), "resolver не создаёт каталог до authorization")
 
 
 # ---------------------------------------------------------------------------

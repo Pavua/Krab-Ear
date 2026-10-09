@@ -32,8 +32,10 @@ class ObsidianExportPrivacyGateTestCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
         self._privacy: dict[str, object] = {"privacy_mode_enabled": False}
-        self.svc = HistoryService(
-            store=self.store,
+        from _plaintext_export_test_helpers import history_service_with_off_policy
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
+        self.svc = history_service_with_off_policy(
+            self.store,
             cached_settings=lambda: dict(self._privacy),
         )
         # Seed transcript content so a leak would be observable.

@@ -46,6 +46,7 @@ class AutoLearnRealChainEnabledTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         self.settings_svc = SettingsService(store=self.store)
         self.llm_ops_svc = LLMOpsService(
             store=self.store, settings_svc=self.settings_svc, transcriber=None
@@ -104,6 +105,7 @@ class AutoLearnRealChainDisabledTestCase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         self.settings_svc = SettingsService(store=self.store)
         self.llm_ops_svc = LLMOpsService(
             store=self.store, settings_svc=self.settings_svc, transcriber=None

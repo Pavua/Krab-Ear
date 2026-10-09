@@ -30,6 +30,8 @@ from backend.settings_validator import CURRENT_SCHEMA_VERSION
 # ---------------------------------------------------------------------------
 
 _BASE_SETTINGS: dict = {
+    "history_encryption_enabled": False,
+    "privacy_mode_enabled": False,
     "quality_profile": "balanced",
     "cleanup_profile": "soft",
     "translation_mode": "off",
@@ -88,7 +90,7 @@ def _make_store(settings: dict | None = None) -> MagicMock:
     def load_settings(lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return dict(current)
 
-    def save_settings(new_settings: dict) -> dict:
+    def save_settings(new_settings: dict, **_kwargs) -> dict:
         current.clear()
         current.update(new_settings)
         return dict(current)
@@ -199,6 +201,8 @@ class TestRestoreBackupValidateW1435(unittest.TestCase):
         backup_file = Path(self.tmp) / f"{backup_id}.json"
 
         old_schema_data: dict = {
+            "history_encryption_enabled": False,
+            "privacy_mode_enabled": False,
             "quality_profile": "balanced",
             "cleanup_profile": "soft",
             "translation_mode": "off",

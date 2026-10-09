@@ -16,6 +16,8 @@
 """
 from __future__ import annotations
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import json
 import sys
 import tempfile
@@ -73,7 +75,7 @@ class _Base(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.vault_dir = Path(self.tmp.name) / "vault"
         self.vault_dir.mkdir()
-        self.mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        self.mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         self.mgr.configure(str(self.vault_dir))
 
     def _target_dir(self) -> Path:
@@ -190,13 +192,13 @@ class TestSyncSkipsWhenVaultPathMissing(unittest.TestCase):
 
     def test_sync_skips_when_vault_path_missing(self) -> None:
         """sync() вызывает RuntimeError когда vault не настроен."""
-        mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         with self.assertRaises(RuntimeError):
             mgr.sync([_item()])
 
     def test_sync_without_configure_raises_runtime_error(self) -> None:
         """get_sync_status() возвращает configured=False без configure()."""
-        mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         status = mgr.get_sync_status()
         self.assertFalse(status["configured"])
 
@@ -223,7 +225,7 @@ class TestSyncStatePersistedToObsidianSyncJson(_Base):
         original_status = self.mgr.get_sync_status()
 
         # Создаём новый экземпляр с тем же data_dir
-        mgr2 = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr2 = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         reloaded_status = mgr2.get_sync_status()
 
         self.assertTrue(reloaded_status["configured"])
@@ -405,7 +407,7 @@ class TestStateFileCorruptedRecoveredToEmpty(unittest.TestCase):
         state_path = self.data_dir / "obsidian_sync.json"
         state_path.write_text("{ this is NOT valid JSON !!!", encoding="utf-8")
 
-        mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         status = mgr.get_sync_status()
 
         self.assertFalse(status["configured"], "Vault не должен быть настроен после corrupt state")
@@ -421,7 +423,7 @@ class TestStateFileCorruptedRecoveredToEmpty(unittest.TestCase):
         state_path = self.data_dir / "obsidian_sync.json"
         state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         status = mgr.get_sync_status()
 
         # vault_path не существует → не должен быть загружен
@@ -440,7 +442,7 @@ class TestStateFileCorruptedRecoveredToEmpty(unittest.TestCase):
         state_path = self.data_dir / "obsidian_sync.json"
         state_path.write_text(json.dumps(state), encoding="utf-8")
 
-        mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         status = mgr.get_sync_status()
 
         self.assertTrue(status["configured"])

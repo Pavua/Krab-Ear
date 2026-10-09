@@ -104,7 +104,7 @@ def _make_translation_service(
     # save_settings mutates the settings cell and returns the saved dict
     settings_cell = [dict(base)]
 
-    def save_settings(s: dict) -> dict:
+    def save_settings(s: dict, **_kwargs) -> dict:
         settings_cell[0] = dict(s)
         return dict(s)
 
@@ -601,7 +601,7 @@ class GlossaryConcurrencyTestCase(unittest.TestCase):
             settings_cell = [{"translation_glossary": {}}]
             store = MagicMock()
 
-            def save_settings(s: dict) -> dict:
+            def save_settings(s: dict, **_kwargs) -> dict:
                 with lock:
                     settings_cell[0] = dict(s)
                     all_saved.append(dict(s.get("translation_glossary", {})))

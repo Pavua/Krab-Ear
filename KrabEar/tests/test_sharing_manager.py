@@ -1,6 +1,8 @@
 """Unit-тесты для SharingManager."""
 
 from __future__ import annotations
+
+from _plaintext_export_test_helpers import off_authorizer
 from backend.sharing_manager import SharingManager, SharePackage, SUPPORTED_FORMATS
 
 import json
@@ -75,7 +77,7 @@ class GenerateShareIdTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
 
     def test_share_id_length_is_8(self) -> None:
         sid = self._mgr.generate_share_id()
@@ -120,7 +122,7 @@ class PrepareShareTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("id1", "Привет мир")
         self._store.add_fake_item("id2", "Второй элемент", translated_text="Second item")
 
@@ -209,7 +211,7 @@ class ListAndGetSharedTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("a1", "текст А")
         self._store.add_fake_item("b1", "текст Б")
 
@@ -256,7 +258,7 @@ class ListAndGetSharedTestCase(unittest.TestCase):
     def test_index_persisted_across_instances(self) -> None:
         """Созданные пакеты должны быть доступны в новом экземпляре SharingManager."""
         pkg = self._mgr.prepare_share(["a1"])
-        mgr2 = SharingManager(store=self._store)
+        mgr2 = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         found = mgr2.get_shared(pkg.share_id)
         self.assertIsNotNone(found)
         self.assertEqual(found.share_id, pkg.share_id)
@@ -272,7 +274,7 @@ class IPCHandlersTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("x1", "текст X")
 
     def test_handle_prepare_share_returns_dict(self) -> None:
@@ -330,7 +332,7 @@ class RenderFormatsTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item(
             "r1",
             "Тест рендеринга",
@@ -381,7 +383,7 @@ class PersistenceAndCleanupTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("p1", "текст для сохранения")
 
     def test_index_file_created_after_prepare_share(self) -> None:
@@ -409,7 +411,7 @@ class PersistenceAndCleanupTestCase(unittest.TestCase):
         pkg1 = self._mgr.prepare_share(["p1"])
 
         # Создаём новый экземпляр, который загружает индекс с диска
-        mgr2 = SharingManager(store=self._store)
+        mgr2 = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
 
         # Старый пакет должен быть виден
         found = mgr2.get_shared(pkg1.share_id)
@@ -420,10 +422,11 @@ class PersistenceAndCleanupTestCase(unittest.TestCase):
         """Если индекс повреждён, должен создаться пустой индекс без ошибки."""
         # Создаём повреждённый индекс
         index_path = Path(self._tmpdir) / "shares" / "shares_index.json"
+        index_path.parent.mkdir(parents=True, exist_ok=True)
         index_path.write_text("not valid json {", encoding="utf-8")
 
         # Новый экземпляр должен игнорировать повреждённый файл
-        mgr2 = SharingManager(store=self._store)
+        mgr2 = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         # list_shared должен вернуть пустой список (индекс переинициализирован)
         self.assertEqual(mgr2.list_shared(), [])
 
@@ -438,7 +441,7 @@ class ThreadSafetyTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         # Добавляем несколько элементов для параллельного использования
         for i in range(10):
             self._store.add_fake_item(f"item_{i}", f"текст {i}")
@@ -512,7 +515,7 @@ class EdgeCasesTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
 
     def test_very_large_content(self) -> None:
         """Тест с очень большим контентом (10MB)."""
@@ -570,7 +573,7 @@ class SharePackageIdentifierTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("item1", "текст пакета")
 
     def test_create_share_package_returns_share_id(self) -> None:
@@ -626,7 +629,7 @@ class NoExpiryTestCase(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
         # Disable default TTL so packages have no expiry (backward-compat mode)
-        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True)
+        self._mgr = SharingManager(store=self._store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("e1", "вечный текст")
 
     def test_share_package_has_expires_at_none_when_no_default_ttl(self) -> None:
@@ -647,7 +650,7 @@ class NoExpiryTestCase(unittest.TestCase):
     def test_share_survives_manager_reload_no_expiry(self) -> None:
         """Пакет доступен после перезагрузки менеджера (нет TTL)."""
         pkg = self._mgr.prepare_share(["e1"])
-        mgr2 = SharingManager(store=self._store, share_no_default_ttl=True)
+        mgr2 = SharingManager(store=self._store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer())
         found = mgr2.get_shared(pkg.share_id)
         self.assertIsNotNone(found)
         self.assertEqual(found.content, pkg.content)
@@ -659,7 +662,7 @@ class MultiBundleTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._items = []
         for i in range(4):
             item = self._store.add_fake_item(
@@ -728,7 +731,7 @@ class Wave98RequiredTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
 
     # test_create_share_link_for_history_item
     def test_create_share_link_for_history_item(self) -> None:
@@ -746,14 +749,14 @@ class Wave98RequiredTestCase(unittest.TestCase):
     def test_link_no_expiration_24h(self) -> None:
         """W158: default TTL is 168h; бессрочный пакет создаётся с share_no_default_ttl=True."""
         # W158 added TTL. To create a package without expires_at, use share_no_default_ttl=True
-        mgr_no_ttl = SharingManager(store=self._store, share_no_default_ttl=True)
+        mgr_no_ttl = SharingManager(store=self._store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("exp1", "текст без TTL")
         pkg = mgr_no_ttl.prepare_share(["exp1"])
         d = pkg.to_dict()
         # With share_no_default_ttl=True, expires_at should be None
         self.assertIsNone(d.get("expires_at"), "share_no_default_ttl=True should produce no expiry")
         # Package remains accessible after reload
-        mgr2 = SharingManager(store=self._store, share_no_default_ttl=True)
+        mgr2 = SharingManager(store=self._store, share_no_default_ttl=True, plaintext_export_authorizer=off_authorizer())
         self.assertIsNotNone(mgr2.get_shared(pkg.share_id))
 
     def test_link_no_expiration_7d(self) -> None:
@@ -762,7 +765,7 @@ class Wave98RequiredTestCase(unittest.TestCase):
         pkg = self._mgr.prepare_share(["exp7"])
         # Симулируем N перезагрузок менеджера (эквивалент 7 дней)
         for _ in range(3):
-            mgr = SharingManager(store=self._store)
+            mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
             found = mgr.get_shared(pkg.share_id)
             self.assertIsNotNone(found, "Пакет должен быть доступен без TTL")
             self.assertEqual(found.share_id, pkg.share_id)
@@ -930,7 +933,7 @@ class CapsW1546TestCase(unittest.TestCase):
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
         self._store.add_fake_item("c1", "cap test item")
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
 
     def test_max_ttl_hours_constant_present(self) -> None:
         """_MAX_TTL_HOURS must be importable and be a positive integer (W1244)."""
@@ -995,7 +998,7 @@ class W1762RevokeErasesFilesTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("r1", "секретный текст для revoke")
 
     def test_revoke_deletes_share_file_from_disk(self) -> None:
@@ -1028,7 +1031,7 @@ class W1762RevokeErasesFilesTestCase(unittest.TestCase):
                 tmpdir = tempfile.mkdtemp()
                 store = FakeStore(data_dir=tmpdir)
                 store.add_fake_item("rf1", f"текст {fmt}")
-                mgr = SharingManager(store=store)
+                mgr = SharingManager(store=store, plaintext_export_authorizer=off_authorizer())
                 pkg = mgr.prepare_share(["rf1"], format=fmt)
                 file_path = Path(tmpdir) / "shares" / pkg.filename
                 self.assertTrue(file_path.exists())
@@ -1070,7 +1073,7 @@ class W1762PurgeAllTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         for i in range(3):
             self._store.add_fake_item(f"p{i}", f"текст пакета {i}")
 
@@ -1114,7 +1117,7 @@ class W1762PurgeAllTestCase(unittest.TestCase):
         self._mgr.purge_all()
 
         # Перезагружаем менеджер — должен быть пустой индекс
-        mgr2 = SharingManager(store=self._store)
+        mgr2 = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         shares = mgr2.list_shared(include_expired=True, include_revoked=True)
         self.assertEqual(shares, [], "после перезагрузки индекс должен оставаться пустым")
 
@@ -1153,7 +1156,7 @@ class W1762NoPersistOrphanTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self._tmpdir = tempfile.mkdtemp()
         self._store = FakeStore(data_dir=self._tmpdir)
-        self._mgr = SharingManager(store=self._store)
+        self._mgr = SharingManager(store=self._store, plaintext_export_authorizer=off_authorizer())
         self._store.add_fake_item("o1", "текст для orphan теста")
 
     def test_persist_failure_leaves_no_orphan_file(self) -> None:

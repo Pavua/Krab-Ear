@@ -6,6 +6,32 @@
 
 **Оперативный фронт для агентов: [`docs/NOW.md`](NOW.md)** — одна страница «что делать сейчас». Этот файл — журнал волн и история решений, не очередь задач. Как работать слабым исполнителям: [`docs/EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md). Карточки: `docs/superpowers/plans/`. Не брать в работу C2/C3 из handoff 2026-08-15 — обе волны закрыты в июле.
 
+## Запись 2026-10-09 — A5.4 synthetic crypto IPC source checkpoint
+
+Actual AES-GCM/StateStore/Unix IPC на synthetic профиле: локально109 checks,
+Astra independent recheck PASS. Restart/persistence, wrong-key/tag fail-closed,
+export capability epoch и actual-sink secret scanner controls проверены.
+Production sources не менялись; отдельная test ветка
+`codex/ear-a54-crypto-ipc-20261009` поверх docs merge `c106199f`;
+новый exact-SHA CI и merge — отдельные gates.
+[Матрица и ограничения](superpowers/handoffs/2026-10-09-a54-synthetic-crypto-ipc.md).
+Swift rollback byte-exact PASS; build/cutover HOLD при pressure2/active paging.
+Sentry auth/API PASS, свежий Ear ingress UNKNOWN. Source→existing binary
+provenance UNKNOWN, reuse HOLD. Это не Keychain/UI/live activation приёмка;
+оперативный фронт — NOW, существующий release plan сохраняется.
+
+## Запись 2026-10-08 — A5.3 source integration завершена
+
+Семь PR (#2076, #2075, #2077–#2079, #2081, #2080) MERGED;
+итоговый `9fee1ef4c2f5540636fd4faae1e53c93142054a5`, оба exact-SHA post-merge CI SUCCESS.
+Combined targeted Python 3.12: 121 tests + 38 subtests; Astra Ultra SOURCE
+COMPOSITION PASS. Full backend CI: 1091 файлов, все 16 chunks.
+[Source acceptance и ограничения](superpowers/handoffs/2026-10-08-a53-source-merged.md).
+Source 7/7 завершён; production deployment/encrypted-history/live UI acceptance
+и activation этим результатом не закрыты. Timeline ON LIMIT сохранён.
+[План A5.4](superpowers/plans/2026-10-08-a54-release-acceptance.md) — подготовка
+раздельных gates, без нового lifecycle разрешения; оперативный фронт остаётся NOW.
+
 Решения владельца, зафиксированные при создании (2026-07-07):
 - Горизонт: двухуровневый — детальные ближние волны + направления до конца 2026 и дальше.
 - Приоритеты ближних волн: **A1 → архитектура (event-транспорт) → B1 → пакет A-болей** («1-4-2-3»).

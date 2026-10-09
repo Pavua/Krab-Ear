@@ -258,6 +258,7 @@ class HistoryServiceFuzzySearchTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.store = StateStore(Path(self.tmp.name) / "data")
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
         self.svc = HistoryService(store=self.store)
 
         # Добавляем записи в историю

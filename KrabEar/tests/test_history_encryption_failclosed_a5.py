@@ -60,8 +60,13 @@ def test_encrypt_error_rejects_new_history_line() -> None:
 def test_enabling_encryption_invalidates_plaintext_writer_cache() -> None:
     """Ломается, если первый plaintext append кэширует crypto=None навсегда."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        data_dir = Path(temp_dir)
+        # Каталог создаёт сам StateStore: это достоверно новый профиль, и его
+        # первая поддержанная запись обязана быть разрешена. Раньше каталог
+        # существовал заранее, и та же запись падала бы с отказом по
+        # MISSING_SETTINGS — инвариант теста про crypto-кэш этим не меняется.
+        data_dir = Path(temp_dir) / "data"
         store = StateStore(data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         store.add_history_item(text="SYNTHETIC_BEFORE_ENABLE")
         store.save_settings({"history_encryption_enabled": True})
 
@@ -257,12 +262,17 @@ def test_read_recovers_when_temporarily_missing_key_returns() -> None:
 def test_disabling_before_first_encrypted_line_clears_cached_crypto() -> None:
     """Ломается, если явный OFF всё ещё пишет ENC1 из старого crypto-кэша."""
     with tempfile.TemporaryDirectory() as temp_dir:
-        data_dir = Path(temp_dir)
-        settings_path = data_dir / "settings.json"
-        settings_path.write_text(
-            json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
-        )
+        data_dir = Path(temp_dir) / "data"
         store = StateStore(data_dir)
+        # Валидный KNOWN_ON-профиль. Раньше здесь лежал только
+        # {"history_encryption_enabled": true} — а такой профиль долговечный
+        # guard save_settings отвергает (MISSING_KEY), и проверка стала бы
+        # проверкой отказа вместо проверки явного OFF. Инвариант прежний:
+        # записанный OFF обязан победить уже закэшированный crypto.
+        store.save_settings({
+            "history_encryption_enabled": True,
+            "privacy_mode_enabled": True,
+        })
         crypto = HistoryCrypto(b"H" * 32)
         with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
             assert store._get_history_crypto() is crypto

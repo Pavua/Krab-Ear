@@ -8,6 +8,8 @@ Covers:
   ValueError and silently skipping the item.
 """
 
+from _plaintext_export_test_helpers import off_authorizer
+
 import sys
 import unittest
 import tempfile
@@ -45,7 +47,7 @@ class TestGetSyncStatusContainment(unittest.TestCase):
 
     def _make_configured_mgr(self, folder: str = "Notes") -> ObsidianSyncManager:
         """Create a manager already configured with vault + folder."""
-        mgr = ObsidianSyncManager(data_dir=self.data_dir)
+        mgr = ObsidianSyncManager(data_dir=self.data_dir, plaintext_export_authorizer=off_authorizer())
         # Directly inject state to bypass configure() validation
         mgr._vault_path = self.vault
         mgr._folder = folder
@@ -110,7 +112,7 @@ class TestBuildMdContentConfidenceCoercion(unittest.TestCase):
     """_build_md_content must coerce non-numeric confidence to 0.0."""
 
     def setUp(self):
-        self.mgr = ObsidianSyncManager()
+        self.mgr = ObsidianSyncManager(plaintext_export_authorizer=off_authorizer())
 
     def _item(self, confidence):
         return {
@@ -161,7 +163,7 @@ class TestBuildMdContentConfidenceCoercion(unittest.TestCase):
             vault.mkdir()
             data_dir = Path(tmp) / "data"
             data_dir.mkdir()
-            mgr = ObsidianSyncManager(data_dir=data_dir)
+            mgr = ObsidianSyncManager(data_dir=data_dir, plaintext_export_authorizer=off_authorizer())
             mgr.configure(str(vault), "Notes")
 
             item = {

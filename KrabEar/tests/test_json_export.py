@@ -12,6 +12,8 @@
 """
 
 from __future__ import annotations
+
+from _plaintext_export_test_helpers import history_service_with_off_policy
 from backend.history_service import HistoryService
 from backend.state_store import StateStore
 
@@ -31,7 +33,7 @@ def _make_store(tmp_dir: Path) -> StateStore:
 
 
 def _make_svc(store: StateStore) -> HistoryService:
-    return HistoryService(store=store)
+    return history_service_with_off_policy(store=store)
 
 
 class TestExportHistoryJsonStructure(unittest.TestCase):

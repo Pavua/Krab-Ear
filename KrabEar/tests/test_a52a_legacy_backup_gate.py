@@ -27,6 +27,7 @@ from backend.history_encryption_policy import (
     store_policy_reader,
 )
 from backend.history_service import HistoryService
+from backend.plaintext_export_authorization import POLICY_REVISION_KEY
 from backend.state_store import StateStore
 from backend.transcript_versioning import TranscriptVersionManager
 
@@ -40,6 +41,23 @@ def _data_dir(tmp_path: Path) -> Path:
 def _write_settings(data_dir: Path, payload) -> None:
     text = payload if isinstance(payload, str) else json.dumps(payload)
     (data_dir / "settings.json").write_text(text, encoding="utf-8")
+
+
+def _seed_known_off_profile(data_dir: Path) -> None:
+    """Валидный KNOWN_OFF-профиль (оба exact-bool + валидная ревизия).
+
+    Обязателен тестам, которые переключают шифрование OFF→ON поддержанной
+    записью: долговечный guard ``save_settings`` отказывает на отсутствующем
+    или неполном settings.json (в т.ч. на голом
+    ``{"history_encryption_enabled": true}``), и без явного сида такой тест
+    проверял бы отказ вместо гейта под локом. Сид делает сценарий ровно
+    боевым: профиль известен, и единственное, что его меняет, — флип под локом.
+    """
+    _write_settings(data_dir, {
+        "history_encryption_enabled": False,
+        "privacy_mode_enabled": False,
+        POLICY_REVISION_KEY: "0123456789abcdef0123456789abcdef",
+    })
 
 
 def _bytes(path: Path):
@@ -210,6 +228,7 @@ class TestManualBackupRestoreGate:
 
     def test_manual_backup_recheck_under_lock_blocks_off_to_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         store = StateStore(data_dir)
         svc = HistoryService(store=store, cached_settings=lambda: {})
         second = StateStore(data_dir)
@@ -232,6 +251,7 @@ class TestManualBackupRestoreGate:
 
     def test_restore_refuses_on_and_keeps_current_profile(self, tmp_path):
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         store = StateStore(data_dir)
         svc = HistoryService(store=store)
         store.add_history_item(text="synthetic restore seed")
@@ -406,6 +426,7 @@ class TestAutoBackupGate:
         snapshot — но никогда к legacy plaintext-каталогу.
         """
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         crypto = _synthetic_crypto()
         _write_history(data_dir, crypto)
         store = _store_with_crypto(data_dir, crypto)
@@ -486,6 +507,7 @@ class TestArchiveManagerGate:
 
     def test_unarchive_recheck_under_store_lock_blocks_off_to_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         store = StateStore(data_dir)
         item = store.add_history_item(text="synthetic unarchive race")
         off_mgr = ArchiveManager(store=store)
@@ -581,6 +603,7 @@ class TestTranscriptVersionGate:
 
     def test_save_version_recheck_under_lock_blocks_off_to_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         mgr = TranscriptVersionManager(data_dir=data_dir)
         second = StateStore(data_dir)
         before = _bytes(data_dir / "transcript_versions.ndjson")
@@ -591,6 +614,7 @@ class TestTranscriptVersionGate:
 
     def test_revert_recheck_under_lock_blocks_off_to_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         seed = TranscriptVersionManager(data_dir=data_dir)
         seed.save_version("item-1", "first", "stt_raw")
         mgr = TranscriptVersionManager(data_dir=data_dir)
@@ -769,6 +793,7 @@ class TestDataMigratorGate:
 
     def test_migrate_recheck_under_flock_blocks_off_to_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         (data_dir / "history.ndjson").write_text(
             json.dumps({"id": "1", "text": "v1"}) + "\n", encoding="utf-8"
         )
@@ -784,6 +809,7 @@ class TestDataMigratorGate:
 
     def test_rollback_recheck_under_flock_blocks_off_to_on(self, tmp_path):
         data_dir = _data_dir(tmp_path)
+        _seed_known_off_profile(data_dir)
         backup = data_dir / "backups" / "migration_backup_x"
         backup.mkdir(parents=True)
         (backup / "history.ndjson").write_text('{"id":"restored"}\n', encoding="utf-8")

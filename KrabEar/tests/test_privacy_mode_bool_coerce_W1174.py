@@ -1,23 +1,7 @@
-"""W1174: privacy_mode_enabled bool-coerce fix tests.
+"""A5.3: privacy принимает только exact bool; обычные toggles сохраняют bool-coerce.
 
-Covers W1168 F4 HIGH — privacy_mode_enabled was missing from:
-  - SettingsService.handle_set_settings bool-coerce block
-  - SettingsValidator._BOOL_FIELDS
-
-Result of that bug: client sending JSON "false" (string) → settings.json
-stored "false" (string) → Python truthy → privacy mode stuck permanently ON
-with no way to turn it off via API.
-
-Test cases:
-  - test_privacy_mode_enabled_false_string_coerces_to_false
-  - test_privacy_mode_enabled_true_string_coerces_to_true
-  - test_privacy_mode_enabled_in_bool_fields_validator
-  - test_privacy_mode_enabled_numeric_zero_coerces_to_false
-  - test_privacy_mode_enabled_numeric_one_coerces_to_true
-  - test_privacy_mode_enabled_off_string_coerces_to_false
-  - test_privacy_mode_enabled_on_string_coerces_to_true
-  - test_llm_rewrite_enabled_false_string_coerces_to_false
-  - test_auto_save_transcripts_false_string_coerces_to_false
+Старый W1174 защищал от truthy строки "false" посредством нормализации.
+Теперь malformed policy отклоняется до normalizer и до любой записи.
 """
 
 from __future__ import annotations
@@ -32,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.settings_service import SettingsService  # noqa: E402
+from backend.state_store import StateStoreSettingsCorruptError  # noqa: E402
 from backend.settings_validator import SettingsValidator  # noqa: E402
 
 
@@ -97,7 +82,7 @@ def _make_store(extra: dict | None = None) -> MagicMock:
 
     saved_holder: list[dict] = []
 
-    def _save(s: dict) -> dict:
+    def _save(s: dict, **kwargs) -> dict:
         current.clear()
         current.update(s)
         store.load_settings.return_value = dict(current)
@@ -111,80 +96,27 @@ def _make_store(extra: dict | None = None) -> MagicMock:
     return store
 
 
-class TestPrivacyModeBoolCoerce(unittest.TestCase):
-    """Test that privacy_mode_enabled is properly coerced in handle_set_settings."""
+class TestPrivacyModeExactBool(unittest.TestCase):
+    """Граница IPC отклоняет malformed policy, не меняя существующие значения."""
 
-    def _set_and_read(self, value) -> bool:
-        """Call handle_set_settings with privacy_mode_enabled=value and return stored bool."""
-        store = _make_store()
-        svc = SettingsService(store=store)
-        # Prime cache
-        svc.cached_settings()
-        svc.handle_set_settings({"privacy_mode_enabled": value})
-        saved = store._saved[0]
-        return saved["privacy_mode_enabled"]
+    def test_non_bool_policy_values_are_rejected_without_save(self):
+        for value in ("false", "true", 0, 1, "off", "on", "0", "1", "no", "yes", None):
+            with self.subTest(value=value):
+                store = _make_store()
+                svc = SettingsService(store=store)
+                before = dict(store._current)
+                with self.assertRaises(StateStoreSettingsCorruptError):
+                    svc.handle_set_settings({"privacy_mode_enabled": value})
+                store.save_settings.assert_not_called()
+                self.assertEqual(store._current, before)
 
-    def test_privacy_mode_enabled_false_string_coerces_to_false(self):
-        """String 'false' must be coerced to False — the core bug from W1168 F4."""
-        result = self._set_and_read("false")
-        self.assertIs(result, False)
-        self.assertIsInstance(result, bool)
-
-    def test_privacy_mode_enabled_true_string_coerces_to_true(self):
-        """String 'true' must be coerced to True."""
-        result = self._set_and_read("true")
-        self.assertIs(result, True)
-        self.assertIsInstance(result, bool)
-
-    def test_privacy_mode_enabled_numeric_zero_coerces_to_false(self):
-        """Integer 0 must coerce to False."""
-        result = self._set_and_read(0)
-        self.assertIs(result, False)
-
-    def test_privacy_mode_enabled_numeric_one_coerces_to_true(self):
-        """Integer 1 must coerce to True."""
-        result = self._set_and_read(1)
-        self.assertIs(result, True)
-
-    def test_privacy_mode_enabled_off_string_coerces_to_false(self):
-        """String 'off' must coerce to False."""
-        result = self._set_and_read("off")
-        self.assertIs(result, False)
-
-    def test_privacy_mode_enabled_on_string_coerces_to_true(self):
-        """String 'on' must coerce to True."""
-        result = self._set_and_read("on")
-        self.assertIs(result, True)
-
-    def test_privacy_mode_enabled_zero_string_coerces_to_false(self):
-        """String '0' must coerce to False."""
-        result = self._set_and_read("0")
-        self.assertIs(result, False)
-
-    def test_privacy_mode_enabled_one_string_coerces_to_true(self):
-        """String '1' must coerce to True."""
-        result = self._set_and_read("1")
-        self.assertIs(result, True)
-
-    def test_privacy_mode_enabled_bool_false_stays_false(self):
-        """Native bool False must stay False."""
-        result = self._set_and_read(False)
-        self.assertIs(result, False)
-
-    def test_privacy_mode_enabled_bool_true_stays_true(self):
-        """Native bool True must stay True."""
-        result = self._set_and_read(True)
-        self.assertIs(result, True)
-
-    def test_privacy_mode_enabled_no_string_is_not_truthy(self):
-        """String 'no' must coerce to False, not be truthy."""
-        result = self._set_and_read("no")
-        self.assertIs(result, False)
-
-    def test_privacy_mode_enabled_yes_string_coerces_to_true(self):
-        """String 'yes' must coerce to True."""
-        result = self._set_and_read("yes")
-        self.assertIs(result, True)
+    def test_native_bool_policy_values_remain_exact_bool(self):
+        for value in (False, True):
+            with self.subTest(value=value):
+                store = _make_store()
+                svc = SettingsService(store=store)
+                svc.handle_set_settings({"privacy_mode_enabled": value})
+                self.assertIs(store._saved[0]["privacy_mode_enabled"], value)
 
 
 class TestPrivacyModeBoolInValidator(unittest.TestCase):

@@ -163,6 +163,7 @@ def real_call_stack(monkeypatch, tmp_path):
             close=Mock(wraps=router.close),
         )
         store = StateStore(tmp_path / "owner")
+        store.initialize_startup_plaintext_policy(new_profile=True)
         service = BackendService(
             store=store,
             recorder=SimpleNamespace(is_recording=False, sample_rate=16000),

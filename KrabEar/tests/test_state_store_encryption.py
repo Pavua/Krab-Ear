@@ -96,6 +96,7 @@ class TestStateStoreEncryptionDefaultOff(unittest.TestCase):
         from backend.state_store import StateStore
 
         store = StateStore(self.data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         store._history_crypto_initialized = True
         store._history_crypto_instance = HistoryCrypto(os.urandom(32))
 
@@ -307,6 +308,7 @@ class TestStateStoreSettingsAlwaysPlaintext(unittest.TestCase):
         from backend.state_store import StateStore
 
         store = StateStore(self.data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         store._history_crypto_initialized = True
         store._history_crypto_instance = self._fake_crypto
 
@@ -320,6 +322,7 @@ class TestStateStoreSettingsAlwaysPlaintext(unittest.TestCase):
         from backend.state_store import StateStore
 
         store = StateStore(self.data_dir)
+        store.initialize_startup_plaintext_policy(new_profile=True)
         store.save_settings({"history_encryption_enabled": True})
 
         store2 = StateStore(self.data_dir)

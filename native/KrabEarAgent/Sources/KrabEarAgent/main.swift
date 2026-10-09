@@ -158,6 +158,17 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     let launchAgentManager: LaunchAgentManager
     var ipcClient: IPCClient
 
+    // Создаём после окончательной настройки ipcClient; quit не создаёт новую сессию.
+    private var storedPlaintextExportCoordinator: PlaintextExportCoordinator?
+    var plaintextExportCoordinator: PlaintextExportCoordinator {
+        if let coordinator = storedPlaintextExportCoordinator { return coordinator }
+        let coordinator = PlaintextExportCoordinator(ipc: ipcClient)
+        storedPlaintextExportCoordinator = coordinator
+        return coordinator
+    }
+    private var plaintextExportTerminationPending = false
+    private var plaintextExportTerminationReplied = false
+
     let pasteService = PasteService()
     let quickEditOverlay = QuickEditOverlay()
     let audioDuckingService = SystemAudioDuckingService()
@@ -492,6 +503,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // PermissionWizard удален, используем QuickStartWindowController
         historyPanel = HistoryPanelController(
             ipcClient: ipcClient,
+            plaintextExportCoordinator: plaintextExportCoordinator,
             settingsProvider: { [weak self] in
                 self?.settings ?? .default
             },
@@ -615,7 +627,34 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Backend recovery (see main+IPCRecovery.swift)
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let coordinator = storedPlaintextExportCoordinator else { return .terminateNow }
+        if plaintextExportTerminationReplied { return .terminateNow }
+        if plaintextExportTerminationPending { return .terminateLater }
+        // shutdown закрывает новые операции и очищает RAM синхронно.
+        guard let revoke = coordinator.shutdown() else { return .terminateNow }
+        plaintextExportTerminationPending = true
+        Task { @MainActor [weak self] in
+            await revoke.value
+            self?.finishPlaintextExportTermination(sender)
+        }
+        // Выход приложения не зависит от ответа IPC, даже если transport завис.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            self?.finishPlaintextExportTermination(sender)
+        }
+        return .terminateLater
+    }
+
+    private func finishPlaintextExportTermination(_ sender: NSApplication) {
+        guard plaintextExportTerminationPending else { return }
+        plaintextExportTerminationPending = false
+        plaintextExportTerminationReplied = true
+        sender.reply(toApplicationShouldTerminate: true)
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        _ = storedPlaintextExportCoordinator?.shutdown()
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
         hotkeyManager?.stop()

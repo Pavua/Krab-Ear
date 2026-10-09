@@ -463,7 +463,8 @@ extension HistoryPanelController {
     }
 
     @objc func onOpenAnalyticsDashboard() {
-        let wc = AnalyticsDashboardWindowController(ipcClient: ipcClient)
+        let wc = AnalyticsDashboardWindowController(
+            ipcClient: ipcClient, plaintextExportCoordinator: plaintextExportCoordinator)
         wc.showWindow(nil)
         // Keep strong reference while shown
         objc_setAssociatedObject(self, &AssocDashboardKey.dashboardWC, wc, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)

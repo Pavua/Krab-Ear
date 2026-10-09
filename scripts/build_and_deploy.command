@@ -6,7 +6,7 @@
 #   1. swift build -c release
 #   2. cp → native/runtime/KrabEarAgent
 #   3. cp → Krab Ear.app/Contents/MacOS/KrabEarAgent
-#   4. codesign (stable identity или ad-hoc fallback)
+#   4. codesign (одна стабильная identity, без ad-hoc fallback)
 #   5. UUID match-check между binary и .dSYM
 #   6. sentry-cli debug-files upload
 #   7. macOS notification (osascript)
@@ -136,6 +136,13 @@ fi
 
 ok "Repo root: $ROOT_DIR"
 
+# Фиксируем сертификат ДО сборки/копирования; ошибка доступа к Keychain — отказ.
+if ! source "$SCRIPT_DIR/agent_signing_identity.sh"; then
+  exit 2
+fi
+SIGN_ID="$(resolve_agent_signing_identity)" || exit 2
+ok "Stable signing identity: $SIGN_ID (сертификат + bundle ID сохраняют TCC grant)"
+
 # ── Step 1: Swift build ───────────────────────────────────────────
 section "Step 1/5 — Swift Build"
 log "swift build -c release --package-path $PACKAGE_DIR"
@@ -222,38 +229,30 @@ fi
 # ── Step 3: Code signing ──────────────────────────────────────────
 section "Step 3/5 — Code Signing"
 
-LOCAL_IDENTITY="Krab Ear Dev Local"
-if security find-identity -v -p codesigning 2>/dev/null | grep -q "$LOCAL_IDENTITY"; then
-  SIGN_ID="$LOCAL_IDENTITY"
-  ok "Using stable identity: \"$SIGN_ID\" (TCC-safe, cdhash stable)"
-else
-  SIGN_ID="-"
-  warn "Stable identity not found — using ad-hoc (-s -)"
-  warn "TCC permissions may reset after rebuild."
-  warn "Run: scripts/create_local_signing_identity.command"
-fi
-
 if [ "$DRY_RUN" -eq 0 ]; then
   # Sign runtime binary
   if ! codesign --force --sign "$SIGN_ID" --timestamp=none \
-       --identifier "$BUNDLE_ID" "$RUNTIME_BIN" 2>/dev/null; then
+       --identifier "$BUNDLE_ID" "$RUNTIME_BIN"; then
     fail "codesign failed for runtime binary"
     exit 2
   fi
   ok "runtime binary signed"
 
   # Sign app bundle (signs binary inside too)
-  if ! codesign --force --sign "$SIGN_ID" "$APP_BUNDLE" 2>/dev/null; then
+  if ! codesign --force --sign "$SIGN_ID" --timestamp=none \
+       --identifier "$BUNDLE_ID" "$APP_BUNDLE"; then
     fail "codesign failed for app bundle"
     exit 2
   fi
   ok "App bundle signed"
 
   # Verify
-  if codesign -v "$APP_BUNDLE" 2>/dev/null; then
+  if codesign --verify --strict "$RUNTIME_BIN" \
+     && codesign --verify --strict "$APP_BUNDLE"; then
     ok "Signature verified"
   else
-    warn "codesign -v reported warnings (non-fatal for dev builds)"
+    fail "Signature verification failed"
+    exit 2
   fi
 else
   echo -e "  ${YELLOW}[dry-run]${NC} codesign --force --sign \"$SIGN_ID\" $RUNTIME_BIN"

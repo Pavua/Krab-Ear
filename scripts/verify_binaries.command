@@ -43,6 +43,12 @@ for arg in "$@"; do
   esac
 done
 
+# Report-only не требует Keychain. --fix обязан проверить identity до lifecycle.
+if [ "$FIX_DRIFT" = true ]; then
+  source "$ROOT_DIR/scripts/agent_signing_identity.sh"
+  SIGN_ID="$(resolve_agent_signing_identity)" || exit 2
+fi
+
 # Hash helper. Каждый ad-hoc `codesign -s -` invocation генерирует new
 # signature blob с unique salt — поэтому SHA-256 raw файла всегда
 # differs даже для identical Mach-O contents. CDHash тоже зависит от signature
@@ -50,16 +56,16 @@ done
 # header как proxy для "same compiled output" — fragile но достаточно для
 # detecting **stale builds** (different sizes / dramatically different headers).
 hash_or_missing() {
-  local path="$1"
-  if [ ! -f "$path" ]; then
+  local file_path="$1"
+  if [ ! -f "$file_path" ]; then
     echo "MISSING"
     return
   fi
   local size
-  size="$(/usr/bin/stat -f '%z' "$path" 2>/dev/null || echo "0")"
+  size="$(/usr/bin/stat -f '%z' "$file_path" 2>/dev/null || echo "0")"
   # Header proxy — first 4 KiB после первых байт magic header.
   local hdr
-  hdr="$(/bin/dd if="$path" bs=4096 count=1 2>/dev/null | /usr/bin/shasum -a 256 | awk '{print $1}')"
+  hdr="$(/bin/dd if="$file_path" bs=4096 count=1 2>/dev/null | /usr/bin/shasum -a 256 | awk '{print $1}')"
   printf "size=%s hdr=%s" "$size" "${hdr:0:16}"
 }
 
@@ -124,7 +130,7 @@ if [ "$BUILD_HASH" != "MISSING" ]; then
   BUILD_MTIME="$(/usr/bin/stat -f '%m' "$BUILD_BIN" 2>/dev/null || echo 0)"
   APP_MTIME="${APP_MTIME:-$(/usr/bin/stat -f '%m' "$APP_BIN" 2>/dev/null || echo 0)}"
   if [ "$BUILD_MTIME" -gt "$APP_MTIME" ]; then
-    echo "  ℹ️  .build/release/ свежее .app/ — `make sign` чтобы deploy"
+    echo '  ℹ️  .build/release/ свежее .app/ — make sign чтобы deploy'
   fi
 fi
 
@@ -172,10 +178,18 @@ fi
 echo "  → using newest source ($(/bin/date -r "$SOURCE_MT" '+%H:%M:%S')): $SOURCE_BIN"
 
 # 3. Copy + sign both.
-/bin/cp -f "$SOURCE_BIN" "$APP_BIN"
-/usr/bin/codesign -s - -f "$APP_BIN" >/dev/null 2>&1 || true
-/bin/cp -f "$SOURCE_BIN" "$RUNTIME_BIN"
-/usr/bin/codesign -s - -f "$RUNTIME_BIN" >/dev/null 2>&1 || true
+# Источник может совпадать с destination (самокопирование cp возвращает ошибку).
+if [ "$SOURCE_BIN" != "$APP_BIN" ]; then
+  /bin/cp -f "$SOURCE_BIN" "$APP_BIN"
+fi
+if [ "$SOURCE_BIN" != "$RUNTIME_BIN" ]; then
+  /bin/cp -f "$SOURCE_BIN" "$RUNTIME_BIN"
+fi
+BUNDLE_ID="com.antigravity.krab-ear"
+/usr/bin/codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN"
+/usr/bin/codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$ROOT_DIR/Krab Ear.app"
+/usr/bin/codesign --verify --strict "$RUNTIME_BIN"
+/usr/bin/codesign --verify --strict "$ROOT_DIR/Krab Ear.app"
 echo "  → synced both paths to source"
 
 # 4. Restart .app.

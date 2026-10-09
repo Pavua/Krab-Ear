@@ -57,7 +57,7 @@ def _make_service(settings: dict[str, Any] | None = None) -> tuple[TranslationSe
 
     store = MagicMock()
     store.get_history_page.return_value = ([], None)
-    store.save_settings.side_effect = lambda s: s
+    store.save_settings.side_effect = lambda s, **_kwargs: s
     store.load_vocabulary.return_value = []
 
     cell = [dict(effective)]

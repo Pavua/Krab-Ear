@@ -270,7 +270,7 @@ jobs:
         run: |
           cd native/KrabEarAgent
           swift build --build-tests
-          swift test --skip-build --filter "WiringTests|SourceContract"
+          swift test --skip-build --filter "WiringTests|SourceContract|PlaintextExportCoordinatorTests"
 
   public-runner-isolation-guard:
     name: Public runner isolation guard
