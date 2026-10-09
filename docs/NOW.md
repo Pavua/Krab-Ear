@@ -1,5 +1,53 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-10 — A5.4: пакет применён, runtime smoke PASS
+
+Снимок Ear-приёмки: 10.10, 00:08 CEST; дальнейший Gateway lifecycle ведёт
+соседний координатор, состояние соседей ниже относится к этому снимку.
+
+Runtime source-база: `9d7a0aac0cd064a05294f796a6f5fde7804e33a7` (#2083).
+Оба post-merge workflow этого SHA SUCCESS:
+[CI](https://github.com/Pavua/Krab-Ear/actions/runs/37861320422),
+[krab-ear-ci](https://github.com/Pavua/Krab-Ear/actions/runs/37861320426).
+A5.3 source 7/7 завершён; synthetic crypto IPC — 109 checks / Astra PASS.
+Повторять A5.3 или начинать уже закрытый logging-блок не требуется.
+
+Новый Swift-пакет собран одним заданием из проверенной Git-копии и применён.
+Все 164 входа, pinned dependencies и шесть binary archives сверены. Две копии
+Sparkle полностью эквивалентны, включая служебные атрибуты; packaged framework
+проверен до подписи. Strict/deep signature и сохранённое Accessibility
+requirement PASS; arm64 UUID бинарника/dSYM/пакета совпадают. Старый пакет с
+UNKNOWN source provenance не переиспользован; старые source/app сохранены.
+
+**Runtime:** Backend → REST → Swift запущены по одному разу после полного
+дренирования прежних процессов. Оба STT-движка прогреты; новая запись журнала
+подтверждает passive supervision Swift. Smoke: все три PID/start/runs стабильны,
+IPC и REST HTTP200/status ok PASS более 23 секунд. Конфигурация и argv указывают
+на новый release; loaded Python module SHA этим не аттестуется.
+**Новая owner-проверка диктовки и вставки без Cmd-V PASS (00:08 CEST).**
+После неё same PID/start/runs, IPC и REST health подтверждены повторно.
+
+Владелец разрешил выпуск Ear при текущей нагрузке; это не resource GO или
+разрешение запуска Gateway. Wake word включён: Swift остановлен первым,
+запущен последним после готовности Backend/REST. Откат после старта нового
+Swift требует снова остановить Swift первым и повторить свежий idle gate.
+
+**Дальше:** закрыть документационный PR; затем отдельная карточка оставшихся
+A5.4 UI/Keychain acceptance с явным scope перед activation.
+Шифрование реальной истории остаётся OFF; migration/restore не активны.
+Activation/Keychain/purge не выполнялись. Timeline ON остаётся отдельным UI
+LIMIT, поэтому весь A5.4 не закрыт. Main сохранён; Gateway на момент этой
+приёмки был в согласованном простое. Global IPC inflight не наблюдаем. Sentry auth/organization
+приём PASS; свежий ingress именно Ear UNKNOWN. Изменение hash settings после
+старта сохранено как наблюдение с неустановленной причиной, без заявления
+byte-exact settings parity.
+[Фактический release и границы проверки](superpowers/handoffs/2026-10-10-a54-package-runtime-release.md).
+Sol6.1High — механика/docs; Astra — package/lifecycle gate;
+Muse/agy — только публичные scout briefs.
+
+Нижние разделы — checkpoints на указанную дату; старые PID/SHA/HOLD не являются
+текущим состоянием. Package/runtime smoke не доказывает live crypto acceptance.
+
 ## 2026-10-09 — A5.4 synthetic crypto IPC проверен; release HOLD
 
 Тестовый блок завершён локально: **109 checks**, независимый Astra recheck
@@ -398,20 +446,15 @@ Source-проверки не доказывают CI другого SHA или �
 
 ## Следующая волна
 
-### A5.2b — следующий кусок (первый приоритет после приёмки A5.2a)
+### A5 — исторический checkpoint 30.09 (не текущая очередь)
 
-- **A5.2a DONE (26.09, #2052, source-only).** Fail-closed гейты на всех plaintext
-  legacy-sinks (manual/auto backup+restore, archive, version, schema migration) при
-  `history_encryption_enabled=ON`, с re-check под общим `history.lock`. Прошёл
-  независимый adversarial-ревью: 2 CRITICAL (TOCTOU) и 1 MAJOR (ML под глобальным
-  lock) закрыты. Долг код-видим: `A5_2B_CALLER_SUCCESS_LOG_DEBT` (ложный startup
-  success-log, `service.py` был заморожен баном волны), ErrorBus-проводка
-  `data_dir_policy_reader(push_error=)`.
-- **A5.2b** — manifest/state machine для encrypted multi-file snapshot: recovery,
-  restore с union нынешних tombstones/purged IDs, rollback к plaintext запрещён.
-  Спека: `docs/superpowers/specs/2026-09-24-a5-history-at-rest-design.md`; порядок
-  работ и RED-кейсы — `docs/superpowers/handoffs/2026-09-25-a5-lifecycle-start.md`
-  (в колее с #2052). A5.2c — scoped inventory.
+- **Source `origin/codex/krab-ear-v2` @ `efecb801` сверён 30.09.** A5.2a DONE (#2052): fail-closed гейты plaintext legacy-sinks при `history_encryption_enabled=ON`, re-check под `history.lock`; adversarial-ревью A5.2a закрыло 2 CRITICAL (TOCTOU) и 1 MAJOR.
+- **A5.2b DONE в source:** b1 #2056/4971c24a (encrypted snapshot), b2 #2058/96554b75 (restore/recovery + union tombstones/purged), b3 #2060/7afa21da (diskguard+retention); далее integrity #2066/#2068/#2069 accepted.
+- **Runtime — исторический снапшот 1ebd12eb #2072 (17:47), encryption OFF:** активации и live encrypted E2E-доказательства нет; релиз уже отражён вверху NOW, blanket-GO не даётся.
+- **Scoped inventory 30.09:** ограниченная локальная инвентаризация завершена / review PASS; полное покрытие INCOMPLETE, содержимое UNKNOWN, сырой отчёт приватен и не публикуется.
+- **Долг код-видим:** `A5_2B_CALLER_SUCCESS_LOG_DEBT` активен (`service.py` логирует migration-complete при `MigrationResult.reason=history_encryption_operation_unavailable`); у PolicyReader callback `push_error` есть, но manager-вызовы его не пробрасывают — отдельным долгом, fixed не заявляется.
+- **Спека:** [A5 history-at-rest](superpowers/specs/2026-09-24-a5-history-at-rest-design.md); [handoff 25.09](superpowers/handoffs/2026-09-25-a5-lifecycle-start.md) — исторический порядок работ, A5.2b1–b3 уже приняты.
+- **На дату 30.09 дальше планировались** logging и A5.3 по spec §7. К 08.10 A5.3 source завершён (7/7 PR); актуальная очередь — A5.4 release/acceptance в начале NOW. Утверждения этого checkpoint о долгах и нереализованных контрактах не использовать как текущую проверку кода.
 
 ### Инцидент Glovo 2026-09-26 — закрыт (whisper)
 
