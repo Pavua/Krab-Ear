@@ -6,6 +6,30 @@
 
 **Оперативный фронт для агентов: [`docs/NOW.md`](NOW.md)** — одна страница «что делать сейчас». Этот файл — журнал волн и история решений, не очередь задач. Как работать слабым исполнителям: [`docs/EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md). Карточки: `docs/superpowers/plans/`. Не брать в работу C2/C3 из handoff 2026-08-15 — обе волны закрыты в июле.
 
+## Запись 2026-10-10 — A5.4 package/runtime release и новая диктовка PASS
+
+Применён runtime source `9d7a0aac0cd064a05294f796a6f5fde7804e33a7`;
+оба exact-SHA post-merge workflow SUCCESS. Новый Swift release действительно
+собран jobs=1: 164 native inputs, pinned dependencies, шесть binary archives,
+полная эквивалентность двух Sparkle деревьев и packaged framework до подписи
+проверены. Strict/deep signature, прежнее Accessibility requirement и UUID
+binary/dSYM/package PASS. Старый source/целый app сохранены для отката.
+
+Owner разрешил выпуск Ear при текущей нагрузке. После свежих idle gates и
+дренирования старого scope Swift остановлен первым; Backend → REST → Swift
+запущены по одному разу. Оба STT warmups, новый passive Swift marker и stable
+IPC/REST smoke более 23 секунд PASS. Owner 00:08 CEST подтвердил новую диктовку
+и автоматическую вставку в Codex без Cmd-V; после неё current health PASS.
+Astra независимо приняла package/deployment/narrow smoke.
+[Release evidence и ограничения](superpowers/handoffs/2026-10-10-a54-package-runtime-release.md).
+
+Encryption OFF; live Keychain/activation/migration/purge не выполнялись.
+Timeline ON остаётся отдельным UI LIMIT. Loaded Python module SHA и свежий
+Sentry Ear ingress UNKNOWN; settings hash изменился с неустановленной причиной.
+Принятая owner нагрузка Ear не является resource GO или Gateway return ticket.
+Main не менялся, Gateway сохраняет собственный lifecycle/return contract.
+Full A5.4 этим выпуском не закрыт; текущая очередь — NOW, не старые checkpoints.
+
 ## Запись 2026-10-09 — A5.4 synthetic crypto IPC source checkpoint
 
 Actual AES-GCM/StateStore/Unix IPC на synthetic профиле: локально109 checks,
