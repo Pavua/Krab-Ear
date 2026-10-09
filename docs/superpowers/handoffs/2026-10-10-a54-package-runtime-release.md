@@ -1,5 +1,8 @@
 # A5.4 — фактический package/runtime release 10.10.2026
 
+Снимок Ear-приёмки: 10.10, 00:08 CEST. Последующий Gateway lifecycle —
+самостоятельный scope соседнего координатора; это не live status monitor.
+
 ## Что применено
 
 Source: `9d7a0aac0cd064a05294f796a6f5fde7804e33a7`, Git tree

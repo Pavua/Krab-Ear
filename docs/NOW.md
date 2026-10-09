@@ -2,6 +2,9 @@
 
 ## 2026-10-10 — A5.4: пакет применён, runtime smoke PASS
 
+Снимок Ear-приёмки: 10.10, 00:08 CEST; дальнейший Gateway lifecycle ведёт
+соседний координатор, состояние соседей ниже относится к этому снимку.
+
 Runtime source-база: `9d7a0aac0cd064a05294f796a6f5fde7804e33a7` (#2083).
 Оба post-merge workflow этого SHA SUCCESS:
 [CI](https://github.com/Pavua/Krab-Ear/actions/runs/37861320422),
@@ -33,8 +36,8 @@ Swift требует снова остановить Swift первым и по�
 A5.4 UI/Keychain acceptance с явным scope перед activation.
 Шифрование реальной истории остаётся OFF; migration/restore не активны.
 Activation/Keychain/purge не выполнялись. Timeline ON остаётся отдельным UI
-LIMIT, поэтому весь A5.4 не закрыт. Main сохранён; Gateway остаётся в
-согласованном простое. Global IPC inflight не наблюдаем. Sentry auth/organization
+LIMIT, поэтому весь A5.4 не закрыт. Main сохранён; Gateway на момент этой
+приёмки был в согласованном простое. Global IPC inflight не наблюдаем. Sentry auth/organization
 приём PASS; свежий ingress именно Ear UNKNOWN. Изменение hash settings после
 старта сохранено как наблюдение с неустановленной причиной, без заявления
 byte-exact settings parity.
