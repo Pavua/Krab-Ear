@@ -156,6 +156,11 @@ def has_encrypted_history_in(journal_paths) -> bool:
 
     P2: перед open() проверяется регулярность записи (lstat + S_ISREG),
     чтобы FIFO/каталог/сокет не блокировали процесс под эксклюзивным flock.
+
+    Fail-closed: существующий журнал, который не удалось проверить (OSError,
+    кроме ENOENT), считается «возможно зашифрован» — иначе потерянный
+    settings.json плюс нечитаемый ENC1-журнал читались бы как шифрование OFF
+    и новые записи шли бы открытым текстом.
     """
     from backend.history_crypto import SENTINEL
 
@@ -165,14 +170,18 @@ def has_encrypted_history_in(journal_paths) -> bool:
             st = os.lstat(path)
             if not stat.S_ISREG(st.st_mode):
                 continue
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            return True
         try:
             with path.open("r", encoding="utf-8") as fh:
                 if any(line.startswith(SENTINEL) for line in fh):
                     return True
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError:
+            return True
     return False
 
 
@@ -1028,8 +1037,13 @@ class StateStore:
             except (_DuplicateKeyError, ValueError, TypeError):
                 payload = None
             if payload is None:
-                logger.warning("Файл настроек поврежден, возвращены дефолты")
-                return dict(DEFAULT_SETTINGS)
+                # Неизвестность трактуется как privacy ON: иначе битый файл
+                # открывает все privacy-гейты (тот же принцип, что у фоллбэка
+                # SettingsService.cached_settings при контенции лока).
+                logger.warning("Файл настроек поврежден, возвращены дефолты (privacy ON)")
+                fallback = dict(DEFAULT_SETTINGS)
+                fallback["privacy_mode_enabled"] = True
+                return fallback
 
             settings = dict(DEFAULT_SETTINGS)
             if isinstance(payload, dict):
@@ -2829,12 +2843,15 @@ class StateStore:
         except FileNotFoundError:
             return
         except OSError as exc:
-            logger.warning(
+            # Ошибка открытия НЕ равна «журнал пуст»: пустой поток дошёл бы до
+            # компактации и она перезаписала бы history.ndjson пустым результатом
+            # со сбросом tombstones/дельт. Падаем громко, файлы остаются нетронутыми.
+            logger.error(
                 "_read_history_ndjson_unlocked: не удалось открыть %s: %s",
                 path.name,
                 exc,
             )
-            return
+            raise
 
         try:
             st = os.fstat(fd)

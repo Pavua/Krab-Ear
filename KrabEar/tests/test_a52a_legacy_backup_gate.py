@@ -167,8 +167,10 @@ class TestManualBackupPolicyFailureModes:
             "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
         ):
             result = svc.handle_backup_history({})
-        assert result["ok"] is False
-        assert result["reason"] == REASON
+        # Битый settings.json теперь даёт privacy ON (fail-closed), и privacy-гейт
+        # срабатывает РАНЬШЕ encryption-policy гейта: отказ остаётся, меняется причина.
+        assert result["reason"] == "privacy_mode_active"
+        assert result["backup_path"] is None
         assert not (data_dir / "backups").exists()
 
     def test_manual_backup_refuses_on_invalid_flag_type(self, tmp_path):
