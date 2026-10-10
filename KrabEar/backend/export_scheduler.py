@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -28,6 +29,9 @@ SUPPORTED_FORMATS = {"srt", "csv", "markdown", "json", "obsidian", "html"}
 
 # Максимальное количество хранимых экспортов
 MAX_EXPORTS_DEFAULT = 30
+
+# Сколько отложенных нечитаемых копий расписания хранить.
+_CORRUPT_KEEP = 5
 
 
 class ExportScheduler:
@@ -76,13 +80,35 @@ class ExportScheduler:
     # Внутренние методы
     # ------------------------------------------------------------------
 
+    def _read_schedule_file(self) -> dict | None:
+        """Читает расписание. None — файла нет; бросает исключение — файл нечитаем/не dict."""
+        try:
+            raw = self._schedule_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError("export_schedule.json: ожидался JSON-объект")
+        return loaded
+
     def _load_schedule(self) -> dict:
-        """Загружает расписание из файла."""
-        if self._schedule_path.exists():
-            try:
-                return json.loads(self._schedule_path.read_text(encoding="utf-8"))
-            except Exception:
-                pass
+        """Загружает расписание из файла.
+
+        Отсутствующий файл — нормальный свежий старт. Нечитаемый/битый файл тоже
+        даёт значения по умолчанию (enabled=False), но громко логируется, а при
+        следующей записи оригинал сохраняется (см. ``_save_schedule``).
+        """
+        try:
+            loaded = self._read_schedule_file()
+        except Exception as exc:
+            logger.warning(
+                "export_scheduler: export_schedule.json нечитаем (%s) — расписание "
+                "отключено до перезаписи; оригинал будет сохранён как .corrupt-*",
+                exc,
+            )
+            loaded = None
+        if loaded is not None:
+            return loaded
         return {
             "enabled": False,
             "format": "json",
@@ -92,9 +118,33 @@ class ExportScheduler:
             "exports": [],
         }
 
+    def _rotate_corrupt_schedule(self) -> None:
+        """Откладывает нечитаемый export_schedule.json в сторону (не копирует), ретеншн 5.
+
+        Перезапись дефолтами стёрла бы ``exports`` — список, по которому режутся старые
+        экспорты: уже записанные plaintext-файлы стали бы неотслеживаемыми.
+        """
+        try:
+            self._read_schedule_file()
+            return
+        except Exception:
+            pass
+        try:
+            backup = self._schedule_path.with_name(f"{self._schedule_path.name}.corrupt-{time.time_ns()}")
+            os.replace(self._schedule_path, backup)
+            siblings = sorted(self._schedule_path.parent.glob(f"{self._schedule_path.name}.corrupt-*"))
+            for old in siblings[:-_CORRUPT_KEEP]:
+                old.unlink(missing_ok=True)
+            logger.error("export_scheduler: нечитаемое расписание сохранено как %s", backup.name)
+        except OSError:
+            # Не смогли сохранить оригинал — перезапись запрещена (fail-closed).
+            logger.error("export_scheduler: не удалось отложить нечитаемое расписание", exc_info=True)
+            raise
+
     def _save_schedule(self, schedule: dict) -> None:
         """Сохраняет расписание в файл атомарно."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        self._rotate_corrupt_schedule()
         tmp = self._schedule_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(schedule, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._schedule_path)

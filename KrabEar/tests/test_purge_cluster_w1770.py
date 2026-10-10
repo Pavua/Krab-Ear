@@ -170,6 +170,14 @@ class DirectStorePurgeTestCase(unittest.TestCase):
         self.assertTrue(result.get("ok"), result)
         self.assertFalse(f.exists(), "export_schedule.json должен быть удалён")
 
+    def test_export_schedule_corrupt_rotations_removed(self) -> None:
+        """Отложенные ExportScheduler копии .corrupt-* тоже стираются."""
+        f = self._dir / "export_schedule.json.corrupt-1700000000000000000"
+        f.write_text('{"exports": [{"path": "/Users/me/Documents/x.json"', encoding="utf-8")
+        result = self._purge()
+        self.assertTrue(result.get("ok"), result)
+        self.assertFalse(f.exists(), "отложенная копия расписания должна быть удалена")
+
     def test_event_replay_removed(self) -> None:
         """event_replay.ndjson удаляется."""
         f = self._dir / "event_replay.ndjson"
