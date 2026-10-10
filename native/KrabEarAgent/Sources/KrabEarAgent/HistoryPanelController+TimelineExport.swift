@@ -11,7 +11,7 @@
  Контракт (KrabEar/backend/service.py, ~4268-4407):
    Params:   {output_dir: null, group_by: "hour"|"day"|"week", limit: Int, [width, height]}
    Success:  {"path": String, "blocks": Int}
-   Failure:  {"error": {"code": "privacy_mode"|"invalid_path", "message": String}}
+   Failure:  {"error": {"code": "privacy_mode_active"|"privacy_mode"|"invalid_path", "message": String}}
  Ответ handle_request заворачивает результат хендлера под response["result"] —
  хендлер никогда не бросает исключение, поэтому и success, и failure приходят
  как response["result"], а не как response["error"] (см. handle_request, service.py:2061-2062).
@@ -30,6 +30,28 @@ import Foundation
 
 private enum TimelineExportAssocKeys {
     nonisolated(unsafe) static var groupByPopUp: UInt8 = 0
+}
+
+/// Разбор ответа export_timeline_* без UI (чистая функция, тестируется отдельно).
+enum TimelineExportOutcome: Equatable {
+    case privacy
+    case failure(String)
+    case emptyPath
+    case saved(String)
+
+    static func classify(_ result: [String: Any]) -> TimelineExportOutcome {
+        if let errDict = result["error"] as? [String: Any] {
+            let code = errDict["code"] as? String ?? ""
+            let message = errDict["message"] as? String ?? "Неизвестная ошибка"
+            // Бэкенд шлёт оба кода: "privacy_mode_active" (авторизатор, service.py
+            // _timeline_export_denied) и "privacy_mode" (прямой гейт настроек).
+            if code == "privacy_mode_active" || code == "privacy_mode" { return .privacy }
+            if (result["reason"] as? String) == "privacy_mode_active" { return .privacy }
+            return .failure(message)
+        }
+        guard let path = result["path"] as? String, !path.isEmpty else { return .emptyPath }
+        return .saved(path)
+    }
 }
 
 extension HistoryPanelController {
@@ -147,24 +169,17 @@ extension HistoryPanelController {
     private func handleTimelineExportResult(_ result: [String: Any], label: String) {
         // Хендлер никогда не бросает исключение — и успех, и {"error": {...}}
         // приходят внутри response["result"] (см. handle_request, service.py:2061-2062).
-        if let errDict = result["error"] as? [String: Any] {
-            let code = errDict["code"] as? String ?? ""
-            let message = errDict["message"] as? String ?? "Неизвестная ошибка"
-            if code == "privacy_mode" {
-                BackendToast.shared.show("Экспорт отключён в режиме приватности", duration: 4.0)
-            } else {
-                BackendToast.shared.show("Не удалось экспортировать таймлайн: \(message)", duration: 4.0)
-            }
-            return
-        }
-
-        guard let path = result["path"] as? String, !path.isEmpty else {
+        switch TimelineExportOutcome.classify(result) {
+        case .privacy:
+            BackendToast.shared.show("Экспорт отключён в режиме приватности", duration: 4.0)
+        case .failure(let message):
+            BackendToast.shared.show("Не удалось экспортировать таймлайн: \(message)", duration: 4.0)
+        case .emptyPath:
             BackendToast.shared.show("Бэкенд вернул пустой путь при экспорте таймлайна (\(label))", duration: 4.0)
-            return
+        case .saved(let path):
+            let filename = (path as NSString).lastPathComponent
+            BackendToast.shared.show("Таймлайн сохранён: \(filename)", duration: 4.0)
+            NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
         }
-
-        let filename = (path as NSString).lastPathComponent
-        BackendToast.shared.show("Таймлайн сохранён: \(filename)", duration: 4.0)
-        NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: path)])
     }
 }

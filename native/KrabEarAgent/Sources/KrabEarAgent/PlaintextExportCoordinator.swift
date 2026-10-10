@@ -21,7 +21,7 @@ final class PlaintextExportCoordinator {
         case runObsidianSync = "run_obsidian_sync"
     }
 
-    enum Failure: Error, LocalizedError {
+    enum Failure: Error, LocalizedError, Equatable {
         case cancelled, closed, expired, privacy, unavailable, malformed, transport, writeFailed, partial
         var errorDescription: String? {
             switch self {
@@ -394,11 +394,12 @@ final class PlaintextExportCoordinator {
         }
         return result
     }
-    private func reason(_ value: Any?) -> Failure {
+    private func reason(_ value: Any?) -> Failure { Self.failure(forReason: value) }
+    static func failure(forReason value: Any?) -> Failure {
         switch value as? String {
         case "privacy_mode_active": return .privacy
         case "plaintext_policy_unavailable": return .unavailable
-        case "plaintext_session_expired", "plaintext_consent_required": return .expired
+        case "plaintext_session_expired", "plaintext_confirmation_required": return .expired
         default: return .unavailable
         }
     }
