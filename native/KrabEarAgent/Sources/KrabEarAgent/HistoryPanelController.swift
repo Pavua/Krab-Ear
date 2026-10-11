@@ -574,6 +574,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     }
 
     func showPanel() {
+        migrationObservationCoordinator.activate()
+        refreshMigrationStatus()
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         currentQuery = ""
