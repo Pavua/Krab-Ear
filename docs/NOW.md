@@ -9,15 +9,18 @@ callbacks при close→reopen. Backend migration при close продолжа
 Фаза finishing и revision guard сохраняют свежий terminal warning от late refresh;
 AppKit остаётся adapter, IPC off-main и прежние0.5/1.5s/IPC-over-SSE сохранены.
 
-Source commits `d237a376` + `c43a5a4d0ab1b5f83c3422fdfd4708817bbd0d10`.
+Source commits `d237a376`, `c43a5a4d` и Escape fix
+`260a37f361c040765b156d438373fe96e693bd93`.
 Corrected extraction RED30/44, pending-start RED1/45 и найденный Astra P2
 finishing-refresh RED2/48 → **48/48 callback checks PASS**. Affected headless
-XCTest20/20, точечный Swift typecheck, flake8/diff-check и guarded Python3.12
-parity PASS/no new worker leaks; source manifest8/8 подтверждён.
+XCTest21/21, точечный Swift typecheck, flake8/diff-check и guarded Python3.12
+parity PASS/no new worker leaks; source manifest9/9 подтверждён.
 [Доказательства и границы](superpowers/handoffs/2026-10-11-migration-observation-lifecycle.md).
 Astra task review после finishing fix: **spec + quality Approved**, новых
-defects в fix diff нет. Whole-card Astra review и exact-head hosted CI —
-отдельные completion gates; актуальный итог после этого source checkpoint записывается в PR body/checks
+defects в finishing fix diff нет. Whole-card Astra нашла Escape bypass:
+штатная Escape-ветка теперь вызывает cleanup перед прежним orderOut;
+adapter regression RED1/21→GREEN21/21. Scoped final re-review и новый
+exact-head hosted CI — completion gates; актуальный итог после этого source checkpoint записывается в PR body/checks
 ветки, а не переносится с предыдущего SHA. P3 не считать deployed/live-accepted.
 
 Предыдущий [PR #2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT:

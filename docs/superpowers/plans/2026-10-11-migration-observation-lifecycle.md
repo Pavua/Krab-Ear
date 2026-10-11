@@ -17,7 +17,7 @@
 - Close invalidates first, then cleanup; activate idempotent while open, fresh epoch after close. Backend migration is never cancelled by window close.
 - Keep AppKit layout/text/color unchanged. No runModal/new EventBridge/wake-word SSE. IPC stays off-main; UI/coordination on main.
 - RED must fail from a real stale production effect; source-contract checks supplement executable callbacks and cannot replace them.
-- Explicit git add paths only; no stash/reset/clean/foreign edits. Implementer owns only listed eight source/test/CI files; root owns docs.
+- Explicit git add paths only; no stash/reset/clean/foreign edits. Implementer owns the listed eight source/test/CI files plus the final-review Escape adapter path; root owns docs.
 
 ## Review Focus
 
@@ -38,6 +38,7 @@
 - Create: `KrabEar/tests/test_history_migration_observation_swift_harness.py`
 - Modify: `.github/workflows/ci.yml`
 - Modify: `.github/workflows/krabear-ci.yml`
+- Final-review fix: `native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+KeyboardShortcuts.swift` (Escape dismissal invalidates observation before existing orderOut).
 
 **Interfaces:**
 - Existing `HistoryMigrationOutcome.resolve` / `effectiveTerminalStatus` unchanged.
@@ -60,3 +61,12 @@
 - [ ] Final strong lifecycle diff review; exact patch/source manifest.
 - [x] NOW/ROADMAP/handoff/project memory/global extension updated as source checkpoint; final dynamic receipt in PR body/ignored ledger, #2085 preserved.
 - [ ] Separate draft PR to codex/krab-ear-v2; attach artifact; all exact-head CI completed SUCCESS; no merge/deploy/live claims.
+
+## Final-review fix wave
+
+Astra whole-card review found REAL P2: supported Escape close only orderOut,
+so no windowWillClose cleanup. Root expands ownership by the keyboard adapter
+path; existing close/reopen behavior checks plus narrow adapter regression
+must catch missing cleanup/order. Glossary sheet belongs to another controller,
+minimize/system Hide policy is unchanged. Final source approval remains pending
+until this fix, scoped re-review and new exact-head CI.

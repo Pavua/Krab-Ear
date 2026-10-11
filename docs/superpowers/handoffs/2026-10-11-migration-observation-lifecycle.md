@@ -66,3 +66,22 @@ Source→binary/live wiring этим headless тестом не аттестуе
 Ресурсный снимок10:14CEST: pressure2, swap~23.3GiB, load317. Локально только
 малые serial harness/selected tests; full package build и full backend suites
 через hosted CI. Sol6.1High implementation; Astra — финальный lifecycle gate.
+
+## Final-review integration fix
+
+Astra Ultra whole-card review: one REAL P2, Escape выполняет orderOut без
+windowWillClose, оставляя observation active и прежний epoch при reopen.
+Root разрешил дополнительный keyboard adapter path, прежний UI hide сохранён,
+Fix `260a37f361c040765b156d438373fe96e693bd93`: cleanup вызывается перед
+прежним orderOut. Actual headless adapter regression RED1/21→GREEN21/21;
+unchanged production callback48/48 PASS. Finalsource manifest9/9 независимо
+сверён с gitblobs/workingfiles. Новая scoped verification/CI требуются;
+draftPR2086 oldhead a74d7195 ещё не final approved.
+GlossarySuggestions orderOut принадлежит отдельному sheet controller, его
+не меняем. Full live key-event/AppKit acceptance не входит в source proof.
+
+Escape boundary — source contract отдельной реальной handler ветки; он не
+выдаётся за живое нажатие клавиши. Py312/compiler/typecheck source inputs
+coordinator/harness неизменны с c43a, прежний48 parity receipt сохраняется;
+Escape actor/package integration проверяется новым hosted CI. Ledger сохраняет
+initial8path и final9path seals, task/final-review finding history и оба RED.
