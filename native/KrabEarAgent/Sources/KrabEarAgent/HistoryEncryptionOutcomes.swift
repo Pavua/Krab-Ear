@@ -18,11 +18,23 @@ enum HistoryMigrationOutcome: Equatable {
     case partial(plaintext: Int)
     /// Живой файл зашифрован, но plaintext .bak не удалось безопасно стереть.
     case backupCleanupFailed
+    /// Миграция завершилась отказом (verification_failed, error, ...): «Готово» показывать нельзя.
+    case failed(status: String)
+
+    /// Итог берётся из IPC (`last_migration_status`): он переживает пропущенный SSE.
+    /// SSE-наблюдатель остаётся запасным источником (например, UI подхватил уже идущую миграцию).
+    static func effectiveTerminalStatus(ipc: String?, sse: String?) -> String? {
+        if let ipc, !ipc.isEmpty { return ipc }
+        if let sse, !sse.isEmpty { return sse }
+        return nil
+    }
 
     static func resolve(plaintext: Int, terminalStatus: String?) -> HistoryMigrationOutcome {
-        // Фоновый поток миграции кладёт итог только в событие: живой файл при
-        // backup_cleanup_failed уже зашифрован (plaintext == 0), но plaintext .bak остался.
+        // Живой файл при backup_cleanup_failed уже зашифрован (plaintext == 0), но plaintext .bak остался.
         if terminalStatus == "backup_cleanup_failed" { return .backupCleanupFailed }
+        if let status = terminalStatus, !status.isEmpty, status != "done", status != "encrypting" {
+            return .failed(status: status)
+        }
         if plaintext == 0 { return .done }
         return .partial(plaintext: plaintext)
     }

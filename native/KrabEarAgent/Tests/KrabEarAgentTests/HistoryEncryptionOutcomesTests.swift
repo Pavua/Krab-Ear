@@ -120,4 +120,38 @@ final class SecuritySettingsWiringContractTests: XCTestCase {
         let ipcPos = try XCTUnwrap(start.range(of: "\"migrate_history_encryption\""))
         XCTAssertLessThan(watchPos.lowerBound, ipcPos.lowerBound)
     }
+
+    // MARK: - IPC-итог миграции (last_migration_status)
+
+    func test_migration_any_other_terminal_status_is_failed_not_done() {
+        XCTAssertEqual(
+            HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: "verification_failed"),
+            .failed(status: "verification_failed"))
+        XCTAssertEqual(
+            HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: "error"),
+            .failed(status: "error"))
+    }
+
+    func test_migration_encrypting_is_not_terminal() {
+        XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: "encrypting"), .done)
+        XCTAssertEqual(
+            HistoryMigrationOutcome.resolve(plaintext: 2, terminalStatus: "encrypting"),
+            .partial(plaintext: 2))
+    }
+
+    func test_effective_terminal_status_prefers_ipc_over_sse() {
+        XCTAssertEqual(HistoryMigrationOutcome.effectiveTerminalStatus(ipc: "done", sse: "backup_cleanup_failed"), "done")
+        XCTAssertEqual(HistoryMigrationOutcome.effectiveTerminalStatus(ipc: nil, sse: "backup_cleanup_failed"), "backup_cleanup_failed")
+        XCTAssertNil(HistoryMigrationOutcome.effectiveTerminalStatus(ipc: nil, sse: nil))
+        XCTAssertNil(HistoryMigrationOutcome.effectiveTerminalStatus(ipc: "", sse: nil))
+    }
+
+    func test_poll_reads_last_migration_status_from_ipc() throws {
+        let src = try source()
+        let poll = try body(of: "private func pollMigrationOnce()", in: src)
+        XCTAssertTrue(poll.contains("result[\"last_migration_status\"] as? String"))
+        let present = try body(of: "private func presentMigrationOutcome(", in: src)
+        XCTAssertTrue(present.contains("HistoryMigrationOutcome.effectiveTerminalStatus("))
+        XCTAssertTrue(present.contains("case .failed"))
+    }
 }

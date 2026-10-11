@@ -435,6 +435,7 @@ extension HistoryPanelController {
             let plaintext = result["plaintext"] as? Int ?? 0
             let pct = result["pct"] as? Int ?? 0
             let migrating = result["migrating"] as? Bool ?? false
+            let ipcTerminal = result["last_migration_status"] as? String
             DispatchQueue.main.async {
                 if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
                     progress.doubleValue = Double(pct)
@@ -453,7 +454,7 @@ extension HistoryPanelController {
                     }
                 }
                 // migrating == false: миграция завершена.
-                self.finishMigrationPolling(total: total, encrypted: encrypted, plaintext: plaintext)
+                self.finishMigrationPolling(total: total, encrypted: encrypted, plaintext: plaintext, ipcTerminal: ipcTerminal)
             }
         }
     }
@@ -463,8 +464,13 @@ extension HistoryPanelController {
     /// запоздать относительно последнего опроса счётчиков (мост IPC→REST батчит) —
     /// поэтому короткая пауза перед вердиктом.
     @MainActor
-    private func finishMigrationPolling(total: Int, encrypted: Int, plaintext: Int) {
+    private func finishMigrationPolling(total: Int, encrypted: Int, plaintext: Int, ipcTerminal: String?) {
         objc_setAssociatedObject(self, &SecurityAssocKeys.migratePolling, false, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        // IPC-итог уже известен — SSE ждать не нужно (backend пишет его ДО сброса migrating).
+        if let ipcTerminal, !ipcTerminal.isEmpty {
+            presentMigrationOutcome(plaintext: plaintext, ipcTerminal: ipcTerminal)
+            return
+        }
         let hasWatcher = objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher) != nil
         if plaintext == 0, hasWatcher,
            (objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher) as? HistoryMigrationTerminalWatcher)?.terminalStatus == nil {
@@ -473,17 +479,18 @@ extension HistoryPanelController {
                 status.textColor = KrabEarTheme.Colors.textSecondary
             }
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-                self?.presentMigrationOutcome(plaintext: plaintext)
+                self?.presentMigrationOutcome(plaintext: plaintext, ipcTerminal: nil)
             }
             return
         }
-        presentMigrationOutcome(plaintext: plaintext)
+        presentMigrationOutcome(plaintext: plaintext, ipcTerminal: nil)
     }
 
     @MainActor
-    private func presentMigrationOutcome(plaintext: Int) {
-        let terminal = (objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher)
+    private func presentMigrationOutcome(plaintext: Int, ipcTerminal: String?) {
+        let sse = (objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher)
             as? HistoryMigrationTerminalWatcher)?.terminalStatus
+        let terminal = HistoryMigrationOutcome.effectiveTerminalStatus(ipc: ipcTerminal, sse: sse)
         stopMigrationEventWatch()
         switch HistoryMigrationOutcome.resolve(plaintext: plaintext, terminalStatus: terminal) {
         case .done:
@@ -520,6 +527,22 @@ extension HistoryPanelController {
             }
             if let row = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateRow) as? NSStackView {
                 row.isHidden = false
+            }
+        case .failed(let failure):
+            if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
+                progress.isHidden = true
+            }
+            if let status = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateStatus) as? NSTextField {
+                status.stringValue = "Миграция завершилась с ошибкой: \(failure). Часть записей может остаться незашифрованной."
+                status.textColor = KrabEarTheme.Colors.warning
+            }
+            if let row = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateRow) as? NSStackView {
+                row.isHidden = false
+            }
+            // Кнопка остаётся доступной: миграция идемпотентна, можно повторить.
+            if let button = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateButton) as? NSButton {
+                button.isEnabled = true
+                button.isHidden = false
             }
         case .partial(let remaining):
             // Частично/прервано — возвращаем к обычному виду со счётчиком.
