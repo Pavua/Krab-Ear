@@ -53,10 +53,16 @@ private final class ExportSocket: IPCSocketProviding, @unchecked Sendable {
                           "receipt": String(format: "%043d", repeatedReceipt ? 1 : seq),
                           "operation_seq": seq, "sink_kind": params["sink_kind"]!]
             }
-        case "export_history", "run_obsidian_sync":
+        case "export_history", "run_obsidian_sync", "export_timeline_svg", "export_timeline_json", "export_timeline_ical":
             let context = params["plaintext_export"] as? [String: Any] ?? [:]
             if privacy || context["epoch"] as? String != epoch || context["expected_policy_generation"] as? Int != generation {
                 result = ["ok": false, "reason": "plaintext_session_expired"]
+            } else if encrypted && context["capability"] as? String != capability {
+                // Зеркало service.py::_timeline_export_denied: ok/reason/path/error.
+                result = ["ok": false, "reason": "plaintext_confirmation_required", "path": NSNull(),
+                          "error": ["code": "plaintext_confirmation_required", "message": "SECRET_SENTINEL"]]
+            } else if method.hasPrefix("export_timeline_") {
+                result = ["path": "/isolated/timeline.out", "blocks": 3]
             } else if method == "export_history" {
                 result = ["path": "/isolated/history.md", "total_items": 1, "content": "test markdown"]
             } else {
@@ -447,6 +453,88 @@ private enum ExportChecks {
         await observe.value
         try check(drained && socket.count("revoke_plaintext_export_session") == 1, "revoke retry or lost completion")
     }
+    static func timelineExports() async throws {
+        let methods: [PlaintextExportCoordinator.BackendMethod] = [
+            .exportTimelineSVG, .exportTimelineJSON, .exportTimelineICal]
+        let wire = ["export_timeline_svg", "export_timeline_json", "export_timeline_ical"]
+        let request: [String: Any] = ["output_dir": NSNull(), "group_by": "day", "limit": 500]
+        for (method, name) in zip(methods, wire) {
+            try check(method.rawValue == name, "timeline method wire name drifted")
+            // ON: согласие и grant до первого запроса; контекст несёт capability.
+            let socket = ExportSocket(), coordinator = socket.make()
+            var consents = 0
+            let ticket = try await coordinator.prepareBackend(method: method, consent: { consents += 1; return true })
+            let result = try await coordinator.performBackend(ticket, params: request)
+            try check(consents == 1 && socket.count("grant_plaintext_export_session") == 1, "ON timeline skipped consent")
+            try check(result["path"] as? String == "/isolated/timeline.out" && result["blocks"] as? Int == 3,
+                      "timeline result not returned")
+            let sent = socket.calls.first { $0.0 == name }!.1
+            let context = sent["plaintext_export"] as! [String: Any]
+            try check(Set(context.keys) == Set(["app_session_id", "epoch", "capability", "expected_policy_generation"])
+                      && context["capability"] as? String == socket.capability, "timeline context not bound to grant")
+            try check(sent["format"] == nil && sent["save_to_file"] == nil && sent["group_by"] as? String == "day",
+                      "timeline request params altered")
+            try check(socket.count("validate_plaintext_export") == 0, "backend timeline used Swift receipt protocol")
+            try await denied { _ = try await coordinator.performBackend(ticket, params: request) }
+
+            // Отмена согласия: ни grant, ни запроса экспорта.
+            let declined = ExportSocket(), declinedCoordinator = declined.make()
+            try await denied { _ = try await declinedCoordinator.prepareBackend(method: method, consent: { false }) }
+            try check(declined.count("grant_plaintext_export_session") == 0 && declined.count(name) == 0,
+                      "declined consent reached backend")
+
+            // OFF: без согласия и grant, capability в контексте null.
+            let off = ExportSocket(); off.encrypted = false
+            let offCoordinator = off.make()
+            let offTicket = try await offCoordinator.prepareBackend(method: method, consent: { consents += 100; return false })
+            _ = try await offCoordinator.performBackend(offTicket, params: request)
+            let offContext = off.calls.first { $0.0 == name }!.1["plaintext_export"] as! [String: Any]
+            try check(consents == 1 && off.count("grant_plaintext_export_session") == 0 && offContext["capability"] is NSNull,
+                      "OFF timeline prompted or granted")
+        }
+    }
+    static func timelineDenialsAndMalformed() async throws {
+        // Backend отказал без capability: пользователь видит безопасную причину, не сырой код.
+        let socket = ExportSocket(), coordinator = socket.make()
+        let ticket = try await coordinator.prepareBackend(method: .exportTimelineSVG, consent: { true })
+        socket.transform = { method, envelope in
+            guard method == "export_timeline_svg" else { return envelope }
+            var out = envelope
+            out["result"] = ["ok": false, "reason": "plaintext_confirmation_required", "path": NSNull(),
+                             "error": ["code": "plaintext_confirmation_required", "message": "SECRET_SENTINEL"]]
+            return out
+        }
+        do {
+            _ = try await coordinator.performBackend(ticket, params: [:])
+            throw CheckFailure(message: "timeline denial accepted")
+        } catch PlaintextExportCoordinator.Failure.expired {}
+        catch { throw CheckFailure(message: "timeline confirmation_required not mapped to consent failure") }
+
+        for mode in 0..<5 {
+            let socket = ExportSocket(), coordinator = socket.make()
+            socket.encrypted = false
+            let ticket = try await coordinator.prepareBackend(method: .exportTimelineJSON, consent: { false })
+            socket.transform = { method, envelope in
+                guard method == "export_timeline_json" else { return envelope }
+                var out = envelope, result = envelope["result"] as! [String: Any]
+                switch mode {
+                case 0: result = ["ok": false, "reason": "privacy_mode_active", "path": NSNull(),
+                                  "error": ["code": "privacy_mode_active", "message": "SECRET_SENTINEL"]]
+                case 1: result["path"] = ""
+                case 2: result.removeValue(forKey: "path")
+                case 3: result["blocks"] = "3"
+                default: result = [:]
+                }
+                out["result"] = result; return out
+            }
+            do {
+                _ = try await coordinator.performBackend(ticket, params: [:])
+                throw CheckFailure(message: "malformed timeline result accepted")
+            } catch PlaintextExportCoordinator.Failure.privacy where mode == 0 {}
+            catch is PlaintextExportCoordinator.Failure where mode != 0 {}
+            catch { throw CheckFailure(message: "timeline result mapping wrong") }
+        }
+    }
     static func runAll() async throws -> Int {
         try await invalidationRevokes()
         try await cancel()
@@ -465,7 +553,9 @@ private enum ExportChecks {
         try await obsidianResults()
         try await queuedInvalidation()
         try await privacyBackendReason()
-        return 17
+        try await timelineExports()
+        try await timelineDenialsAndMalformed()
+        return 19
     }
 }
 
@@ -504,5 +594,7 @@ final class PlaintextExportCoordinatorTests: XCTestCase {
     func testPrivacyBackendReason() async throws { try await ExportChecks.privacyBackendReason() }
     func testInvalidationRevokes() async throws { try await ExportChecks.invalidationRevokes() }
     func testObsidianResults() async throws { try await ExportChecks.obsidianResults() }
+    func testTimelineBackendExports() async throws { try await ExportChecks.timelineExports() }
+    func testTimelineDenialsAndMalformed() async throws { try await ExportChecks.timelineDenialsAndMalformed() }
 }
 #endif

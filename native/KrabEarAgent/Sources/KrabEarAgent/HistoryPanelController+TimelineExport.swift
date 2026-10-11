@@ -6,7 +6,10 @@
  Секция «Экспорт таймлайна» в History-табе, рядом с другими экспорт-опциями.
 
  Бэкенд сам выбирает путь для файла (<data_dir>/exports/timeline) — диалогов
- сохранения не требуется, поэтому в этом файле нет ни одного NSAlert/NSPanel.
+ сохранения не требуется. Файл открытого текста пишет сервер, поэтому запрос идёт
+ через PlaintextExportCoordinator (A5.3): при включённом шифровании истории
+ coordinator один раз показывает общий sheet согласия и подставляет
+ plaintext_export-контекст; без него бэкенд ответил бы plaintext_confirmation_required.
 
  Контракт (KrabEar/backend/service.py, ~4268-4407):
    Params:   {output_dir: null, group_by: "hour"|"day"|"week", limit: Int, [width, height]}
@@ -17,8 +20,8 @@
  как response["result"], а не как response["error"] (см. handle_request, service.py:2061-2062).
 
  Паттерны:
- - ipcClient.call — строго off-main (DispatchQueue.global → DispatchQueue.main), AGENT-3.
- - НЕТ runModal() — путь для файла выбирает бэкенд, диалоги не нужны.
+ - IPC строго off-main (coordinator использует callAsync), AGENT-3.
+ - НЕТ runModal() — согласие и ошибки идут через sheet (presentAlertSheet).
  - BackendToast.shared.show — non-modal уведомление об успехе/ошибке.
  - Glyph-free: не используем ● ○ ◉ • ▶ ◀ ▲ ▼ ★ ✕ ✓ ⏱ в labelWithString.
 */
@@ -122,21 +125,21 @@ extension HistoryPanelController {
     // MARK: - Actions
 
     @objc func onExportTimelineSVG() {
-        performTimelineExport(method: "export_timeline_svg", label: "SVG")
+        performTimelineExport(method: .exportTimelineSVG, label: "SVG")
     }
 
     @objc func onExportTimelineJSON() {
-        performTimelineExport(method: "export_timeline_json", label: "JSON")
+        performTimelineExport(method: .exportTimelineJSON, label: "JSON")
     }
 
     @objc func onExportTimelineICal() {
-        performTimelineExport(method: "export_timeline_ical", label: "iCalendar")
+        performTimelineExport(method: .exportTimelineICal, label: "iCalendar")
     }
 
     /// Общая реализация для всех трёх форматов — отличаются только IPC-методом
     /// и текстом уведомления. width/height (SVG-only) бэкенд применяет через
     /// собственный дефолт (1200x400), когда не переданы — здесь не усложняем UI.
-    private func performTimelineExport(method: String, label: String) {
+    private func performTimelineExport(method: PlaintextExportCoordinator.BackendMethod, label: String) {
         let groupBy = selectedTimelineGroupBy
         let params: [String: Any] = [
             "output_dir": NSNull(),
@@ -144,22 +147,23 @@ extension HistoryPanelController {
             "limit": 500
         ]
 
-        let ipcClient = self.ipcClient
-        // AGENT-3: ipcClient.call строго off-main.
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        // Контекст (и согласие, если шифрование включено) фиксируется ДО запроса;
+        // IPC уходит через coordinator.callAsync — вне main thread.
+        Task { [weak self] in
+            guard let self else { return }
             do {
-                nonisolated(unsafe) let response = try ipcClient.call(method: method, params: params)
-                nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
-                DispatchQueue.main.async {
-                    self?.handleTimelineExportResult(result, label: label)
-                }
+                let ticket = try await self.plaintextExportCoordinator.prepareBackend(
+                    method: method, presenting: self.window
+                )
+                let result = try await self.plaintextExportCoordinator.performBackend(ticket, params: params)
+                self.handleTimelineExportResult(result, label: label)
+            } catch PlaintextExportCoordinator.Failure.cancelled {
+                return
             } catch {
-                DispatchQueue.main.async {
-                    BackendToast.shared.show(
-                        "Ошибка экспорта таймлайна (\(label)): \(error.localizedDescription)",
-                        duration: 4.0
-                    )
-                }
+                self.showInfoAlert(
+                    title: "Экспорт таймлайна (\(label))",
+                    body: PlaintextExportCoordinator.errorMessage(error)
+                )
             }
         }
     }

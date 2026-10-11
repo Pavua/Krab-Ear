@@ -19,6 +19,11 @@ final class PlaintextExportCoordinator {
     enum BackendMethod: String {
         case exportHistoryMarkdown = "export_history"
         case runObsidianSync = "run_obsidian_sync"
+        // Таймлайн пишет файл сам (<data_dir>/exports/timeline): сервер проверяет
+        // BackendSink.TIMELINE по тому же четырёхполевому контексту.
+        case exportTimelineSVG = "export_timeline_svg"
+        case exportTimelineJSON = "export_timeline_json"
+        case exportTimelineICal = "export_timeline_ical"
     }
 
     enum Failure: Error, LocalizedError, Equatable {
@@ -391,6 +396,11 @@ final class PlaintextExportCoordinator {
                   let partial = boolean(result["partial"]) else { throw Failure.malformed }
             if partial || !errors.isEmpty { throw Failure.partial }
             if let value = result["reason"], !(value is NSNull) { throw reason(value) }
+        case .exportTimelineSVG, .exportTimelineJSON, .exportTimelineICal:
+            // Успех — {path, blocks}; отказ авторизатора приходит как ok:false + reason.
+            if let value = result["reason"], !(value is NSNull) { throw reason(value) }
+            guard let path = result["path"] as? String, !path.isEmpty,
+                  integer(result["blocks"]) != nil else { throw Failure.writeFailed }
         }
         return result
     }
