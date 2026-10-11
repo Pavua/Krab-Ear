@@ -1,5 +1,38 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-11 — Migration observation lifecycle: source checkpoint
+
+В owned `codex/ear-migration-lifecycle-20261011` от `5d0ed47f` реализована
+[карточка](superpowers/plans/2026-10-11-migration-observation-lifecycle.md):
+один production Foundation coordinator инвалидирует старые IPC/retry/sheet
+callbacks при close→reopen. Backend migration при close продолжается.
+Фаза finishing и revision guard сохраняют свежий terminal warning от late refresh;
+AppKit остаётся adapter, IPC off-main и прежние0.5/1.5s/IPC-over-SSE сохранены.
+
+Source commits `d237a376` + `c43a5a4d0ab1b5f83c3422fdfd4708817bbd0d10`.
+Corrected extraction RED30/44, pending-start RED1/45 и найденный Astra P2
+finishing-refresh RED2/48 → **48/48 callback checks PASS**. Affected headless
+XCTest20/20, точечный Swift typecheck, flake8/diff-check и guarded Python3.12
+parity PASS/no new worker leaks; source manifest8/8 подтверждён.
+[Доказательства и границы](superpowers/handoffs/2026-10-11-migration-observation-lifecycle.md).
+Astra task review после finishing fix: **spec + quality Approved**, новых
+defects в fix diff нет. Whole-card Astra review и exact-head hosted CI —
+отдельные completion gates; актуальный итог после этого source checkpoint записывается в PR body/checks
+ветки, а не переносится с предыдущего SHA. P3 не считать deployed/live-accepted.
+
+Предыдущий [PR #2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT:
+head `5d0ed47fa5d0602eda9ef23171b47f5e453c3407`, final27/27 SUCCESS,
+все3workflows SUCCESS, оба полных backend suites1101files/16chunks/rc0.
+Stack включает незамерженные #2084/#2085; после их интеграции проверить actual
+ancestry/base и повторить exact-head CI при rebase. Исторический CI родителей
+не доказывает новую migration card. Merge/deploy/restart, realhistory/Keychain,
+activation/migration/purge и live NSWindow/SSE acceptance не выполнялись.
+
+Локально только малые serial harness; full build/tests — hosted CI. Ресурсный
+снимок10:14CEST: swap~23.3GiB/pressure2/load317. Sol6.1High implementation,
+Astra — lifecycle review. Main Krab уже в Codex; owner разрешил Main/VG обмен
+данными, соседние runtime/правки не входят в эту карточку.
+
 ## 2026-10-11 — Timeline crypto IPC и fail-closed source проверены
 
 Ветка `claude/haiku-agents-work-79f6d6`, 15 коммитов поверх `16d2b226`; подробности и список открытого —
