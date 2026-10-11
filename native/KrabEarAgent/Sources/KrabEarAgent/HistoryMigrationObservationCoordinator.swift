@@ -30,6 +30,8 @@ final class HistoryMigrationObservationCoordinator {
     private let presentConfirmation: PresentConfirmation
     private var active = false
     private var startPending = false
+    // polling уже false, но terminal fallback ещё владеет наблюдением.
+    private var finishing = false
     private var epoch: UInt64 = 0
     // Refresh, отправленный до нового наблюдения, не должен перерисовать его итог.
     private var observationRevision: UInt64 = 0
@@ -67,17 +69,18 @@ final class HistoryMigrationObservationCoordinator {
         epoch &+= 1
         active = false
         startPending = false
+        finishing = false
         polling = false
         stopWatcher()
     }
 
     func refresh() {
-        guard active, !polling, !startPending else { return }
+        guard active, !polling, !startPending, !finishing else { return }
         let expectedEpoch = epoch
         let expectedRevision = observationRevision
         request("get_history_encryption_status") { [weak self] response in
             guard let self, self.isCurrent(expectedEpoch),
-                  self.observationRevision == expectedRevision, !self.polling,
+                  self.observationRevision == expectedRevision, !self.polling, !self.finishing,
                   let result = response?["result"] as? [String: Any] else { return }
             if result["migrating"] as? Bool ?? false {
                 self.beginPolling()
@@ -104,7 +107,7 @@ final class HistoryMigrationObservationCoordinator {
     }
 
     func startMigration() {
-        guard active, !startPending else { return }
+        guard active, !startPending, !finishing else { return }
         let expectedEpoch = epoch
         startPending = true
         observationRevision &+= 1
@@ -126,7 +129,7 @@ final class HistoryMigrationObservationCoordinator {
     }
 
     private func beginPolling() {
-        guard active, !polling else { return }
+        guard active, !polling, !finishing else { return }
         observationRevision &+= 1
         polling = true
         if !hasWatcher() { startWatcher() }
@@ -155,6 +158,7 @@ final class HistoryMigrationObservationCoordinator {
             if let ipcTerminal, !ipcTerminal.isEmpty {
                 self.finish(plaintext: plaintext, ipcTerminal: ipcTerminal, epoch: expectedEpoch)
             } else if plaintext == 0, self.hasWatcher(), self.terminalStatus() == nil {
+                self.finishing = true
                 self.render(.finishing)
                 self.schedule(1.5) { [weak self] in
                     guard let self, self.isCurrent(expectedEpoch) else { return }
@@ -176,6 +180,9 @@ final class HistoryMigrationObservationCoordinator {
 
     private func finish(plaintext: Int, ipcTerminal: String?, epoch expectedEpoch: UInt64) {
         guard isCurrent(expectedEpoch) else { return }
+        // Отсекаем refresh, отправленный до получения свежего terminal outcome.
+        observationRevision &+= 1
+        finishing = false
         let terminal = HistoryMigrationOutcome.effectiveTerminalStatus(ipc: ipcTerminal, sse: terminalStatus())
         let outcome = HistoryMigrationOutcome.resolve(plaintext: plaintext, terminalStatus: terminal)
         stopWatcher()

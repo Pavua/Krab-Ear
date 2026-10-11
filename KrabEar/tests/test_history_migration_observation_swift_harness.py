@@ -30,4 +30,4 @@ def test_history_migration_observation_callbacks(tmp_path):
     assert compilation.returncode == 0, compilation.stdout + compilation.stderr
     execution = subprocess.run([str(binary)], capture_output=True, text=True, timeout=30)
     assert execution.returncode == 0, execution.stdout + execution.stderr
-    assert "45/45 migration observation checks passed" in execution.stdout
+    assert "48/48 migration observation checks passed" in execution.stdout

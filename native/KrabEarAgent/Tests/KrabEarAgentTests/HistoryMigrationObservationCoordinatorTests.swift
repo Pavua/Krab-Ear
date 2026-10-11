@@ -292,6 +292,64 @@ private enum MigrationObservationChecks {
             f.coordinator.refresh()
             _ = try f.takeRequest("get_history_encryption_status")
         }))
+        cases.append(("late_finishing_refresh_preserves_terminal_warning", {
+            let rows: [(String, HistoryMigrationOutcome)] = [
+                ("backup_cleanup_failed", .backupCleanupFailed),
+                ("error", .failed(status: "error"))
+            ]
+            for (terminal, expected) in rows {
+                let f = MigrationEffects(); f.activate(); let poll = try f.begin()
+                poll(f.status(["migrating": false, "plaintext": 0]))
+                try check(!f.coordinator.polling && f.events.last == .finishing,
+                          "fallback должен сохранить polling=false до terminal")
+                f.activate(); f.coordinator.refresh()
+                // RED удерживает реальный callback; GREEN запрещает его producer.
+                let refresh = f.requests.isEmpty ? nil : try f.takeRequest("get_history_encryption_status")
+                f.terminal = terminal
+                f.scheduled.removeFirst().1()
+                try check(f.events.last == .outcome(expected), "late SSE не дал literal warning \(expected)")
+                let snapshot = f.trace
+                refresh?(f.status(["enabled": true, "plaintext": 0, "migrating": false]))
+                try check(f.trace == snapshot && f.events.last == .outcome(expected),
+                          "held finishing refresh скрыл terminal warning \(terminal)")
+                try check(refresh == nil, "finishing refresh producer отправил лишний IPC")
+            }
+        }))
+        cases.append(("repeated_refresh_during_finishing_is_inert", {
+            let f = MigrationEffects(); f.activate(); let poll = try f.begin()
+            poll(f.status(["migrating": false, "plaintext": 0]))
+            let snapshot = f.trace
+            for _ in 0..<3 { f.activate(); f.coordinator.refresh() }
+            try check(f.requests.isEmpty && f.trace == snapshot && f.events.last == .finishing,
+                      "повторный show/refresh во время finishing создал IPC или изменил UI")
+            try check(!f.coordinator.polling && f.watcher && f.scheduled.count == 1 && f.scheduled[0].0 == 1.5,
+                      "повторный show разрушил finishing fallback")
+            f.terminal = "verification_failed"
+            f.scheduled.removeFirst().1()
+            try check(f.events.last == .outcome(.failed(status: "verification_failed")) && !f.watcher,
+                      "собственный finishing fallback не показал failure")
+        }))
+        cases.append(("held_preobservation_refresh_cannot_erase_terminal_warning", {
+            let rows: [(String, HistoryMigrationOutcome)] = [
+                ("backup_cleanup_failed", .backupCleanupFailed),
+                ("error", .failed(status: "error"))
+            ]
+            for (terminal, expected) in rows {
+                let f = MigrationEffects(); f.activate(); f.coordinator.refresh()
+                let refresh = try f.takeRequest("get_history_encryption_status")
+                let poll = try f.begin()
+                poll(f.status(["migrating": false, "plaintext": 0]))
+                f.terminal = terminal
+                f.scheduled.removeFirst().1()
+                try check(f.events.last == .outcome(expected), "нет собственного terminal warning")
+                let snapshot = f.trace
+                let polling = f.coordinator.polling
+                refresh(f.status(["enabled": true, "plaintext": 0, "migrating": false]))
+                try check(f.trace == snapshot && f.events.last == .outcome(expected)
+                          && f.coordinator.polling == polling && !f.watcher,
+                          "always-held refresh изменил terminal warning/watch/polling \(terminal)")
+            }
+        }))
         cases.append(("inactive_entries_and_close_idempotence", {
             let f = MigrationEffects()
             f.coordinator.refresh(); f.coordinator.startMigration(); f.coordinator.confirmAndStartMigration()
