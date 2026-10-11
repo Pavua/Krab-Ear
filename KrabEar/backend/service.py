@@ -5688,11 +5688,8 @@ class BackendService:
         width = max(200, int(params.get("width", 1200)))
         height = max(100, int(params.get("height", 400)))
 
-        try:
-            with self.store._lock():
-                raw_items = self.store._load_active_items_unlocked()[:limit]
-        except Exception:
-            raw_items = []
+        with self.store._lock():
+            raw_items = self.store._load_active_items_unlocked()[:limit]
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]
@@ -5749,11 +5746,8 @@ class BackendService:
         group_by = str(params.get("group_by", "day")).strip()
         limit = max(1, min(int(params.get("limit", 500)), 5000))
 
-        try:
-            with self.store._lock():
-                raw_items = self.store._load_active_items_unlocked()[:limit]
-        except Exception:
-            raw_items = []
+        with self.store._lock():
+            raw_items = self.store._load_active_items_unlocked()[:limit]
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]
@@ -5809,11 +5803,8 @@ class BackendService:
         group_by = str(params.get("group_by", "day")).strip()
         limit = max(1, min(int(params.get("limit", 500)), 5000))
 
-        try:
-            with self.store._lock():
-                raw_items = self.store._load_active_items_unlocked()[:limit]
-        except Exception:
-            raw_items = []
+        with self.store._lock():
+            raw_items = self.store._load_active_items_unlocked()[:limit]
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]

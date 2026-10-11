@@ -15,9 +15,9 @@
    Params:   {output_dir: null, group_by: "hour"|"day"|"week", limit: Int, [width, height]}
    Success:  {"path": String, "blocks": Int}
    Failure:  {"error": {"code": "privacy_mode_active"|"privacy_mode"|"invalid_path", "message": String}}
- Ответ handle_request заворачивает результат хендлера под response["result"] —
- хендлер никогда не бросает исключение, поэтому и success, и failure приходят
- как response["result"], а не как response["error"] (см. handle_request, service.py:2061-2062).
+ Штатный результат и policy/path отказ приходят под response["result"].
+ Ошибка чтения/расшифровки истории приходит верхнеуровневым IPC error;
+ coordinator обрабатывает её до вызова handleTimelineExportResult.
 
  Паттерны:
  - IPC строго off-main (coordinator использует callAsync), AGENT-3.
@@ -171,8 +171,8 @@ extension HistoryPanelController {
     // MARK: - Result handler (must be called on main thread)
 
     private func handleTimelineExportResult(_ result: [String: Any], label: String) {
-        // Хендлер никогда не бросает исключение — и успех, и {"error": {...}}
-        // приходят внутри response["result"] (см. handle_request, service.py:2061-2062).
+        // Здесь уже проверен конверт coordinator: транспортные/crypto ошибки
+        // обработаны в performBackend, а штатный result можно разобрать отдельно.
         switch TimelineExportOutcome.classify(result) {
         case .privacy:
             BackendToast.shared.show("Экспорт отключён в режиме приватности", duration: 4.0)
