@@ -6,6 +6,27 @@
 
 **Оперативный фронт для агентов: [`docs/NOW.md`](NOW.md)** — одна страница «что делать сейчас». Этот файл — журнал волн и история решений, не очередь задач. Как работать слабым исполнителям: [`docs/EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md). Карточки: `docs/superpowers/plans/`. Не брать в работу C2/C3 из handoff 2026-08-15 — обе волны закрыты в июле.
 
+## Запись 2026-10-11 — Claude source reconciliation и Timeline acceptance
+
+Свежая база `origin/codex/krab-ear-v2` = `16d2b226`. Claude wave уже опубликована
+как [#2084](https://github.com/Pavua/Krab-Ear/pull/2084), head `5e309376`, 15 commits,
+33 files; 27 exact-head CI checks SUCCESS. Независимый Astra Ultra review всего
+diff PASS без новых P0–P2; P3 SSE close/callback race и прежние RMW ограничения
+зафиксированы отдельно. Daily audit `a0311e19` повторяет source этой волны,
+повторного cherry-pick нет. Старый «не запушена» handoff исправлен.
+
+Source-карточка — [настоящий Timeline Swift/Unix IPC/crypto](superpowers/plans/2026-10-11-a54-timeline-crypto-ipc.md),
+без Keychain и реальной истории. Шесть правильных wrong-key/tag RED cases
+подтвердили exception→empty success; минимальный fix всех 3 handlers GREEN.
+Новый файл30PASS (18Swift +12directIPC), selected-file Python3.12 parity
+83PASS+27subtests, independent final Astra Ultra delta PASS. Все14audit-all
+gates PASS. Followup [#2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT,
+source/test commit `f1b86d10`; новый exact-head CI проверяется в PR отдельно от
+27checks исходного #2084. Локальный source-блок100%, весь A5.4 этим не закрыт.
+[Матрица и ограничения](superpowers/handoffs/2026-10-11-a54-timeline-crypto-ipc.md).
+Merge/deploy/live crypto acceptance не выполнены в этой сессии;
+production release checkpoint 10.10 сохраняется историческим снимком.
+
 ## Запись 2026-10-10 — A5.4 package/runtime release и новая диктовка PASS
 
 Применён runtime source `9d7a0aac0cd064a05294f796a6f5fde7804e33a7`;
