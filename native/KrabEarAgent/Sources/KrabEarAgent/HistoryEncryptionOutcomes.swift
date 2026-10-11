@@ -88,6 +88,17 @@ enum EncryptionChangeOutcome: Equatable {
         return .failed(enabled: enabled)
     }
 
+    /// Достоверно известное состояние после отказа или nil, если подтвердить его нечем
+    /// (ответ потерян и повторное чтение тоже провалилось): нельзя утверждать «не применено».
+    func knownEnabled(desired: Bool, reread: Bool?) -> Bool? {
+        switch self {
+        case .applied:
+            return desired
+        case .keychainUnavailable(let enabled), .failed(let enabled):
+            return reread ?? enabled
+        }
+    }
+
     /// Реальное состояние переключателя после отказа: свежее чтение > то, что сообщил
     /// backend > отмена желаемого значения.
     func actualEnabled(desired: Bool, reread: Bool?) -> Bool {

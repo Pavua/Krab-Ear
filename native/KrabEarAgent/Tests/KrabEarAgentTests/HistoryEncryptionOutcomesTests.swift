@@ -155,3 +155,37 @@ final class SecuritySettingsWiringContractTests: XCTestCase {
         XCTAssertTrue(present.contains("case .failed"))
     }
 }
+
+/// Тоггл шифрования: состояние, которое не удалось подтвердить, не выдаётся за известное;
+/// SSE-наблюдатель миграции отменяется при закрытии окна.
+final class EncryptionToggleUnknownStateTests: XCTestCase {
+    func test_known_enabled_prefers_reread_then_reported_and_is_nil_when_unknown() {
+        let failed = EncryptionChangeOutcome.failed(enabled: true)
+        XCTAssertEqual(failed.knownEnabled(desired: false, reread: false), false)
+        XCTAssertEqual(failed.knownEnabled(desired: false, reread: nil), true)
+        XCTAssertNil(EncryptionChangeOutcome.failed(enabled: nil).knownEnabled(desired: true, reread: nil))
+        XCTAssertNil(EncryptionChangeOutcome.keychainUnavailable(enabled: nil).knownEnabled(desired: true, reread: nil))
+        XCTAssertEqual(EncryptionChangeOutcome.applied.knownEnabled(desired: true, reread: nil), true)
+    }
+
+    private func source(_ file: String) throws -> String {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent")
+        return try String(contentsOf: root.appendingPathComponent(file), encoding: .utf8)
+    }
+
+    func test_toggle_failure_uses_known_state_and_honest_unknown_message() throws {
+        let src = try source("HistoryPanelController+SecuritySettings.swift")
+        XCTAssertTrue(src.contains("outcome.knownEnabled(desired: desired, reread: reread)"))
+        XCTAssertTrue(src.contains("Не удалось подтвердить состояние шифрования"))
+    }
+
+    func test_window_close_cancels_migration_event_watch() throws {
+        let controller = try source("HistoryPanelController.swift")
+        let start = try XCTUnwrap(controller.range(of: "func windowWillClose(_ notification: Notification) {"))
+        let rest = controller[start.upperBound...]
+        let end = rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex
+        XCTAssertTrue(String(rest[..<end]).contains("cancelMigrationEventWatch()"))
+    }
+}

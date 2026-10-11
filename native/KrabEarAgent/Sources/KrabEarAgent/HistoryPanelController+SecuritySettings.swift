@@ -571,6 +571,12 @@ extension HistoryPanelController {
         session.dataTask(with: request).resume()
     }
 
+    /// Вызывается при закрытии окна: стрим SSE не должен жить без UI.
+    @MainActor
+    func cancelMigrationEventWatch() {
+        stopMigrationEventWatch()
+    }
+
     @MainActor
     private func stopMigrationEventWatch() {
         (objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatchSession) as? URLSession)?.invalidateAndCancel()
@@ -634,7 +640,8 @@ extension HistoryPanelController {
                 available = status["available"] as? Bool
             }
             DispatchQueue.main.async {
-                let actual = outcome.actualEnabled(desired: desired, reread: reread)
+                let known = outcome.knownEnabled(desired: desired, reread: reread)
+                let actual = known ?? outcome.actualEnabled(desired: desired, reread: reread)
                 var keychainMissing = available == false
                 if case .keychainUnavailable = outcome { keychainMissing = true }
                 toggleRef.state = actual ? .on : .off
@@ -643,6 +650,10 @@ extension HistoryPanelController {
                 if keychainMissing {
                     alert.messageText = "Шифрование недоступно"
                     alert.informativeText = "Шифрование недоступно: Keychain не найден.\nФункция поддерживается только на macOS."
+                } else if known == nil {
+                    alert.messageText = "Не удалось изменить шифрование"
+                    alert.informativeText = "Не удалось подтвердить состояние шифрования. "
+                        + "Закройте и откройте раздел заново, чтобы увидеть актуальное состояние."
                 } else {
                     alert.messageText = "Не удалось изменить шифрование"
                     alert.informativeText = "Настройка не применена. Сейчас шифрование истории "
