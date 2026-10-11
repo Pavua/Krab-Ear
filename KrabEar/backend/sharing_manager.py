@@ -181,14 +181,16 @@ class SharingManager:
     def _ensure_index_writable_locked(self) -> None:
         """Fail-closed: при нечитаемом индексе запись запрещена. Вызывать под self._lock.
 
-        Если файл с тех пор починили (или удалили) — подхватывает его и снимает запрет.
+        Проверяет диск при каждом вызове. Здоровый рабочий индекс не перезагружает:
+        в нём могут быть reserved-слоты и ещё не сохранённый пакет после partial.
+        Только после прежней нечитаемости подхватывает починенный (или удалённый) файл.
         """
-        if not self._index_unreadable:
-            return
         try:
             loaded = self._read_index_file()
         except Exception:
             raise SharePersistenceError("share_index_unreadable", written_file_count=0) from None
+        if not self._index_unreadable:
+            return
         reserved = {k: v for k, v in self._index.items() if v.get("_reserved")}
         self._index = {**(loaded or {}), **reserved}
         self._index_unreadable = False
@@ -839,8 +841,9 @@ class SharingManager:
                 self._save_index(plaintext_export=plaintext_export)
             except PlaintextExportDenied as exc:
                 raise SharePersistenceError(exc.reason) from None
-            except SharePersistenceError:
-                raise
+            except SharePersistenceError as exc:
+                # Payload уже сохранён: guard индекса не может обещать ноль файлов.
+                raise SharePersistenceError(exc.reason, written_file_count=1) from None
             except Exception as exc:
                 raise SharePersistenceError("share_index_write_failed") from exc
 
