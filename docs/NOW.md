@@ -11,10 +11,17 @@
 AstraHigh task1/task2 spec+quality Approved/open0. Guard проверяет диск,
 не заменяя healthy working index; post-payload failure честно count1.
 Scheduler I/O не даёт write/rotation, repaired secondread сохраняет exports.
-Combined17fileparity/audit-all и AstraUltra whole-card пока gates; два
-TTL-файла получили local30s timeout в Torch/matplotlib import, это не PASS.
-Финальные результаты exact-SHA CI будут в PRbody/checks и receipt ledger
-после этого source checkpoint, без переноса зелени с SHA родителей.
+Whole-card AstraUltra нашла новый P2 в strict scheduled checkpoint после
+payload: потерю tracking при transient guard read. Single final fixwave `28c4fe63` даёт
+только alreadyhealthy/fresh-authorized auto checkpoint явно tolerate readOSError,
+сохраняя полный journal+entry без rotation. Direct/config/cancel strict; real
+rotation/unlink/write failures не подавляются. Proper actual-file unittestRED2→
+GREEN23 и existing scheduler auth7/7 PASS; sharing15 unchanged. Final scoped
+AstraUltra,14audits rerun и exact amended-head hostedCI остаются gates.
+Local17filepytest batch остановлен exit143 после repeated30s Torch/matplotlib
+imports; не PASS. Sourcecheckpoint docs — до finalCI; актуальный receipt
+[PR2087](https://github.com/Pavua/Krab-Ear/pull/2087)/checks и ownledger,
+без переноса зелени с SHA родителей или первого98549298 head.
 
 Предыдущий [draft #2086](https://github.com/Pavua/Krab-Ear/pull/2086) source/CI
 завершён: `eb372f8b1d977bbf48e9de1993a7548c1d962c56`, 27/27 SUCCESS,
