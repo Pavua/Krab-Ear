@@ -2712,7 +2712,15 @@ class HistoryService:
                                 "complete": False,
                             }
 
-            active = self.store._load_active_items_unlocked()
+            try:
+                active = self.store._load_active_items_unlocked()
+            except OSError:
+                # Нечитаемый побочный журнал не смеет блокировать wipe приватных данных:
+                # tombstone-шаг пропускается, остальные шаги purge и финальный barrier
+                # идут дальше, неполнота честно попадает в ответ.
+                logger.warning("purge_all_data: журнал нечитаем — tombstone-шаг пропущен", exc_info=True)
+                secondary_errors.append("history_unreadable")
+                active = []
             # A5.2c1 (B1‴): собственные томбестоны purge пишутся ОТКРЫТЫМИ.
             # `_append_ndjson` кодирует строку через `_maybe_encrypt`, поэтому
             # после ENOSENT/сбоя компактирования (шаг 1b) эти ENC1-строки

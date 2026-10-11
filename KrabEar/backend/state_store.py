@@ -151,7 +151,7 @@ def history_journal_paths(data_dir: Path) -> tuple[Path, ...]:
     return tuple(base / name for name in HISTORY_JOURNAL_FILENAMES)
 
 
-def has_encrypted_history_in(journal_paths) -> bool:
+def has_encrypted_history_in(journal_paths, *, unreadable_is_encrypted: bool = True) -> bool:
     """Есть ли ENC1-строки в любом из переданных журналов.
 
     P2: перед open() проверяется регулярность записи (lstat + S_ISREG),
@@ -161,6 +161,10 @@ def has_encrypted_history_in(journal_paths) -> bool:
     кроме ENOENT), считается «возможно зашифрован» — иначе потерянный
     settings.json плюс нечитаемый ENC1-журнал читались бы как шифрование OFF
     и новые записи шли бы открытым текстом.
+
+    ``unreadable_is_encrypted=False`` — только для guard'ов, которым нужно ДОКАЗАННОЕ
+    наличие ENC1 (блок ON→OFF в save_settings): нечитаемый файл не доказательство и не
+    должен блокировать любую запись настроек.
     """
     from backend.history_crypto import SENTINEL
 
@@ -173,7 +177,9 @@ def has_encrypted_history_in(journal_paths) -> bool:
         except FileNotFoundError:
             continue
         except OSError:
-            return True
+            if unreadable_is_encrypted:
+                return True
+            continue
         try:
             with path.open("r", encoding="utf-8") as fh:
                 if any(line.startswith(SENTINEL) for line in fh):
@@ -181,7 +187,9 @@ def has_encrypted_history_in(journal_paths) -> bool:
         except FileNotFoundError:
             continue
         except OSError:
-            return True
+            if unreadable_is_encrypted:
+                return True
+            continue
     return False
 
 
@@ -1048,6 +1056,13 @@ class StateStore:
             settings = dict(DEFAULT_SETTINGS)
             if isinstance(payload, dict):
                 settings.update(payload)
+            else:
+                # Валидный JSON, но не объект ([], 1, "x", null) — тоже «настройки
+                # нечитаемы»: privacy ON, как и для битого JSON.
+                settings["privacy_mode_enabled"] = True
+            if type(settings.get("privacy_mode_enabled")) is not bool:
+                # null / 0 / "false" в флаге приватности — неизвестность, не OFF.
+                settings["privacy_mode_enabled"] = True
             return settings
 
     def save_settings(
@@ -1191,7 +1206,8 @@ class StateStore:
         if (
             settings["history_encryption_enabled"] is not True
             and has_encrypted_history_in(
-                self._history_journal_paths() if history_paths is None else history_paths
+                self._history_journal_paths() if history_paths is None else history_paths,
+                unreadable_is_encrypted=False,
             )
         ):
             raise StateStoreSettingsCorruptError(
@@ -2065,6 +2081,16 @@ class StateStore:
         при нормальном использовании журнал содержит O(active_count) строк;
         при спаме он неограниченно растёт, замедляя каждый history-read.
         """
+        try:
+            return self._maybe_compact_locked()
+        except OSError:
+            # Опортунистическое компактирование не смеет валить старт/IPC: нечитаемый
+            # журнал → компактация пропускается (файлы не тронуты), следующий запуск
+            # повторит. Явные compact()/compact_with_stats() по-прежнему падают громко.
+            logger.error("maybe_compact: журнал нечитаем — компактация пропущена", exc_info=True)
+            return False
+
+    def _maybe_compact_locked(self) -> bool:
         with self._lock():
             try:
                 current_size = self.history_path.stat().st_size

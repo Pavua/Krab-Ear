@@ -173,6 +173,20 @@ class TestManualBackupPolicyFailureModes:
         assert result["backup_path"] is None
         assert not (data_dir / "backups").exists()
 
+    def test_manual_backup_policy_refusal_on_corrupt_settings_independent_of_privacy_gate(self, tmp_path):
+        """Без privacy-гейта (стаб) битые настройки по-прежнему отказывают по encryption-policy."""
+        data_dir = _data_dir(tmp_path)
+        _write_settings(data_dir, "{synthetic-corruption")
+        store = StateStore(data_dir)
+        svc = HistoryService(store=store)
+        with patch.object(svc, "_is_privacy_mode", return_value=False), patch(
+            "backend.history_crypto.build_history_crypto", side_effect=_no_keychain
+        ):
+            result = svc.handle_backup_history({})
+        assert result["ok"] is False
+        assert result["reason"] == REASON
+        assert not (data_dir / "backups").exists()
+
     def test_manual_backup_refuses_on_invalid_flag_type(self, tmp_path):
         data_dir = _data_dir(tmp_path)
         _write_settings(data_dir, {"history_encryption_enabled": None})
