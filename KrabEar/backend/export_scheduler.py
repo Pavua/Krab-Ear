@@ -121,13 +121,18 @@ class ExportScheduler:
             "exports": [],
         }
 
-    def _rotate_corrupt_schedule(self) -> dict | None:
+    def _rotate_corrupt_schedule(self, *, allow_checkpoint_read_error: bool = False) -> dict | None:
         """Откладывает доказанную corruption, ретеншн 5; возвращает healthy reread.
 
-        I/O-ошибка не доказывает повреждение и запрещает ротацию/перезапись.
+        I/O-ошибка не доказывает повреждение и запрещает ротацию. Только
+        auto-checkpoint может записать уже прочитанный healthy schedule.
         """
         try:
             return self._read_schedule_file()
+        except OSError:
+            if not allow_checkpoint_read_error:
+                raise
+            return None
         except (ValueError, UnicodeError):
             pass
         try:
@@ -143,10 +148,10 @@ class ExportScheduler:
             raise
         return None
 
-    def _save_schedule(self, schedule: dict) -> None:
-        """Сохраняет расписание в файл атомарно."""
+    def _save_schedule(self, schedule: dict, *, allow_checkpoint_read_error: bool = False) -> None:
+        """Атомарная запись; auto-checkpoint отдельно допускает сбой guard-read."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._rotate_corrupt_schedule()
+        self._rotate_corrupt_schedule(allow_checkpoint_read_error=allow_checkpoint_read_error)
         tmp = self._schedule_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(schedule, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._schedule_path)
@@ -545,7 +550,9 @@ class ExportScheduler:
                 schedule = self._prune_old_exports(schedule)
                 run_export_write(
                     self._plaintext_export_authorizer, None, BackendSink.SCHEDULER,
-                    lambda: self._save_schedule(schedule),
+                    # Только этот caller имеет healthy initial read + новую
+                    # разрешённую entry; defaults никогда не доходят до payload.
+                    lambda: self._save_schedule(schedule, allow_checkpoint_read_error=True),
                 )
             except PlaintextExportDenied as exc:
                 return {**entry, "exported": True, "partial": True, "reason": exc.reason}
