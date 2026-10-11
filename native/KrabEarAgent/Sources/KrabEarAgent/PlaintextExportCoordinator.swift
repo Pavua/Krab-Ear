@@ -24,6 +24,18 @@ final class PlaintextExportCoordinator {
         case exportTimelineSVG = "export_timeline_svg"
         case exportTimelineJSON = "export_timeline_json"
         case exportTimelineICal = "export_timeline_ical"
+
+        /// Рендер таймлайна по большой истории (и под контенцией общего лока) может идти дольше
+        /// 5 с; таймаут здесь = «результат не подтверждён» + сброс согласия, а файл на сервере
+        /// всё равно мог записаться. Остальные серверные writes остаются на быстром таймауте.
+        var requestTimeoutSec: Int {
+            switch self {
+            case .exportTimelineSVG, .exportTimelineJSON, .exportTimelineICal:
+                return IPCClient.defaultTimeoutSec
+            case .exportHistoryMarkdown, .runObsidianSync:
+                return IPCClient.quickTimeoutSec
+            }
+        }
     }
 
     enum Failure: Error, LocalizedError, Equatable {
@@ -224,7 +236,8 @@ final class PlaintextExportCoordinator {
             requestParams["save_to_file"] = true
         }
         do {
-            let response = try await request(operation.method.rawValue, requestParams)
+            let response = try await request(operation.method.rawValue, requestParams,
+                                              timeoutSec: operation.method.requestTimeoutSec)
             try ensureOpen()
             return try backendResult(response, method: operation.method)
         } catch {
@@ -302,9 +315,10 @@ final class PlaintextExportCoordinator {
         return context
     }
 
-    private func request(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+    private func request(_ method: String, _ params: [String: Any],
+                         timeoutSec: Int = IPCClient.quickTimeoutSec) async throws -> [String: Any] {
         // Никакого recovery/restart/retry при неоднозначном результате RPC.
-        do { return try await ipc.callAsync(method: method, params: params, timeoutSec: IPCClient.quickTimeoutSec) }
+        do { return try await ipc.callAsync(method: method, params: params, timeoutSec: timeoutSec) }
         catch { throw Failure.transport }
     }
 

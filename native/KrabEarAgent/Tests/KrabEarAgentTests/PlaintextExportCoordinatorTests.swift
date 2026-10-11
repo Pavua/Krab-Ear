@@ -596,5 +596,16 @@ final class PlaintextExportCoordinatorTests: XCTestCase {
     func testObsidianResults() async throws { try await ExportChecks.obsidianResults() }
     func testTimelineBackendExports() async throws { try await ExportChecks.timelineExports() }
     func testTimelineDenialsAndMalformed() async throws { try await ExportChecks.timelineDenialsAndMalformed() }
+
+    /// Таймлайн по большой истории не должен упираться в быстрый 5-секундный таймаут
+    /// (таймаут = «не подтверждено» + сброс согласия при уже записанном файле).
+    func testTimelineMethodsUseLongRequestTimeoutOthersStayQuick() {
+        typealias M = PlaintextExportCoordinator.BackendMethod
+        for method in [M.exportTimelineSVG, .exportTimelineJSON, .exportTimelineICal] {
+            XCTAssertEqual(method.requestTimeoutSec, IPCClient.defaultTimeoutSec)
+        }
+        XCTAssertEqual(M.exportHistoryMarkdown.requestTimeoutSec, IPCClient.quickTimeoutSec)
+        XCTAssertEqual(M.runObsidianSync.requestTimeoutSec, IPCClient.quickTimeoutSec)
+    }
 }
 #endif
