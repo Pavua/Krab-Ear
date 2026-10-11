@@ -191,6 +191,21 @@ final class EncryptionToggleUnknownStateTests: XCTestCase {
         XCTAssertTrue(src.contains("Не удалось подтвердить состояние шифрования"))
     }
 
+
+    func test_escape_closes_migration_observation_before_hiding_panel() throws {
+        let keyboard = try source("HistoryPanelController+KeyboardShortcuts.swift")
+        XCTAssertTrue(keyboard.contains("NSEvent.addLocalMonitorForEvents(matching: .keyDown)"))
+        XCTAssertTrue(keyboard.contains("self.window?.isKeyWindow == true"))
+        let escape = try XCTUnwrap(keyboard.range(of: "if event.keyCode == Keycode.escape.rawValue {"))
+        let rest = keyboard[escape.upperBound...]
+        let end = try XCTUnwrap(rest.range(of: "\n            }"))
+        let body = String(rest[..<end.lowerBound])
+        let cleanup = try XCTUnwrap(body.range(of: "self.cancelMigrationEventWatch()"))
+        let hide = try XCTUnwrap(body.range(of: "self.window?.orderOut(nil)"))
+        XCTAssertLessThan(cleanup.lowerBound, hide.lowerBound)
+        XCTAssertTrue(body.contains("return nil"))
+    }
+
     func test_window_hooks_share_one_migration_coordinator() throws {
         let controller = try source("HistoryPanelController.swift")
         let start = try XCTUnwrap(controller.range(of: "func windowWillClose(_ notification: Notification) {"))

@@ -86,6 +86,7 @@ extension HistoryPanelController {
 
             // Escape — закрыть панель
             if event.keyCode == Keycode.escape.rawValue {
+                self.cancelMigrationEventWatch()
                 self.window?.orderOut(nil)
                 return nil
             }
