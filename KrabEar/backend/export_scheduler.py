@@ -91,21 +91,24 @@ class ExportScheduler:
             raise ValueError("export_schedule.json: ожидался JSON-объект")
         return loaded
 
-    def _load_schedule(self) -> dict:
-        """Загружает расписание из файла.
+    def _load_schedule(self, *, for_write: bool = False) -> dict:
+        """Загружает расписание; read-only сбой даёт отключённые defaults.
 
-        Отсутствующий файл — нормальный свежий старт. Нечитаемый/битый файл тоже
-        даёт значения по умолчанию (enabled=False), но громко логируется, а при
-        следующей записи оригинал сохраняется (см. ``_save_schedule``).
+        Mutation не заменяет журнал defaults при I/O-ошибке. Доказанную
+        corruption откладываем, а исправленный между чтениями файл используем.
         """
         try:
             loaded = self._read_schedule_file()
+        except (ValueError, UnicodeError) as exc:
+            if for_write:
+                loaded = self._rotate_corrupt_schedule()
+            else:
+                logger.warning("export_scheduler: битое расписание (%s) — отключено", type(exc).__name__)
+                loaded = None
         except Exception as exc:
-            logger.warning(
-                "export_scheduler: export_schedule.json нечитаем (%s) — расписание "
-                "отключено до перезаписи; оригинал будет сохранён как .corrupt-*",
-                exc,
-            )
+            if for_write:
+                raise
+            logger.warning("export_scheduler: расписание нечитаемо (%s) — отключено", type(exc).__name__)
             loaded = None
         if loaded is not None:
             return loaded
@@ -118,16 +121,14 @@ class ExportScheduler:
             "exports": [],
         }
 
-    def _rotate_corrupt_schedule(self) -> None:
-        """Откладывает нечитаемый export_schedule.json в сторону (не копирует), ретеншн 5.
+    def _rotate_corrupt_schedule(self) -> dict | None:
+        """Откладывает доказанную corruption, ретеншн 5; возвращает healthy reread.
 
-        Перезапись дефолтами стёрла бы ``exports`` — список, по которому режутся старые
-        экспорты: уже записанные plaintext-файлы стали бы неотслеживаемыми.
+        I/O-ошибка не доказывает повреждение и запрещает ротацию/перезапись.
         """
         try:
-            self._read_schedule_file()
-            return
-        except Exception:
+            return self._read_schedule_file()
+        except (ValueError, UnicodeError):
             pass
         try:
             backup = self._schedule_path.with_name(f"{self._schedule_path.name}.corrupt-{time.time_ns()}")
@@ -135,11 +136,12 @@ class ExportScheduler:
             siblings = sorted(self._schedule_path.parent.glob(f"{self._schedule_path.name}.corrupt-*"))
             for old in siblings[:-_CORRUPT_KEEP]:
                 old.unlink(missing_ok=True)
-            logger.error("export_scheduler: нечитаемое расписание сохранено как %s", backup.name)
+            logger.error("export_scheduler: битое расписание сохранено как %s", backup.name)
         except OSError:
             # Не смогли сохранить оригинал — перезапись запрещена (fail-closed).
-            logger.error("export_scheduler: не удалось отложить нечитаемое расписание", exc_info=True)
+            logger.error("export_scheduler: не удалось отложить битое расписание", exc_info=True)
             raise
+        return None
 
     def _save_schedule(self, schedule: dict) -> None:
         """Сохраняет расписание в файл атомарно."""
@@ -469,7 +471,7 @@ class ExportScheduler:
             validated_output_dir = str(validated_path)
 
         with self._lock:
-            schedule = self._load_schedule()
+            schedule = self._load_schedule(for_write=True)
             schedule["format"] = fmt
             schedule["interval_hours"] = interval_hours
             schedule["output_dir"] = validated_output_dir
@@ -597,7 +599,7 @@ class ExportScheduler:
             Обновлённый статус расписания.
         """
         with self._lock:
-            schedule = self._load_schedule()
+            schedule = self._load_schedule(for_write=True)
             schedule["enabled"] = False
             self._save_schedule(schedule)
         return self.get_schedule_status()
