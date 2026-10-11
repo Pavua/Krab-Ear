@@ -3279,7 +3279,8 @@ Returns: `{ok, status}` — status: `"started"` | `"already_running"` | (`ok:fal
 *(service.py → state_store.py)*  
 Статистика шифрования `history.ndjson` (считает `ENC1:`-сигнатуры vs plaintext, не контент — gate не нужен).  
 Нет params.  
-Returns: `{ok, enabled, total, encrypted, plaintext, pct, migrating}`
+Returns: `{ok, enabled, total, encrypted, plaintext, pct, migrating, last_migration_status}`  
+`last_migration_status` (2026-10-11, additive) — терминальный итог последней миграции ЭТОГО процесса: `"done"` или причина отказа (`backup_cleanup_failed`, `verification_failed`, `error`, …); `null` — миграция не запускалась или ещё идёт. Дублирует итоговое событие `history_encryption.migrate.progress`, но переживает пропущенный SSE. Только строка статуса, без текста.
 
 
 ### `get_encryption_status`

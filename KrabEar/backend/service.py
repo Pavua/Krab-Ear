@@ -5923,20 +5923,27 @@ class BackendService:
 
             try:
                 result = self.store.migrate_history_encryption(progress_cb=_progress)
+                terminal = "done" if result.get("ok") else result.get("reason", "error")
+                # Итог хранится в памяти процесса ДО эмита события: подписчик SSE может
+                # его пропустить, а статус-IPC переживает любой пропуск.
+                self._history_migration_last_status = terminal
                 _event_bus.emit("history_encryption.migrate.progress", {
                     "total": result.get("total", 0),
                     "done": result.get("total", 0),
                     "encrypted": result.get("encrypted", 0),
                     "pct": 100 if result.get("ok") else 0,
-                    "status": "done" if result.get("ok") else result.get("reason", "error"),
+                    "status": terminal,
                 })
             except Exception:
                 logger.exception("migrate_history_encryption: migration error")
+                if getattr(self, "_history_migration_last_status", None) is None:
+                    self._history_migration_last_status = "error"
             finally:
                 self._history_migration_running = False
 
         import threading as _threading
         self._history_migration_running = True
+        self._history_migration_last_status = None
         t = _threading.Thread(target=_run, daemon=True, name="history-enc-migration")
         t.start()
         return {"ok": True, "status": "started"}
@@ -5956,11 +5963,17 @@ class BackendService:
                 "plaintext": int,
                 "migrating": bool,
                 "pct": int,
+                "last_migration_status": str | None,
             }
+
+        ``last_migration_status`` — терминальный итог последней миграции этого
+        процесса ("done" или причина отказа, напр. "backup_cleanup_failed"); None —
+        миграция не запускалась или ещё идёт. Только строка статуса, без текста.
         """
         status = self.store.get_history_encryption_status()
         status["ok"] = True
         status["migrating"] = getattr(self, "_history_migration_running", False)
+        status["last_migration_status"] = getattr(self, "_history_migration_last_status", None)
         return status
 
     # ------------------------------------------------------------------
