@@ -24,8 +24,10 @@ Swift→Unix IPC и 12 direct IPC), selected-file Python 3.12 parity —
 `audit-all`: все14gates PASS. Followup
 [PR #2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT, source/test commit
 `f1b86d10bf507f1074674401a35c5a80ce91f524`; оба workflows запускаются на base
-`codex/krab-ear-v2`. На момент публикации новый CI pending; точный актуальный
-head/status и receipt проверяются в PR checks/body, исходные27checks #2084
+`codex/krab-ear-v2`. Первый head `0d34b7d9`: 25 checks SUCCESS / два backend
+lint F811 failure до suites; исправлен binding общего pytest fixture,
+production source не менялся. Новый exact-head/status и receipt проверяются
+в PR checks/body, исходные27checks #2084
 не считаются CI followup. Локальная source-карточка100%; merge/deploy не выполнены.
 [Проверки и границы](superpowers/handoffs/2026-10-11-a54-timeline-crypto-ipc.md).
 Далее отдельный source fix P3 close/callback SSE race; живой click-through

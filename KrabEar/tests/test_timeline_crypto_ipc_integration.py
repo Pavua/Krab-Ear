@@ -10,11 +10,13 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
+import test_plaintext_export_integration as plaintext_integration
 from test_history_encryption_integration import assert_crypto_evidence
 from test_plaintext_export_integration import (
     IsolatedBackend, assert_secret_free_streams, synthetic_subprocess_env,
 )
-from test_plaintext_export_integration import swift_harness as swift_harness
+
+swift_harness = plaintext_integration.swift_harness
 
 pytestmark = pytest.mark.timeout(150)
 MARKER = "syntheticcryptotimeline"

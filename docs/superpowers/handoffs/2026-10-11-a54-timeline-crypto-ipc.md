@@ -14,8 +14,11 @@ Followup [PR #2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT;
 проверенный source/test commit
 `f1b86d10bf507f1074674401a35c5a80ce91f524`. Отдельный docs commit содержит этот
 receipt, поэтому CI head проверяется по PR, а не приравнивается к source commit.
-На момент публикации новый CI pending; финальный exact-head receipt сохраняется
-в PR body/checks. Base `codex/krab-ear-v2` запускает оба workflows; незамерженный
+Первый CI head `0d34b7d9`: 25 checks SUCCESS, два backend jobs остановились на
+flake8 F811 до запуска suites. Исправлена только регистрация общего pytest
+fixture через module binding; production source и fixture object/scope прежние.
+Финальный exact-head receipt после этой правки сохраняется в PR body/checks.
+Base `codex/krab-ear-v2` запускает оба workflows; незамерженный
 #2084 входит в общий diff, после его merge diff сузится.
 
 ## Исправленное поведение
@@ -61,7 +64,14 @@ Independent final Astra Ultra gate **PASS** на неизменной дельт
 exact sentinel probe с положительным funcargs control, лишней правки нет.
 `make audit-all`: все **14 gates PASS**, exit0. Public-runner lint и полная
 native build проверяются новым exact-head CI; локальный Python3.12 venv не
-содержит flake8, дополнительные зависимости не устанавливались.
+содержит flake8. Уже установленный `/opt/homebrew/anaconda3/bin/flake8`
+воспроизвёл обе F811 и после module binding прошёл; collect-only сохраняет
+30 тестов, object identity/scope/autouse проверены отдельно.
+После этой правки changed-file Python 3.12 parity повторён: **30 PASS**,
+81.28 секунды, exit0, без новых worker leaks; все18Swift paths выполнялись.
+Scoped Astra Ultra recheck fixture binding **PASS**, новых REAL P0–P2 нет;
+остальной AST идентичен, прежний six-file review сохранён.
+Дополнительные зависимости не устанавливались.
 Полной сборки приложения локально нет: компилировались только три исходника
 native integration harness. У публичного Linux CI Darwin-сценарии будут skip;
 это не замена локальным 18 Swift-проверкам.
@@ -77,6 +87,6 @@ Timeline ON live consent-sheet и Keychain recovery требуют отдель�
 Отдельно остаются P3 migration close/late-callback SSE race и прежние
 sharing corruption-after-start / scheduler transient-read RMW ограничения.
 Эта карточка их не закрывает. Локальная source-карточка **100%**; далее
-проверить CI точного нового head #2085 и отдельный source fix P3 SSE race.
+проверить CI точного нового head #2085; затем отдельный source fix P3 SSE race.
 Для механики Sol 6.1 High; для security
 whole-diff gate Astra Ultra. [Карточка](../plans/2026-10-11-a54-timeline-crypto-ipc.md).

@@ -47,3 +47,13 @@
 - [x] Получить правильный RED Task 1: wrong-key/tamper export сейчас сообщает успешный пустой файл.
 - [x] Убрать exception→`raw_items=[]` из всех 3 `_handle_export_timeline_*`; настоящий пустой журнал сохраняет штатный пустой export, ошибка чтения поднимается к существующему IPC error boundary до file-write.
 - [x] Повторить Task 1 GREEN и зависимые Timeline/source-contract тесты, audit-all и Python3.12 parity. Independent Astra review всей source/test дельты. Python3.12:83tests+27subtests, audit-all14gates и final Astra PASS.
+
+### CI followup: регистрация shared fixture
+
+Первый published head `0d34b7d9` дал25SUCCESS/2F811: backend suites ещё не
+выполнялись. Только импорт fixture изменён на existing module-binding pattern;
+production source, общий fixture и его scope/autouse прежние.
+Локальный existing flake8: RED2F811→GREEN; collect30 и same-object checks PASS.
+Changed-file Python3.12 parity повторён:30PASS/81.28s/exit0, no newworker leaks.
+Scoped Astra Ultra recheck PASS; новый exact-head CI проверяется в PR #2085;
+финальный receipt хранится в PR body/checks отдельно от source commit `f1b86d10`.

@@ -21,7 +21,9 @@ Source-карточка — [настоящий Timeline Swift/Unix IPC/crypto](
 Новый файл30PASS (18Swift +12directIPC), selected-file Python3.12 parity
 83PASS+27subtests, independent final Astra Ultra delta PASS. Все14audit-all
 gates PASS. Followup [#2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT,
-source/test commit `f1b86d10`; новый exact-head CI проверяется в PR отдельно от
+source/test commit `f1b86d10`; первый CI head `0d34b7d9` дал25SUCCESS/2F811
+до backend suites. Fixture binding исправлен без смены object/scope;
+новый exact-head CI проверяется в PR отдельно от
 27checks исходного #2084. Локальный source-блок100%, весь A5.4 этим не закрыт.
 [Матрица и ограничения](superpowers/handoffs/2026-10-11-a54-timeline-crypto-ipc.md).
 Merge/deploy/live crypto acceptance не выполнены в этой сессии;
