@@ -1,5 +1,35 @@
 # Krab Ear — план развития H2-2026 (и дальше)
 
+## Запись 2026-10-11 — Remaining RMW roots: source checkpoint
+
+От reviewed migration head `eb372f8b` в owned `codex/ear-rmw-roots-20261011`
+начата [RMW-карточка](superpowers/plans/2026-10-11-rmw-roots.md): повторная
+проверка shares index перед mutation и строгая загрузка scheduler для записи.
+Реальная corruption-after-start и transient-read → defaults → overwrite
+проверяются временными filesystem fixtures. Source `26865bf1` (scheduler) и `a0bcea9c` (sharing): proper RED→GREEN,
+15+17 methods (scheduler16subtests), 4pathCI-flake8/diff-check PASS.
+AstraHigh task1/task2 spec+quality Approved/open0. Guard проверяет диск,
+не заменяя healthy working index; post-payload failure честно count1.
+Scheduler I/O не даёт write/rotation, repaired secondread сохраняет exports.
+Combined17fileparity/audit-all и AstraUltra whole-card пока gates; два
+TTL-файла получили local30s timeout в Torch/matplotlib import, это не PASS.
+Финальные результаты exact-SHA CI будут в PRbody/checks и receipt ledger
+после этого source checkpoint, без переноса зелени с SHA родителей.
+
+Предыдущий [draft #2086](https://github.com/Pavua/Krab-Ear/pull/2086) source/CI
+завершён: `eb372f8b1d977bbf48e9de1993a7548c1d962c56`, 27/27 SUCCESS,
+все3 runs38128598253/38128598248/38128594131 SUCCESS; оба backend suites
+1102files/16chunks/rc0/no fallback. Astra whole-card + scoped Escape fix PASS.
+Это receipt source/CI; live UI/Keychain/migration приёмка остаётся отдельной.
+
+Новая ветка включает незамерженные #2084/#2085/#2086; remote base проверена
+`16d2b226`. Merge/deploy/restart, реальные shares/history/schedules/Keychain
+и соседние правки не входят в scope. Sol6.1High implementation, AstraUltra
+whole-card gate; user-approved `agy` Gemini3.8FlashHigh и OpenCode
+MuseSpark1.3ContributorFree — скауты на source-копиях, не security approval.
+Малые serial проверки, полный backend/Swift CI hosted; shared venv не менять.
+
+
 Дата: 2026-07-07 · Автор: сессия Claude (Fable 5, финальный день доступности) + владелец
 Статус: **ЖИВОЙ документ** — обновлять секцию статусов после каждой волны (правила — §6)
 Заменяет: `docs/ROADMAP.md` (2026-02-12, S01-S75) как рабочий план — реконсиляция в §4, старый файл остаётся архивом.
