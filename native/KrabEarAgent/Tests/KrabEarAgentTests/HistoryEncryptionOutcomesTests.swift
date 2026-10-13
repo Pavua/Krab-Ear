@@ -108,17 +108,23 @@ final class SecuritySettingsWiringContractTests: XCTestCase {
         XCTAssertFalse(fn.contains("runModal"))
     }
 
-    func test_migration_verdict_uses_outcome_with_watcher_status() throws {
+    func test_migration_adapter_renders_resolved_outcome_and_delegates_callbacks() throws {
         let src = try source()
         let fn = try body(of: "private func presentMigrationOutcome(", in: src)
-        XCTAssertTrue(fn.contains("HistoryMigrationOutcome.resolve(plaintext: plaintext, terminalStatus: terminal)"))
+        XCTAssertTrue(fn.contains("switch outcome"))
         XCTAssertTrue(fn.contains("case .backupCleanupFailed:"))
+        XCTAssertFalse(fn.contains("HistoryMigrationOutcome.resolve"))
         XCTAssertTrue(src.contains("filter=history_encryption.migrate.progress"))
-        // Watcher должен быть поднят ДО запуска миграции.
-        let start = try body(of: "private func startHistoryMigration()", in: src)
-        let watchPos = try XCTUnwrap(start.range(of: "startMigrationEventWatch()"))
-        let ipcPos = try XCTUnwrap(start.range(of: "\"migrate_history_encryption\""))
-        XCTAssertLessThan(watchPos.lowerBound, ipcPos.lowerBound)
+        XCTAssertTrue(src.contains("migrationObservationCoordinator.confirmAndStartMigration()"))
+        XCTAssertTrue(src.contains("migrationObservationCoordinator.refresh()"))
+        XCTAssertFalse(src.contains("migratePolling"))
+        XCTAssertFalse(src.contains("private func pollMigrationOnce()"))
+        XCTAssertFalse(src.contains("private func finishMigrationPolling("))
+        XCTAssertTrue(src.contains("startWatcher: { [weak self] in self?.startMigrationEventWatch() }"))
+        XCTAssertTrue(src.contains("terminalStatus: { [weak self] in"))
+        XCTAssertTrue(src.contains("self.ipcClient.call(method: method, params: [:])"))
+        XCTAssertTrue(src.contains("DispatchQueue.main.async { completion(response) }"))
+        XCTAssertTrue(src.contains("completion(response == .alertFirstButtonReturn)"))
     }
 
     // MARK: - IPC-итог миграции (last_migration_status)
@@ -146,14 +152,18 @@ final class SecuritySettingsWiringContractTests: XCTestCase {
         XCTAssertNil(HistoryMigrationOutcome.effectiveTerminalStatus(ipc: "", sse: nil))
     }
 
-    func test_poll_reads_last_migration_status_from_ipc() throws {
-        let src = try source()
-        let poll = try body(of: "private func pollMigrationOnce()", in: src)
-        XCTAssertTrue(poll.contains("result[\"last_migration_status\"] as? String"))
-        let present = try body(of: "private func presentMigrationOutcome(", in: src)
-        XCTAssertTrue(present.contains("HistoryMigrationOutcome.effectiveTerminalStatus("))
+    func test_coordinator_owns_terminal_parsing_and_adapter_render() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent")
+        let coordinator = try String(contentsOf: root.appendingPathComponent("HistoryMigrationObservationCoordinator.swift"), encoding: .utf8)
+        XCTAssertTrue(coordinator.contains("result[\"last_migration_status\"] as? String"))
+        XCTAssertTrue(coordinator.contains("HistoryMigrationOutcome.effectiveTerminalStatus("))
+        XCTAssertTrue(coordinator.contains("HistoryMigrationOutcome.resolve(plaintext: plaintext, terminalStatus: terminal)"))
+        let present = try body(of: "private func presentMigrationOutcome(", in: try source())
         XCTAssertTrue(present.contains("case .failed"))
     }
+
 }
 
 /// Тоггл шифрования: состояние, которое не удалось подтвердить, не выдаётся за известное;
@@ -181,11 +191,40 @@ final class EncryptionToggleUnknownStateTests: XCTestCase {
         XCTAssertTrue(src.contains("Не удалось подтвердить состояние шифрования"))
     }
 
-    func test_window_close_cancels_migration_event_watch() throws {
+
+    func test_escape_closes_migration_observation_before_hiding_panel() throws {
+        let keyboard = try source("HistoryPanelController+KeyboardShortcuts.swift")
+        XCTAssertTrue(keyboard.contains("NSEvent.addLocalMonitorForEvents(matching: .keyDown)"))
+        XCTAssertTrue(keyboard.contains("self.window?.isKeyWindow == true"))
+        let escape = try XCTUnwrap(keyboard.range(of: "if event.keyCode == Keycode.escape.rawValue {"))
+        let rest = keyboard[escape.upperBound...]
+        let end = try XCTUnwrap(rest.range(of: "\n            }"))
+        let body = String(rest[..<end.lowerBound])
+        let cleanup = try XCTUnwrap(body.range(of: "self.cancelMigrationEventWatch()"))
+        let hide = try XCTUnwrap(body.range(of: "self.window?.orderOut(nil)"))
+        XCTAssertLessThan(cleanup.lowerBound, hide.lowerBound)
+        XCTAssertTrue(body.contains("return nil"))
+    }
+
+    func test_window_hooks_share_one_migration_coordinator() throws {
         let controller = try source("HistoryPanelController.swift")
         let start = try XCTUnwrap(controller.range(of: "func windowWillClose(_ notification: Notification) {"))
         let rest = controller[start.upperBound...]
         let end = rest.range(of: "\n    }\n")?.lowerBound ?? rest.endIndex
         XCTAssertTrue(String(rest[..<end]).contains("cancelMigrationEventWatch()"))
+        let show = try XCTUnwrap(controller.range(of: "func showPanel() {"))
+        let showRest = String(controller[show.upperBound...])
+        let activation = try XCTUnwrap(showRest.range(of: "migrationObservationCoordinator.activate()"))
+        let refresh = try XCTUnwrap(showRest.range(of: "refreshMigrationStatus()"))
+        let sync = try XCTUnwrap(showRest.range(of: "syncSettingsControls()"))
+        XCTAssertLessThan(activation.lowerBound, refresh.lowerBound)
+        XCTAssertLessThan(refresh.lowerBound, sync.lowerBound)
+        let adapter = try source("HistoryPanelController+SecuritySettings.swift")
+        let close = try XCTUnwrap(adapter.range(of: "func cancelMigrationEventWatch() {"))
+        let closeRest = adapter[close.upperBound...]
+        let closeEnd = try XCTUnwrap(closeRest.range(of: "\n    }"))
+        XCTAssertTrue(closeRest[..<closeEnd.lowerBound].contains("migrationObservationCoordinator.close()"))
+        XCTAssertTrue(adapter.contains("as? HistoryMigrationObservationCoordinator { return existing }"))
     }
+
 }

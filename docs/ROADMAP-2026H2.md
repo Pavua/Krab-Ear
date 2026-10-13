@@ -6,6 +6,27 @@
 
 **Оперативный фронт для агентов: [`docs/NOW.md`](NOW.md)** — одна страница «что делать сейчас». Этот файл — журнал волн и история решений, не очередь задач. Как работать слабым исполнителям: [`docs/EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md). Карточки: `docs/superpowers/plans/`. Не брать в работу C2/C3 из handoff 2026-08-15 — обе волны закрыты в июле.
 
+## Запись 2026-10-11 — Migration observation close/reopen: source checkpoint
+
+Owned `codex/ear-migration-lifecycle-20261011` от `5d0ed47f`:
+[спека](superpowers/specs/2026-10-11-migration-observation-lifecycle.md) /
+[план](superpowers/plans/2026-10-11-migration-observation-lifecycle.md).
+Один production coordinator защищает close/reopen IPC/retry/confirmation
+и same-window finishing refresh. Source `d237a376` + `c43a5a4d` + Escape `260a37f3`:
+correctedRED30/44, pending-startRED1/45, Astra-found finishingRED2/48 →
+standalone48/48PASS; actual headless contracts21PASS; typecheck/flake8/diff-check
+и guardedPy312PASS/no leaks. Scoped Astra review: finding ADDRESSED,
+spec+quality Approved. Whole-card Astra нашла поддержанный Escape hide bypass;
+cleanup перед прежним orderOut + adapterRED1/21→GREEN исправляют его.
+Final scoped review и новый exact-head hosted CI остаются gates; итоговый receipt после source checkpoint — PRbody/checks.
+
+Backend migration при close не отменяется; никаких realhistory/Keychain/
+activation/live/lifecycle изменений. Full local build не запускался, полная
+Swift сборка и executable XCTest — hosted CI. Stack включает незамерженные
+#2084/#2085 (предыдущий2085DRAFT/head5d0ed47f/exact27SUCCESS), после integration
+проверить ancestry/base/rebase и новый exact-head CI. Source gates не означают
+живую приёмку или завершение всей A5.4 roadmap; остальные RMW roots отдельно.
+
 ## Запись 2026-10-11 — Claude source reconciliation и Timeline acceptance
 
 Свежая база `origin/codex/krab-ear-v2` = `16d2b226`. Claude wave уже опубликована
