@@ -276,10 +276,18 @@ Returns: `{ok: true}`
 | `import_history_ndjson` | Импорт из внешнего NDJSON файла |
 
 ### `get_history_page`
-*(history_service.py)*  
-Paginated history с фильтрами по языку, дате, confidence.  
-Params: `{page?, page_size?, lang?, date_from?, date_to?, min_confidence?}`  
-Returns: `{items: [...], total, page, page_size, has_more}`
+*(history_service.py)*
+Страница истории с cursor-based pagination и фильтрами статуса/времени.
+Params: `{cursor?, limit?, paste_status?, translation_mode?, translation_status?, from_ts?, to_ts?}`; `limit` по умолчанию `50`.
+Returns: `{items: [...], next_cursor: str | null, restore_pending: bool}`.
+
+При privacy mode: `{items: [], next_cursor: null, reason: "privacy_mode_active"}`;
+поле `restore_pending` в этой ветке отсутствует. При незавершённом restore обычный
+ответ сохраняет доступные `items` и содержит `restore_pending: true` вместе с
+`reason: "restore_pending"`. Это предупреждение о возможном смешанном состоянии,
+а не отказ в чтении. Клиент должен учитывать `reason`/`restore_pending`, не
+приравнивая такой ответ к обычной пустой истории.
+
 
 ### `get_history_item`
 *(history_service.py)*  

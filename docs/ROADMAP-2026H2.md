@@ -1,9 +1,9 @@
 # Krab Ear — план развития H2-2026 (и дальше)
 
-## Запись 2026-10-11 — Remaining RMW roots: source checkpoint
+## Запись 2026-10-11 — Remaining RMW roots: SOURCE/CI завершены
 
 От reviewed migration head `eb372f8b` в owned `codex/ear-rmw-roots-20261011`
-начата [RMW-карточка](superpowers/plans/2026-10-11-rmw-roots.md): повторная
+завершена [RMW-карточка](superpowers/plans/2026-10-11-rmw-roots.md): повторная
 проверка shares index перед mutation и строгая загрузка scheduler для записи.
 Реальная corruption-after-start и transient-read → defaults → overwrite
 проверяются временными filesystem fixtures. Source `26865bf1` (scheduler) и `a0bcea9c` (sharing): proper RED→GREEN,
@@ -17,11 +17,18 @@ payload: потерю tracking при transient guard read. Single final fixwave
 сохраняя полный journal+entry без rotation. Direct/config/cancel strict; real
 rotation/unlink/write failures не подавляются. Proper actual-file unittestRED2→
 GREEN23 и existing scheduler auth7/7 PASS; sharing15 unchanged. Final scoped
-AstraUltra,14audits rerun и exact amended-head hostedCI остаются gates.
+AstraUltra PASS/P2 закрыт/open0; повторный audit-all14gates PASS. Source/CI head
+`7e49e4ced72b695834ced3c2872ebac8973f3d01`:27/27checks SUCCESS, все3runs
+38137823544/38137823549/38137820784 SUCCESS. Оба backend1102files/16chunks,
+Aggregate rc0/no fallback/isofail0; оба regression-файла входят в chunks5/12
+полного test-glob. Все3Swift jobs actual production callback test PASS.
 Local17filepytest batch остановлен exit143 после repeated30s Torch/matplotlib
-imports; не PASS. Sourcecheckpoint docs — до finalCI; актуальный receipt
-[PR2087](https://github.com/Pavua/Krab-Ear/pull/2087)/checks и ownledger,
-без переноса зелени с SHA родителей или первого98549298 head.
+imports; не PASS. Full dependency coverage получено на hosted Python3.12.
+[PR2087](https://github.com/Pavua/Krab-Ear/pull/2087) остаётся DRAFT/unmerged;
+proof/rawlogs/seal9paths/clean ownedWT сохранены. Source/CI-карточка100%,
+live A5.4 acceptance отдельная. Final docs и исправленный cursor/limit контракт
+get_history_page — [docs PR2088](https://github.com/Pavua/Krab-Ear/pull/2088),
+с identical Python/Swift trees и отдельно отслеживаемым docsCI.
 
 Предыдущий [draft #2086](https://github.com/Pavua/Krab-Ear/pull/2086) source/CI
 завершён: `eb372f8b1d977bbf48e9de1993a7548c1d962c56`, 27/27 SUCCESS,
