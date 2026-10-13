@@ -47,8 +47,8 @@
 - [x] Необходимые fixture keyword adapters, targeted diff-check.
   Guarded selected unit/pytest — 549 на каждой версии; real IPC — ещё 1
   на каждой. Baseline IPC RED: неожиданное создание ключа (1 вместо 0).
-- [ ] `make audit-all` (14 gates) PENDING на freeze; root получает итоговый
-  external receipt/PR body без дополнительной правки этого head.
+- [x] `make -j1 audit-all`: все 14 gates PASS после первоначального freeze;
+  результат сохранён в external receipt и PR body.
   Полный backend/Swift CI выполняет root hosted.
 - [x] Handoff с точными командами/results и остаточными рисками. Root проводит
   независимый Astra Ultra whole-diff gate; новый SHA требует собственного CI.
@@ -56,5 +56,23 @@
 Raw RED/GREEN и command ledger находятся в ignored
 `.superpowers/sdd/2026-10-14-passive-history-key/`. Полный локальный suite,
 build/install/restart, настоящие данные и Keychain не входят в эту карточку.
+
+## Hosted CI follow-up
+
+Два purge-теста из полного CI вызывали passive getter как подготовку нового
+encrypted synthetic-профиля. Proper guarded RED воспроизвёл оба отказа
+`crypto is None`; fixture `_store_crypto` теперь явно передаёт
+`allow_create=True`. Проверки реального purge/ledger не ослабляются,
+production read-side контракт остаётся прежним. Полный test-файл проверяется
+на обеих существующих Python-версиях: **100/100 + 100/100 PASS**.
+
+Третий CI failure возвращал `MagicMock` из warmup handler. Collection-time
+patch может сохраниться в захваченном `backend.service.Transcriber` alias.
+CPU-only poison-control воспроизвёл точную assertion (`loaded` отсутствует
+в MagicMock). Handler shape test теперь явно инъецирует transcriber/engine,
+выключает startup warmup в temp store и проверяет единственный explicit
+warmup, полный dict и отсутствие вызова default factory. Poison-control
+GREEN и полный файл **10/10 PASS на Python 3.12 и 3.14**. Production STT
+не меняется. Новый head требует нового полного hosted CI.
 
 Sol 6.1 High — реализация и проверки; Astra Ultra — final whole-diff gate.

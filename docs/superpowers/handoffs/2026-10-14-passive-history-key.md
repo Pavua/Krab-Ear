@@ -55,9 +55,8 @@ Raw receipts и точные argv/env harness:
   b1 (69), restore b2 (157), disk guard b3 (40), journal encryption (28),
   backend plaintext sinks (41), irregular journal (17), encryption failclosed
   (13), плюс оба обязательных post-purge controls (1+1).
-- `git diff --check` — PASS. `make -j1 audit-all` (14 targets) на момент
-  freeze ещё выполняется; **PENDING**, не PASS. Финальный receipt получает
-  root для PR body/external evidence без изменения этого source head.
+- `git diff --check` — PASS. `make -j1 audit-all`: **14/14 PASS** после
+  первоначального freeze; root получил финальный external receipt.
 
 Guarded harness устанавливает HOME/data/audit/settings-backup в throwaway до
 imports, CPU import fence до приложения, запрет внешней persistent-записи,
@@ -96,8 +95,24 @@ INTERNALERROR до коллекции (logging plugin вне throwaway) и дв�
 
 ## Следующий gate
 
-Source/tests/docs заморожены после этой передачи. Audit receipt может быть
-добавлен root в PR body; docs этого head ради него не меняются.
+Первоначальный head `b6c4b47` получил два одинаковых hosted CI FAILURE:
+runs 38481104984 и 38481184605. Два purge fixture вызывали passive getter
+до первой записи; warmup shape test получил `MagicMock` из сохранённого
+default Transcriber alias. Оба класса воспроизведены guarded RED.
+
+Follow-up меняет только тестовую подготовку: purge helper явно создаёт
+synthetic ключ (`allow_create=True`), warmup handler test инъецирует
+transcriber и содержит poison-alias regression guard. Production три файла
+побайтно совпадают с reviewed `b6c4b47`. Полный purge-файл **100/100** и
+warmup-файл **10/10** проходят на каждой Python-версии; poison-control также
+GREEN на обеих. Первый локальный полный purge имел 99 PASS/1 harness failure:
+облегчённый runner не сбрасывал audit singleton между тестами. После переноса
+штатной autouse изоляции conftest в private runner полный файл повторён GREEN.
+Это **220 дополнительных file-test executions**, не новый full-suite PASS.
+
+Новый head и его exact-SHA CI отслеживаются в PR #2090. Старые FAILURE
+не отменяются и не переименовываются в PASS; source acceptance, hosted CI,
+merge и runtime приёмка остаются отдельными gates.
 
 Root владеет независимым whole-diff review, commit/push, exact-head hosted
 backend/Swift CI и последующим release decision. Локальные receipts не

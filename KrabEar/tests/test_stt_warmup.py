@@ -16,7 +16,8 @@ import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -270,27 +271,34 @@ class TestBackendServiceWarmupStartup(unittest.TestCase):
 class TestHandleWarmupStt(unittest.TestCase):
     """Тест IPC-метода warmup_stt (live extracted handler: STTManagementService)."""
 
-    @patch("core.engine.mlx_whisper")
-    def test_handle_warmup_stt_returns_correct_shape(self, mock_mlx):
-        """warmup_stt возвращает dict с ожидаемыми полями."""
-        mock_mlx.transcribe.return_value = {"text": ""}
+    @patch("backend.service.Transcriber")
+    def test_handle_warmup_stt_returns_correct_shape(self, default_transcriber):
+        """Реальный handler сохраняет схему независимо от collection-stub Transcriber."""
+        warmup = Mock(return_value={
+            "loaded": True, "latency_ms": 12, "model_name": "warmup-test-model", "error": None,
+        })
+        transcriber = FakeTranscriber()
+        transcriber.engine = SimpleNamespace(current_model="warmup-test-model", warmup=warmup)
 
         with tempfile.TemporaryDirectory() as tmp:
             from backend.state_store import StateStore
             from backend.service import BackendService
 
             store = StateStore(Path(tmp) / "data")
+            store.save_settings({"stt_warmup_on_startup": False})
             with closing(BackendService(
                 store=store,
                 recorder=FakeRecorder(),
+                transcriber=transcriber,
                 translator=FakeTranslator(),
             )) as svc:
                 result = svc._stt_mgmt_svc.handle_warmup_stt({})
 
-        self.assertIn("loaded", result)
-        self.assertIn("latency_ms", result)
-        self.assertIn("model_name", result)
-        self.assertIn("error", result)
+        default_transcriber.assert_not_called()
+        warmup.assert_called_once_with()
+        self.assertEqual(result, {
+            "loaded": True, "latency_ms": 12, "model_name": "warmup-test-model", "error": None,
+        })
 
     def test_handle_warmup_stt_no_engine(self):
         """warmup_stt возвращает error=engine not available если нет engine."""
