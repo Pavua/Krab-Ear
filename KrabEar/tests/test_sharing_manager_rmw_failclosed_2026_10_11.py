@@ -12,8 +12,10 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 from _plaintext_export_test_helpers import off_authorizer
 
@@ -71,6 +73,154 @@ class SharingIndexFailClosedTest(unittest.TestCase):
     def _corrupt(self, raw: bytes = b'{"abc": {"share_id": "abc", ') -> bytes:
         self._index_path().write_bytes(raw)
         return raw
+
+    def _snapshot(self) -> dict[str, bytes]:
+        return {p.name: p.read_bytes() for p in self._index_path().parent.iterdir()}
+
+    def _assert_late_unreadable_refuses_mutation(self, operation: str) -> None:
+        share_id = self._seed_valid_share()
+        good = self._index_path().read_bytes()
+        for failure in (b'{"broken":', b'[1, 2, 3]', OSError("transient read")):
+            with self.subTest(operation=operation, failure=repr(failure)):
+                self._index_path().write_bytes(good)
+                mgr = self._mgr()
+                if operation == "prune":
+                    with mgr._lock:
+                        mgr._index[share_id]["expires_at"] = -1
+                if isinstance(failure, bytes):
+                    raw = self._corrupt(failure)
+                    read_failure = nullcontext()
+                else:
+                    raw = good
+                    read_failure = patch.object(mgr, "_read_index_file", side_effect=failure)
+                before = self._snapshot()
+                with read_failure, self.assertRaises(SharePersistenceError) as caught:
+                    if operation == "prepare":
+                        mgr.prepare_share(["i1"], format="text")
+                    elif operation == "revoke":
+                        mgr.revoke_share(share_id)
+                    else:
+                        with mgr._lock:
+                            mgr._prune_expired_locked()
+                self.assertEqual(caught.exception.reason, "share_index_unreadable")
+                self.assertEqual(caught.exception.written_file_count, 0)
+                self.assertFalse(caught.exception.partial)
+                self.assertEqual(self._index_path().read_bytes(), raw)
+                self.assertEqual(self._snapshot(), before)
+                self.assertFalse(any(v.get("_reserved") for v in mgr._index.values()))
+
+    def test_prepare_refuses_index_that_became_unreadable_after_init(self) -> None:
+        self._assert_late_unreadable_refuses_mutation("prepare")
+
+    def test_revoke_refuses_index_that_became_unreadable_after_init(self) -> None:
+        self._assert_late_unreadable_refuses_mutation("revoke")
+
+    def test_prune_refuses_index_that_became_unreadable_after_init(self) -> None:
+        self._assert_late_unreadable_refuses_mutation("prune")
+
+    def test_unreadable_after_payload_reports_one_written_file(self) -> None:
+        self._seed_valid_share()
+        mgr = self._mgr()
+        raw = b'{"broken":'
+        before = self._snapshot()
+        original_save = mgr._save_index
+
+        def corrupt_before_save(**kwargs):
+            self._corrupt(raw)
+            return original_save(**kwargs)
+
+        with patch.object(mgr, "_save_index", side_effect=corrupt_before_save):
+            result = mgr.handle_prepare_share({"item_ids": ["i1"], "format": "text"})
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "share_index_unreadable")
+        self.assertTrue(result["partial"])
+        self.assertEqual(result["written_file_count"], 1)
+        self.assertEqual(self._index_path().read_bytes(), raw)
+        after = self._snapshot()
+        new_files = set(after) - set(before)
+        self.assertEqual(len(new_files), 1)
+        for name in set(before) - {"shares_index.json"}:
+            self.assertEqual(after[name], before[name])
+        self.assertIn("секретный текст", after[new_files.pop()].decode("utf-8"))
+
+    def test_repair_after_post_payload_failure_retains_pending_and_new_package(self) -> None:
+        share_id = self._seed_valid_share()
+        good = self._index_path().read_bytes()
+        mgr = self._mgr()
+        original_save = mgr._save_index
+
+        def corrupt_before_save(**kwargs):
+            self._corrupt()
+            return original_save(**kwargs)
+
+        with patch.object(mgr, "_save_index", side_effect=corrupt_before_save):
+            with self.assertRaises(SharePersistenceError) as caught:
+                mgr.prepare_share(["i1"], format="text")
+        self.assertEqual(caught.exception.reason, "share_index_unreadable")
+        self.assertEqual(caught.exception.written_file_count, 1)
+        pending_id, = set(mgr._index) - {share_id}
+        pending = dict(mgr._index[pending_id])
+        payload = self._index_path().parent / pending["filename"]
+        payload_bytes = payload.read_bytes()
+        self._index_path().write_bytes(good)
+        new = mgr.prepare_share(["i1"], format="text")
+        index = json.loads(self._index_path().read_text(encoding="utf-8"))
+        self.assertEqual(set(index), {share_id, pending_id, new.share_id})
+        self.assertEqual(index[pending_id], pending)
+        self.assertEqual(payload.read_bytes(), payload_bytes)
+
+    def test_prepare_retains_reservation_during_nested_prepare_and_new_package(self) -> None:
+        mgr = self._mgr()
+        original_persist = mgr._persist_package
+        nested = []
+
+        def prepare_while_reserved(package, **kwargs):
+            if package.share_id == "firstid":
+                self.assertTrue(mgr._index[package.share_id]["_reserved"])
+                nested.append(mgr.prepare_share(["i1"], format="text"))
+                self.assertTrue(mgr._index[package.share_id]["_reserved"])
+            return original_persist(package, **kwargs)
+
+        with patch.object(mgr, "generate_share_id", side_effect=["firstid", "firstid", "secondid"]):
+            with patch.object(mgr, "_persist_package", side_effect=prepare_while_reserved):
+                first = mgr.prepare_share(["i1"], format="text")
+        self.assertEqual(first.share_id, "firstid")
+        self.assertEqual(nested[0].share_id, "secondid")
+        index = json.loads(self._index_path().read_text(encoding="utf-8"))
+        self.assertEqual(set(index), {"firstid", "secondid"})
+        self.assertEqual(index[first.share_id], first.to_dict())
+        self.assertEqual(index[nested[0].share_id], nested[0].to_dict())
+        self.assertEqual(mgr.get_shared(first.share_id), first)
+
+    def test_repeated_prepare_and_revoke_keep_tombstones(self) -> None:
+        mgr = self._mgr()
+        first = mgr.prepare_share(["i1"], format="text")
+        second = mgr.prepare_share(["i1"], format="text")
+        self.assertTrue(mgr.revoke_share(first.share_id))
+        third = mgr.prepare_share(["i1"], format="text")
+        index = json.loads(self._index_path().read_text(encoding="utf-8"))
+        self.assertEqual(set(index), {first.share_id, second.share_id, third.share_id})
+        self.assertTrue(index[first.share_id]["is_revoked"])
+        self.assertNotIn("content", index[first.share_id])
+        self.assertEqual(index[second.share_id], second.to_dict())
+        self.assertEqual(index[third.share_id], third.to_dict())
+        self.assertFalse((self._index_path().parent / first.filename).exists())
+
+    def test_initial_unreadable_recovery_preserves_reserved_slots(self) -> None:
+        share_id = self._seed_valid_share()
+        good = self._index_path().read_bytes()
+        self._corrupt()
+        mgr = self._mgr()
+        reservation = {"share_id": "pending", "_reserved": True}
+        with mgr._lock:
+            mgr._index["pending"] = reservation
+        self._index_path().write_bytes(good)
+        with mgr._lock:
+            mgr._ensure_index_writable_locked()
+        self.assertFalse(mgr._index_unreadable)
+        self.assertIn(share_id, mgr._index)
+        self.assertEqual(mgr._index["pending"], reservation)
+        self.assertIsNotNone(mgr.get_shared(share_id))
 
     def test_prepare_share_refuses_and_preserves_unreadable_index(self) -> None:
         self._seed_valid_share()

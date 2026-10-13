@@ -91,21 +91,24 @@ class ExportScheduler:
             raise ValueError("export_schedule.json: ожидался JSON-объект")
         return loaded
 
-    def _load_schedule(self) -> dict:
-        """Загружает расписание из файла.
+    def _load_schedule(self, *, for_write: bool = False) -> dict:
+        """Загружает расписание; read-only сбой даёт отключённые defaults.
 
-        Отсутствующий файл — нормальный свежий старт. Нечитаемый/битый файл тоже
-        даёт значения по умолчанию (enabled=False), но громко логируется, а при
-        следующей записи оригинал сохраняется (см. ``_save_schedule``).
+        Mutation не заменяет журнал defaults при I/O-ошибке. Доказанную
+        corruption откладываем, а исправленный между чтениями файл используем.
         """
         try:
             loaded = self._read_schedule_file()
+        except (ValueError, UnicodeError) as exc:
+            if for_write:
+                loaded = self._rotate_corrupt_schedule()
+            else:
+                logger.warning("export_scheduler: битое расписание (%s) — отключено", type(exc).__name__)
+                loaded = None
         except Exception as exc:
-            logger.warning(
-                "export_scheduler: export_schedule.json нечитаем (%s) — расписание "
-                "отключено до перезаписи; оригинал будет сохранён как .corrupt-*",
-                exc,
-            )
+            if for_write:
+                raise
+            logger.warning("export_scheduler: расписание нечитаемо (%s) — отключено", type(exc).__name__)
             loaded = None
         if loaded is not None:
             return loaded
@@ -118,16 +121,19 @@ class ExportScheduler:
             "exports": [],
         }
 
-    def _rotate_corrupt_schedule(self) -> None:
-        """Откладывает нечитаемый export_schedule.json в сторону (не копирует), ретеншн 5.
+    def _rotate_corrupt_schedule(self, *, allow_checkpoint_read_error: bool = False) -> dict | None:
+        """Откладывает доказанную corruption, ретеншн 5; возвращает healthy reread.
 
-        Перезапись дефолтами стёрла бы ``exports`` — список, по которому режутся старые
-        экспорты: уже записанные plaintext-файлы стали бы неотслеживаемыми.
+        I/O-ошибка не доказывает повреждение и запрещает ротацию. Только
+        auto-checkpoint может записать уже прочитанный healthy schedule.
         """
         try:
-            self._read_schedule_file()
-            return
-        except Exception:
+            return self._read_schedule_file()
+        except OSError:
+            if not allow_checkpoint_read_error:
+                raise
+            return None
+        except (ValueError, UnicodeError):
             pass
         try:
             backup = self._schedule_path.with_name(f"{self._schedule_path.name}.corrupt-{time.time_ns()}")
@@ -135,16 +141,17 @@ class ExportScheduler:
             siblings = sorted(self._schedule_path.parent.glob(f"{self._schedule_path.name}.corrupt-*"))
             for old in siblings[:-_CORRUPT_KEEP]:
                 old.unlink(missing_ok=True)
-            logger.error("export_scheduler: нечитаемое расписание сохранено как %s", backup.name)
+            logger.error("export_scheduler: битое расписание сохранено как %s", backup.name)
         except OSError:
             # Не смогли сохранить оригинал — перезапись запрещена (fail-closed).
-            logger.error("export_scheduler: не удалось отложить нечитаемое расписание", exc_info=True)
+            logger.error("export_scheduler: не удалось отложить битое расписание", exc_info=True)
             raise
+        return None
 
-    def _save_schedule(self, schedule: dict) -> None:
-        """Сохраняет расписание в файл атомарно."""
+    def _save_schedule(self, schedule: dict, *, allow_checkpoint_read_error: bool = False) -> None:
+        """Атомарная запись; auto-checkpoint отдельно допускает сбой guard-read."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self._rotate_corrupt_schedule()
+        self._rotate_corrupt_schedule(allow_checkpoint_read_error=allow_checkpoint_read_error)
         tmp = self._schedule_path.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(schedule, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp.replace(self._schedule_path)
@@ -469,7 +476,7 @@ class ExportScheduler:
             validated_output_dir = str(validated_path)
 
         with self._lock:
-            schedule = self._load_schedule()
+            schedule = self._load_schedule(for_write=True)
             schedule["format"] = fmt
             schedule["interval_hours"] = interval_hours
             schedule["output_dir"] = validated_output_dir
@@ -543,7 +550,9 @@ class ExportScheduler:
                 schedule = self._prune_old_exports(schedule)
                 run_export_write(
                     self._plaintext_export_authorizer, None, BackendSink.SCHEDULER,
-                    lambda: self._save_schedule(schedule),
+                    # Только этот caller имеет healthy initial read + новую
+                    # разрешённую entry; defaults никогда не доходят до payload.
+                    lambda: self._save_schedule(schedule, allow_checkpoint_read_error=True),
                 )
             except PlaintextExportDenied as exc:
                 return {**entry, "exported": True, "partial": True, "reason": exc.reason}
@@ -597,7 +606,7 @@ class ExportScheduler:
             Обновлённый статус расписания.
         """
         with self._lock:
-            schedule = self._load_schedule()
+            schedule = self._load_schedule(for_write=True)
             schedule["enabled"] = False
             self._save_schedule(schedule)
         return self.get_schedule_status()
