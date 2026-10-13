@@ -29,6 +29,10 @@ class KeystoreUnavailable(Exception):
     """``security`` CLI недоступен на этой платформе."""
 
 
+class HistoryKeyMissing(KeystoreUnavailable):
+    """Ключ истории отсутствует; lookup не создаёт замену."""
+
+
 def _run_security(args: Sequence[str]) -> subprocess.CompletedProcess:
     """Выполняет команду ``security`` и возвращает CompletedProcess.
 
@@ -55,14 +59,12 @@ def _run_security(args: Sequence[str]) -> subprocess.CompletedProcess:
         ) from exc
 
 
-def get_or_create_history_key() -> bytes:
-    """Возвращает 32-байтный ключ шифрования из Keychain.
-
-    Если ключ отсутствует — генерирует новый ``os.urandom(32)``,
-    сохраняет в Keychain и возвращает.
+def get_history_key() -> bytes:
+    """Читает существующий 32-байтный ключ, не создавая новый.
 
     Raises:
-        KeystoreUnavailable: если ``security`` CLI не найден (не macOS).
+        HistoryKeyMissing: если Keychain подтвердил отсутствие ключа.
+        KeystoreUnavailable: при отказе чтения или повреждённом ключе.
     """
     # Пробуем найти существующий ключ
     result = _run_security(
@@ -81,6 +83,15 @@ def get_or_create_history_key() -> bytes:
         raise KeystoreUnavailable(
             f"не удалось прочитать ключ из Keychain (код {result.returncode})"
         )
+    raise HistoryKeyMissing("ключ истории отсутствует в Keychain")
+
+
+def get_or_create_history_key() -> bytes:
+    """Читает ключ; при подтверждённом отсутствии создаёт и сохраняет новый."""
+    try:
+        return get_history_key()
+    except HistoryKeyMissing:
+        pass
 
     # Генерируем новый ключ и сохраняем
     key = os.urandom(32)
@@ -98,8 +109,8 @@ def get_or_create_history_key() -> bytes:
         # Fail-closed: НЕ возвращаем неперсистированный ключ. Иначе текущая
         # сессия зашифрует им историю, а при рестарте ключ не найдётся →
         # сгенерируется новый → данные станут НЕДЕШИФРУЕМЫМИ (потеря данных).
-        # raise → build_history_crypto вернёт None → шифрование останется ВЫКЛ
-        # (открытый текст, но без потери данных).
+        # raise → build_history_crypto вернёт None → запись при Encryption ON
+        # будет отклонена вызывающим StateStore.
         raise KeystoreUnavailable(
             "не удалось сохранить ключ в Keychain "
             f"(код {store_result.returncode}): {store_result.stderr.strip()}"

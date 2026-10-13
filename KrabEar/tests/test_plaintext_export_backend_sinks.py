@@ -349,7 +349,7 @@ def test_manual_grant_keeps_auto_backup_encrypted(setup_auth):
     from backend.history_crypto import HistoryCrypto
     auth, context, store, path = setup_auth
     crypto = HistoryCrypto(os.urandom(32))
-    store._get_history_crypto = lambda: crypto
+    store._get_history_crypto = lambda *, allow_create=False: crypto
     store.history_path.write_text(crypto.encrypt_line('{"id":"synthetic","text":"PRIVATE_TEST_MARKER"}') + "\n")
     original = store.history_path.read_bytes()
     result = AutoBackupManager(store=store, interval_hours=0).check_and_backup()

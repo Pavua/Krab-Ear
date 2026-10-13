@@ -74,7 +74,7 @@ def _inject_crypto(store, crypto=None):
     store._history_crypto_instance = crypto
     # migrate_history_encryption() deliberately reinitializes crypto; bypass
     # Keychain in this temp-profile fixture without weakening production code.
-    store._get_history_crypto = lambda: crypto
+    store._get_history_crypto = lambda *, allow_create=False: crypto
     return crypto
 
 
@@ -575,7 +575,7 @@ class TestMigrateSettingsRace(unittest.TestCase):
             store = _make_store(data_dir)
             crypto = _make_fake_crypto()
 
-            def disable_then_return_crypto():
+            def disable_then_return_crypto(*, allow_create=True):
                 _make_store(data_dir).save_settings({"history_encryption_enabled": False})
                 return crypto
 
@@ -606,12 +606,13 @@ class TestMigrateCryptoUnavailable(unittest.TestCase):
         store = _make_store(self.data_dir)
         _seed_known_profile(self.data_dir)
         store.save_settings({"history_encryption_enabled": True})
-        store._history_crypto_initialized = True
-        store._history_crypto_instance = None
 
         _write_plaintext_line(self.data_dir / "history.ndjson", _make_item_payload("id1", "Данные"))
 
-        result = store.migrate_history_encryption()
+        # Миграция переинициализирует crypto: None в старом кэше не имитирует
+        # unavailable provider и без этого patch допускает живой Keychain lookup.
+        with patch("backend.history_crypto.build_history_crypto", return_value=None):
+            result = store.migrate_history_encryption()
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "encryption_unavailable")

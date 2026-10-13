@@ -20,7 +20,7 @@ JOURNALS = (
 @pytest.fixture
 def protected_store(tmp_path, monkeypatch):
     crypto = HistoryCrypto(b"S" * 32)
-    monkeypatch.setattr("backend.history_crypto.build_history_crypto", lambda: crypto)
+    monkeypatch.setattr("backend.history_crypto.build_history_crypto", lambda *, allow_create=True: crypto)
     (tmp_path / "settings.json").write_text(
         json.dumps({"history_encryption_enabled": True}), encoding="utf-8"
     )
@@ -66,7 +66,7 @@ def test_sidecar_enc1_without_settings_cannot_write_plaintext(protected_store, m
     store, crypto = protected_store
     getattr(store, name).write_text(crypto.encrypt_line('{"id":"deleted"}') + "\n", encoding="utf-8")
     store.settings_path.unlink()
-    monkeypatch.setattr("backend.history_crypto.build_history_crypto", lambda: None)
+    monkeypatch.setattr("backend.history_crypto.build_history_crypto", lambda *, allow_create=True: None)
     fresh = StateStore(store.data_dir)
     with pytest.raises(HistoryEncryptionUnavailable):
         fresh.add_history_item(text="SYNTHETIC_AFTER_SETTINGS_LOSS")

@@ -525,7 +525,7 @@ class TestMigrateHistoryEncryptionWithSharedLoadSettings(unittest.TestCase):
         crypto = HistoryCrypto(os.urandom(32))
         store._history_crypto_initialized = True
         store._history_crypto_instance = crypto
-        store._get_history_crypto = lambda: crypto
+        store._get_history_crypto = lambda *, allow_create=False: crypto
 
         for i in range(5):
             _write_plaintext_line(store.history_path, f"item-{i}", f"text {i}")

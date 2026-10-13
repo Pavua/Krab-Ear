@@ -85,7 +85,7 @@ def _policy_on(data_dir: Path) -> bool:
 
 def _store_with_crypto(data_dir: Path, crypto) -> StateStore:
     store = StateStore(data_dir)
-    store._get_history_crypto = lambda: crypto  # инъекция ключа БЕЗ Keychain
+    store._get_history_crypto = lambda *, allow_create=False: crypto  # инъекция ключа БЕЗ Keychain
     return store
 
 

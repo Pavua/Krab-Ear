@@ -138,6 +138,31 @@ class TestHistoryCryptoKeyValidation(unittest.TestCase):
 class TestBuildHistoryCrypto(unittest.TestCase):
     """build_history_crypto возвращает None если keystore недоступен."""
 
+    def test_passive_builder_missing_key_does_not_create(self):
+        import subprocess
+        from unittest.mock import patch
+        from backend.history_crypto import build_history_crypto
+
+        with patch("backend.crypto_keystore._run_security", side_effect=[
+            subprocess.CompletedProcess([], 44, "", "not found"),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]) as security:
+            self.assertIsNone(build_history_crypto(allow_create=False))
+        self.assertEqual(security.call_count, 1)
+
+    def test_default_builder_preserves_deliberate_creation(self):
+        import subprocess
+        from unittest.mock import patch
+        from backend.history_crypto import build_history_crypto
+
+        with patch("backend.crypto_keystore._run_security", side_effect=[
+            subprocess.CompletedProcess([], 44, "", "not found"),
+            subprocess.CompletedProcess([], 0, "", ""),
+        ]) as security:
+            self.assertIsNotNone(build_history_crypto())
+        self.assertEqual([call.args[0][0] for call in security.call_args_list],
+                         ["find-generic-password", "add-generic-password"])
+
     def test_returns_none_when_keystore_unavailable(self) -> None:
         from unittest.mock import patch
 

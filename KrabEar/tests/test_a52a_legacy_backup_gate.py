@@ -91,7 +91,7 @@ def _synthetic_crypto():
 def _store_with_crypto(data_dir: Path, crypto):
     """StateStore с подставленным ключом (тот же приём, что в тестах A5.1)."""
     store = StateStore(data_dir)
-    store._get_history_crypto = lambda: crypto
+    store._get_history_crypto = lambda *, allow_create=False: crypto
     return store
 
 

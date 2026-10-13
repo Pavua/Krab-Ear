@@ -1780,7 +1780,7 @@ class TestRecoveryTriggerPoints:
 def _store_with_crypto(data_dir: Path, crypto) -> StateStore:
     store = StateStore(data_dir)
     # Инъекция ключа БЕЗ Keychain (приём b1/A5.1).
-    store._get_history_crypto = lambda: crypto
+    store._get_history_crypto = lambda *, allow_create=False: crypto
     return store
 
 
