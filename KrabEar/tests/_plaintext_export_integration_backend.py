@@ -130,6 +130,8 @@ def run_child(connection, root_string, source_string, crypto_key=None):
         "KRAB_EAR_STT_GIGAAM_ENABLED": "false", "KRAB_EAR_STT_WARMUP_ENABLED": "false",
         "XDG_CACHE_HOME": str(home / "cache"), "MPLCONFIGDIR": str(home / "matplotlib"),
         "PYTHONDONTWRITEBYTECODE": "1", "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+        "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
+        "NUMEXPR_NUM_THREADS": "1",
     })
     sys.dont_write_bytecode = True
     sys.path.insert(0, source_string)
@@ -328,7 +330,8 @@ def run_child(connection, root_string, source_string, crypto_key=None):
             reached = threading.Event()
             state = {"phase": None, "context": None, "writes": 0, "gates": 0,
                      "output": None, "revoke_after_first": False, "raw_error": False,
-                     "raw_error_injections": 0, "validations": 0, "run_auth": None}
+                     "raw_error_injections": 0, "validations": 0, "run_auth": None,
+                     "grants_issued": 0}
 
             def retain_auth(values):
                 if isinstance(values, dict):
@@ -450,6 +453,13 @@ def run_child(connection, root_string, source_string, crypto_key=None):
                             raise AssertionError("fixture validation barrier deadline")
                 result = original_dispatch(request)
                 retain_auth(result)
+                if method == "grant_plaintext_export_session" and result.get("result", {}).get("ok") is True:
+                    # Test-control остаётся внутри owned child; parent видит
+                    # только boolean revoke, capability/session не пересылаются.
+                    issued = result["result"]
+                    state["grants_issued"] += 1
+                    state["context"] = {"app_session_id": params["app_session_id"],
+                                        "epoch": issued["epoch"], "capability": issued["capability"]}
                 if method == "validate_plaintext_export":
                     state["validations"] += 1
                     if state["raw_error"] and result.get("result", {}).get("ok") is True:
@@ -533,6 +543,11 @@ def run_child(connection, root_string, source_string, crypto_key=None):
                     revoke(state["context"])
                     release.set()
                     reply = True
+                elif name == "revoke_current":
+                    assert state["context"] is not None
+                    reply = revoke(state["context"])["result"]["ok"] is True
+                elif name == "grant_count":
+                    reply = state["grants_issued"]
                 elif name == "write_probe":
                     target = root / command["directory"]
                     assert target.resolve().is_relative_to(root.resolve())

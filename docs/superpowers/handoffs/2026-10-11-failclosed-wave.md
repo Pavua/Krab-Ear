@@ -1,6 +1,13 @@
 # Волна fail-closed + честный UI шифрования (2026-10-11)
 
-Ветка `claude/haiku-agents-work-79f6d6` (база `16d2b226`, 15 коммитов, НЕ запушена, PR не открыт).
+Ветка `claude/haiku-agents-work-79f6d6` (база `16d2b226`, 15 коммитов),
+[PR #2084](https://github.com/Pavua/Krab-Ear/pull/2084) OPEN.
+Проверено 11.10 в Codex: exact head `5e30937619d91aaf6bf4afa0a01385caf877f352`,
+27 CI checks SUCCESS. Независимый Astra whole-diff gate PASS; отдельная synthetic
+Timeline Swift/crypto IPC карточка прошла83tests+27subtests и final delta Astra
+PASS, audit-all14gates PASS. Followup
+[#2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT; его новый exact-head CI
+проверяется отдельно. Merge/deploy/live acceptance не заявлены.
 Исполнители: Sonnet 5.5 (воркеры в worktree), Haiku 5.5 (скауты, read-only), Opus 5.5 (ревью всей ветки). Каждую находку гейтил сам владелец сессии против кода.
 
 ## Что сделано
@@ -24,7 +31,11 @@
 - Аудиты: purge-coverage, fake-store-signatures — чисто. `audit_orphan_imports --strict` красный на параметрах функций — ложная тревога сканера, CI гоняет без `--strict`.
 
 ## Открыто (следующим агентам)
-1. **Push + PR + CI** по слову владельца (ничего не запушено).
+1. **Новый exact-head CI и review followup #2085** по
+   [карточке](../plans/2026-10-11-a54-timeline-crypto-ipc.md). Push/PR/exact-head CI
+   и whole-diff review исходной ветки уже выполнены; повторно создавать эту
+   волну не требуется. Synthetic проверки и новый source fix описаны в
+   [Timeline handoff](2026-10-11-a54-timeline-crypto-ipc.md).
 2. **Живой click-through** consent-sheet для 3 кнопок таймлайна при включённом шифровании (не проверялся в приложении).
 3. **Бриф Краба** `docs/superpowers/handoffs/2026-10-11-krab-consumer-drift-brief.md` не передан (сессия Краба недоступна): `get_history` (нет у Ear, есть `get_history_page`), `:18000/health`, `/screenshot`, flock в perceptor.
 4. **Дизайн-решение владельца**: нечитаемый побочный журнал теперь даёт `internal_error` на чтениях истории (раньше частичный вид) — оставить или мягкая деградация.

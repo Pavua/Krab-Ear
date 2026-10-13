@@ -3594,19 +3594,26 @@ Returns: `{preset: {name, description, builtin: false, settings_patch}}`
 *(service.py)*  
 Экспортирует таймлайн в SVG-файл.  
 Params: `{output_dir?, group_by="day", limit=500, width=1200, height=400}` — group_by: `"hour"|"day"|"week"`; limit макс 5000.  
-Returns: `{path, blocks}` (успех) или `{error: {code: "privacy_mode"|"invalid_path", message}}` (бэкенд не бросает исключение — ошибка ВНУТРИ result, ok:true на верхнем уровне).
+Returns: `{path, blocks}` (успех); policy/path отказ внутри `result`:
+`{ok:false, reason, path:null, error:{code,message}}` либо `{error:{code,message}}`.
+Ошибки чтения/расшифровки истории доходят до общей IPC boundary:
+`{ok:false, error:{code:"internal_error",message}}`, без `result`, каталога или
+нового файла. Нечитаемая история не экспортируется как успешный пустой таймлайн.
+Настоящая пустая история допускает обычный экспорт с `blocks=0`.
 
 ### `export_timeline_json`
 *(service.py)*  
 То же для JSON (без width/height).  
 Params: `{output_dir?, group_by="day", limit=500}`  
 Returns: `{path, blocks}` или `{error: {code, message}}`
+Ошибки чтения/crypto имеют тот же верхнеуровневый `internal_error`, что SVG.
 
 ### `export_timeline_ical`
 *(service.py)*  
 То же для iCalendar (.ics), blocks = число VEVENT.  
 Params: `{output_dir?, group_by="day", limit=500}`  
 Returns: `{path, blocks}` или `{error: {code, message}}`
+Ошибки чтения/crypto имеют тот же верхнеуровневый `internal_error`, что SVG.
 
 > **WebhookManager** — внешние webhook-интеграции (HMAC-подпись, SSRF-защита, retry с backoff).
 

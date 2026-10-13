@@ -1,15 +1,43 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-11 — волна fail-closed + честный UI шифрования (ветка не запушена)
+## 2026-10-11 — Timeline crypto IPC и fail-closed source проверены
 
 Ветка `claude/haiku-agents-work-79f6d6`, 15 коммитов поверх `16d2b226`; подробности и список открытого —
 [handoff](superpowers/handoffs/2026-10-11-failclosed-wave.md). Итог: privacy fail-closed при битых/нечитаемых
 настройках и журналах (с деградацией вместо падения на старте и purge), RMW-защита шаринга и расписания
 экспорта, итог миграции шифрования через IPC, таймлайн-экспорт через consent, сверка reason-строк Swift↔Python.
-**Дальше:** push + PR + CI по слову владельца; живой click-through consent-sheet таймлайна; бриф для Краба
+Ветка уже опубликована как [PR #2084](https://github.com/Pavua/Krab-Ear/pull/2084):
+head `5e309376`, 27 exact-head checks SUCCESS; independent Astra Ultra source diff
+`16d2b226 → 5e309376` PASS, все 33 файла просмотрены, новых P0–P2 не обнаружено.
+P3: поздний migration IPC callback после закрытия окна может возобновить SSE;
+прежние corruption-after-start sharing и transient-read scheduler ограничения
+не закрыты этой волной. PASS не означает live UI/Keychain приёмку.
+
+**Текущая source-карточка:** [synthetic Timeline Swift/Unix IPC/AES-GCM](superpowers/plans/2026-10-11-a54-timeline-crypto-ipc.md)
+в owned `codex/ear-failclosed-followup-20261011` поверх PR #2084. Все три формата,
+decline/privacy/stale/revoked grants и wrong-key/tag failure проверены на
+временном профиле, без Keychain. Wrong-key/tag→пустой успешный Timeline export
+подтверждён шестью actual-AES-GCM RED cases и исправлен во всех 3 handlers;
+protected history/settings сохраняются. Новый файл **30 PASS** (18 production
+Swift→Unix IPC и 12 direct IPC), selected-file Python 3.12 parity —
+**83 PASS + 27 subtests**, independent Astra Ultra final delta PASS.
+`audit-all`: все14gates PASS. Followup
+[PR #2085](https://github.com/Pavua/Krab-Ear/pull/2085) DRAFT, source/test commit
+`f1b86d10bf507f1074674401a35c5a80ce91f524`; оба workflows запускаются на base
+`codex/krab-ear-v2`. Первый head `0d34b7d9`: 25 checks SUCCESS / два backend
+lint F811 failure до suites; исправлен binding общего pytest fixture,
+production source не менялся. Новый exact-head/status и receipt проверяются
+в PR checks/body, исходные27checks #2084
+не считаются CI followup. Локальная source-карточка100%; merge/deploy не выполнены.
+[Проверки и границы](superpowers/handoffs/2026-10-11-a54-timeline-crypto-ipc.md).
+Далее отдельный source fix P3 close/callback SSE race; живой click-through
+consent-sheet таймлайна; бриф для Краба
 (`get_history`); решение владельца по activation шифрования (HOLD, отдельный scope) и по поведению при
 нечитаемом побочном журнале. Прод-runtime в этой волне НЕ менялся и не перезапускался.
-Перегрузка машины (swap ~97%) — главный источник сегодняшних hang-детекций, не код Ear.
+Начальный снимок ресурсов этой Codex-сессии: swap ~16.4 GiB, диск 93%;
+07:56 CEST — swap ~21.8 GiB, pressure2. Source/малые серийные
+тесты допустимы, full Swift build/install/restart не выполняются. Предыдущая
+гипотеза о перегрузке как причине hang не аттестует конкретные новые инциденты.
 
 ## 2026-10-10 — A5.4: пакет применён, runtime smoke PASS
 

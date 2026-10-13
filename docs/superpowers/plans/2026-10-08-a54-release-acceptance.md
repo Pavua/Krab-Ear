@@ -90,11 +90,19 @@ scope; Backend/REST cutover сам по себе его не разрешает.
 наследовать crypto-deny trap D и обещать ON acceptance. Не обращаться к системному
 Keychain или пользовательской истории ради synthetic проверки.
 
-**Timeline ON LIMIT:** сейчас нет session context, backend fail-closed.
+**Timeline ON LIMIT (снимок 08.10):** нет session context, backend fail-closed.
 Для полной ON UI-приёмки нужна отдельная source-карточка wiring и review/E2E.
 Если release сознательно сохраняет LIMIT, это отдельное документированное решение
 владельца; сохранённый отказ не превращается в PASS функциональности.
 Не обходить authorizer, не переносить consent между окнами и не обещать peer-auth.
+
+Уточнение 11.10: source wiring уже написан в
+[PR #2084](https://github.com/Pavua/Krab-Ear/pull/2084), head `5e309376`, с
+27 exact-head checks SUCCESS и independent Astra review PASS.
+[Synthetic Timeline crypto IPC карточка](2026-10-11-a54-timeline-crypto-ipc.md)
+проверяет эту проводку и исправляет найденную подмену ошибки расшифровки пустым
+успешным экспортом. Это source-only работа; живой Timeline ON UI LIMIT остаётся
+до отдельной согласованной приёмки, повторно реализовывать wiring не требуется.
 
 ## 4. Activation и старые plaintext-копии
 
