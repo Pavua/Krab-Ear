@@ -220,19 +220,31 @@ final class IPCCallObserverSettings: CallObserverSettingsProviding {
                     self.lock.lock(); self._lastApiKey = key; self.lock.unlock()  // IPC-провал → живёт последний успешный кэш
                 }
             }
-            var hudEnabled = true
-            var autoplay = false
-            var privacy = false
-            if let resp = try? client.call(method: "get_settings", params: [:]),
-               let s = resp["result"] as? [String: Any] {
-                hudEnabled = s["call_observer_hud_enabled"] as? Bool ?? true
-                autoplay = s["call_observer_autoplay_audio"] as? Bool ?? false
-                privacy = s["privacy_mode_enabled"] as? Bool ?? false
-            }
+            let resolved = Self.resolveSettings(
+                response: try? client.call(method: "get_settings", params: [:]))
             let baseURL = self.lastBaseURL
             DispatchQueue.main.async {
-                completion(hudEnabled, autoplay, privacy, baseURL)
+                completion(resolved.hud, resolved.autoplay, resolved.privacy, baseURL)
             }
         }
+    }
+
+    /// Провал IPC и нечитаемый privacy-флаг трактуются как privacy ON (fail-closed):
+    /// иначе таймаут backend посреди звонка открывал HUD и autoplay при включённом
+    /// privacy. Отсутствующий ключ при успешном ответе — новый профиль, privacy OFF.
+    static func resolveSettings(response: [String: Any]?)
+        -> (hud: Bool, autoplay: Bool, privacy: Bool) {
+        guard let s = response?["result"] as? [String: Any] else {
+            return (hud: true, autoplay: false, privacy: true)
+        }
+        let privacy: Bool
+        if let raw = s["privacy_mode_enabled"] {
+            privacy = (raw as? Bool) ?? true
+        } else {
+            privacy = false
+        }
+        return (hud: s["call_observer_hud_enabled"] as? Bool ?? true,
+                autoplay: s["call_observer_autoplay_audio"] as? Bool ?? false,
+                privacy: privacy)
     }
 }

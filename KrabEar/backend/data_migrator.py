@@ -82,6 +82,17 @@ def _detect_version_from_items(items: list[dict[str, Any]]) -> str:
     return LATEST_VERSION
 
 
+def _enc_blocked(reader, data_dir: Path) -> bool:
+    """Политика блокирует ИЛИ в журналах остались ENC1-строки.
+
+    ``_read_ndjson`` пропускает не-JSON строки, поэтому raw-rewrite (migrate,
+    rollback) молча стёр бы ENC1-остаток даже при явном флаге OFF.
+    """
+    from backend.state_store import has_encrypted_history_in, history_journal_paths
+
+    return policy_blocks(reader) or has_encrypted_history_in(history_journal_paths(data_dir))
+
+
 def _read_ndjson(path: Path) -> list[dict[str, Any]]:
     """Читает NDJSON-файл и возвращает список объектов, пропуская некорректные строки."""
     if not path.exists():
@@ -234,7 +245,7 @@ class DataMigrator:
         # При Encryption ON — отказ. Guard не трогает Keychain. Возвращаем
         # MigrationResult (startup ожидает его, а не произвольный failure dict).
         reader = data_dir_policy_reader(data_dir)
-        if policy_blocks(reader):
+        if _enc_blocked(reader, data_dir):
             logger.warning(
                 "DataMigrator.migrate: history encryption on — legacy schema "
                 "migration refused (to=%s, %s)",
@@ -269,7 +280,7 @@ class DataMigrator:
         # политика — перепроверяться ПОСЛЕ захвата lock. Иначе второй
         # StateStore/IPC-клиент может включить шифрование между guard и copy.
         with history_flock(data_dir):
-            if policy_blocks(reader):
+            if _enc_blocked(reader, data_dir):
                 logger.warning(
                     "DataMigrator.migrate: encryption включён до захвата lock — "
                     "legacy schema migration refused (%s)",
@@ -434,7 +445,7 @@ class DataMigrator:
         # A5.2a: rollback восстанавливает plaintext-файлы из миграционного
         # backup. При Encryption ON — отказ до copy/prune.
         reader = data_dir_policy_reader(data_dir)
-        if policy_blocks(reader):
+        if _enc_blocked(reader, data_dir):
             logger.warning(
                 "rollback_migration: history encryption on — legacy plaintext "
                 "rollback refused (%s)",
@@ -455,7 +466,7 @@ class DataMigrator:
         # CRITICAL-1: copy под тем же history.lock flock, что и save_settings, с
         # повторной проверкой политики ПОСЛЕ захвата (OFF→ON вторым StateStore).
         with history_flock(data_dir):
-            if policy_blocks(reader):
+            if _enc_blocked(reader, data_dir):
                 logger.warning(
                     "rollback_migration: encryption включён до захвата lock — "
                     "legacy plaintext rollback refused (%s)",

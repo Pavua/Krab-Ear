@@ -66,11 +66,11 @@ class SharePackage:
 class SharePersistenceError(IpcOperationalError):
     """Файл пакета сохранён, но запись индекса не завершена; rollback запрещён."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, written_file_count: int = 1) -> None:
         super().__init__(reason)
         self.reason = reason
-        self.partial = True
-        self.written_file_count = 1
+        self.partial = written_file_count > 0
+        self.written_file_count = written_file_count
 
 
 class SharingManager:
@@ -96,6 +96,9 @@ class SharingManager:
         self._index_path = self._shares_dir / _SHARES_INDEX_FILE
         self._lock = threading.Lock()
         self._index: dict[str, dict[str, Any]] = {}
+        # True — shares_index.json существует, но нечитаем: пустой _index НЕ отражает
+        # диск, и любая его запись стёрла бы живые шары и tombstone'ы отзыва.
+        self._index_unreadable = False
         self._default_share_ttl_hours = default_share_ttl_hours
         self._share_no_default_ttl = share_no_default_ttl
         # wave-25 A2: callable returning bool — checked at IPC boundary in handle_prepare_share.
@@ -144,16 +147,51 @@ class SharingManager:
     # Персистентность индекса
     # ------------------------------------------------------------------
 
-    def _load_index(self) -> None:
-        """Загружает индекс пакетов из файла."""
+    def _read_index_file(self) -> dict[str, dict[str, Any]] | None:
+        """None — файла нет (свежий старт); бросает исключение — файл нечитаем/не dict."""
         try:
-            if self._index_path.exists():
-                raw = self._index_path.read_text(encoding="utf-8")
-                loaded = json.loads(raw)
-                if isinstance(loaded, dict):
-                    self._index = loaded
+            raw = self._index_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        loaded = json.loads(raw)
+        if not isinstance(loaded, dict):
+            raise ValueError("shares_index.json: ожидался JSON-объект")
+        return loaded
+
+    def _load_index(self) -> None:
+        """Загружает индекс пакетов из файла.
+
+        Нечитаемый существующий индекс помечается ``_index_unreadable``: записи в него
+        (prepare/revoke/prune) запрещены, оригинал остаётся на диске нетронутым.
+        """
+        try:
+            loaded = self._read_index_file()
         except Exception as exc:
-            logger.warning("Не удалось загрузить индекс shares: %s", exc)
+            self._index_unreadable = True
+            logger.error(
+                "Индекс shares нечитаем (%s) — записи в него ЗАПРЕЩЕНЫ, файл не тронут. "
+                "Исправьте или удалите %s",
+                exc,
+                self._index_path,
+            )
+            return
+        if loaded is not None:
+            self._index = loaded
+
+    def _ensure_index_writable_locked(self) -> None:
+        """Fail-closed: при нечитаемом индексе запись запрещена. Вызывать под self._lock.
+
+        Если файл с тех пор починили (или удалили) — подхватывает его и снимает запрет.
+        """
+        if not self._index_unreadable:
+            return
+        try:
+            loaded = self._read_index_file()
+        except Exception:
+            raise SharePersistenceError("share_index_unreadable", written_file_count=0) from None
+        reserved = {k: v for k, v in self._index.items() if v.get("_reserved")}
+        self._index = {**(loaded or {}), **reserved}
+        self._index_unreadable = False
 
     def _save_index(self, *, plaintext_export=None, index=None, before_write=None) -> None:
         """Каждая перезапись индекса с history — отдельный fresh-authorized файл.
@@ -161,6 +199,7 @@ class SharingManager:
         Содержимое фиксируется до authorization. before_write — только внутреннее
         удаление истёкшего/отозванного payload, связанное с этой записью индекса.
         """
+        self._ensure_index_writable_locked()
         content = json.dumps(self._index if index is None else index, ensure_ascii=False, indent=2)
         tmp = self._index_path.with_suffix(".tmp")
 
@@ -398,6 +437,8 @@ class SharingManager:
             RuntimeError: если файл на диске не удалось удалить.
         """
         with self._lock:
+            # Нечитаемый индекс: «не найден» было бы ложью — пакет может быть жив на диске.
+            self._ensure_index_writable_locked()
             entry = self._find_share_by_token_constant_time(token)
             if entry is None:
                 return False
@@ -470,6 +511,8 @@ class SharingManager:
                         fh.write("{}")
                     self._index_path.with_suffix(".tmp").unlink(missing_ok=True)
                 cleared = 1
+                # Нечитаемый индекс сознательно заменён пустым — запрет записи снят.
+                self._index_unreadable = False
             except Exception as exc:
                 logger.error("purge_all: не удалось сохранить пустой индекс: %s", exc)
 
@@ -496,6 +539,8 @@ class SharingManager:
         """
         with self._lock:
             self._index.clear()
+            # Вызывается после rmtree(shares/): нечитаемого файла на диске больше нет.
+            self._index_unreadable = False
 
     def get_share_package_by_token(self, token: str) -> SharePackage | None:
         """Alias для get_shared (более явное именование для токен-ориентированного API)."""
@@ -557,7 +602,7 @@ class SharingManager:
             return {"ok": False, "reason": exc.reason, "error": exc.reason}
         except SharePersistenceError as exc:
             return {"ok": False, "reason": exc.reason, "error": exc.reason,
-                    "partial": True, "written_file_count": 1}
+                    "partial": exc.partial, "written_file_count": exc.written_file_count}
         except ValueError as exc:
             raise RuntimeError(str(exc)) from exc
         result = package.to_dict()
@@ -764,6 +809,9 @@ class SharingManager:
     def _persist_package(self, package: SharePackage, *, plaintext_export=None) -> None:
         """Payload и индекс получают раздельную authorization; partial не откатывается."""
         precheck_export(self._plaintext_export_authorizer, plaintext_export, BackendSink.SHARING)
+        # Нечитаемый индекс: отказ ДО записи payload — иначе остался бы файл без записи в индексе.
+        with self._lock:
+            self._ensure_index_writable_locked()
         file_path = self._resolve_contained_share_path(package.filename)
         if file_path is None:
             raise ValueError("Небезопасный filename пакета")
@@ -791,6 +839,8 @@ class SharingManager:
                 self._save_index(plaintext_export=plaintext_export)
             except PlaintextExportDenied as exc:
                 raise SharePersistenceError(exc.reason) from None
+            except SharePersistenceError:
+                raise
             except Exception as exc:
                 raise SharePersistenceError("share_index_write_failed") from exc
 

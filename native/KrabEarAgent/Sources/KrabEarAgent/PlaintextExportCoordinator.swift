@@ -19,9 +19,26 @@ final class PlaintextExportCoordinator {
     enum BackendMethod: String {
         case exportHistoryMarkdown = "export_history"
         case runObsidianSync = "run_obsidian_sync"
+        // Таймлайн пишет файл сам (<data_dir>/exports/timeline): сервер проверяет
+        // BackendSink.TIMELINE по тому же четырёхполевому контексту.
+        case exportTimelineSVG = "export_timeline_svg"
+        case exportTimelineJSON = "export_timeline_json"
+        case exportTimelineICal = "export_timeline_ical"
+
+        /// Рендер таймлайна по большой истории (и под контенцией общего лока) может идти дольше
+        /// 5 с; таймаут здесь = «результат не подтверждён» + сброс согласия, а файл на сервере
+        /// всё равно мог записаться. Остальные серверные writes остаются на быстром таймауте.
+        var requestTimeoutSec: Int {
+            switch self {
+            case .exportTimelineSVG, .exportTimelineJSON, .exportTimelineICal:
+                return IPCClient.defaultTimeoutSec
+            case .exportHistoryMarkdown, .runObsidianSync:
+                return IPCClient.quickTimeoutSec
+            }
+        }
     }
 
-    enum Failure: Error, LocalizedError {
+    enum Failure: Error, LocalizedError, Equatable {
         case cancelled, closed, expired, privacy, unavailable, malformed, transport, writeFailed, partial
         var errorDescription: String? {
             switch self {
@@ -219,7 +236,8 @@ final class PlaintextExportCoordinator {
             requestParams["save_to_file"] = true
         }
         do {
-            let response = try await request(operation.method.rawValue, requestParams)
+            let response = try await request(operation.method.rawValue, requestParams,
+                                              timeoutSec: operation.method.requestTimeoutSec)
             try ensureOpen()
             return try backendResult(response, method: operation.method)
         } catch {
@@ -297,9 +315,10 @@ final class PlaintextExportCoordinator {
         return context
     }
 
-    private func request(_ method: String, _ params: [String: Any]) async throws -> [String: Any] {
+    private func request(_ method: String, _ params: [String: Any],
+                         timeoutSec: Int = IPCClient.quickTimeoutSec) async throws -> [String: Any] {
         // Никакого recovery/restart/retry при неоднозначном результате RPC.
-        do { return try await ipc.callAsync(method: method, params: params, timeoutSec: IPCClient.quickTimeoutSec) }
+        do { return try await ipc.callAsync(method: method, params: params, timeoutSec: timeoutSec) }
         catch { throw Failure.transport }
     }
 
@@ -391,14 +410,20 @@ final class PlaintextExportCoordinator {
                   let partial = boolean(result["partial"]) else { throw Failure.malformed }
             if partial || !errors.isEmpty { throw Failure.partial }
             if let value = result["reason"], !(value is NSNull) { throw reason(value) }
+        case .exportTimelineSVG, .exportTimelineJSON, .exportTimelineICal:
+            // Успех — {path, blocks}; отказ авторизатора приходит как ok:false + reason.
+            if let value = result["reason"], !(value is NSNull) { throw reason(value) }
+            guard let path = result["path"] as? String, !path.isEmpty,
+                  integer(result["blocks"]) != nil else { throw Failure.writeFailed }
         }
         return result
     }
-    private func reason(_ value: Any?) -> Failure {
+    private func reason(_ value: Any?) -> Failure { Self.failure(forReason: value) }
+    static func failure(forReason value: Any?) -> Failure {
         switch value as? String {
         case "privacy_mode_active": return .privacy
         case "plaintext_policy_unavailable": return .unavailable
-        case "plaintext_session_expired", "plaintext_consent_required": return .expired
+        case "plaintext_session_expired", "plaintext_confirmation_required": return .expired
         default: return .unavailable
         }
     }

@@ -357,18 +357,20 @@ class HistoryStoreTestCase(unittest.TestCase):
         self.assertEqual(len(results), 2)
 
     def test_load_settings_handles_corrupted_json(self) -> None:
-        """Проверяет, что load_settings возвращает дефолты при битом JSON."""
+        """Проверяет, что load_settings возвращает дефолты (privacy ON) при битом JSON."""
         self.store.settings_path.write_text("{broken json!!!", encoding="utf-8")
         result = self.store.load_settings()
         from backend.models import DEFAULT_SETTINGS
-        self.assertEqual(result, dict(DEFAULT_SETTINGS))
+        # Дефолты, но privacy ON: неизвестность не открывает privacy-гейты.
+        self.assertEqual(result, {**DEFAULT_SETTINGS, "privacy_mode_enabled": True})
 
     def test_load_settings_handles_empty_file(self) -> None:
-        """Проверяет, что load_settings возвращает дефолты при пустом файле."""
+        """Проверяет, что load_settings возвращает дефолты (privacy ON) при пустом файле."""
         self.store.settings_path.write_text("", encoding="utf-8")
         result = self.store.load_settings()
         from backend.models import DEFAULT_SETTINGS
-        self.assertEqual(result, dict(DEFAULT_SETTINGS))
+        # Дефолты, но privacy ON: неизвестность не открывает privacy-гейты.
+        self.assertEqual(result, {**DEFAULT_SETTINGS, "privacy_mode_enabled": True})
 
     # ------------------------------------------------------------------
     # Новые edge-case тесты

@@ -2642,6 +2642,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
     func windowWillClose(_ notification: Notification) {
         stopPreviewPolling()
+        cancelMigrationEventWatch()
         // Закрытие окна завершает активный разговор с AI: иначе микрофон и
         // WebSocket живут без UI, а wake word остаётся на вечной паузе —
         // pause(.conversation) без парного resume (ревью-находка волны

@@ -2712,7 +2712,15 @@ class HistoryService:
                                 "complete": False,
                             }
 
-            active = self.store._load_active_items_unlocked()
+            try:
+                active = self.store._load_active_items_unlocked()
+            except OSError:
+                # Нечитаемый побочный журнал не смеет блокировать wipe приватных данных:
+                # tombstone-шаг пропускается, остальные шаги purge и финальный barrier
+                # идут дальше, неполнота честно попадает в ответ.
+                logger.warning("purge_all_data: журнал нечитаем — tombstone-шаг пропущен", exc_info=True)
+                secondary_errors.append("history_unreadable")
+                active = []
             # A5.2c1 (B1‴): собственные томбестоны purge пишутся ОТКРЫТЫМИ.
             # `_append_ndjson` кодирует строку через `_maybe_encrypt`, поэтому
             # после ENOSENT/сбоя компактирования (шаг 1b) эти ENC1-строки
@@ -3197,6 +3205,9 @@ class HistoryService:
         # привязанные к выгрузке PII-истории). Стираем вместе с экспортами.
         try:
             (_data_dir / "export_schedule.json").unlink(missing_ok=True)
+            # Нечитаемые версии расписания, отложенные ExportScheduler перед перезаписью.
+            for _corrupt in _data_dir.glob("export_schedule.json.corrupt-*"):
+                _corrupt.unlink(missing_ok=True)
         except Exception:
             logger.warning("purge_all_data: удаление export_schedule.json не удалось", exc_info=True)
             secondary_errors.append("export_schedule")

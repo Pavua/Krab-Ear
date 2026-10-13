@@ -50,6 +50,10 @@ private enum SecurityAssocKeys {
     nonisolated(unsafe) static var migrateProgress: UInt8 = 0
     nonisolated(unsafe) static var migrateStatus: UInt8 = 0
     nonisolated(unsafe) static var migratePolling: UInt8 = 0
+    // SSE-наблюдатель терминального статуса миграции (итог фонового потока приходит только событием)
+    nonisolated(unsafe) static var migrationWatcher: UInt8 = 0
+    nonisolated(unsafe) static var migrationWatchSession: UInt8 = 0
+    nonisolated(unsafe) static var migrationWatchDelegate: UInt8 = 0
 }
 
 // MARK: - HistoryPanelController+SecuritySettings
@@ -342,6 +346,7 @@ extension HistoryPanelController {
     /// Отправляет migrate_history_encryption (off-main), затем запускает поллинг.
     @MainActor
     private func startHistoryMigration() {
+        startMigrationEventWatch()
         // Готовим UI: блокируем кнопку, показываем прогресс-бар на 0%.
         if let button = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateButton) as? NSButton {
             button.isEnabled = false
@@ -378,6 +383,7 @@ extension HistoryPanelController {
     /// Состояние «шифрование недоступно» — нет ключа в Keychain.
     @MainActor
     private func handleMigrationUnavailable() {
+        stopMigrationEventWatch()
         objc_setAssociatedObject(self, &SecurityAssocKeys.migratePolling, false, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
             progress.isHidden = true
@@ -398,6 +404,9 @@ extension HistoryPanelController {
             return   // уже поллим
         }
         objc_setAssociatedObject(self, &SecurityAssocKeys.migratePolling, true, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        if objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher) == nil {
+            startMigrationEventWatch()   // миграция уже идёт (подхвачена после рестарта UI)
+        }
         if let button = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateButton) as? NSButton {
             button.isEnabled = false
         }
@@ -426,6 +435,7 @@ extension HistoryPanelController {
             let plaintext = result["plaintext"] as? Int ?? 0
             let pct = result["pct"] as? Int ?? 0
             let migrating = result["migrating"] as? Bool ?? false
+            let ipcTerminal = result["last_migration_status"] as? String
             DispatchQueue.main.async {
                 if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
                     progress.doubleValue = Double(pct)
@@ -444,16 +454,46 @@ extension HistoryPanelController {
                     }
                 }
                 // migrating == false: миграция завершена.
-                self.finishMigrationPolling(total: total, encrypted: encrypted, plaintext: plaintext)
+                self.finishMigrationPolling(total: total, encrypted: encrypted, plaintext: plaintext, ipcTerminal: ipcTerminal)
             }
         }
     }
 
-    /// Завершение миграции: «Готово ✓» при plaintext==0, иначе показываем счётчик.
+    /// Завершение миграции: «Готово ✓» только если plaintext==0 И backend не сообщил
+    /// backup_cleanup_failed. Итог фонового потока приходит событием, а оно может
+    /// запоздать относительно последнего опроса счётчиков (мост IPC→REST батчит) —
+    /// поэтому короткая пауза перед вердиктом.
     @MainActor
-    private func finishMigrationPolling(total: Int, encrypted: Int, plaintext: Int) {
+    private func finishMigrationPolling(total: Int, encrypted: Int, plaintext: Int, ipcTerminal: String?) {
         objc_setAssociatedObject(self, &SecurityAssocKeys.migratePolling, false, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        if plaintext == 0 {
+        // IPC-итог уже известен — SSE ждать не нужно (backend пишет его ДО сброса migrating).
+        if let ipcTerminal, !ipcTerminal.isEmpty {
+            presentMigrationOutcome(plaintext: plaintext, ipcTerminal: ipcTerminal)
+            return
+        }
+        let hasWatcher = objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher) != nil
+        if plaintext == 0, hasWatcher,
+           (objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher) as? HistoryMigrationTerminalWatcher)?.terminalStatus == nil {
+            if let status = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateStatus) as? NSTextField {
+                status.stringValue = "Завершение…"
+                status.textColor = KrabEarTheme.Colors.textSecondary
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+                self?.presentMigrationOutcome(plaintext: plaintext, ipcTerminal: nil)
+            }
+            return
+        }
+        presentMigrationOutcome(plaintext: plaintext, ipcTerminal: nil)
+    }
+
+    @MainActor
+    private func presentMigrationOutcome(plaintext: Int, ipcTerminal: String?) {
+        let sse = (objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatcher)
+            as? HistoryMigrationTerminalWatcher)?.terminalStatus
+        let terminal = HistoryMigrationOutcome.effectiveTerminalStatus(ipc: ipcTerminal, sse: sse)
+        stopMigrationEventWatch()
+        switch HistoryMigrationOutcome.resolve(plaintext: plaintext, terminalStatus: terminal) {
+        case .done:
             // ✓ — established glyph (используется в Diagnostics/SemanticSearch и др.).
             if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
                 progress.doubleValue = 100
@@ -471,10 +511,78 @@ extension HistoryPanelController {
                 // Блок остаётся видимым с «Готово ✓» до следующей перезагрузки секции.
                 row.isHidden = false
             }
-        } else {
+        case .backupCleanupFailed:
+            // Живой файл зашифрован, но plaintext .bak мог остаться на диске.
+            if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
+                progress.isHidden = true
+            }
+            if let status = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateStatus) as? NSTextField {
+                status.stringValue = "Записи зашифрованы, но резервная копия (.bak) не удалена — "
+                    + "она может содержать открытый текст. «Удалить все данные» удалит и её."
+                status.textColor = KrabEarTheme.Colors.warning
+            }
+            if let button = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateButton) as? NSButton {
+                button.isEnabled = false
+                button.isHidden = true
+            }
+            if let row = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateRow) as? NSStackView {
+                row.isHidden = false
+            }
+        case .failed(let failure):
+            if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
+                progress.isHidden = true
+            }
+            if let status = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateStatus) as? NSTextField {
+                status.stringValue = "Миграция завершилась с ошибкой: \(failure). Часть записей может остаться незашифрованной."
+                status.textColor = KrabEarTheme.Colors.warning
+            }
+            if let row = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateRow) as? NSStackView {
+                row.isHidden = false
+            }
+            // Кнопка остаётся доступной: миграция идемпотентна, можно повторить.
+            if let button = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateButton) as? NSButton {
+                button.isEnabled = true
+                button.isHidden = false
+            }
+        case .partial(let remaining):
             // Частично/прервано — возвращаем к обычному виду со счётчиком.
-            applyMigrationVisibility(enabled: true, plaintext: plaintext)
+            applyMigrationVisibility(enabled: true, plaintext: remaining)
         }
+    }
+
+    // MARK: - Migration terminal-status watcher (SSE)
+
+    /// Подписка на `history_encryption.migrate.progress` (REST /v1/events): backend отдаёт
+    /// итог фонового потока (в т.ч. backup_cleanup_failed) только этим событием.
+    /// Сбой подключения безопасен: вердикт тогда опирается на счётчики, как раньше.
+    @MainActor
+    private func startMigrationEventWatch() {
+        stopMigrationEventWatch()
+        guard let url = URL(string: "http://127.0.0.1:5005/v1/events?filter=history_encryption.migrate.progress")
+        else { return }
+        let watcher = HistoryMigrationTerminalWatcher()
+        let delegate = SSESessionDelegate(onLine: { [weak watcher] line in watcher?.ingest(line: line) })
+        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        var request = URLRequest(url: url, timeoutInterval: 600)
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatcher, watcher, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatchDelegate, delegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatchSession, session, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        session.dataTask(with: request).resume()
+    }
+
+    /// Вызывается при закрытии окна: стрим SSE не должен жить без UI.
+    @MainActor
+    func cancelMigrationEventWatch() {
+        stopMigrationEventWatch()
+    }
+
+    @MainActor
+    private func stopMigrationEventWatch() {
+        (objc_getAssociatedObject(self, &SecurityAssocKeys.migrationWatchSession) as? URLSession)?.invalidateAndCancel()
+        objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatchSession, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatchDelegate, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatcher, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 
     // MARK: - Toggle actions (Gemini)
@@ -501,39 +609,59 @@ extension HistoryPanelController {
 
     // MARK: - Shared IPC call
 
-    /// Отправляет set_history_encryption IPC, откатывает тоггл при ошибке Keychain.
+    /// Отправляет set_history_encryption IPC. При любом отказе (бросок IPC, ok=false,
+    /// кривой ответ) возвращает тоггл к РЕАЛЬНОМУ состоянию (свежий get_encryption_status)
+    /// и объясняет это листом — тоггл не остаётся «врущим» в выбранной позиции.
     private func applyEncryptionChange(desired: Bool, toggleRef: NSButton) {
         // Оптимистично — оставляем тоггл как есть; отменим при ошибке.
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            guard let resp = try? self.ipcClient.call(
+            let resp = try? self.ipcClient.call(
                 method: "set_history_encryption",
                 params: ["enabled": desired]
-            ) else { return }
-            DispatchQueue.main.async {
-                guard let result = resp["result"] as? [String: Any] else { return }
-                let ok = result["ok"] as? Bool ?? false
-                if ok {
-                    // Успех — ничего делать не нужно, тоггл уже в правильном состоянии.
+            )
+            let outcome = EncryptionChangeOutcome.resolve(response: resp)
+            if outcome == .applied {
+                DispatchQueue.main.async {
                     // Sync обоих вариантов на случай, если оба видимы.
                     self.syncSecuritySettings(enabled: desired, available: true)
                     // Пересчитываем видимость migrate-блока: включили шифрование при
                     // наличии plaintext → показать кнопку; выключили → скрыть.
                     self.refreshMigrationStatus()
-                } else {
-                    // Ошибка Keychain — откатываем тоггл.
-                    toggleRef.state = desired ? .off : .on
-                    // Синхронизируем второй вариант
-                    let current = result["enabled"] as? Bool ?? !desired
-                    self.syncSecuritySettings(enabled: current, available: false)
-                    // Показываем сообщение без runModal
-                    let alert = NSAlert()
+                }
+                return
+            }
+            // Отказ: перечитываем реальное состояние (off-main), затем откатываем на main.
+            var reread: Bool?
+            var available: Bool?
+            if let statusResp = try? self.ipcClient.call(method: "get_encryption_status", params: [:]),
+               let status = statusResp["result"] as? [String: Any], (status["ok"] as? Bool) == true {
+                reread = status["enabled"] as? Bool
+                available = status["available"] as? Bool
+            }
+            DispatchQueue.main.async {
+                let known = outcome.knownEnabled(desired: desired, reread: reread)
+                let actual = known ?? outcome.actualEnabled(desired: desired, reread: reread)
+                var keychainMissing = available == false
+                if case .keychainUnavailable = outcome { keychainMissing = true }
+                toggleRef.state = actual ? .on : .off
+                self.syncSecuritySettings(enabled: actual, available: !keychainMissing)
+                let alert = NSAlert()
+                if keychainMissing {
                     alert.messageText = "Шифрование недоступно"
                     alert.informativeText = "Шифрование недоступно: Keychain не найден.\nФункция поддерживается только на macOS."
-                    alert.alertStyle = .warning
-                    alert.addButton(withTitle: "OK")
-                    presentAlertSheet(alert, for: self.window) { _ in }
+                } else if known == nil {
+                    alert.messageText = "Не удалось изменить шифрование"
+                    alert.informativeText = "Не удалось подтвердить состояние шифрования. "
+                        + "Закройте и откройте раздел заново, чтобы увидеть актуальное состояние."
+                } else {
+                    alert.messageText = "Не удалось изменить шифрование"
+                    alert.informativeText = "Настройка не применена. Сейчас шифрование истории "
+                        + (actual ? "включено." : "выключено.")
                 }
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "OK")
+                presentAlertSheet(alert, for: self.window) { _ in }
             }
         }
     }

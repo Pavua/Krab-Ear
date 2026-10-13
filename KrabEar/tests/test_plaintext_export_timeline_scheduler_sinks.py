@@ -61,6 +61,23 @@ class TimelineSinkTest(unittest.TestCase):
                 result = self.call(fmt, plaintext_export=context)
                 self.assertTrue(Path(result["path"]).is_file())
 
+    def test_wire_shapes_consumed_by_swift_coordinator(self):
+        """Swift ``backendResult`` разбирает ровно эти формы (A5.3 timeline consent)."""
+        self.enable()
+        for fmt in ("svg", "json", "ical"):
+            with self.subTest(fmt=fmt, case="denied"):
+                denied = self.call(fmt)
+                self.assertIs(denied["ok"], False)
+                self.assertEqual(denied["reason"], "plaintext_confirmation_required")
+                self.assertIsNone(denied["path"])
+                self.assertEqual(denied["error"]["code"], denied["reason"])
+            with self.subTest(fmt=fmt, case="granted"):
+                granted = self.call(fmt, plaintext_export=self.context())
+                self.assertIsInstance(granted["path"], str)
+                self.assertTrue(granted["path"])
+                self.assertIs(type(granted["blocks"]), int)
+                self.assertNotIn("reason", granted)
+
     def test_unknown_missing_authorizer_and_malformed_context_deny(self):
         for raw in (None, {}, "wrong", {"capability": "synthetic-secret"}):
             with self.subTest(raw=type(raw).__name__):
