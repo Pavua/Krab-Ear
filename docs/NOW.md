@@ -1,5 +1,38 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-14 — CURRENT: source stack merged, final CI PASS
+
+Проверено 14.10 CEST: source-база `origin/codex/krab-ear-v2` —
+`3c8a05bc67f51ef156034f4a37adf65f1807cec6`.
+[#2084](https://github.com/Pavua/Krab-Ear/pull/2084),
+[#2085](https://github.com/Pavua/Krab-Ear/pull/2085),
+[#2086](https://github.com/Pavua/Krab-Ear/pull/2086),
+[#2087](https://github.com/Pavua/Krab-Ear/pull/2087) и
+[#2088](https://github.com/Pavua/Krab-Ear/pull/2088) **MERGED** 13.10,
+03:34:59–03:36:54 CEST; открытых PR на момент проверки **0**.
+Оба post-merge workflow точного final SHA —
+[CI SUCCESS](https://github.com/Pavua/Krab-Ear/actions/runs/38332970422) и
+[krab-ear-ci SUCCESS](https://github.com/Pavua/Krab-Ear/actions/runs/38332970357).
+Check receipt: **19 SUCCESS / 2 Swift SKIPPED** по docs-фильтру.
+`KrabEar/` и `native/` идентичны reviewed head
+`7e49e4ced72b695834ced3c2872ebac8973f3d01`; повторный Swift run этим
+post-merge receipt не подтверждается.
+
+**Граница runtime:** release-конфигурация указывает на `9d7a0aac`, current
+loaded Python SHA — **UNKNOWN**. Deployment merged stack и живая UI/Keychain
+приёмка не подтверждены этой source/CI-проверкой. Текущие runtime/alert
+наблюдения требуют отдельной диагностики; причина alerts о Swift не установлена.
+
+**Дальше:** source review жизненного цикла ключа и границы activation;
+отдельная owner-scoped UI/Keychain приёмка перед activation шифрования.
+Merge/deploy/restart, реальные
+history/shares/schedules, Keychain и purge в эту docs-карточку не входят.
+[Receipt и повторная проверка](superpowers/handoffs/2026-10-14-source-integration-status.md),
+[карточка](superpowers/plans/2026-10-14-source-integration-status.md).
+
+**Ниже — исторические checkpoints на указанную дату.** Старые DRAFT/unmerged,
+SHA/PID/health/HOLD описывают прежние снимки; актуальный source-статус дан выше.
+
 ## 2026-10-11 — Remaining RMW roots: SOURCE/CI завершены
 
 От reviewed migration head `eb372f8b` в owned `codex/ear-rmw-roots-20261011`
