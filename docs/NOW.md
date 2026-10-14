@@ -1,6 +1,40 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-14 — CURRENT: history key safety, final verification
+## 2026-10-14 — CURRENT: объединённый релиз установлен, RU call-profile PASS
+
+Runtime source — `26542ccdc50ee1a8e062c32b93da24a2e16c61cb`:
+[#2090](https://github.com/Pavua/Krab-Ear/pull/2090),
+[#2091](https://github.com/Pavua/Krab-Ear/pull/2091) и
+[#2092](https://github.com/Pavua/Krab-Ear/pull/2092) MERGED. Оба post-merge
+workflow точного final SHA SUCCESS: [backend](https://github.com/Pavua/Krab-Ear/actions/runs/38504270511),
+[CI](https://github.com/Pavua/Krab-Ear/actions/runs/38504270497).
+
+Owner разрешил merge/deploy/E2E; Main и VG подтвердили новое тихое окно.
+После двух полных минутных idle gates и штатного drain установлены оба
+release plist и подписанное приложение. Backend PID **70875**, REST **71046**,
+Swift **71349**, у каждого `runs=1`; loaded entrypoint/PYTHONPATH у Python
+указывают на закреплённый чистый release worktree `26542ccd`.
+Свежие startup markers: GigaAM ready, engine warmup, Swift passive Variant B.
+Accessibility startup `trusted=true`; настоящая вставка текста не проверялась.
+
+На 03:44:47 UTC локальный ephemeral RU E2E: **HTTP 200 за 2.062 s**, GigaAM
+subprocess, непустой русский текст, профиль `voice_gateway_call`, deadline8,
+без сохранения. История **23274**, encryption/migrating/restore/recording/meeting
+все exact False. IPC history-page возвращает одну запись без restore warning.
+После E2E завершено **15min / 16 контрольных снимков PASS**, без смены
+PID/start/runs. На 04:01:30 UTC Sentry API200/complete: backend0 recent,
+Swift5 прежних AppHang; lastSeen после новых bootstrap отсутствует.
+Новый Ear ingress этим не аттестован. Тихое окно Main/VG освобождено.
+
+Открыто: причина прежних default REST Whisper/MLX timeout/failfast70 и пяти
+недавних Swift AppHanging UNKNOWN. RU PASS не доказывает устойчивость обычного
+Whisper-пути, реальных звонков или устранение прежней причины HTTP504.
+Real encryption activation, migration, purge и rotation не выполнялись.
+[Подробный runtime checkpoint и следующий шаг](superpowers/handoffs/2026-10-14-combined-runtime-release.md).
+Sol 6.1 Medium — docs/CI; High — следующая диагностика; Astra Ultra точечно
+для нового security/architecture/release gate. Ниже — исторические checkpoints.
+
+## 2026-10-14 — Checkpoint: history key safety, final verification
 
 Source-база — `86a0b1978086bb4e2d9bbbf7505a264cd2abf928`:
 [#2091](https://github.com/Pavua/Krab-Ear/pull/2091) MERGED после всех 27

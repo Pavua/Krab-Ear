@@ -1,5 +1,23 @@
 # Krab Ear — план развития H2-2026 (и дальше)
 
+## Запись 2026-10-14 — Combined runtime release и RU E2E
+
+Source #2090/#2091/#2092 интегрирован и установлен как `26542ccd`; оба точных
+post-merge workflow SUCCESS. Main/VG quiet ACK → два полных 60s idle gates,
+Swift-first shutdown, полный drain старых поколений → coherent app/plist
+cutover → свежие GigaAM/engine/passive markers и loaded-path checks.
+301 native inputs, 6 archive checksums, 3 dependency pins и полные manifests
+позволили переиспользовать подписанную сборку `3c8a05bc` с прежней signing
+identity; whole old app и оба before plist сохранены.
+Backend70875/REST71046/Swift71349, runs1, startup AX trusted=true.
+03:44:47 UTC: один local ephemeral RU call-profile запрос **HTTP200/2.062s**,
+GigaAM subprocess, history23274 unchanged, crypto OFF. Maintenance READY и
+узкий RU E2E PASS; 15min/16snapshots PASS без смены PID/start/runs.
+Final Sentry API200 complete: backend0recent/agent5old, lastSeen после новых
+bootstrap отсутствует; fresh ingress UNKNOWN. Main/VG FINISH отправлен.
+AppHanging/default Whisper causality и полная live A5.4/Keychain приёмка
+остаются открытыми. [Receipt и границы](superpowers/handoffs/2026-10-14-combined-runtime-release.md).
+
 ## Запись 2026-10-11 — Remaining RMW roots: SOURCE/CI завершены
 
 От reviewed migration head `eb372f8b` в owned `codex/ear-rmw-roots-20261011`
