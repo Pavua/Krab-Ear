@@ -123,14 +123,14 @@ def transcribe_via_mlx_worker(
 ) -> dict[str, Any]:
     """Пишет ndarray в temp WAV и шлёт transcribe в worker."""
     tmp: str | None = None
-    if isinstance(audio_data, (str, Path)):
-        audio_path = str(audio_data)
-    else:
-        fd, tmp = tempfile.mkstemp(suffix=".wav")
-        os.close(fd)
-        _write_pcm_wav(tmp, audio_data)
-        audio_path = tmp
     try:
+        if isinstance(audio_data, (str, Path)):
+            audio_path = str(audio_data)
+        else:
+            fd, tmp = tempfile.mkstemp(suffix=".wav")
+            os.close(fd)
+            _write_pcm_wav(tmp, audio_data)
+            audio_path = tmp
         return get_mlx_whisper_session().transcribe(
             audio_path,
             mlx_params,
@@ -168,7 +168,6 @@ class MLXWhisperSession:
         self._lock = threading.Lock()
         self._stderr_ring: deque[str] = deque(maxlen=200)
         self._stderr_drain_thread: Optional[threading.Thread] = None
-        self._timed_out = False
         self._inflight = 0
         self._last_used_ts = time.monotonic()
 
@@ -381,7 +380,7 @@ class MLXWhisperSession:
             raise RuntimeError("mlx_whisper worker: pipes missing")
 
         with self._lock:
-            self._timed_out = False
+            proc = self._proc
             try:
                 self._proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
                 self._proc.stdin.flush()
@@ -393,17 +392,37 @@ class MLXWhisperSession:
                 self._close_unlocked()
                 raise MLXWorkerCrashed(rc, model_name) from exc
 
-            timer = threading.Timer(timeout_sec, self._timeout_kill)
+            # cancel() не останавливает уже вошедший callback. Состояние и
+            # guard принадлежат запросу, а не переиспользуемому worker-PID.
+            timeout_guard = threading.Lock()
+            active = True
+            timed_out = False
+
+            def timeout_kill() -> None:
+                nonlocal timed_out
+                with timeout_guard:
+                    if not active:
+                        return
+                    timed_out = True
+                    try:
+                        proc.kill()
+                    except OSError:
+                        pass
+
+            timer = threading.Timer(timeout_sec, timeout_kill)
             timer.start()
             try:
                 line = self._proc.stdout.readline()
             finally:
                 timer.cancel()
+                # Retire до release session-lock: старый callback больше
+                # не сможет убить этот же proc во время следующего запроса.
+                with timeout_guard:
+                    active = False
 
         if not line:
             rc = self._proc.poll() if self._proc is not None else None
             stderr_tail = "".join(self._stderr_ring)[-2000:]
-            timed_out = self._timed_out
             self.close()
             if timed_out:
                 raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
@@ -419,16 +438,6 @@ class MLXWhisperSession:
             self.close()
             raise MLXWorkerCrashed(rc, model_name, stderr_tail=line[:500])
         return parsed
-
-    def _timeout_kill(self) -> None:
-        self._timed_out = True
-        proc = self._proc
-        if proc is None:
-            return
-        try:
-            proc.kill()
-        except OSError:
-            pass
 
     def _start_stderr_drain(self) -> None:
         if self._proc is None or self._proc.stderr is None:
