@@ -342,7 +342,7 @@ class TestReadHistoryNdjsonDescriptorSafety:
         history_file.write_text("ENC1:some-fake-ciphertext\n", encoding="utf-8")
 
         # Симулируем недоступность криптомодуля
-        monkeypatch.setattr(store, "_get_history_crypto", lambda: None)
+        monkeypatch.setattr(store, "_get_history_crypto", lambda *, allow_create=False: None)
 
         with pytest.raises(HistoryEncryptionUnavailable):
             list(store._read_history_ndjson_unlocked(history_file))

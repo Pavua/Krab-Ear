@@ -291,7 +291,9 @@ def _store_crypto(store: StateStore) -> HistoryCrypto:
     Снимок/ledger обязаны шифроваться ключом профиля, иначе тест проверял бы
     согласованность двух случайных ключей вместо поведения purge.
     """
-    crypto = store._get_history_crypto()
+    # Это подготовка synthetic encrypted-профиля, а не пассивное чтение:
+    # ключ для следующих snapshot/append создаётся явно до проверки purge.
+    crypto = store._get_history_crypto(allow_create=True)
     assert crypto is not None, "профиль ON обязан иметь crypto"
     return crypto
 

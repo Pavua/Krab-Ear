@@ -62,7 +62,7 @@ def _inject_crypto(store: StateStore) -> HistoryCrypto:
     store.save_settings({"history_encryption_enabled": True})
     store._history_crypto_initialized = True
     store._history_crypto_instance = crypto
-    store._get_history_crypto = lambda: crypto
+    store._get_history_crypto = lambda *, allow_create=False: crypto
     return crypto
 
 

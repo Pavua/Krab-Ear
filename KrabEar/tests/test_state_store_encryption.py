@@ -10,12 +10,15 @@
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 _PROJECT_ROOT = Path(__file__).parent.parent
 if str(_PROJECT_ROOT) not in sys.path:
@@ -331,6 +334,176 @@ class TestStateStoreSettingsAlwaysPlaintext(unittest.TestCase):
 
         settings = store2.load_settings()
         self.assertTrue(settings["history_encryption_enabled"])
+
+
+class TestStateStorePassiveKeyAccess(unittest.TestCase):
+    """Пассивные пути не создают замену пропавшему ключу истории."""
+
+    def setUp(self) -> None:
+        from backend.history_crypto import HistoryCrypto
+        from backend.state_store import StateStore
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data_dir = Path(self.tmp.name)
+        self.old_key = os.urandom(32)
+        self.old_crypto = HistoryCrypto(self.old_key)
+        self.key = None
+        self.commands = []
+        self.store = StateStore(self.data_dir)
+        self.store.settings_path.write_text(json.dumps({
+            "history_encryption_enabled": True,
+            "privacy_mode_enabled": False,
+            "settings_revision": "0" * 32,
+        }), encoding="utf-8")
+        self.store.lock_path.touch(exist_ok=True)
+        provider = patch("backend.crypto_keystore._run_security", side_effect=self.security)
+        provider.start()
+        self.addCleanup(provider.stop)
+
+    def security(self, args):
+        """Настоящий CLI seam: missing=44, ошибочное создание УСПЕШНО."""
+        self.commands.append(tuple(args))
+        if args[0] == "find-generic-password":
+            if self.key is None:
+                return subprocess.CompletedProcess(args, 44, "", "not found")
+            return subprocess.CompletedProcess(
+                args, 0, base64.b64encode(self.key).decode("ascii") + "\n", ""
+            )
+        if args[0] == "add-generic-password":
+            self.key = base64.b64decode(args[args.index("-w") + 1])
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError("unexpected security operation")
+
+    def profile_bytes(self):
+        return {
+            str(path.relative_to(self.data_dir)): path.read_bytes()
+            for path in self.data_dir.rglob("*") if path.is_file()
+        }
+
+    def assert_no_create(self):
+        self.assertFalse(
+            any(args[0] == "add-generic-password" for args in self.commands),
+            "пассивный доступ вызвал создание нового ключа",
+        )
+
+    def write_history(self, encrypted=True):
+        payload = json.dumps(_make_history_item("old-item", "Синтетическая запись").to_dict())
+        self.store.history_path.write_text(
+            (self.old_crypto.encrypt_line(payload) if encrypted else payload) + "\n",
+            encoding="utf-8",
+        )
+
+    def test_missing_key_read_does_not_create_and_same_store_recovers(self):
+        from backend.state_store import HistoryEncryptionUnavailable
+
+        self.write_history()
+        before = self.profile_bytes()
+        with self.assertRaises(HistoryEncryptionUnavailable):
+            self.store.get_history_page(None, 100)
+        self.assert_no_create()
+        self.assertEqual(self.profile_bytes(), before)
+        self.key = self.old_key
+        items, _ = self.store.get_history_page(None, 100)
+        self.assertEqual([item["id"] for item in items], ["old-item"])
+        self.assert_no_create()
+
+    def test_sidecar_only_missing_key_does_not_create_or_rewrite(self):
+        from backend.state_store import HistoryEncryptionUnavailable
+
+        self.write_history(encrypted=False)
+        self.store.status_path.write_text(self.old_crypto.encrypt_line(json.dumps({
+            "id": "old-item", "paste_status": "ok",
+        })) + "\n", encoding="utf-8")
+        before = self.profile_bytes()
+        with self.assertRaises(HistoryEncryptionUnavailable):
+            self.store.get_history_page(None, 100)
+        self.assert_no_create()
+        self.assertEqual(self.profile_bytes(), before)
+        self.key = self.old_key
+        items, _ = self.store.get_history_page(None, 100)
+        self.assertEqual(items[0]["paste_status"], "ok")
+
+    def test_default_getter_retries_missing_key_on_same_store(self):
+        before = self.profile_bytes()
+        crypto = self.store._get_history_crypto()
+        self.assert_no_create()
+        self.assertIsNone(crypto)
+        self.assertEqual(self.profile_bytes(), before)
+        self.key = self.old_key
+        crypto = self.store._get_history_crypto()
+        self.assertIsNotNone(crypto)
+        token = self.old_crypto.encrypt_line("synthetic")
+        self.assertEqual(crypto.decrypt_line(token), "synthetic")
+
+    def test_empty_on_snapshot_getter_is_passive_and_retries(self):
+        from backend.history_service import HistoryService
+
+        service = object.__new__(HistoryService)
+        service.store = self.store
+        before = self.profile_bytes()
+        crypto = service._history_crypto_for_snapshot()
+        self.assert_no_create()
+        self.assertIsNone(crypto)
+        self.assertEqual(self.profile_bytes(), before)
+        self.key = self.old_key
+        self.assertIsNotNone(service._history_crypto_for_snapshot())
+        self.assert_no_create()
+
+    def test_pending_recovery_missing_key_preserves_profile(self):
+        from backend.encrypted_snapshot import (
+            REASON_CRYPTO_UNAVAILABLE, recover_pending_restore_from_store,
+        )
+
+        self.write_history()
+        staging = self.data_dir / ".a52b2-restore-synthetic"
+        staging.mkdir()
+        (staging / "restore_marker.json").write_text(json.dumps({
+            "version": 1, "state": "COMMITTING", "transaction_id": "synthetic",
+            "target_snapshot": "missing-target", "pre_restore_snapshot": None,
+        }), encoding="utf-8")
+        before = self.profile_bytes()
+        result = recover_pending_restore_from_store(self.store)
+        self.assert_no_create()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], REASON_CRYPTO_UNAVAILABLE)
+        self.assertEqual(self.profile_bytes(), before)
+
+    def test_existing_key_loads_without_create(self):
+        self.write_history()
+        self.key = self.old_key
+        items, _ = self.store.get_history_page(None, 100)
+        self.assertEqual(items[0]["id"], "old-item")
+        self.assert_no_create()
+
+    def test_wrong_key_rejects_read_without_create_or_rewrite(self):
+        from backend.state_store import HistoryEncryptionUnavailable
+
+        self.write_history()
+        self.key = os.urandom(32)
+        before = self.profile_bytes()
+        with self.assertRaises(HistoryEncryptionUnavailable):
+            self.store.get_history_page(None, 100)
+        self.assert_no_create()
+        self.assertEqual(self.profile_bytes(), before)
+
+    def test_explicit_new_write_can_create_after_passive_miss(self):
+        from backend.state_store import StateStore
+
+        self.store._get_history_crypto()
+        self.commands.clear()
+        item = _add_item(self.store, "Новая синтетическая запись")
+        self.assertEqual(sum(args[0] == "add-generic-password" for args in self.commands), 1)
+        items, _ = StateStore(self.data_dir).get_history_page(None, 100)
+        self.assertEqual(items[0]["id"], item.id)
+
+    def test_direct_migration_preserves_deliberate_creation(self):
+        self.write_history(encrypted=False)
+        result = self.store.migrate_history_encryption()
+        self.assertTrue(result["ok"])
+        self.assertEqual(sum(args[0] == "add-generic-password" for args in self.commands), 1)
+        items, _ = self.store.get_history_page(None, 100)
+        self.assertEqual(items[0]["id"], "old-item")
 
 
 if __name__ == "__main__":

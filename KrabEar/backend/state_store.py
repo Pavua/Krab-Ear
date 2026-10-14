@@ -547,9 +547,8 @@ class StateStore:
         self._active_ids: set[str] | None = None
 
         # Шифрование истории (per-line AES-256-GCM).
-        # Инициализируется лениво при первом обращении к _history_crypto_unlocked().
-        # None означает "ещё не инициализировано", что отличается от "не доступно"
-        # (для последнего используем False-sentinel после первой попытки).
+        # Инициализируется лениво; кэшируем успешный crypto, а недоступный
+        # ключ повторно запрашиваем при следующем обращении.
         self._history_crypto_initialized: bool = False
         self._history_crypto_instance = None  # HistoryCrypto | None
 
@@ -579,11 +578,12 @@ class StateStore:
 
         # Phase B.2 — error_bus late-injection
 
-    def _get_history_crypto(self):
+    def _get_history_crypto(self, *, allow_create: bool = False):
         """Возвращает ``HistoryCrypto`` или ``None`` (ленивая инициализация).
 
-        Инициализируется один раз при первом вызове.  Если шифрование
-        отключено в настройках или Keychain недоступен — возвращает None.
+        По умолчанию только читает существующий ключ. Создание разрешают
+        явная запись и миграция. Если ключ недоступен, следующий вызов повторяет
+        lookup: восстановление ключа не требует записи или рестарта Store.
 
         🔴 Вызывается из _maybe_encrypt/_maybe_decrypt, которые в свою очередь
         вызываются из _append_history_ndjson/_read_history_ndjson_unlocked, уже
@@ -591,13 +591,13 @@ class StateStore:
         тот же lock) здесь вызвать нельзя — deadlock.  Вместо этого читаем
         settings.json напрямую без блокировки (atomic read, файл маленький).
         """
-        if not self._history_crypto_initialized:
+        if not self._history_crypto_initialized or self._history_crypto_instance is None:
             self._history_crypto_initialized = True
             try:
                 enabled = self._read_encryption_flag_unlocked()
                 if enabled:
                     from backend.history_crypto import build_history_crypto
-                    self._history_crypto_instance = build_history_crypto()
+                    self._history_crypto_instance = build_history_crypto(allow_create=allow_create)
                     if self._history_crypto_instance is None:
                         # Флаг включён, но ключ недоступен (Keychain) — молчать
                         # нельзя: иначе тихий plaintext при включённом флаге.
@@ -661,7 +661,7 @@ class StateStore:
             # Флаг мог включиться после прежней plaintext-записи; повторно
             # получить ключ до записи вместо использования старого None-кэша.
             self._history_crypto_initialized = False
-        crypto = self._get_history_crypto()
+        crypto = self._get_history_crypto(allow_create=True)
         if crypto is None:
             if enabled:
                 raise HistoryEncryptionUnavailable("history encryption unavailable")
@@ -3176,7 +3176,7 @@ class StateStore:
 
         # Force re-init so we pick up a freshly enabled flag.
         self._history_crypto_initialized = False
-        crypto = self._get_history_crypto()
+        crypto = self._get_history_crypto(allow_create=True)
         if crypto is None:
             return {"ok": False, "reason": "encryption_unavailable"}
 

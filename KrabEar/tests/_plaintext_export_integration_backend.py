@@ -7,6 +7,7 @@ import logging
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import threading
 import tempfile
@@ -110,7 +111,7 @@ def scan_synthetic_secrets(value, secrets, raw_keys=()):
         return True
 
 
-def run_child(connection, root_string, source_string, crypto_key=None):
+def run_child(connection, root_string, source_string, crypto_key=None, crypto_key_missing=False):
     """Настоящий IPCServer; control Pipe не пишет auth context в stdout/файлы."""
     root = Path(root_string).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -239,19 +240,35 @@ def run_child(connection, root_string, source_string, crypto_key=None):
             from backend import crypto_keystore, history_crypto, memory_ledger
             stack.enter_context(mock.patch.object(crypto_keystore, "_run_security", forbidden_provider))
             key_reads = []
+            key_creates = []
+            memory_key = [None if crypto_key_missing else crypto_key]
+            provider_keys = [crypto_key] if crypto_key is not None else []
             if crypto_key is None:
                 stack.enter_context(mock.patch.object(history_crypto, "build_history_crypto", forbidden_provider))
             else:
-                # Источник synthetic key единственная crypto-подмена: production
-                # build_history_crypto/HistoryCrypto/AESGCM не заменяются.
+                # Только CLI seam подменён: lookup/create/builder/AESGCM production.
                 if not isinstance(crypto_key, bytes) or len(crypto_key) != 32:
                     raise AssertionError("fixture requires 32-byte synthetic key")
 
-                def memory_key():
-                    key_reads.append(True)
-                    return crypto_key
+                def memory_security(args):
+                    if args[0] == "find-generic-password":
+                        key_reads.append(True)
+                        if memory_key[0] is None:
+                            return subprocess.CompletedProcess(args, 44, "", "not found")
+                        return subprocess.CompletedProcess(args, 0, base64.b64encode(memory_key[0]).decode("ascii"), "")
+                    if args[0] == "add-generic-password":
+                        key_creates.append(True)
+                        if memory_key[0] is not None:
+                            return subprocess.CompletedProcess(args, 45, "", "already exists")
+                        memory_key[0] = base64.b64decode(args[args.index("-w") + 1], validate=True)
+                        provider_keys.append(memory_key[0])
+                        encodings = {memory_key[0].hex(), base64.b64encode(memory_key[0]).decode("ascii"), repr(memory_key[0])}
+                        key_encodings.update(encodings)
+                        secrets.update(encodings)
+                        return subprocess.CompletedProcess(args, 0, "", "")
+                    raise AssertionError("fixture forbids this Keychain operation")
 
-                stack.enter_context(mock.patch.object(crypto_keystore, "get_or_create_history_key", memory_key))
+                stack.enter_context(mock.patch.object(crypto_keystore, "_run_security", memory_security))
             memory_ledger._TEST_PATH_OVERRIDE = root / "ledger"
             from backend.service import BackendService
             from backend.state_store import StateStore
@@ -348,7 +365,7 @@ def run_child(connection, root_string, source_string, crypto_key=None):
                         retain_auth(value)
 
             def contains_secret(value):
-                return scan_synthetic_secrets(value, secrets, (crypto_key,) if crypto_key is not None else ())
+                return scan_synthetic_secrets(value, secrets, provider_keys)
 
             def inspect_state():
                 leaked_files = 0
@@ -579,9 +596,15 @@ def run_child(connection, root_string, source_string, crypto_key=None):
                     # Только count/boolean: ни key bytes, ни представления ключа
                     # не пересекают диагностическую Pipe-границу.
                     reply = {"provider_reads": len(key_reads),
+                             "provider_creates": len(key_creates),
                              "key_registered": bool(key_encodings) and key_encodings <= secrets,
                              "positive_control": bool(key_encodings) and all(
                                  contains_secret(value) for value in key_encodings)}
+                elif name == "restore_history_key":
+                    assert crypto_key is not None
+                    memory_key[0] = crypto_key
+                    # Кэш StateStore не сбрасываем: retry обязан сделать production.
+                    reply = True
                 elif name == "metrics":
                     reply = {"writes": state["writes"], "gates": state["gates"]}
                 elif name == "signing":

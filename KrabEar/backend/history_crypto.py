@@ -59,16 +59,18 @@ class HistoryCrypto:
         return line.startswith(SENTINEL)
 
 
-def build_history_crypto() -> HistoryCrypto | None:
+def build_history_crypto(*, allow_create: bool = True) -> HistoryCrypto | None:
     """Создаёт ``HistoryCrypto`` используя ключ из macOS Keychain.
 
-    Возвращает ``None``, если Keychain недоступен (Linux CI / нет ключа).
+    ``allow_create=False`` читает только существующий ключ. Без аргумента
+    сохраняет контракт явного включения/записи: отсутствующий ключ создаётся.
+    Возвращает ``None``, если ключ недоступен (Linux CI / нет ключа).
     Логирует предупреждение, но не поднимает исключение — StateStore
     обрабатывает None как «шифрование недоступно».
     """
     try:
-        from backend.crypto_keystore import get_or_create_history_key
-        key = get_or_create_history_key()
+        from backend.crypto_keystore import get_history_key, get_or_create_history_key
+        key = get_or_create_history_key() if allow_create else get_history_key()
         return HistoryCrypto(key)
     except Exception as exc:
         # На платформе без Keychain (Linux CI) None — ожидаемая деградация (WARNING).
@@ -83,7 +85,7 @@ def build_history_crypto() -> HistoryCrypto | None:
         logger.log(
             level,
             "history_crypto: не удалось инициализировать шифрование: %s — "
-            "история будет храниться в открытом виде",
+            "crypto истории недоступен",
             exc,
         )
         return None

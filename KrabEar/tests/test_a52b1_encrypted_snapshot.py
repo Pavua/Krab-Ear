@@ -815,7 +815,7 @@ def _settings_off(data_dir: Path) -> None:
 def _store_with_crypto(data_dir: Path, crypto: HistoryCrypto | None) -> StateStore:
     store = StateStore(data_dir)
     # Инъекция ключа БЕЗ Keychain (тот же приём, что в существующих тестах A5.1).
-    store._get_history_crypto = lambda: crypto
+    store._get_history_crypto = lambda *, allow_create=False: crypto
     return store
 
 
@@ -1593,7 +1593,7 @@ class TestAutoBackupRefusalObservability:
         assert mgr.check_and_backup()["backed_up"] is True
 
         # Ключ стал недоступен — следующий цикл честно отказывает.
-        store._get_history_crypto = lambda: None
+        store._get_history_crypto = lambda *, allow_create=False: None
         assert mgr.check_and_backup()["backed_up"] is False
 
         status = mgr.get_auto_backup_status()

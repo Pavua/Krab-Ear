@@ -32,6 +32,55 @@ def _fail_result(returncode: int = 44, stderr: str = "not found") -> MagicMock:
     return m
 
 
+class TestGetHistoryKey(unittest.TestCase):
+    """Lookup отсутствующего/недоступного ключа никогда не создаёт замену."""
+
+    def test_missing_key_does_not_generate_or_add(self):
+        from backend.crypto_keystore import HistoryKeyMissing, get_history_key
+
+        with patch("backend.crypto_keystore._run_security", side_effect=[_fail_result(), _ok_result()]) as security, \
+                patch("backend.crypto_keystore.os.urandom") as random:
+            with self.assertRaises(HistoryKeyMissing):
+                get_history_key()
+        self.assertEqual(security.call_count, 1)
+        random.assert_not_called()
+
+    def test_existing_key_loads_with_only_find(self):
+        from backend.crypto_keystore import get_history_key
+
+        key = os.urandom(32)
+        with patch("backend.crypto_keystore._run_security", return_value=_ok_result(base64.b64encode(key).decode())) as security:
+            self.assertEqual(get_history_key(), key)
+        self.assertEqual(security.call_count, 1)
+        self.assertEqual(security.call_args.args[0][0], "find-generic-password")
+
+    def test_corrupt_and_denied_lookup_cannot_trigger_creation(self):
+        from backend.crypto_keystore import KeystoreUnavailable, get_history_key, get_or_create_history_key
+
+        for result in (_ok_result("not base64!"), _ok_result(base64.b64encode(b"short").decode()), _fail_result(45)):
+            for provider in (get_history_key, get_or_create_history_key):
+                with self.subTest(provider=provider.__name__), \
+                        patch("backend.crypto_keystore._run_security", return_value=result) as security, \
+                        patch("backend.crypto_keystore.os.urandom") as random:
+                    with self.assertRaises(KeystoreUnavailable):
+                        provider()
+                    self.assertEqual(security.call_count, 1)
+                    random.assert_not_called()
+
+    def test_timeout_is_unavailable_without_add(self):
+        import subprocess
+        from backend.crypto_keystore import KeystoreUnavailable, get_history_key, get_or_create_history_key
+
+        for provider in (get_history_key, get_or_create_history_key):
+            with self.subTest(provider=provider.__name__), \
+                    patch("backend.crypto_keystore.subprocess.run", side_effect=subprocess.TimeoutExpired("security", 10)) as process, \
+                    patch("backend.crypto_keystore.os.urandom") as random:
+                with self.assertRaises(KeystoreUnavailable):
+                    provider()
+                self.assertEqual(process.call_count, 1)
+                random.assert_not_called()
+
+
 class TestGetOrCreateHistoryKey(unittest.TestCase):
     """get_or_create_history_key: find, create, invalid-length paths."""
 
