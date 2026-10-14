@@ -12,7 +12,7 @@ import os
 import sys
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -24,6 +24,10 @@ def _service(migrate_result=None, migrate_exc=None):
 
     obj = object.__new__(BackendService)
     store = MagicMock()
+    # Store._lock — вызываемый context manager; MagicMock._lock — свой RLock.
+    store._lock = MagicMock(return_value=threading.RLock())
+    store._read_encryption_flag_unlocked.return_value = True
+    store._acquire_history_crypto_unlocked.return_value = object()
     if migrate_exc is not None:
         store.migrate_history_encryption.side_effect = migrate_exc
     else:
@@ -36,8 +40,7 @@ def _service(migrate_result=None, migrate_exc=None):
 
 
 def _run_migration(obj) -> dict:
-    with patch("backend.history_crypto.build_history_crypto", return_value=object()):
-        started = obj._handle_migrate_history_encryption({})
+    started = obj._handle_migrate_history_encryption({})
     for t in threading.enumerate():
         if t.name == "history-enc-migration":
             t.join(timeout=10)
@@ -87,8 +90,7 @@ class MigrationTerminalStatusTest(unittest.TestCase):
             return {"ok": True, "total": 1, "encrypted": 1}
 
         obj.store.migrate_history_encryption = slow
-        with patch("backend.history_crypto.build_history_crypto", return_value=object()):
-            obj._handle_migrate_history_encryption({})
+        obj._handle_migrate_history_encryption({})
         mid = obj._handle_get_history_encryption_status({})
         self.assertIsNone(mid["last_migration_status"])
         self.assertTrue(mid["migrating"])
