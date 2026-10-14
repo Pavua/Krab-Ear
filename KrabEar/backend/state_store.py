@@ -21,7 +21,7 @@ import stat
 import sys
 import threading
 import time
-from typing import Any, Iterator
+from typing import Any, Iterator, TYPE_CHECKING
 import uuid
 
 from core.parsing_utils import safe_json_loads
@@ -53,6 +53,9 @@ from .plaintext_export_authorization import (
     unknown_snapshot,
 )
 from core.search_index import SearchIndex
+
+if TYPE_CHECKING:
+    from .history_crypto import HistoryCrypto
 
 logger = logging.getLogger("KrabEar.Backend.Store")
 
@@ -596,8 +599,14 @@ class StateStore:
             try:
                 enabled = self._read_encryption_flag_unlocked()
                 if enabled:
-                    from backend.history_crypto import build_history_crypto
-                    self._history_crypto_instance = build_history_crypto(allow_create=allow_create)
+                    if allow_create:
+                        # Только creating path берёт EX; пассивное чтение может
+                        # уже держать SH, который запрещено повышать до EX.
+                        with self._lock():
+                            self._history_crypto_instance = self._acquire_history_crypto_unlocked()
+                    else:
+                        from backend.history_crypto import build_history_crypto
+                        self._history_crypto_instance = build_history_crypto(allow_create=False)
                     if self._history_crypto_instance is None:
                         # Флаг включён, но ключ недоступен (Keychain) — молчать
                         # нельзя: иначе тихий plaintext при включённом флаге.
@@ -615,6 +624,31 @@ class StateStore:
             except Exception:
                 logger.exception("StateStore: ошибка инициализации history crypto")
         return self._history_crypto_instance
+
+    def _acquire_history_crypto_unlocked(self, *, history_paths: tuple[Path, ...] | None = None):
+        """Fresh provider lookup; новый ключ допустим только для доказанно plaintext.
+
+        Caller держит общий EX-lock. При restore проверяем live ∪ prospective:
+        замена журнала не разрешает забыть ещё существующий старый ENC1.
+        Нечитаемый/нерегулярный журнал не доказывает отсутствие ciphertext.
+        """
+        from backend.history_crypto import build_history_crypto
+
+        paths = tuple(dict.fromkeys(self._history_journal_paths() + (history_paths or ())))
+        allow_create = True
+        try:
+            for path in paths:
+                try:
+                    if not stat.S_ISREG(path.lstat().st_mode):
+                        allow_create = False
+                        break
+                except FileNotFoundError:
+                    continue
+            if allow_create:
+                allow_create = not has_encrypted_history_in(paths)
+        except (OSError, UnicodeError):
+            allow_create = False
+        return build_history_crypto(allow_create=allow_create)
 
     def _history_journal_paths(self) -> tuple[Path, ...]:
         """Явный набор журналов, подчинённых политике шифрования истории."""
@@ -1071,12 +1105,14 @@ class StateStore:
         *,
         validated_repair: bool = False,
         expected_revision: object = _UNCONDITIONAL_SETTINGS_COMMIT,
+        force_history_crypto_preflight: bool = False,
     ) -> dict[str, Any]:
         """Все supported writes: общий lock, guards, новая durable revision."""
         with self._lock():
             return self._save_settings_unlocked(
                 new_settings, validated_repair=validated_repair,
                 expected_revision=expected_revision,
+                force_history_crypto_preflight=force_history_crypto_preflight,
             )
 
     @staticmethod
@@ -1172,7 +1208,8 @@ class StateStore:
         self, new_settings: dict[str, Any], *, validated_repair: bool = False,
         expected_revision: object = _UNCONDITIONAL_SETTINGS_COMMIT,
         history_paths: tuple[Path, ...] | None = None,
-    ) -> tuple[dict[str, Any], str]:
+        force_history_crypto_preflight: bool = False,
+    ) -> tuple[dict[str, Any], str, HistoryCrypto | None]:
         """Общая проверка commit ДО mutation; caller держит store EX-lock.
 
         Restore подаёт будущий набор журналов: запрет ENC1→OFF обязан пройти
@@ -1218,20 +1255,50 @@ class StateStore:
         serialized = json.dumps(settings, ensure_ascii=False, indent=2)
         if len(serialized.encode("utf-8")) > MAX_POLICY_BYTES:
             raise StateStoreSettingsCorruptError("serialized settings too large")
-        return settings, serialized
+        try:
+            already_enabled = self.read_settings_import(self.settings_path).get("history_encryption_enabled") is True
+        except StateStoreSettingsCorruptError:
+            already_enabled = False
+        crypto_candidate = None
+        if settings["history_encryption_enabled"] is True and (
+            force_history_crypto_preflight or not already_enabled
+        ):
+            # Проверяем предложенную ON-policy после pure guards/serialization.
+            # Warm crypto cache не доказывает текущую доступность Keychain.
+            crypto_candidate = self._acquire_history_crypto_unlocked(history_paths=history_paths)
+            if crypto_candidate is None:
+                raise HistoryEncryptionUnavailable("history encryption unavailable")
+        # Ключ остаётся local до видимого commit policy: ошибка copy2/write
+        # не должна включить шифрование в памяти при прежней OFF/UNKNOWN policy.
+        return settings, serialized, crypto_candidate
 
     def _save_settings_unlocked(
         self, new_settings: dict[str, Any], *, validated_repair: bool = False,
         expected_revision: object = _UNCONDITIONAL_SETTINGS_COMMIT,
+        force_history_crypto_preflight: bool = False,
     ) -> dict[str, Any]:
         """Central commit: guards, свежая revision, atomic file+directory fsync."""
-        from core.atomic_io import atomic_write_text
-
-        settings, serialized = self._prepare_settings_commit_unlocked(
+        prepared = self._prepare_settings_commit_unlocked(
             new_settings, validated_repair=validated_repair,
             expected_revision=expected_revision,
+            force_history_crypto_preflight=force_history_crypto_preflight,
         )
+        return self._commit_prepared_settings_unlocked(*prepared)
+
+    def _commit_prepared_settings_unlocked(
+        self, settings: dict[str, Any], serialized: str,
+        crypto_candidate: HistoryCrypto | None,
+    ) -> dict[str, Any]:
+        """Применяет prepared commit под тем же EX-lock, без нового preflight."""
+        from core.atomic_io import atomic_write_text
+
         atomic_write_text(self.settings_path, serialized)
+        # atomic_write_text завершается сразу после os.replace. Policy уже
+        # видима: до directory fsync публикуем тот же свежий ключ, даже если
+        # последующий fsync завершится ошибкой. None сохраняет прежний cache.
+        if crypto_candidate is not None:
+            self._history_crypto_initialized = True
+            self._history_crypto_instance = crypto_candidate
         # После replace даже ошибка directory fsync не делает профиль новым.
         self._fresh_settings_pending = False
         self._startup_initialization_consumed = True
@@ -3168,22 +3235,14 @@ class StateStore:
         import shutil as _shutil
         from backend.history_crypto import HistoryCrypto
 
-        # Do not create/load a key for a disabled profile, and do not turn an
-        # explicit OFF setting into ENC1 even when migration is called directly.
         with self._lock():
             if not self._read_encryption_flag_unlocked():
                 return {"ok": False, "reason": "encryption_disabled"}
-
-        # Force re-init so we pick up a freshly enabled flag.
-        self._history_crypto_initialized = False
-        crypto = self._get_history_crypto(allow_create=True)
-        if crypto is None:
-            return {"ok": False, "reason": "encryption_unavailable"}
-
-        with self._lock():
-            # Keychain access above can take time. Another StateStore may have
-            # disabled encryption while the key was loading; the final check
-            # must share the lock with save_settings before any file writes.
+            # Policy, profile scan, provider и запись имеют один EX-lock.
+            self._history_crypto_initialized = False
+            crypto = self._get_history_crypto(allow_create=True)
+            if crypto is None:
+                return {"ok": False, "reason": "encryption_unavailable"}
             if not self._read_encryption_flag_unlocked():
                 return {"ok": False, "reason": "encryption_disabled"}
             if not self.history_path.exists() or self.history_path.stat().st_size == 0:

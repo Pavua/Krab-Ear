@@ -5858,22 +5858,20 @@ class BackendService:
             или
             {"ok": False, "error": "keychain_unavailable", "enabled": bool}
         """
-        enabled = bool(params.get("enabled", False))
-
-        if enabled:
-            from backend.history_crypto import build_history_crypto
-            crypto = build_history_crypto()
-            if crypto is None:
-                current = bool(
-                    self._settings_svc.cached_settings().get("history_encryption_enabled", False)
-                )
-                return {
-                    "ok": False,
-                    "error": "keychain_unavailable",
-                    "enabled": current,
-                }
-
-        result = self._settings_svc.handle_set_settings({"history_encryption_enabled": enabled})
+        enabled = params.get("enabled", False)
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be bool")
+        from backend.state_store import HistoryEncryptionUnavailable
+        try:
+            result = self._settings_svc.handle_set_settings(
+                {"history_encryption_enabled": enabled},
+                **({"force_history_crypto_preflight": True} if enabled else {}),
+            )
+        except HistoryEncryptionUnavailable:
+            return {
+                "ok": False, "error": "keychain_unavailable",
+                "enabled": bool(self._settings_svc.cached_settings().get("history_encryption_enabled", False)),
+            }
         if not result.get("ok", True):
             return result
         return {"ok": True, "enabled": enabled, "available": True}
@@ -5893,9 +5891,9 @@ class BackendService:
         if getattr(self, "_history_migration_running", False):
             return {"ok": True, "status": "already_running"}
 
-        from backend.history_crypto import build_history_crypto
-        if build_history_crypto() is None:
-            return {"ok": False, "status": "encryption_unavailable"}
+        with self.store._lock():
+            if not self.store._read_encryption_flag_unlocked() or self.store._acquire_history_crypto_unlocked() is None:
+                return {"ok": False, "status": "encryption_unavailable"}
 
         def _run() -> None:
             from backend.event_bus import bus as _event_bus

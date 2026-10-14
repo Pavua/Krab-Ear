@@ -389,9 +389,13 @@ class SettingsService:
             "voice_gateway_api_key": settings.get("voice_gateway_api_key", ""),
         }
 
-    def handle_set_settings(self, params: dict[str, Any]) -> dict[str, Any]:
+    def handle_set_settings(
+        self, params: dict[str, Any], *, force_history_crypto_preflight: bool = False,
+    ) -> dict[str, Any]:
         with self._save_lock:  # W1437
-            return self._handle_set_settings_locked(params)
+            return self._handle_set_settings_locked(
+                params, force_history_crypto_preflight=force_history_crypto_preflight,
+            )
 
     # ---------------------------------------------------------------------------
     # ENV-PIN guard: these settings may be locked by the operator via env vars.
@@ -415,7 +419,9 @@ class SettingsService:
                     f"remove {env_var} to allow updates"
                 )
 
-    def _handle_set_settings_locked(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _handle_set_settings_locked(
+        self, params: dict[str, Any], *, force_history_crypto_preflight: bool = False,
+    ) -> dict[str, Any]:
         StateStore.validate_raw_policy_flags(params)
         old_settings = self.cached_settings()
 
@@ -631,7 +637,10 @@ class SettingsService:
                 _log.warning("settings save: %s", w)
         settings = vr.fixed
 
-        result = self._save_partial_settings(settings, old_settings, raw_input=params)
+        result = self._save_partial_settings(
+            settings, old_settings, raw_input=params,
+            force_history_crypto_preflight=force_history_crypto_preflight,
+        )
         self.invalidate_cache()
         add_breadcrumb(
             category="settings",
@@ -984,6 +993,7 @@ class SettingsService:
 
     def _save_partial_settings(
         self, settings: dict, previous: dict, *, raw_input: dict | None = None,
+        force_history_crypto_preflight: bool = False,
     ) -> dict:
         """CAS под store lock: cache/probe не может откатить чужую новую policy.
 
@@ -995,6 +1005,7 @@ class SettingsService:
                 settings,
                 validated_repair=StateStore.has_explicit_policy_flags(raw_input),
                 expected_revision=previous.get(POLICY_REVISION_KEY),
+                **({"force_history_crypto_preflight": True} if force_history_crypto_preflight else {}),
             )
         finally:
             self.invalidate_cache()

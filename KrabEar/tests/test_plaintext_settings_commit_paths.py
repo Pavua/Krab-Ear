@@ -25,7 +25,10 @@ def make_service(store):
 def store(tmp_path):
     value = StateStore(tmp_path / "profile")
     value.initialize_startup_plaintext_policy(new_profile=True)
-    return value
+    # Эти тесты проверяют policy/CAS; deliberate ON теперь требует provider.
+    from backend.history_crypto import HistoryCrypto
+    with patch("backend.history_crypto.build_history_crypto", return_value=HistoryCrypto(b"P" * 32)):
+        yield value
 
 
 @pytest.mark.parametrize("payload", [{}, {"history_encryption_enabled": False}, {**FLAGS, "privacy_mode_enabled": 0}])

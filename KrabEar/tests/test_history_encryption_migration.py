@@ -69,7 +69,8 @@ def _inject_crypto(store, crypto=None):
     if crypto is None:
         crypto = _make_fake_crypto()
     _seed_known_profile(store.data_dir)
-    store.save_settings({"history_encryption_enabled": True})
+    with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
+        store.save_settings({"history_encryption_enabled": True})
     store._history_crypto_initialized = True
     store._history_crypto_instance = crypto
     # migrate_history_encryption() deliberately reinitializes crypto; bypass
@@ -576,7 +577,9 @@ class TestMigrateSettingsRace(unittest.TestCase):
             crypto = _make_fake_crypto()
 
             def disable_then_return_crypto(*, allow_create=True):
-                _make_store(data_dir).save_settings({"history_encryption_enabled": False})
+                # Provider теперь вызывается под EX: используем тот же Store
+                # для reentrant callback, чужой writer обязан ждать этот flock.
+                store.save_settings({"history_encryption_enabled": False})
                 return crypto
 
             with patch(
@@ -605,7 +608,8 @@ class TestMigrateCryptoUnavailable(unittest.TestCase):
     def test_returns_encryption_unavailable_when_crypto_none(self):
         store = _make_store(self.data_dir)
         _seed_known_profile(self.data_dir)
-        store.save_settings({"history_encryption_enabled": True})
+        with patch("backend.history_crypto.build_history_crypto", return_value=_make_fake_crypto()):
+            store.save_settings({"history_encryption_enabled": True})
 
         _write_plaintext_line(self.data_dir / "history.ndjson", _make_item_payload("id1", "Данные"))
 
@@ -762,7 +766,8 @@ class TestGetHistoryEncryptionStatus(unittest.TestCase):
 
         # Включаем через settings.json
         _seed_known_profile(self.data_dir)
-        store.save_settings({"history_encryption_enabled": True})
+        with patch("backend.history_crypto.build_history_crypto", return_value=_make_fake_crypto()):
+            store.save_settings({"history_encryption_enabled": True})
         status2 = store.get_history_encryption_status()
         self.assertTrue(status2["enabled"])
 
@@ -792,6 +797,7 @@ class TestIPCMigrateHistoryEncryption(unittest.TestCase):
         from backend.service import BackendService
         from backend.state_store import StateStore
         store = StateStore(self.data_dir)
+        _seed_known_profile(self.data_dir, encryption=True)
         svc = BackendService(store=store)
         self.service = svc
         return svc

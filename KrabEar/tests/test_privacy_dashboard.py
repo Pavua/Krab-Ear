@@ -195,9 +195,10 @@ class TestPrivacyDashboardFlags(_PrivacyDashboardBase):
         self.assertIs(data["encryption_enabled"], False)
 
     def test_encryption_enabled_reflects_setting(self):
-        # Устанавливаем напрямую через settings (не через set_history_encryption —
-        # та проверяет Keychain, которого нет в CI)
-        self._set_setting("history_encryption_enabled", True)
+        # Generic commit тоже проверяет ключ; dashboard использует stub provider.
+        from backend.history_crypto import HistoryCrypto
+        with patch("backend.history_crypto.build_history_crypto", return_value=HistoryCrypto(b"F" * 32)):
+            self._set_setting("history_encryption_enabled", True)
         with self._patch_audit():
             resp = self._call()
         data = resp.get("result", resp)

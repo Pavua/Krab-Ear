@@ -10,6 +10,7 @@ from backend.export_scheduler import ExportScheduler
 from backend.plaintext_export_authorization import PlaintextExportAuthorizer
 from backend.state_store import StateStore
 from _settings_test_helpers import safe_backend_for_settings
+from _history_crypto_test_helpers import save_settings_with_synthetic_key
 
 
 class TimelineSinkTest(unittest.TestCase):
@@ -30,7 +31,7 @@ class TimelineSinkTest(unittest.TestCase):
         return result["result"]
 
     def enable(self):
-        self.store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+        save_settings_with_synthetic_key(self.store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
 
     def context(self):
         auth = self.service._plaintext_export_authorizer
@@ -151,7 +152,7 @@ class SchedulerSinkTest(unittest.TestCase):
         )
 
     def test_direct_scheduler_on_denied_despite_active_manual_grant(self):
-        self.store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+        save_settings_with_synthetic_key(self.store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
         self.assertTrue(self.auth.issue_grant(str(uuid.uuid4())).ok)
         scheduler = self.scheduler()
         target = self.root / "exports"
@@ -169,7 +170,7 @@ class SchedulerSinkTest(unittest.TestCase):
         scheduler = self.scheduler()
         scheduler.configure("json")
         before = scheduler._schedule_path.read_bytes()
-        self.store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+        save_settings_with_synthetic_key(self.store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
         with patch.object(scheduler, "_prune_old_exports", wraps=scheduler._prune_old_exports) as prune:
             result = scheduler.check_and_export(self.store)
             self.assertFalse(result.get("exported", True))
@@ -185,7 +186,7 @@ class SchedulerSinkTest(unittest.TestCase):
         original = scheduler._do_export
         def export_then_enable(*args):
             entry = original(*args)
-            self.store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+            save_settings_with_synthetic_key(self.store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
             return entry
         with patch.object(scheduler, "_do_export", side_effect=export_then_enable), patch.object(scheduler, "_prune_old_exports", wraps=scheduler._prune_old_exports) as prune:
             result = scheduler.check_and_export(self.store)
@@ -198,7 +199,7 @@ class SchedulerSinkTest(unittest.TestCase):
         scheduler = self.scheduler()
         target = self.root / "exports"
         def render(*args):
-            self.store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+            save_settings_with_synthetic_key(self.store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
             return "synthetic plaintext"
         with patch.object(scheduler, "_generate_content", side_effect=render):
             with self.assertRaisesRegex(RuntimeError, "plaintext_session_expired|plaintext_confirmation_required"):
@@ -211,7 +212,7 @@ class SchedulerSinkTest(unittest.TestCase):
         old_file.write_text("synthetic plaintext", encoding="utf-8")
         scheduler.max_exports = 0
         schedule = {"exports": [{"path": str(old_file)}]}
-        self.store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+        save_settings_with_synthetic_key(self.store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
         with self.assertRaisesRegex(RuntimeError, "plaintext_confirmation_required"):
             scheduler._prune_old_exports(schedule)
         self.assertTrue(old_file.exists())

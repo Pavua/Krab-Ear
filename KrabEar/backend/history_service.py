@@ -5510,7 +5510,7 @@ class HistoryService:
                         else live_path
                         for live_path in self.store._history_journal_paths()
                     )
-                    settings_to_restore, _ = self.store._prepare_settings_commit_unlocked(
+                    settings_to_restore = self.store._prepare_settings_commit_unlocked(
                         checked.fixed,
                         validated_repair=settings_repair,
                         history_paths=prospective_paths,
@@ -5526,9 +5526,7 @@ class HistoryService:
 
             if settings_to_restore is not None:
                 # Уже держим store EX-lock, нового flock FD здесь нет.
-                self.store._save_settings_unlocked(
-                    settings_to_restore, validated_repair=settings_repair,
-                )
+                self.store._commit_prepared_settings_unlocked(*settings_to_restore)
 
         restored_entries = self.store.count_active_items()
         logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)

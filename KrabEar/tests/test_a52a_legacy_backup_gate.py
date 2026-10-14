@@ -130,7 +130,8 @@ def _flipping_flock_patch(module_name: str, second_store: StateStore):
 
     @contextmanager
     def _flip(data_dir, *args, **kwargs):
-        second_store.save_settings({"history_encryption_enabled": True})
+        with patch("backend.history_crypto.build_history_crypto", return_value=_synthetic_crypto()):
+            second_store.save_settings({"history_encryption_enabled": True})
         if real_flock is None:
             yield
         else:
@@ -255,7 +256,8 @@ class TestManualBackupRestoreGate:
         def flipping_lock(*args, **kwargs):
             if not state["flipped"]:
                 state["flipped"] = True
-                second.save_settings({"history_encryption_enabled": True})
+                with patch("backend.history_crypto.build_history_crypto", return_value=_synthetic_crypto()):
+                    second.save_settings({"history_encryption_enabled": True})
             with real_lock(*args, **kwargs):
                 yield
 
@@ -273,7 +275,8 @@ class TestManualBackupRestoreGate:
         store.add_history_item(text="synthetic restore seed")
         backup = svc.handle_backup_history({})
         backup_dir = Path(backup["backup_path"])
-        store.save_settings({"history_encryption_enabled": True})
+        with patch("backend.history_crypto.build_history_crypto", return_value=_synthetic_crypto()):
+            store.save_settings({"history_encryption_enabled": True})
         history_before = _bytes(store.history_path)
         settings_before = _bytes(data_dir / "settings.json")
         result = svc.handle_restore_history(
@@ -455,7 +458,8 @@ class TestAutoBackupGate:
         def flipping_lock(*args, **kwargs):
             if not state["flipped"]:
                 state["flipped"] = True
-                second.save_settings({"history_encryption_enabled": True})
+                with patch("backend.history_crypto.build_history_crypto", return_value=_synthetic_crypto()):
+                    second.save_settings({"history_encryption_enabled": True})
             with real_lock(*args, **kwargs):
                 yield
 
@@ -538,7 +542,8 @@ class TestArchiveManagerGate:
         def flipping_lock(*args, **kwargs):
             if not state["flipped"]:
                 state["flipped"] = True
-                second.save_settings({"history_encryption_enabled": True})
+                with patch("backend.history_crypto.build_history_crypto", return_value=_synthetic_crypto()):
+                    second.save_settings({"history_encryption_enabled": True})
             with real_lock(*args, **kwargs):
                 yield
 

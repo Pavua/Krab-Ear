@@ -103,7 +103,8 @@ class TestStateStoreEncryptionDefaultOff(unittest.TestCase):
         store._history_crypto_initialized = True
         store._history_crypto_instance = HistoryCrypto(os.urandom(32))
 
-        store.save_settings({"history_encryption_enabled": True})
+        with patch("backend.history_crypto.build_history_crypto", return_value=store._history_crypto_instance):
+            store.save_settings({"history_encryption_enabled": True})
         raw = self.data_dir.joinpath("settings.json").read_text(encoding="utf-8")
         parsed = json.loads(raw)
         self.assertIn("history_encryption_enabled", parsed)
@@ -315,7 +316,8 @@ class TestStateStoreSettingsAlwaysPlaintext(unittest.TestCase):
         store._history_crypto_initialized = True
         store._history_crypto_instance = self._fake_crypto
 
-        store.save_settings({"history_encryption_enabled": True})
+        with patch("backend.history_crypto.build_history_crypto", return_value=self._fake_crypto):
+            store.save_settings({"history_encryption_enabled": True})
         raw = self.data_dir.joinpath("settings.json").read_text(encoding="utf-8")
         self.assertFalse(raw.strip().startswith("ENC1:"))
         parsed = json.loads(raw)
@@ -326,7 +328,8 @@ class TestStateStoreSettingsAlwaysPlaintext(unittest.TestCase):
 
         store = StateStore(self.data_dir)
         store.initialize_startup_plaintext_policy(new_profile=True)
-        store.save_settings({"history_encryption_enabled": True})
+        with patch("backend.history_crypto.build_history_crypto", return_value=self._fake_crypto):
+            store.save_settings({"history_encryption_enabled": True})
 
         store2 = StateStore(self.data_dir)
         store2._history_crypto_initialized = True

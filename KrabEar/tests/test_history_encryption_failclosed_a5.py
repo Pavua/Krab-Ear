@@ -68,10 +68,9 @@ def test_enabling_encryption_invalidates_plaintext_writer_cache() -> None:
         store = StateStore(data_dir)
         store.initialize_startup_plaintext_policy(new_profile=True)
         store.add_history_item(text="SYNTHETIC_BEFORE_ENABLE")
-        store.save_settings({"history_encryption_enabled": True})
-
         crypto = HistoryCrypto(os.urandom(32))
         with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
+            store.save_settings({"history_encryption_enabled": True})
             store.add_history_item(text="SYNTHETIC_AFTER_ENABLE")
 
         lines = (data_dir / "history.ndjson").read_text(encoding="utf-8").splitlines()
@@ -269,12 +268,12 @@ def test_disabling_before_first_encrypted_line_clears_cached_crypto() -> None:
         # guard save_settings отвергает (MISSING_KEY), и проверка стала бы
         # проверкой отказа вместо проверки явного OFF. Инвариант прежний:
         # записанный OFF обязан победить уже закэшированный crypto.
-        store.save_settings({
-            "history_encryption_enabled": True,
-            "privacy_mode_enabled": True,
-        })
         crypto = HistoryCrypto(b"H" * 32)
         with patch("backend.history_crypto.build_history_crypto", return_value=crypto):
+            store.save_settings({
+                "history_encryption_enabled": True,
+                "privacy_mode_enabled": True,
+            })
             assert store._get_history_crypto() is crypto
         store.save_settings({"history_encryption_enabled": False})
 
