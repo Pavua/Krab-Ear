@@ -499,8 +499,8 @@ class TestCentralSettingsCommit(_PolicySnapshotFixture):
         self.seed_known_profile()
         seen = []
         for encryption in (False, True, False):
-            saved = save_settings_with_synthetic_key(self.store,
-                {ENCRYPTION_KEY: encryption, PRIVACY_KEY: False}
+            saved = save_settings_with_synthetic_key(
+                self.store, {ENCRYPTION_KEY: encryption, PRIVACY_KEY: False}
             )
             seen.append(saved[POLICY_REVISION_KEY])
             snapshot = self.store.read_plaintext_policy_snapshot()
@@ -1601,8 +1601,8 @@ class _AuthorizerFixture(_PolicySnapshotFixture):
         self.seed_known_profile(encryption=False, privacy=privacy, revision=revision)
 
     def save_flags(self, *, encryption, privacy=False):
-        return save_settings_with_synthetic_key(self.store,
-            {ENCRYPTION_KEY: encryption, PRIVACY_KEY: privacy}
+        return save_settings_with_synthetic_key(
+            self.store, {ENCRYPTION_KEY: encryption, PRIVACY_KEY: privacy}
         )
 
     def issue_on(self, authorizer=None, session=None):
@@ -2194,8 +2194,8 @@ def _worker_5a_granter(data_dir_s, ready_evt, done_evt, result_q):
             read_snapshot=store.read_plaintext_policy_snapshot,
             profile_identity=str(data_dir),
         )
-        save_settings_with_synthetic_key(store,
-            {"history_encryption_enabled": True, "privacy_mode_enabled": False}
+        save_settings_with_synthetic_key(
+            store, {"history_encryption_enabled": True, "privacy_mode_enabled": False}
         )
         snapshot = store.read_plaintext_policy_snapshot()
         if snapshot.state is not AZ.PolicyState.KNOWN_ON:
@@ -2241,8 +2241,8 @@ def _worker_5a_changer(data_dir_s, ready_evt, done_evt):
     store.save_settings(
         {"history_encryption_enabled": False, "privacy_mode_enabled": False}
     )
-    save_settings_with_synthetic_key(store,
-        {"history_encryption_enabled": True, "privacy_mode_enabled": False}
+    save_settings_with_synthetic_key(
+        store, {"history_encryption_enabled": True, "privacy_mode_enabled": False}
     )
     done_evt.set()
 
