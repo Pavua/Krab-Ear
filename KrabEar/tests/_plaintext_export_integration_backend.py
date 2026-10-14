@@ -341,7 +341,10 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                     transcriber=SimpleNamespace(engine=engine, _error_bus=None), translator=mock.Mock(),
                 )
             if crypto_key is None:
-                store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+                # Только deliberate activation получает synthetic provider;
+                # после setup прежний forbidden_provider снова ловит обращения.
+                from _history_crypto_test_helpers import save_settings_with_synthetic_key
+                save_settings_with_synthetic_key(store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
             service._settings_svc.invalidate_cache()
             original_dispatch = service.handle_request
             reached = threading.Event()

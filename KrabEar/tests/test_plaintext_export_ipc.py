@@ -6,6 +6,7 @@ import unittest
 import uuid
 from types import SimpleNamespace
 from unittest import mock
+from _history_crypto_test_helpers import save_settings_with_synthetic_key
 
 
 class PlaintextExportIPCTest(unittest.TestCase):
@@ -41,7 +42,7 @@ class PlaintextExportIPCTest(unittest.TestCase):
         return response["result"]
 
     def enable(self):
-        self.service.store.save_settings({
+        save_settings_with_synthetic_key(self.service.store, {
             "history_encryption_enabled": True, "privacy_mode_enabled": False,
         })
 

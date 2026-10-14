@@ -6,6 +6,8 @@ import socket
 import unittest
 from unittest import mock
 
+from _history_crypto_test_helpers import save_settings_with_synthetic_key
+
 
 _SECRETS = ("sentinel-capability-73", "sentinel-receipt-84", "sentinel-session-95")
 
@@ -151,7 +153,9 @@ class PlaintextExportRedactionTest(unittest.TestCase):
     def test_socket_send_failure_cannot_leak_newly_generated_grant(self):
         from backend.ipc_server import IPCServer
         service = self.service
-        service.store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
+        save_settings_with_synthetic_key(
+            service.store, {"history_encryption_enabled": True, "privacy_mode_enabled": False},
+        )
         policy = service.handle_request({"method": "get_plaintext_export_policy"})["result"]
         request = {
             "method": "grant_plaintext_export_session",

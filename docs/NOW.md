@@ -1,5 +1,46 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-14 — CURRENT: history key safety, final verification
+
+Source-база — `86a0b1978086bb4e2d9bbbf7505a264cd2abf928`:
+[#2091](https://github.com/Pavua/Krab-Ear/pull/2091) MERGED после всех 27
+exact-head checks (24 SUCCESS / 3 SKIPPED) и independent Astra Ultra GO.
+У #2090 и #2091 оба post-merge workflow SUCCESS; для #2091 основной
+[CI SUCCESS](https://github.com/Pavua/Krab-Ear/actions/runs/38493755193),
+[backend SUCCESS](https://github.com/Pavua/Krab-Ear/actions/runs/38493755224):
+19 SUCCESS / 2 SKIPPED jobs на точном merge SHA `86a0b197`.
+
+Новая [карточка history key safety](superpowers/plans/2026-10-14-history-key-safety.md)
+закрывает replacement-key рядом с `ENC1` и обход fresh preflight при generic
+OFF→ON/import/restore. Dedicated `enabled` принимает exact bool. Все десять
+journals проверяются под EX; passive lookup сохраняет SH. Legacy restore
+проверяет live ∪ prospective и применяет один prepared commit.
+
+Early Astra review нашёл P2 в новом patch: cache ключа публиковался до
+отказавшего settings replace. Proper RED 3 FAIL / 2 controls PASS →
+tuple3 `(settings, serialized, crypto_candidate)`; cache публикуется после
+replace, до directory fsync. Исправленный frozen production diff получил
+**Astra Ultra production GO**. На исходной версии тестовой фикстуры Python
+3.12.7 и 3.14.8, все 33 выбранных файла: по **1238 PASS + 142 subtests**,
+0 skips; 3 Swift cases deselected.
+Новые regressions включают 48 Store/AES и 12 настоящих temp Unix IPC cases.
+Дополнительно четыре файла с дочерними процессами на каждой версии прошли
+усиленный exact-target guard: по 185 PASS + 90 subtests. Critical lint и
+14 audit gates PASS. Whole-card review нашёл test-only P2: общий HOME socket
+мог направить запрос чужому backend. Proper RED (истории 1/1 вместо 1/0) →
+уникальный temp socket + owned LISTENING. Финальный IPC-файл **13 PASS на
+каждой версии**; остальные 32 test paths и production байт-идентичны.
+Повторный scoped review и новый hosted CI ещё требуются.
+[Checkpoint и ограничения](superpowers/handoffs/2026-10-14-history-key-safety.md).
+
+**Runtime:** retained `9d7a0aac`, root ещё не переключал app/plists/processes.
+Bundle `86a0b197` подготовлен, не применён; объединённая выкладка crypto+
+Whisper возможна после всех собственных gates и нового тихого окна Main/VG.
+Real encryption OFF; activation, real migration, purge и rotation исключены.
+Причины прежних RU GigaAM HTTP504, default REST MLX timeout/failfast70 и
+AGENT-19 AppHanging остаются UNKNOWN. Sol 6.1 High — implementation/CI;
+Astra Ultra — final security/release gate. Ниже — прежние checkpoints.
+
 ## 2026-10-14 — CURRENT: passive key merged; Whisper lifecycle RED→GREEN
 
 Source-база — `cdfcf8ee57aa75f13ee9a2e2ae4c0ae465af6958`:

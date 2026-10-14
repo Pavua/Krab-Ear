@@ -39,6 +39,8 @@ import uuid
 from pathlib import Path
 from unittest import mock
 
+from _history_crypto_test_helpers import save_settings_with_synthetic_key
+
 from backend.ipc_errors import IpcOperationalError
 from backend.models import DEFAULT_SETTINGS
 from backend.plaintext_export_authorization import (
@@ -497,7 +499,7 @@ class TestCentralSettingsCommit(_PolicySnapshotFixture):
         self.seed_known_profile()
         seen = []
         for encryption in (False, True, False):
-            saved = self.store.save_settings(
+            saved = save_settings_with_synthetic_key(self.store,
                 {ENCRYPTION_KEY: encryption, PRIVACY_KEY: False}
             )
             seen.append(saved[POLICY_REVISION_KEY])
@@ -1599,7 +1601,7 @@ class _AuthorizerFixture(_PolicySnapshotFixture):
         self.seed_known_profile(encryption=False, privacy=privacy, revision=revision)
 
     def save_flags(self, *, encryption, privacy=False):
-        return self.store.save_settings(
+        return save_settings_with_synthetic_key(self.store,
             {ENCRYPTION_KEY: encryption, PRIVACY_KEY: privacy}
         )
 
@@ -2192,7 +2194,7 @@ def _worker_5a_granter(data_dir_s, ready_evt, done_evt, result_q):
             read_snapshot=store.read_plaintext_policy_snapshot,
             profile_identity=str(data_dir),
         )
-        store.save_settings(
+        save_settings_with_synthetic_key(store,
             {"history_encryption_enabled": True, "privacy_mode_enabled": False}
         )
         snapshot = store.read_plaintext_policy_snapshot()
@@ -2239,7 +2241,7 @@ def _worker_5a_changer(data_dir_s, ready_evt, done_evt):
     store.save_settings(
         {"history_encryption_enabled": False, "privacy_mode_enabled": False}
     )
-    store.save_settings(
+    save_settings_with_synthetic_key(store,
         {"history_encryption_enabled": True, "privacy_mode_enabled": False}
     )
     done_evt.set()

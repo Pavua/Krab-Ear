@@ -100,9 +100,24 @@ class TestSetHistoryEncryption(unittest.TestCase):
 
     def _make_obj(self, initial_settings: dict | None = None):
         from backend.service import BackendService
+        from backend.settings_service import SettingsService
+        from backend.state_store import StateStore
+        from pathlib import Path
+        import json
+        import tempfile
 
         obj = object.__new__(BackendService)
-        svc, settings = _make_fake_settings_svc(initial_settings or {})
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = StateStore(Path(temporary.name) / "profile")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        settings = store.load_settings()
+        settings.update(initial_settings or {})
+        store.settings_path.write_text(json.dumps(settings))
+        svc = SettingsService(store, backup=MagicMock())
+        svc._reload_and_fire_hooks = MagicMock(side_effect=lambda old, new: settings.update(new))
+        svc._maybe_disable_sentry_for_privacy = MagicMock()
+        object.__setattr__(obj, "store", store)
         object.__setattr__(obj, "_settings_svc", svc)
         return obj, settings
 

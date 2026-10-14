@@ -27,10 +27,12 @@ class PlaintextPolicyProtocolTest(unittest.TestCase):
         )
 
     def set_policy(self, encryption=True, privacy=False):
-        self.store.save_settings({
-            "history_encryption_enabled": encryption,
-            "privacy_mode_enabled": privacy,
-        })
+        from backend.history_crypto import HistoryCrypto
+        with mock.patch("backend.history_crypto.build_history_crypto", return_value=HistoryCrypto(b"P" * 32)):
+            self.store.save_settings({
+                "history_encryption_enabled": encryption,
+                "privacy_mode_enabled": privacy,
+            })
 
     def grant(self):
         status = self.authorizer.get_policy()

@@ -9,6 +9,7 @@ import pytest
 from backend.history_service import HistoryService
 from backend.plaintext_export_authorization import PlaintextExportAuthorizer
 from backend.state_store import StateStore
+from _history_crypto_test_helpers import save_settings_with_synthetic_key
 
 ROUTES = (
     "history", "srt", "selected-md", "selected-srt", "json", "csv",
@@ -32,7 +33,7 @@ def profile(tmp_path):
 
 
 def policy(store, *, encryption=False, privacy=False):
-    store.save_settings({"history_encryption_enabled": encryption, "privacy_mode_enabled": privacy})
+    save_settings_with_synthetic_key(store, {"history_encryption_enabled": encryption, "privacy_mode_enabled": privacy})
 
 
 def grant(auth):
