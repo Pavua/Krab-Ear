@@ -1,6 +1,34 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-14 — CURRENT: source stack merged, final CI PASS
+## 2026-10-14 — CURRENT: passive key merged; Whisper lifecycle RED→GREEN
+
+Source-база — `cdfcf8ee57aa75f13ee9a2e2ae4c0ae465af6958`:
+[#2089](https://github.com/Pavua/Krab-Ear/pull/2089) и
+[#2090](https://github.com/Pavua/Krab-Ear/pull/2090) MERGED.
+У #2090 exact head `ac2a0d91` все три workflow SUCCESS (24 SUCCESS / 3 SKIPPED
+checks). Для post-merge `cdfcf8ee` основной
+[CI SUCCESS](https://github.com/Pavua/Krab-Ear/actions/runs/38488885927);
+[backend workflow](https://github.com/Pavua/Krab-Ear/actions/runs/38488885928)
+на момент начала следующей карточки ещё выполнялся. Факт готовности итогового
+релиза проверяется на его собственном post-merge SHA.
+
+Текущая [карточка Whisper lifecycle](superpowers/plans/2026-10-14-whisper-lifecycle.md)
+закрывает два подтверждённых MED: partial WAV cleanup и stale watchdog,
+убивающий следующий запрос того же subprocess. Proper RED→GREEN на Python
+3.12/3.14; по **81 PASS + 2 subtests**, включая два настоящих temp JSON-pipe
+integration tests, lint/diff-check и 14 audit gates PASS.
+[Checkpoint и границы](superpowers/handoffs/2026-10-14-whisper-lifecycle.md).
+Independent whole-diff gate и новый hosted CI обязательны до интеграции.
+
+**Runtime:** retained `9d7a0aac`, новый app и оба plist только подготовлены.
+Выкладка объединяется с Whisper-карточкой после CI и тихого окна
+Main/VG; OrbStack/VPN и соседние проекты не меняются. Real encryption OFF,
+activation/purge/rotation не входят в scope. Причина живого default REST MLX
+timeout/failfast70, RU GigaAM call-profile HTTP504 и Sentry AGENT-19 AppHanging
+остаётся UNKNOWN; ни один не объявляется закрытым этими локальными тестами.
+Sol 6.1 High — реализация/CI, Astra Ultra — узкий final review/release gate.
+
+## 2026-10-14 — Source stack checkpoint: merged, final CI PASS
 
 Проверено 14.10 CEST: source-база `origin/codex/krab-ear-v2` —
 `3c8a05bc67f51ef156034f4a37adf65f1807cec6`.
