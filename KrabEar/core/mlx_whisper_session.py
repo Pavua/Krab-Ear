@@ -21,10 +21,12 @@ import threading
 import time
 import wave
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
 from core.mlx_subprocess import MLXTimeoutError
+from core.mlx_lock import MLXLockTimeoutError
 
 logger = logging.getLogger("KrabEar.MLXWhisperWorker")
 
@@ -115,6 +117,13 @@ def kill_mlx_whisper_session() -> None:
     sess.kill()
 
 
+def _remaining_sec(deadline_monotonic: float) -> float:
+    remaining = deadline_monotonic - time.monotonic()
+    if remaining <= 0:
+        raise MLXLockTimeoutError("Срок Whisper worker истёк до отправки запроса")
+    return remaining
+
+
 def transcribe_via_mlx_worker(
     audio_data: Any,
     mlx_params: dict[str, Any],
@@ -122,6 +131,8 @@ def transcribe_via_mlx_worker(
     model_name: str,
 ) -> dict[str, Any]:
     """Пишет ndarray в temp WAV и шлёт transcribe в worker."""
+    deadline = time.monotonic() + timeout_sec
+    _remaining_sec(deadline)
     tmp: str | None = None
     try:
         if isinstance(audio_data, (str, Path)):
@@ -134,7 +145,7 @@ def transcribe_via_mlx_worker(
         return get_mlx_whisper_session().transcribe(
             audio_path,
             mlx_params,
-            timeout_sec=timeout_sec,
+            timeout_sec=_remaining_sec(deadline),
             model_name=model_name,
         )
     finally:
@@ -166,6 +177,7 @@ class MLXWhisperSession:
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen[str]] = None
         self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
         self._stderr_ring: deque[str] = deque(maxlen=200)
         self._stderr_drain_thread: Optional[threading.Thread] = None
         self._inflight = 0
@@ -181,9 +193,26 @@ class MLXWhisperSession:
         """monotonic-таймстемп последнего входа/выхода transcribe()."""
         return self._last_used_ts
 
-    def start(self) -> None:
+    @contextmanager
+    def _request_lock(self, deadline_monotonic: float | None):
+        # Только владелец I/O-lock может отправить JSON или убить свой запрос.
+        # Истёкший waiter уходит без воздействия на активный child.
+        if deadline_monotonic is None:
+            acquired = self._lock.acquire()
+        else:
+            acquired = self._lock.acquire(timeout=_remaining_sec(deadline_monotonic))
+        if not acquired:
+            raise MLXLockTimeoutError("Whisper worker занят до истечения срока")
+        try:
+            if deadline_monotonic is not None:
+                _remaining_sec(deadline_monotonic)
+            yield
+        finally:
+            self._lock.release()
+
+    def start(self, deadline_monotonic: float | None = None) -> None:
         """Idempotent spawn. Мёртвый child (poll()!=None) — сиблинг GigaAM W1216 F1."""
-        with self._lock:
+        with self._request_lock(deadline_monotonic):
             if self._proc is not None and self._proc.poll() is None:
                 return
             if self._proc is not None:
@@ -245,14 +274,15 @@ class MLXWhisperSession:
         timeout_sec: float,
         model_name: str,
     ) -> dict[str, Any]:
-        # C-INFLIGHT: короткие вход/выход-захваты self._lock только для счётчика —
-        # НЕ держим лок через весь start()+_send() (не реентерабелен, _send()
-        # сам берёт self._lock на время записи+чтения ответа).
-        with self._lock:
+        deadline = time.monotonic() + timeout_sec
+        _remaining_sec(deadline)
+        # Короткий state-lock не удерживается через spawn или pipe I/O.
+        # Вход до start() сохраняет conductor gate в промежутке start→send.
+        with self._state_lock:
             self._inflight += 1
             self._last_used_ts = time.monotonic()
         try:
-            self.start()
+            self.start(deadline_monotonic=deadline)
             response = self._send(
                 {
                     "op": "transcribe",
@@ -261,6 +291,7 @@ class MLXWhisperSession:
                 },
                 timeout_sec=timeout_sec,
                 model_name=model_name,
+                deadline_monotonic=deadline,
             )
             if not response.get("ok"):
                 err = str(response.get("error", "unknown"))
@@ -272,7 +303,7 @@ class MLXWhisperSession:
                 raise RuntimeError("mlx_whisper worker: missing result dict")
             return result
         finally:
-            with self._lock:
+            with self._state_lock:
                 self._inflight -= 1
                 self._last_used_ts = time.monotonic()
 
@@ -340,10 +371,11 @@ class MLXWhisperSession:
         разница почти всегда мала, но именно inflight — авторитетный
         источник правды на границе start()→_send())."""
         with self._lock:
-            if self._proc is None or self._inflight > 0:
-                return False
-            if (time.monotonic() - self._last_used_ts) < idle_sec:
-                return False
+            with self._state_lock:
+                if self._proc is None or self._inflight > 0:
+                    return False
+                if (time.monotonic() - self._last_used_ts) < idle_sec:
+                    return False
             self._close_unlocked()
             return True
 
@@ -373,27 +405,20 @@ class MLXWhisperSession:
         request: dict[str, Any],
         timeout_sec: float,
         model_name: str,
+        deadline_monotonic: float | None = None,
     ) -> dict[str, Any]:
-        if self._proc is None:
-            raise RuntimeError("mlx_whisper worker: process not started")
-        if self._proc.stdin is None or self._proc.stdout is None:
-            raise RuntimeError("mlx_whisper worker: pipes missing")
-
-        with self._lock:
+        if deadline_monotonic is None:
+            deadline_monotonic = time.monotonic() + timeout_sec
+        with self._request_lock(deadline_monotonic):
             proc = self._proc
-            try:
-                self._proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
-                self._proc.stdin.flush()
-            except (BrokenPipeError, OSError) as exc:
-                rc = self._proc.poll()
-                # self._lock уже держим (мы внутри `with self._lock:` выше) —
-                # self.close() здесь самозаклинил бы (не реентерабельный лок,
-                # W-#1872 class); _close_unlocked() — тело close() без acquire.
-                self._close_unlocked()
-                raise MLXWorkerCrashed(rc, model_name) from exc
+            if proc is None:
+                raise RuntimeError("mlx_whisper worker: process not started")
+            if proc.stdin is None or proc.stdout is None:
+                raise RuntimeError("mlx_whisper worker: pipes missing")
 
-            # cancel() не останавливает уже вошедший callback. Состояние и
-            # guard принадлежат запросу, а не переиспользуемому worker-PID.
+            # Сериализация и ожидание очереди расходуют тот же бюджет.
+            payload = json.dumps(request, ensure_ascii=False) + "\n"
+            remaining = _remaining_sec(deadline_monotonic)
             timeout_guard = threading.Lock()
             active = True
             timed_out = False
@@ -409,35 +434,45 @@ class MLXWhisperSession:
                     except OSError:
                         pass
 
-            timer = threading.Timer(timeout_sec, timeout_kill)
+            # Вооружить ДО write/flush: полный stdin тоже может блокировать.
+            timer = threading.Timer(remaining, timeout_kill)
             timer.start()
+            write_error = None
+            line = ""
             try:
-                line = self._proc.stdout.readline()
+                try:
+                    proc.stdin.write(payload)
+                    proc.stdin.flush()
+                except (BrokenPipeError, OSError) as exc:
+                    write_error = exc
+                if write_error is None:
+                    line = proc.stdout.readline()
             finally:
                 timer.cancel()
-                # Retire до release session-lock: старый callback больше
-                # не сможет убить этот же proc во время следующего запроса.
+                # cancel не останавливает уже вошедший callback. Retire под
+                # guard до release I/O-lock защищает следующий запрос того же PID.
                 with timeout_guard:
                     active = False
 
-        if not line:
-            rc = self._proc.poll() if self._proc is not None else None
-            stderr_tail = "".join(self._stderr_ring)[-2000:]
-            self.close()
-            if timed_out:
-                raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
-            raise MLXWorkerCrashed(rc, model_name, stderr_tail=stderr_tail)
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError as exc:
-            rc = self._proc.poll() if self._proc is not None else None
-            self.close()
-            raise MLXWorkerCrashed(rc, model_name, stderr_tail=line[:500]) from exc
-        if not isinstance(parsed, dict):
-            rc = self._proc.poll() if self._proc is not None else None
-            self.close()
-            raise MLXWorkerCrashed(rc, model_name, stderr_tail=line[:500])
-        return parsed
+            if write_error is not None or not line:
+                rc = proc.poll()
+                stderr_tail = "".join(self._stderr_ring)[-2000:]
+                # Cleanup принадлежит этому же запросу, пока I/O-lock удерживается.
+                self._close_unlocked()
+                if timed_out:
+                    raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
+                raise MLXWorkerCrashed(rc, model_name, stderr_tail=stderr_tail) from write_error
+            try:
+                parsed = json.loads(line)
+            except json.JSONDecodeError as exc:
+                rc = proc.poll()
+                self._close_unlocked()
+                raise MLXWorkerCrashed(rc, model_name, stderr_tail=line[:500]) from exc
+            if not isinstance(parsed, dict):
+                rc = proc.poll()
+                self._close_unlocked()
+                raise MLXWorkerCrashed(rc, model_name, stderr_tail=line[:500])
+            return parsed
 
     def _start_stderr_drain(self) -> None:
         if self._proc is None or self._proc.stderr is None:

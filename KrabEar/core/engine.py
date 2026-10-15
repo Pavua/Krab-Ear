@@ -3098,7 +3098,7 @@ class AudioEngine:
         Если MLX_CRASH_RECOVERY_ENABLED=True, каждый вызов mlx_whisper.transcribe()
         оборачивается в MLXWatchdog.run_with_timeout(). Таймаут не обрывает
         Python-поток: watchdog ждёт bounded join перед MLXTimeoutError.
-        Абсолютный срок ограничивает ожидание и допуск in-process инференса;
+        Абсолютный срок ограничивает ожидание и допуск обеих ветвей инференса;
         уже начавшийся Metal этот срок принудительно не останавливает.
         """
         effective_language = (
@@ -3128,57 +3128,6 @@ class AudioEngine:
         # Бюджет приходит параметром, а не читается здесь: stt_budget живёт в
         # ContextVar, который НЕ наследуется потоком пула (см. call_in_scope).
         configured_timeout_sec = getattr(settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 60.0)
-        timeout_sec = _fit_worker_timeout(configured_timeout_sec, attempt_timeout_sec)
-
-        last_err: Exception | None = None
-        from core.mlx_whisper_session import (
-            MLXWorkerCrashed,
-            mlx_whisper_worker_enabled,
-            transcribe_via_mlx_worker,
-        )
-
-        if mlx_whisper_worker_enabled():
-            # P0c: Metal только в child. Родитель держит flock (если флаг ON).
-            # Child flock не берёт — иначе deadlock: родитель ждёт JSON, child ждёт flock.
-            with mlx_inter_process_lock():
-                for params in variants:
-                    try:
-                        return transcribe_via_mlx_worker(
-                            audio_data,
-                            params,
-                            timeout_sec=float(timeout_sec),
-                            model_name=model_name,
-                        )
-                    except MLXTimeoutError as e:
-                        logger.error(
-                            "MLX worker timeout %.1fs (model=%s) — fallback",
-                            e.timeout_sec, model_name,
-                        )
-                        self._push_error(
-                            "stt.mlx_timeout",
-                            f"MLXTimeoutError {e.timeout_sec}s (model={model_name})",
-                            severity="error",
-                        )
-                        raise
-                    except MLXWorkerCrashed:
-                        logger.error(
-                            "mlx_whisper worker crashed (model=%s) — REST PID жив",
-                            model_name,
-                        )
-                        raise
-                    except TypeError as e:
-                        last_err = e
-                    except (MemoryError, RuntimeError) as e:
-                        _emsg = str(e).lower()
-                        _code = self._classify_mlx_error_code(_emsg, isinstance(e, MemoryError))
-                        if _code is not None:
-                            self._push_error(
-                                _code,
-                                f"{type(e).__name__}: {e} (model={model_name})",
-                                severity="critical" if _code == "mlx.oom" else "error",
-                            )
-                        last_err = e
-            raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
 
         if attempt_deadline_monotonic is None:
             relative_timeout = attempt_timeout_sec
@@ -3201,6 +3150,66 @@ class AudioEngine:
                     "Срок попытки Whisper истёк до запуска инференса"
                 )
             return remaining
+
+        last_err: Exception | None = None
+        from core.mlx_whisper_session import (
+            MLXWorkerCrashed,
+            mlx_whisper_worker_enabled,
+            transcribe_via_mlx_worker,
+        )
+
+        if mlx_whisper_worker_enabled():
+            # P0c: Metal только в child. Родитель держит flock (если флаг ON).
+            # Child flock не берёт — иначе deadlock: родитель ждёт JSON, child ждёт flock.
+            with mlx_inter_process_lock(timeout_sec=min(5.0, remaining_attempt_sec())):
+                for params in variants:
+                    timeout_sec = _fit_worker_timeout(
+                        configured_timeout_sec, remaining_attempt_sec()
+                    )
+                    try:
+                        return transcribe_via_mlx_worker(
+                            audio_data,
+                            params,
+                            timeout_sec=float(timeout_sec),
+                            model_name=model_name,
+                        )
+                    except MLXLockTimeoutError:
+                        # Wrapper/session тоже расходуют срок (PCM и очередь).
+                        # Их admission timeout не отменяет уже полученный отказ GPU.
+                        if last_inference_error is not None:
+                            raise last_inference_error
+                        raise
+                    except MLXTimeoutError as e:
+                        logger.error(
+                            "MLX worker timeout %.1fs (model=%s) — fallback",
+                            e.timeout_sec, model_name,
+                        )
+                        self._push_error(
+                            "stt.mlx_timeout",
+                            f"MLXTimeoutError {e.timeout_sec}s (model={model_name})",
+                            severity="error",
+                        )
+                        raise
+                    except MLXWorkerCrashed:
+                        logger.error(
+                            "mlx_whisper worker crashed (model=%s) — REST PID жив",
+                            model_name,
+                        )
+                        raise
+                    except TypeError as e:
+                        last_err = e
+                    except (MemoryError, RuntimeError) as e:
+                        last_inference_error = e
+                        _emsg = str(e).lower()
+                        _code = self._classify_mlx_error_code(_emsg, isinstance(e, MemoryError))
+                        if _code is not None:
+                            self._push_error(
+                                _code,
+                                f"{type(e).__name__}: {e} (model={model_name})",
+                                severity="critical" if _code == "mlx.oom" else "error",
+                            )
+                        last_err = e
+            raise last_err or RuntimeError("Ошибка вызова mlx_whisper.transcribe")
 
         def infer_variant(params: dict[str, Any]) -> dict[str, Any]:
             # Проверка выполняется также внутри daemon watchdog — между
