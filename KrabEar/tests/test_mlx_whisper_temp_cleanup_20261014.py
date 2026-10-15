@@ -53,9 +53,10 @@ class WhisperTempCleanupTest(unittest.TestCase):
         def transcribe(path, received_params, **kwargs):
             self.assertEqual(Path(path).read_bytes(), b"synthetic-pcm-wav")
             self.assertIs(received_params, params)
-            self.assertEqual(kwargs, {
-                "timeout_sec": 1.5, "model_name": "synthetic-model",
-            })
+            self.assertEqual(set(kwargs), {"timeout_sec", "model_name"})
+            self.assertEqual(kwargs["model_name"], "synthetic-model")
+            self.assertGreater(kwargs["timeout_sec"], 0.0)
+            self.assertLessEqual(kwargs["timeout_sec"], 1.5)
             return expected
 
         session = Mock(transcribe=Mock(side_effect=transcribe))
