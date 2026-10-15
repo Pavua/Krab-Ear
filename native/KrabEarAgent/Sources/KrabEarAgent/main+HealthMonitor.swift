@@ -28,6 +28,7 @@ private nonisolated(unsafe) var lastHealthStateKey: UInt8 = 0
 private nonisolated(unsafe) var statusErrorBadgeSeverityKey: UInt8 = 0
 private nonisolated(unsafe) var statusBadgeBlinkTimerKey: UInt8 = 0
 private nonisolated(unsafe) var statusBadgeBlinkOpacityKey: UInt8 = 0
+private nonisolated(unsafe) var statusItemRefreshGateKey: UInt8 = 0
 
 /// Считать ли ошибку IPC доказательством того, что backend ЗАКЛИНИЛ —
 /// то есть процесс жив, но его accept-loop мёртв (инцидент 2026-08-07).
@@ -159,6 +160,15 @@ actor WedgeEscalationGate {
 
 @MainActor
 extension AgentAppDelegate {
+    private var statusItemRefreshGate: StatusItemRefreshGate {
+        if let gate = objc_getAssociatedObject(self, &statusItemRefreshGateKey) as? StatusItemRefreshGate {
+            return gate
+        }
+        let gate = StatusItemRefreshGate()
+        objc_setAssociatedObject(self, &statusItemRefreshGateKey, gate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        return gate
+    }
+
     var healthMonitor: HealthMonitor? {
         get { objc_getAssociatedObject(self, &healthMonitorKey) as? HealthMonitor }
         set { objc_setAssociatedObject(self, &healthMonitorKey, newValue, .OBJC_ASSOCIATION_RETAIN) }
@@ -476,19 +486,28 @@ extension AgentAppDelegate {
         self.lastHealthState = state
         guard let button = statusItem?.button else { return }
 
-        // Создаем image для menu-bar с учетом privacyModeEnabled
-        let dotImage = StatusIndicatorImage.image(
-            for: state,
-            privacyMode: self.privacyModeEnabled,
-            errorSeverity: self.statusErrorBadgeSeverity,
+        let renderState = StatusItemRefreshState(
+            health: state,
+            recording: isRecording,
+            processing: isProcessing,
+            presetBadge: activePresetBadge(),
+            privacy: privacyModeEnabled,
+            severity: statusErrorBadgeSeverity,
             badgeOpacity: self.statusBadgeBlinkOpacity,
-            size: 14
+            appearance: button.effectiveAppearance.name.rawValue
         )
-        button.image = dotImage
-        button.imagePosition = .imageLeft  // dot слева от title
-
-        refreshStatusItemTitle()
-        button.title = button.title  // plain text — без ● prefix
+        statusItemRefreshGate.apply(renderState, to: button) {
+            let dotImage = StatusIndicatorImage.image(
+                for: state,
+                privacyMode: self.privacyModeEnabled,
+                errorSeverity: self.statusErrorBadgeSeverity,
+                badgeOpacity: self.statusBadgeBlinkOpacity,
+                size: 14
+            )
+            button.image = dotImage
+            button.imagePosition = .imageLeft
+            refreshStatusItemTitle()
+        }
 
         // Phase B.1: синхронизируем StatusIndicatorView
         statusIndicatorView.updateState(state)
