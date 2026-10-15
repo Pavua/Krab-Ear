@@ -12,7 +12,7 @@ private final class StatusImageWrites: @unchecked Sendable {
 
 /// Настоящий callback агента и AppKit button; ни startup, ни IPC, ни модель.
 @MainActor
-final class StatusItemIdleRefreshTests: XCTestCase {
+final class StatusItemIdleRefreshWiringTests: XCTestCase {
     private func withDelegate(_ body: (AgentAppDelegate, NSStatusBarButton) -> Void) {
         _ = NSApplication.shared
         let defaults = IsolatedUserDefaultsDomain(scope: "StatusItemIdleRefreshTests")

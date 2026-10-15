@@ -30,7 +30,7 @@ render, но ноль setter-вызовов при десяти идентичн
 включить image; повторное recording-состояние тоже не перерисовывать.
 Внешний synthetic title должен восстановиться следующим tick.
 
-- [ ] `swift test -c debug --skip-update --disable-automatic-resolution --jobs 2 --filter StatusItemIdleRefreshTests`.
+- [ ] `swift test -c debug --skip-update --disable-automatic-resolution --jobs 2 --filter StatusItemIdleRefreshWiringTests`.
   До фикса FAIL: repeated image setter writes >0.
 
 ### Task2: минимальный gate и GREEN
