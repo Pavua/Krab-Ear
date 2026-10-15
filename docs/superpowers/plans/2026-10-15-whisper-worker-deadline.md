@@ -27,18 +27,20 @@ GPU и lifecycle только после свежего idle и согласов
 Files: KrabEar/core/engine.py;
 KrabEar/tests/test_whisper_worker_deadline_20261015.py.
 
-- [ ] RED: истёкший deadline до flock и после flock не вызывает worker;
+- [x] RED: истёкший deadline до flock и после flock не вызывает worker;
   TypeError не начинает новый бюджет; ожидание flock уменьшает watchdog;
   настоящий отказ движка сохраняется. Использовать clock-double и worker-double
   только вместо Metal; вызывать настоящий AudioEngine._transcribe_model.
 - [ ] Запуск: `PYTHONPATH="$PWD/KrabEar" /tmp/py312/bin/python -m pytest KrabEar/tests/test_whisper_worker_deadline_20261015.py -q`.
-  До фикса ожидается FAIL: worker вернул результат после истечения срока.
-- [ ] Перенести построение attempt_deadline_monotonic, last_inference_error и
+  Плановый Python3.12 запуск остановился до тестов на preflight окружения.
+  RED→GREEN получен отдельным dev Python3.14 запуском; hosted Python3.12
+  проверка обоих новых файлов — в полном CI, не этим локальным harness.
+- [x] Перенести построение attempt_deadline_monotonic, last_inference_error и
   remaining_attempt_sec выше развилки worker/in-process. В subprocess-ветке:
   `with mlx_inter_process_lock(timeout_sec=min(5.0, remaining_attempt_sec())):`;
   перед каждой variant: `_fit_worker_timeout(configured_timeout_sec, remaining_attempt_sec())`;
   RuntimeError/MemoryError записывать в last_inference_error.
-- [ ] GREEN: новый файл и существующие lock-deadline/worker-timeout-handoff,
+- [x] GREEN: новый файл и существующие lock-deadline/worker-timeout-handoff,
   explicit-auto, OOM, worker-protocol, watchdog-generation и temp-cleanup.
 
 ### Task 2: доказательства и выпуск
@@ -51,31 +53,44 @@ stdlib child: queued timeout возвращается до освобожден�
 не отправляет поздний JSON и не убивает активный child; истёкший запрос не
 spawn-ит; запись WAV расходует бюджет; зависший stdin ограничен watchdog.
 
-- [ ] RED session: тот же Python3.12/pytest, новый файл; до фикса queued запрос
+- [x] RED session: dev Python3.14/pytest, новый файл; до фикса queued запрос
   остаётся ждать self._lock, timeout=0 запускает child.
-- [ ] Отделить короткий счётчик inflight от I/O-lock, чтобы finally не
+- [x] Отделить короткий счётчик inflight от I/O-lock, чтобы finally не
   застревал за следующим запросом. start/_send получают optional absolute
   deadline и bounded contextmanager acquire. Сохранить порядок conductor:
   I/O-lock охватывает close_if_idle; state-lock не удерживается при ожидании I/O.
-- [ ] Один deadline wrapper→PCM→session→start→send. Watchdog вооружить до
+- [x] Один deadline wrapper→PCM→session→start→send. Watchdog вооружить до
   stdin.write, retire под request-local guard до освобождения I/O-lock.
-- [ ] GREEN оба новых файла + существующие conductor/close, watchdog-generation,
+- [x] GREEN оба новых файла + существующие conductor/close, watchdog-generation,
   temp-cleanup и worker-protocol тесты. GPU при этом не используется.
 
-- [ ] Проверить session queue отдельным воспроизведением без GPU. При наличии
+- [x] Проверить session queue отдельным воспроизведением без GPU. При наличии
   дефекта оформить конкретное дополнение к карточке до изменения session.
 - [ ] `scripts/pre_merge_py312_check.sh KrabEar/tests/test_whisper_worker_deadline_20261015.py`;
-  зависимые файлы запускать отдельно, без параллельного импорта MLX/Torch.
-- [ ] `make audit-all`; применимые Swift guards в hosted CI.
-- [ ] Независимый adversarial whole-diff review; точный SHA CI обеих workflow.
-- [ ] Явные пути в commit/PR. После merge проверить CI merge SHA.
-- [ ] Перед выкладкой отдельная свежая lifecycle-проверка; не использовать
+  Локальный parity preflight не прошёл; пункт не отмечен PASS. Зависимые
+  файлы проверены отдельно dev-интерпретатором; полный Ubuntu CI — отдельно.
+- [x] `make audit-all`; применимые Swift guards в hosted CI.
+- [x] Независимый adversarial whole-diff review; точный SHA CI обеих workflow.
+- [x] Явные пути в commit/PR. После merge проверить CI merge SHA.
+- [x] Перед выкладкой отдельная свежая lifecycle-проверка; не использовать
   старые quiet-window разрешения. Без живой проверки Whisper не утверждать,
   что исторический REST timeout или AppHang устранён.
 
 ### AppHang: граница текущего вывода
 
-Пять исследованных событий принадлежат старому UUID EE6DD5B0, текущий C8197C13.
+Пять исследованных событий принадлежат старому UUID EE6DD5B0; на момент
+разбора до выкладки16.10 установка имела UUID C8197C13.
 Символика app-фреймов — entrypoint/MainActor; видимый busy main stack находится
 в AppKit/layout/drawing. Пока нет доказанной причинной цепочки из кода Ear,
 не делать спекулятивную UI-правку и не закрывать Sentry issues.
+
+## Release checkpoint16.10
+
+Source merged и установлен e996f30e; independent whole-diff tree7b221acd PASS.
+Exact-head и оба final post-merge CI SUCCESS. Swift-first controlled lifecycle,
+полные idle/drain/package gates и default REST Whisper ES E2E PASS (весь probe с проверками0.916s);
+история23277/parent generations неизменны, старые backups сохранены.
+15min /16 снимков PASS:900.293s, без смены parent generations и потери IPC/REST. Локальный /tmp/py312 parity harness не прошёл
+preflight окружения; это не local PASS. Full hosted Ubuntu Python3.12 proof
+получен отдельно. Подробные результаты и открытые causal границы —
+[release checkpoint](../handoffs/2026-10-16-apphang-whisper-release.md).

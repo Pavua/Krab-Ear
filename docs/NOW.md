@@ -1,6 +1,48 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-14 — CURRENT: объединённый релиз установлен, RU call-profile PASS
+## 2026-10-16 — CURRENT: AppHang/Whisper установлен; default REST PASS
+
+[#2094](https://github.com/Pavua/Krab-Ear/pull/2094) и
+[#2095](https://github.com/Pavua/Krab-Ear/pull/2095) MERGED. Итоговый source
+`e996f30efc3ef7ba9ad497d423a7095b38e05dd1`, tree `7b221acd`, соответствует
+независимому whole-diff Astra Ultra PASS. У каждого reviewed head27 checks
+SUCCESS/SKIPPED и три workflow SUCCESS; Whisper Ubuntu1109 файлов, Swift-ветка1107 файлов,
+по два полных backend-прогона с Aggregate rc=0. Hosted Swift187 выбранных
+тестов, включая шесть новых actual-callback WiringTests, PASS.
+
+Whisper использует единый monotonic deadline на допуск, очередь сессии,
+WAV и отправку; watchdog включается до stdin.write. Status button не создаёт
+новый NSImage на одинаковом health-tick; переходы и восстановление временного
+title сохранены. Историческая причинность AppHang/HTTP504 остаётся UNKNOWN.
+
+Один offline synthetic RU worker E2E на новом Python-коде: PASS4.173s,
+собственный child reaped, история23277 и production generations не изменились.
+Это не default REST и не приёмка установленного Swift.
+
+**Установлен `e996f30e`:** оба exact post-merge workflow SUCCESS,
+[CI](https://github.com/Pavua/Krab-Ear/actions/runs/38820208308) и
+[backend](https://github.com/Pavua/Krab-Ear/actions/runs/38820208434):21 SUCCESS,
+1109files/16chunks/Aggregate0. После fresh Main/VG quiet и двух полных idle
+окон выполнены Swift-first drain, coherent atomic app/plist replacement,
+after verify и свежие GigaAM/engine/passive startup markers.
+Backend **1247**, REST **1838**, Swift **9366**, `runs=1`; loaded Python roots
+ведут в clean/detached/locked release `e996f30e`. UUID native
+`8F0C7FE2-5700-3ECE-8708-DB8438082B4D`, прежняя подпись/AX trusted=true.
+
+23:41:22UTC15.10 (01:41:22CEST16.10): один ephemeral **default REST** synthetic
+ES запрос: **HTTP200, engine mlx-whisper; весь probe с проверками0.916s**, непустой текст boolean,
+empty history_id, история23277 и все parent generations неизменны.
+`request_profile` не задан; профиль пользователя не менялся. Native AX+скриншот
+получены без записи/вставки. Quiet освобождён; 15min /16 снимков PASS:900.293s, без смены parent generations и потери IPC/REST.
+Старые app/plists/release сохранены для rollback. Canonical non-app WIP и
+native/runtime сохранены; OrbStack/VPN, соседние lifecycle и реальные
+crypto/history activation не выполнялись.
+
+[Receipt и границы](superpowers/handoffs/2026-10-16-apphang-whisper-release.md).
+Sol6.1High — runtime/CI/docs; AstraUltra — узкий final/release gate.
+Ниже — исторические checkpoints.
+
+## 2026-10-14 — Checkpoint: объединённый релиз установлен, RU call-profile PASS
 
 Runtime source — `26542ccdc50ee1a8e062c32b93da24a2e16c61cb`:
 [#2090](https://github.com/Pavua/Krab-Ear/pull/2090),
