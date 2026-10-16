@@ -38,6 +38,11 @@ from core.config import settings
 
 logger = logging.getLogger("KrabEar.Backend.TTS")
 
+# Общий допуск IPC/REST в одном процессе, включая разные TTSService.
+# Rate limit ограничивает частоту, но не число одновременно живущих say/ML-вызовов.
+# Direct bytes API — внутренний; production входит через handle_synthesize_speech.
+_SYNTHESIS_GATE = threading.BoundedSemaphore(1)
+
 # Порог кириллицы для определения RU
 _CYRILLIC_THRESHOLD = 0.30  # >30% символов кириллица -> Russian
 _SILERO_VALID_VOICES: frozenset = frozenset({"baya", "kseniya", "xenia", "eugene", "random"})
@@ -258,17 +263,20 @@ def _say_to_wav(text: str, voice: str | None = None, rate: int = 185) -> bytes:
         # synthesize an arbitrary local file (confirmed exploitable, W1739).
         cmd_say.extend(["--", text])
         try:
-            subprocess.run(cmd_say, check=False, capture_output=True, timeout=_SAY_SUBPROCESS_TIMEOUT)
+            completed = subprocess.run(cmd_say, check=False, capture_output=True, timeout=_SAY_SUBPROCESS_TIMEOUT)
         except subprocess.TimeoutExpired:
             logger.warning(
                 "_say_to_wav: say превысил таймаут %ds — прерываем синтез (W1758)",
                 _SAY_SUBPROCESS_TIMEOUT,
             )
             return b""
+        if completed.returncode != 0:
+            logger.warning("_say_to_wav: say завершился с кодом %s", completed.returncode)
+            return b""
 
         # AIFF -> WAV через встроенный macOS afconvert
         try:
-            subprocess.run(
+            completed = subprocess.run(
                 ["afconvert", "-f", "WAVE", "-d", "LEF32@22050", aiff_path, wav_path],
                 check=False,
                 capture_output=True,
@@ -279,6 +287,9 @@ def _say_to_wav(text: str, voice: str | None = None, rate: int = 185) -> bytes:
                 "_say_to_wav: afconvert превысил таймаут %ds — прерываем конвертацию (W1758)",
                 _AFCONVERT_TIMEOUT,
             )
+            return b""
+        if completed.returncode != 0:
+            logger.warning("_say_to_wav: afconvert завершился с кодом %s", completed.returncode)
             return b""
 
         if os.path.exists(wav_path) and os.path.getsize(wav_path) > 0:
@@ -522,6 +533,8 @@ class TTSService:
 
         Returns:
             dict с ключами wav_bytes_b64, language, engine, byte_count.
+            При занятом/отказавшем backend: ok=False и error_code
+            tts_busy/tts_unavailable. Оба отключённых TTS-флага дают success none.
         """
         text = str(params.get("text", "")).strip()
         if not text:
@@ -546,14 +559,32 @@ class TTSService:
         # Определяем итоговый язык для ответа
         resolved_lang = language if language != "auto" else _detect_language(text)
 
-        wav = self.synthesize_speech(text=text, language=language, voice=voice)
+        empty = {
+            "wav_bytes_b64": "",
+            "language": resolved_lang,
+            "engine": "none",
+            "byte_count": 0,
+        }
+        # Только оба выключенных флага означают намеренный success без аудио.
+        # TTS_ENABLED=False сам по себе оставляет работающий say fallback.
+        if not settings.TTS_ENABLED and not settings.TTS_FALLBACK_SAY:
+            return empty
+        if not _SYNTHESIS_GATE.acquire(blocking=False):
+            return {**empty, "ok": False, "error": "TTS synthesis busy", "error_code": "tts_busy"}
+        try:
+            try:
+                wav = self.synthesize_speech(text=text, language=language, voice=voice)
+            except Exception as exc:
+                # В исключении subprocess могут быть текст/argv. Не отдаём их
+                # клиенту и не печатаем в лог: только безопасный тип отказа.
+                logger.warning("TTS backend failed (%s)", type(exc).__name__)
+                wav = b""
+        finally:
+            # Включает finally/cleanup _say_to_wav: новый вызов не обгоняет
+            # завершение собственного subprocess и удаление temp-файлов.
+            _SYNTHESIS_GATE.release()
         if not wav:
-            return {
-                "wav_bytes_b64": "",
-                "language": resolved_lang,
-                "engine": "none",
-                "byte_count": 0,
-            }
+            return {**empty, "ok": False, "error": "TTS synthesis unavailable", "error_code": "tts_unavailable"}
 
         # Определяем движок: приоритет по загруженным моделям
         engine = "say"

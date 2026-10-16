@@ -3210,8 +3210,18 @@ Returns: `{ok, running, active_model, engine_available, last_detection}`
 ### `synthesize_speech`
 *(tts_service.py)*  
 Синтез речи. Dual-engine: Silero RU primary, Kokoro EN fallback, macOS `say` last resort. Автоопределение языка.  
-Params: `{text, language?, voice?}` — language: `"ru"`, `"en"`, `"auto"`  
-Returns: `{audio_b64?, file_path?, engine_used, duration_sec?}`
+Params: `{text, language?, voice?}` — language: `"ru"`, `"en"`, `"es"`, `"auto"`; text: 1–5000 символов.
+Returns: `{wav_bytes_b64, language, engine, byte_count}`.
+
+Один активный синтез на Python-процесс; конкурентный запрос немедленно получает
+inner `{ok:false, error_code:"tts_busy", error, wav_bytes_b64:"", language,
+engine:"none", byte_count:0}`. Отказ включённого TTS, включая timeout/nonzero
+`say`/`afconvert`, возвращает ту же схему с `error_code:"tts_unavailable"`.
+Внешний IPC envelope при доставленном результате остаётся `ok:true`;
+проверяйте результат операции. REST `/v1/tts/synthesize` отображает оба кода
+в HTTP503, неверные параметры — в HTTP400. Оба отключённых TTS-флага сохраняют
+успешную пустую схему `engine:"none"`. Отдельные Backend и REST процессы имеют
+раздельный допуск: это не host-wide лимит.
 
 ---
 
