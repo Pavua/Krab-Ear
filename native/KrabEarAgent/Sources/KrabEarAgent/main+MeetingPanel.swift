@@ -26,6 +26,7 @@ enum MeetingPromotionRoutingPolicy {
         promoted: Bool,
         meetingToken: String?,
         recordingStartInFlight: Bool,
+        requestMayBeActive: Bool = true,
         recordingStartAmbiguous: Bool = false,
         ambiguousStartToken: String? = nil,
         activeOwner: String?,
@@ -44,7 +45,7 @@ enum MeetingPromotionRoutingPolicy {
             return .ignore
         }
 
-        if recordingStartInFlight && activeOwner == nil {
+        if recordingStartInFlight && requestMayBeActive && activeOwner == nil {
             return .deferUntilStart(token: token)
         }
 
@@ -187,6 +188,8 @@ extension AgentAppDelegate {
     /// Единый вход: сессии нет → meeting_start (backend идемпотентен:
     /// already_active/promoted) → показать панель; сессия есть → просто показать.
     @objc func onMeetingPanelToggle() {
+        // Пока prepare ещё не отправил start IPC, физической G1 для promote нет.
+        guard !recordingStartInFlight || recordingStartRequestMayBeActive else { return }
         // C3a: во время быстрой заметки встреча отвергается (взаимное
         // исключение — спека 2026-07-16-c3-quick-capture-design.md §2a).
         if quickCaptureActive
@@ -253,7 +256,7 @@ extension AgentAppDelegate {
         c.ipcClient = ipcClient
         c.onFinished = { [weak self, weak c] itemID in
             let finishedGenerationToken = c?.lastDeliveredGenerationToken
-            self?.releasePromotedMeetingDucking()
+            self?.releasePromotedMeetingDucking(expectedGenerationToken: finishedGenerationToken)
             self?.openMeetingReportAfterFinish(
                 itemID: itemID,
                 expectedGenerationToken: finishedGenerationToken
@@ -312,7 +315,7 @@ extension AgentAppDelegate {
     /// Проверить повышение до передачи токена панели. Возвращает `true` только
     /// когда ответ принадлежит текущей локальной ветке или новой встрече.
     @discardableResult
-    private func adoptPromotedMeetingGeneration(_ result: [String: Any]) -> Bool {
+    func adoptPromotedMeetingGeneration(_ result: [String: Any]) -> Bool {
         let meetingToken = result["generation_token"] as? String
         let isPromoted = (result["promoted"] as? Bool) == true
         guard isPromoted else {
@@ -334,6 +337,7 @@ extension AgentAppDelegate {
             promoted: isPromoted,
             meetingToken: meetingToken,
             recordingStartInFlight: recordingStartInFlight,
+            requestMayBeActive: recordingStartRequestMayBeActive,
             recordingStartAmbiguous: recordingStartAmbiguous,
             ambiguousStartToken: activeGenerationToken,
             activeOwner: activeGenerationOwner,
@@ -354,7 +358,7 @@ extension AgentAppDelegate {
                 return false
             }
             pendingMeetingPromotionToken = token
-            meetingInheritedDictationDucking = true
+            inheritDictationDuckingForMeeting(token: token, confirmed: false)
             logger.info(
                 "Повышение встречи G1 опередило ответ старта диктовки; " +
                 "передача состояния отложена до того же токена backend"
@@ -378,7 +382,7 @@ extension AgentAppDelegate {
                 return false
             }
             pendingMeetingPromotionToken = nil
-            meetingInheritedDictationDucking = true
+            inheritDictationDuckingForMeeting(token: token, confirmed: true)
             return true
         case .handoffNow:
             guard let expectedToken = nonEmptyToken(meetingToken) else {
@@ -403,7 +407,7 @@ extension AgentAppDelegate {
                 return false
             }
             pendingMeetingPromotionToken = nil
-            meetingInheritedDictationDucking = true
+            inheritDictationDuckingForMeeting(token: expectedToken, confirmed: true)
             return true
         case .rejectForeignAmbiguous:
             logger.warn(
@@ -450,6 +454,7 @@ extension AgentAppDelegate {
                 return true
             }
             pendingMeetingPromotionToken = nil
+            inheritDictationDuckingForMeeting(token: token, confirmed: true)
             return true
         }
     }
@@ -496,10 +501,38 @@ extension AgentAppDelegate {
         return value
     }
 
-    /// Восстановить audio snapshot только после terminal meeting.finished.
-    private func releasePromotedMeetingDucking() {
-        guard meetingInheritedDictationDucking else { return }
+    /// Раннее повышение хранит lease до подтверждения start/reconcile того же token.
+    func inheritDictationDuckingForMeeting(token: String, confirmed: Bool) {
+        if var binding = promotedMeetingDucking {
+            guard binding.generationToken == token else { return }
+            binding.confirmed = binding.confirmed || confirmed
+            promotedMeetingDucking = binding
+        } else if let lease = dictationDuckingLease {
+            promotedMeetingDucking = PromotedMeetingDucking(
+                generationToken: token, startRequestID: recordingStartRequestID ?? activeGenerationStartRequestID,
+                lease: lease, confirmed: confirmed, finished: false
+            )
+        }
+        guard let binding = promotedMeetingDucking, binding.generationToken == token else { return }
+        meetingInheritedDictationDucking = true
+        if binding.confirmed, dictationDuckingLease == binding.lease { dictationDuckingLease = nil }
+        if binding.confirmed && binding.finished {
+            releasePromotedMeetingDucking(expectedGenerationToken: token)
+        }
+    }
+
+    /// Terminal marker сохраняется, если meeting закончилась раньше start response.
+    func releasePromotedMeetingDucking(expectedGenerationToken: String?) {
+        guard var binding = promotedMeetingDucking,
+              binding.generationToken == expectedGenerationToken else { return }
+        guard binding.confirmed else {
+            binding.finished = true
+            promotedMeetingDucking = binding
+            return
+        }
+        promotedMeetingDucking = nil
         meetingInheritedDictationDucking = false
-        audioDuckingService.restoreAfterRecording()
+        if dictationDuckingLease == binding.lease { dictationDuckingLease = nil }
+        audioDuckingService.requestRestore(lease: binding.lease)
     }
 }

@@ -1,5 +1,40 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-16 — Audio ducking lifecycle: локальные проверки PASS, выпуск pending
+
+На базе `be390073` реализован off-main сервис приглушения: одна serial queue,
+UUID lease, общий monotonic deadline, bounded собственный child и сохранение
+исходной громкости после partial mutation/failed restore. `start_recording`
+ждёт prepare; stop/cancel до IPC не открывает recorder. Передача диктовки во
+встречу сохраняет тот же lease и проверяет generation на terminal callback.
+
+Proper actual-class RED3 (retry, partial mutation, MainActor201ms) → GREEN.
+Independent review нашёл две дополнительные P2: provisional meeting finish
+перед потерянным start и idle; поздний start заменял active lease. Обе получили
+собственные RED → GREEN regressions. Финальный review выявил также
+удержание старого lease после authoritative idle: two-toggle RED3 → GREEN;
+задержанный idle до появления новой G1 не освобождает новый lease. Последний локальный Swift targeted-прогон:
+**139 PASS**, включая29 новых actual service/owned-child/delegate tests.
+Полный snapshot теперь отличает physical capture idle от terminal generation idle;
+три stop/recovery regressions RED11 → GREEN и early-meeting negative control PASS.
+Independent Astra Ultra whole-diff review: **PASS**, seal9/9 MATCH, новых P0–P2 нет.
+Дополнительно216 hosted-filter Swift PASS,22 dependent Python PASS, audit14 PASS.
+Release build `swift build -c release -j2` PASS (55s).
+Exact-head/post-merge CI и выкладка ещё не завершены. [Карточка](superpowers/plans/2026-10-16-audio-ducking-lifecycle.md).
+
+TTS admission [#2097](https://github.com/Pavua/Krab-Ear/pull/2097) MERGED в
+`be3900730aaad64974ec3b70de4b9b90fc511d5c`:27 exact-head checks SUCCESS/SKIPPED.
+Оба post-merge workflow точного `be390073` SUCCESS (38839317736/38839317743).
+TTS admission отдельно в production не устанавливался.
+
+Акустическая проба около04:00CEST: два Whisper HTTP200, физический микрофон8s,
+ненулевой сигнал; similarity0 — **FAIL**. Настройки Ear не менялись. История,
+parent generations и idle после пробы сохранены. Native microphone/autopaste
+acceptance остаётся **INCOMPLETE**; причина несовпадения текста неизвестна.
+Текущий установленный релиз остаётся `e996f30e`, без lifecycle изменений здесь.
+Причинность исторических AppHang/504 не установлена.
+
+
 ## 2026-10-16 — TTS admission: source-проверка, выпуск ещё не выполнен
 
 После установленного `e996f30e` обнаружены36 TTS HTTP200 за03:02–03:03CEST

@@ -842,7 +842,7 @@ final class RecordingStopCoordinatorTests: XCTestCase {
         let src = try source("main+MeetingPanel.swift")
         XCTAssertTrue(src.contains("controller.acceptGenerationToken"))
         XCTAssertTrue(src.contains("adoptPromotedMeetingGeneration"))
-        XCTAssertTrue(src.contains("meetingInheritedDictationDucking = true"))
+        XCTAssertTrue(src.contains("inheritDictationDuckingForMeeting"))
         XCTAssertTrue(src.contains("releasePromotedMeetingDucking"))
         XCTAssertTrue(src.contains("controller.hasUnresolvedMeetingStop"))
 
@@ -851,7 +851,7 @@ final class RecordingStopCoordinatorTests: XCTestCase {
             return
         }
         let finishedBody = src[finished.lowerBound...]
-        XCTAssertTrue(finishedBody.contains("releasePromotedMeetingDucking()"))
+        XCTAssertTrue(finishedBody.contains("releasePromotedMeetingDucking(expectedGenerationToken: finishedGenerationToken)"))
     }
 
     // MARK: - R2 Task 7: неоднозначный результат старта
