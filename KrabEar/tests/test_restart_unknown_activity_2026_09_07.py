@@ -22,6 +22,11 @@ SCRIPTS = ("safe_backend_restart.command", "install_backend_launchagent.command"
 
 
 def reply(**fields):
+    # Recording-state protocol: explicit proof, не legacy physical-only idle.
+    if "is_recording" in fields:
+        fields = {"owner": None, "generation_token": None,
+                  "start_request_id": None, "finalizing_count": 0,
+                  "is_finalizing": False, **fields}
     return json.dumps({"id": "1", "ok": True, "result": fields})
 
 

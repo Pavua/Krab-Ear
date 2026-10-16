@@ -217,7 +217,18 @@ Returns: `{status, text, original_text, translated_text, translation_status, tra
 *(service.py → recording_core_service.py)*  
 Текущее состояние записи и preview текст.  
 Нет параметров.  
-Returns: `{is_recording, duration_sec, preview_text}`
+Returns: `{is_recording, owner, generation_token, start_request_id, finalizing_count, is_finalizing, duration_sec, preview_text, audio_rms, elapsed_sec, session_id}`
+
+`is_recording` описывает физический захват. После его остановки STT/history
+могут продолжаться: `finalizing_count` — целое число таких поколений,
+`is_finalizing` — boolean `finalizing_count > 0`. Активная G2 и finalizing G1
+могут существовать одновременно. Owner/token/start request и count снимаются
+под одним lifecycle-lock. Признак финализации не содержит текста или токенов G1.
+
+Клиент безопасного рестарта требует физический idle, null owner/token/start request,
+exact integer count0 и exact boolean false. Отсутствующее или неоднозначное
+поле старого backend означает UNKNOWN/HOLD, а не разрешение рестарта.
+Приватность продолжает скрывать `preview_text`; activity-поля сохраняют схему.
 
 ### `set_paste_status`
 *(service.py)*  
