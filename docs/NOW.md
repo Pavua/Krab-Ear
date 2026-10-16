@@ -1,5 +1,31 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-16 — TTS admission: source-проверка, выпуск ещё не выполнен
+
+После установленного `e996f30e` обнаружены36 TTS HTTP200 за03:02–03:03CEST
+с latency30.7–61.7s и timeout предупреждениями `say`. В том же окне был STT504;
+кто создал TTS burst и связан ли он со STT/AppHang, пока UNKNOWN.
+
+Узкий фикс в `codex/ear-tts-admission-20261016`: один активный синтез на
+Python-процесс через общий IPC/REST handler; busy/unavailable → inner ошибка,
+HTTP503; nonzero `say` не запускает converter, nonzero converter не отдаёт
+частичный WAV. Оба отключённых TTS-флага сохраняют прежний success none.
+Это ограничение процесса, а не общий lock Backend+REST на Mac.
+
+Локально: RED6+2 → GREEN11 новых тестов, включая реальные HTTP и Unix IPC
+listeners с синтетическим backend;52 прежних TTS +105 зависимых PASS,
+audit14 PASS. Exact head CI, независимый final gate и выпуск — следующие этапы.
+Local Python3.12 parity не подтверждён: shared harness содержит MLX, не менялся.
+
+Физический mic/autopaste E2E **INCOMPLETE**: Cua не выводит TextEdit на передний
+план (`windowNotFoundAtPosition`), предыдущая попытка захватила Chrome и дала
+empty_audio. Синтетическая речь не проигрывалась; приглушение не менялось:
+enabled=true, percent15; auto_paste=true, MacBook Pro Microphone. Три parent
+PID/start/runs прежние. Требуется безопасно активировать тестовое поле перед
+повтором; clipboard и synthetic REST smoke не заменяют эту проверку.
+
+[Карточка](superpowers/plans/2026-10-16-tts-admission.md).
+
 ## 2026-10-16 — CURRENT: AppHang/Whisper установлен; default REST PASS
 
 [#2094](https://github.com/Pavua/Krab-Ear/pull/2094) и

@@ -1748,6 +1748,8 @@ def synthesize_speech():
     Notes:
         - Использование реального TTS (Silero/Kokoro) или фоллбэка (macOS say)
           зависит от флага settings.TTS_ENABLED (и settings.TTS_FALLBACK_SAY).
+        - Занятый или отказавший backend: HTTP503, error_code tts_busy либо
+          tts_unavailable. Неверный запрос: HTTP400. Допуск — один синтез на процесс.
 
     Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
@@ -1770,6 +1772,9 @@ def synthesize_speech():
     result = deps.tts_service.handle_synthesize_speech(params)
 
     if not result.get("ok", True):
+        error_code = result.get("error_code")
+        if error_code in {"tts_busy", "tts_unavailable"}:
+            return jsonify(result), 503
         return jsonify({"error": result.get("error", "Unknown TTS error")}), 400
 
     return jsonify({
