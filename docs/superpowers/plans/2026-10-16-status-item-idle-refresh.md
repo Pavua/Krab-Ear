@@ -30,7 +30,7 @@ render, но ноль setter-вызовов при десяти идентичн
 включить image; повторное recording-состояние тоже не перерисовывать.
 Внешний synthetic title должен восстановиться следующим tick.
 
-- [ ] `swift test -c debug --skip-update --disable-automatic-resolution --jobs 2 --filter StatusItemIdleRefreshWiringTests`.
+- [x] `swift test -c debug --skip-update --disable-automatic-resolution --jobs 2 --filter StatusItemIdleRefreshWiringTests`.
   До фикса FAIL: repeated image setter writes >0.
 
 ### Task2: минимальный gate и GREEN
@@ -44,13 +44,24 @@ button/image операции. StatusIndicatorView синхронизирова�
 Ключ либо результат изменился — исполнить прежний callback целиком,
 записать новый snapshot. Визуальный результат и переходы сохраняются.
 
-- [ ] GREEN новой регрессии + StatusIndicatorViewTests, StatusBarTooltipTests,
+- [x] GREEN новой регрессии + StatusIndicatorViewTests, StatusBarTooltipTests,
   MainHealthMonitorWiringTests, QuickPresetsCycleTests, BookmarksAsyncOffloadTests.
-- [ ] `swift build -c release --skip-update --disable-automatic-resolution --jobs 2`;
+- [x] `swift build -c release --skip-update --disable-automatic-resolution --jobs 2`;
   `git diff --check`; применимые Python Swift-source guards и hosted macOS CI.
-- [ ] Independent whole-diff gate; PR с explicit paths; exact-head и merge-SHA CI.
-- [ ] Перед выпуском согласовать общий Ear maintenance window с Main/VG;
+- [x] Independent whole-diff gate; PR с explicit paths; exact-head и merge-SHA CI.
+- [x] Перед выпуском согласовать общий Ear maintenance window с Main/VG;
   post-deploy PID/SHA/health и UI smoke. Исторический AppHang остаётся UNKNOWN
   до воспроизведения или достаточного нового runtime evidence.
 
 Примечание harness: XCTest в release не видит существующие #if DEBUG хуки соседних тестов. Тесты запускать в debug, production build — release. Test hooks не менялись.
+
+## Release checkpoint16.10
+
+Source merged и установлен e996f30e; independent whole-diff tree7b221acd PASS.
+Exact-head и оба final post-merge CI SUCCESS. Swift-first controlled lifecycle,
+полные idle/drain/package gates и default REST Whisper ES E2E PASS (весь probe с проверками0.916s);
+история23277/parent generations неизменны, старые backups сохранены.
+15min /16 снимков PASS:900.293s, без смены parent generations и потери IPC/REST. Локальный /tmp/py312 parity harness не прошёл
+preflight окружения; это не local PASS. Full hosted Ubuntu Python3.12 proof
+получен отдельно. Подробные результаты и открытые causal границы —
+[release checkpoint](../handoffs/2026-10-16-apphang-whisper-release.md).

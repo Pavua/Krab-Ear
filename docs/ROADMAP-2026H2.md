@@ -1,5 +1,22 @@
 # Krab Ear — план развития H2-2026 (и дальше)
 
+## Запись 2026-10-16 — AppHang/Whisper runtime и default REST
+
+PR2094/2095 MERGED и установлен `e996f30e`; reviewed tree `7b221acd`,
+AstraUltra whole-diff и conditional release GO, оба exact post-merge CI SUCCESS,
+21 SUCCESS jobs/backend1109files16chunksAggregate0. Общий Whisper deadline
+включает очередь/PCM/pipe; одинаковый status tick не пересоздаёт button image.
+Новые сценарии RED→GREEN; offline worker E2E PASS4.173s/reaped.
+Fresh Main/VG quiet → два полных60s idle gates → Swift-first full drain →
+atomic coherent app/plist + after verify → backend1247/REST1838/Swift9366,
+runs1, loaded release e996, fresh GigaAM/engine/passive markers, AX trusted=true.
+Actual default REST synthetic ES без истории/без request_profile:
+**HTTP200, engine mlx-whisper; весь probe с проверками0.916s**, nonempty/es/emptyhistory_id, история23277
+и parent generations неизменны. Quiet освобождён, 15min /16 снимков PASS (900.293s), IPC/REST и parent generations стабильны.
+Old app/plists/release и non-app canonical WIP сохранены; Main/VG/OrbStack
+не менялись. Историческая причинность AppHang/504 остаётся UNKNOWN.
+[Receipt и границы](superpowers/handoffs/2026-10-16-apphang-whisper-release.md).
+
 ## Запись 2026-10-14 — Combined runtime release и RU E2E
 
 Source #2090/#2091/#2092 интегрирован и установлен как `26542ccd`; оба точных
