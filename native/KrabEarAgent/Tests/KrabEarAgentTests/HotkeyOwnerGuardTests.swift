@@ -156,7 +156,7 @@ final class HotkeyOwnerGuardTests: XCTestCase {
             "already_recording не должен запускать polling как при своём старте"
         )
         XCTAssertTrue(
-            block.contains("audioDuckingService.restoreAfterRecording()"),
+            block.contains("releaseDictationDucking(expectedLease: audioLease)"),
             "Отказ already_recording обязан откатить включённый до IPC audio ducking"
         )
     }
@@ -176,7 +176,7 @@ final class HotkeyOwnerGuardTests: XCTestCase {
         }
         let catchBlock = source[catchStart.lowerBound..<stopStart.lowerBound]
         XCTAssertTrue(
-            catchBlock.contains("audioDuckingService.restoreAfterRecording()"),
+            catchBlock.contains("releaseDictationDucking(expectedLease: audioLease)"),
             "Транспортный или backend-отказ старта не должен оставлять Mac приглушённым"
         )
     }

@@ -1,142 +1,148 @@
-/*
- Управление приглушением системного звука во время записи Krab Ear.
-
- Связи модуля:
- 1) main.swift: вызывает duck на старте записи и restore на остановке.
-*/
-
 import Foundation
 
-/// Сервис временного приглушения системного вывода звука macOS.
-final class SystemAudioDuckingService {
+struct AudioDuckingLease: Hashable, Sendable {
+    let id: UUID
+    init(id: UUID = UUID()) { self.id = id }
+}
+
+enum DuckingPreparationResult: Equatable, Sendable {
+    case ready, bypassed, failed(DuckingFailure)
+}
+enum DuckingRestoreResult: Equatable, Sendable {
+    case restored, absentOrStale, retained(DuckingFailure)
+}
+
+private final class DuckingCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+    func cancel() { lock.withLock { value = true } }
+    var isCancelled: Bool { lock.withLock { value } }
+}
+
+/// Очередь владеет операцией целиком: snapshot → mute → restore.
+/// MainActor только ожидает continuation и никогда не ждёт subprocess синхронно.
+final class SystemAudioDuckingService: @unchecked Sendable {
     private struct Snapshot {
-        let outputMuted: Bool
-        let outputVolume: Int
+        let lease: AudioDuckingLease
+        let muted: Bool
+        let volume: Int
+        var mutationMayHaveOccurred: Bool
+        var restorePending: Bool
     }
-
+    private let queue = DispatchQueue(label: "krabear.audio-ducking", qos: .userInitiated)
+    private let runner: any AudioDuckingCommandRunning
+    private let operationBudget: Duration
     private let logger = AgentLogger.shared
+    // Только queue; неизвестное завершение child запрещает все будущие команды.
     private var snapshot: Snapshot?
-    private var isDucked = false
+    private var quarantined = false
 
-    /// Приглушает системный звук и запоминает исходное состояние.
-    func duckForRecording(enabled: Bool, duckPercent: Int) {
-        guard enabled else {
-            logger.info("Приглушение системного звука отключено настройками")
-            return
-        }
-        guard snapshot == nil else { return }
+    init(runner: any AudioDuckingCommandRunning = SystemAudioDuckingCommandRunner(), operationBudget: Duration = .seconds(2)) {
+        self.runner = runner
+        self.operationBudget = operationBudget
+    }
 
-        guard let currentMuted = readBool(script: "output muted of (get volume settings)"),
-              let currentVolume = readInt(script: "output volume of (get volume settings)")
-        else {
-            logger.warn("Не удалось получить текущее состояние системного звука")
-            return
-        }
-
-        snapshot = Snapshot(outputMuted: currentMuted, outputVolume: currentVolume)
-        isDucked = false
-
-        if currentMuted {
-            logger.info("Системный звук уже был muted до записи")
-            return
-        }
-
-        let safePercent = max(0, min(duckPercent, 100))
-        if safePercent >= 100 {
-            let ok = run(script: "set volume output muted true")
-            if ok {
-                isDucked = true
-                logger.info("Системный звук приглушен на время записи (muted)")
-            } else {
-                logger.warn("Не удалось приглушить системный звук")
+    func prepare(lease: AudioDuckingLease, enabled: Bool, duckPercent: Int) async -> DuckingPreparationResult {
+        let deadline = ContinuousClock.now + operationBudget
+        let cancellation = DuckingCancellation()
+        return await withTaskCancellationHandler {
+            if Task.isCancelled { cancellation.cancel() }
+            return await withCheckedContinuation { continuation in
+                queue.async {
+                    continuation.resume(returning: self.prepareOnQueue(
+                        lease: lease, enabled: enabled, duckPercent: duckPercent,
+                        deadline: deadline, cancellation: cancellation
+                    ))
+                }
             }
-            return
-        }
+        } onCancel: { cancellation.cancel() }
+    }
 
-        let targetVolume = max(0, min(currentVolume * safePercent / 100, 100))
-        let ok = run(script: "set volume output volume \(targetVolume)\nset volume output muted false")
-        if ok {
-            isDucked = true
-            logger.info("Системный звук приглушен на время записи (volume=\(targetVolume), percent=\(safePercent))")
-        } else {
-            logger.warn("Не удалось приглушить системный звук")
+    /// Постановка в очередь происходит до возврата: следующий prepare не обгонит restore.
+    func requestRestore(
+        lease: AudioDuckingLease,
+        completion: (@MainActor @Sendable (DuckingRestoreResult) -> Void)? = nil
+    ) {
+        let deadline = ContinuousClock.now + operationBudget
+        queue.async {
+            let result = self.restoreOnQueue(lease: lease, deadline: deadline)
+            if let completion { Task { @MainActor in completion(result) } }
         }
     }
 
-    /// Восстанавливает состояние звука до записи.
-    func restoreAfterRecording() {
-        guard let snapshot else { return }
-        defer { self.snapshot = nil }
-        guard isDucked else { return }
-        defer { isDucked = false }
-
-        if snapshot.outputMuted {
-            _ = run(script: "set volume output muted true")
-            logger.info("Состояние звука восстановлено: осталось muted (как до записи)")
-            return
+    private func prepareOnQueue(
+        lease: AudioDuckingLease, enabled: Bool, duckPercent: Int,
+        deadline: ContinuousClock.Instant, cancellation: DuckingCancellation
+    ) -> DuckingPreparationResult {
+        guard !quarantined else { return .failed(.cleanupUnconfirmed) }
+        guard ContinuousClock.now < deadline else { return .failed(.deadlineExceeded) }
+        guard !cancellation.isCancelled else { return .failed(.cancelled) }
+        if let current = snapshot {
+            guard current.restorePending else { return .failed(.busy) }
+            guard restoreOnQueue(lease: current.lease, deadline: deadline) == .restored else {
+                return .failed(quarantined ? .cleanupUnconfirmed : .busy)
+            }
         }
-
-        let safeVolume = max(0, min(snapshot.outputVolume, 100))
-        let restoreScript = "set volume output volume \(safeVolume)\nset volume output muted false"
-        if run(script: restoreScript) {
-            logger.info("Системный звук восстановлен после записи (volume=\(safeVolume))")
-        } else {
-            logger.warn("Не удалось восстановить системный звук после записи")
+        guard enabled else { return .bypassed }
+        let mutedResult = command("output muted of (get volume settings)", deadline: deadline)
+        guard case let .success(mutedRaw) = mutedResult else { return .failed(reason(mutedResult)) }
+        let mutedText = mutedRaw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard mutedText == "true" || mutedText == "false" else { return .failed(.invalidSnapshot) }
+        if mutedText == "true" {
+            snapshot = Snapshot(lease: lease, muted: true, volume: 0, mutationMayHaveOccurred: false, restorePending: false)
+            return cancellation.isCancelled ? .failed(.cancelled) : .bypassed
         }
+        guard !cancellation.isCancelled else { return .failed(.cancelled) }
+        let volumeResult = command("output volume of (get volume settings)", deadline: deadline)
+        guard case let .success(volumeRaw) = volumeResult else { return .failed(reason(volumeResult)) }
+        guard let volume = Int(volumeRaw.trimmingCharacters(in: .whitespacesAndNewlines)), (0...100).contains(volume) else {
+            return .failed(.invalidSnapshot)
+        }
+        guard !cancellation.isCancelled else { return .failed(.cancelled) }
+        guard ContinuousClock.now < deadline else { return .failed(.deadlineExceeded) }
+        // Публикуем original snapshot ДО команды: false exit не исключает partial write.
+        snapshot = Snapshot(lease: lease, muted: false, volume: volume, mutationMayHaveOccurred: true, restorePending: false)
+        let percent = max(0, min(duckPercent, 100))
+        let script = percent >= 100 ? "set volume output muted true"
+            : "set volume output volume \(volume * percent / 100)\nset volume output muted false"
+        let result = command(script, deadline: deadline)
+        guard case .success = result else {
+            snapshot?.restorePending = true
+            return .failed(reason(result))
+        }
+        if cancellation.isCancelled {
+            snapshot?.restorePending = true
+            return .failed(.cancelled)
+        }
+        return .ready
     }
 
-    private func run(script: String) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = script
-            .split(separator: "\n")
-            .flatMap { ["-e", String($0)] }
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            logger.warn("Ошибка запуска osascript для звука: \(error.localizedDescription)")
-            return false
+    private func restoreOnQueue(lease: AudioDuckingLease, deadline: ContinuousClock.Instant) -> DuckingRestoreResult {
+        guard let current = snapshot, current.lease == lease else { return .absentOrStale }
+        guard !quarantined else { return .retained(.cleanupUnconfirmed) }
+        if !current.mutationMayHaveOccurred { snapshot = nil; return .restored }
+        snapshot?.restorePending = true
+        let script = current.muted ? "set volume output muted true"
+            : "set volume output volume \(current.volume)\nset volume output muted false"
+        let result = command(script, deadline: deadline)
+        guard case .success = result else {
+            let failure = reason(result)
+            logger.warn("Восстановление системного звука сохранено для повтора: \(failure.rawValue)")
+            return .retained(failure)
         }
+        snapshot = nil
+        return .restored
     }
 
-    private func readInt(script: String) -> Int? {
-        guard let raw = runAndCapture(script: script) else { return nil }
-        return Int(raw.trimmingCharacters(in: .whitespacesAndNewlines))
+    private func command(_ script: String, deadline: ContinuousClock.Instant) -> AudioDuckingCommandResult {
+        guard !quarantined else { return .failure(.cleanupUnconfirmed, cleanupConfirmed: false) }
+        guard ContinuousClock.now < deadline else { return .failure(.deadlineExceeded, cleanupConfirmed: true) }
+        let result = runner.run(script: script, deadline: deadline)
+        if case let .failure(_, cleanupConfirmed) = result, !cleanupConfirmed { quarantined = true }
+        return result
     }
-
-    private func readBool(script: String) -> Bool? {
-        guard let raw = runAndCapture(script: script)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        else {
-            return nil
-        }
-        if raw == "true" { return true }
-        if raw == "false" { return false }
-        return nil
-    }
-
-    private func runAndCapture(script: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-
-        let outPipe = Pipe()
-        process.standardOutput = outPipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8)
-        } catch {
-            logger.warn("Ошибка osascript capture для звука: \(error.localizedDescription)")
-            return nil
-        }
+    private func reason(_ result: AudioDuckingCommandResult) -> DuckingFailure {
+        if case let .failure(failure, _) = result { return failure }
+        return .commandFailed
     }
 }

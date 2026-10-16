@@ -171,8 +171,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     let pasteService = PasteService()
     let quickEditOverlay = QuickEditOverlay()
-    let audioDuckingService = SystemAudioDuckingService()
-    private let notificationService = NotificationService()
+    let audioDuckingService: SystemAudioDuckingService
+    private let notificationService: NotificationService
     let realtimeOverlay = RealtimeOverlayController()
     let logger = AgentLogger.shared
 
@@ -215,6 +215,17 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Пока backend ещё не вернул token старта, отпускание hold/второй toggle
     /// запоминаются как stop-intent и исполняются сразу после ответа G1.
     var recordingStartInFlight = false
+    /// true только после постановки start_recording в transport.
+    var recordingStartRequestMayBeActive = false
+    var dictationDuckingLease: AudioDuckingLease?
+    struct PromotedMeetingDucking {
+        let generationToken: String
+        let startRequestID: String?
+        let lease: AudioDuckingLease
+        var confirmed: Bool
+        var finished: Bool
+    }
+    var promotedMeetingDucking: PromotedMeetingDucking?
     var recordingStopRequestedDuringStart = false
     /// Идентификатор конкретной попытки start_recording диктовки. Он передаётся
     /// backend без нормализации и позволяет отличить свой потерянный ответ G1
@@ -318,7 +329,13 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// A3 adaptive backoff: last observed audio RMS from get_recording_state
     var previewLastAudioRms: Double = 1.0
 
-    init(options: LaunchOptions, userDefaults: UserDefaults = .standard) {
+    init(
+        options: LaunchOptions, userDefaults: UserDefaults = .standard,
+        audioDuckingService: SystemAudioDuckingService = SystemAudioDuckingService(),
+        notificationService: NotificationService = NotificationService()
+    ) {
+        self.audioDuckingService = audioDuckingService
+        self.notificationService = notificationService
         self.options = options
         self.userDefaults = userDefaults
         self.backendSupervisor = BackendSupervisor(projectRoot: options.projectRoot)

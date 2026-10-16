@@ -47,6 +47,12 @@ struct RecordingStateSnapshot: Equatable {
     let startRequestID: String?
     let stateVerified: Bool
 
+    /// Физический capture может закончиться раньше логической generation.
+    var provesTerminalIdle: Bool {
+        stateVerified && !isRecording && ownerFieldPresent
+            && owner == nil && generationToken == nil
+    }
+
     init(
         isRecording: Bool,
         owner: String?,
@@ -211,8 +217,13 @@ extension AgentAppDelegate {
             return
         }
 
+        let queriedAudioLease = dictationDuckingLease
+        let queriedGeneration = activeGenerationToken
+        let queriedOwner = activeGenerationOwner
+        let queriedRevision = activeGenerationOwnerRevision
+        let snapshot = await recordingStateSnapshot()
         let (backendRecording, backendOwner, ownerFieldPresent, stateVerified) =
-            await syncRecordingStateWithBackend()
+            applyRecordingStateSnapshot(snapshot)
         // Ошибку IPC нельзя выдавать за старый backend без owner: в таком
         // «legacy»-виде promoted meeting снова можно было бы остановить тапом.
         // Пока снимок не подтверждён, fail-safe запрещает и start, и stop.
@@ -225,6 +236,22 @@ extension AgentAppDelegate {
                 )
             }
             return
+        }
+        // Authoritative idle закрывает только lease, существовавший ДО запроса.
+        // Поздний ответ чтения T2 не вправе освободить появившуюся позднее G1.
+        if snapshot.provesTerminalIdle,
+           !isProcessing, !recordingStopRecoveryPending,
+           let queriedAudioLease,
+           dictationDuckingLease == queriedAudioLease,
+           activeGenerationToken == queriedGeneration,
+           activeGenerationOwner == queriedOwner,
+           activeGenerationOwnerRevision == queriedRevision,
+           promotedMeetingDucking == nil {
+            releaseDictationDucking(expectedLease: queriedAudioLease)
+            activeGenerationToken = nil
+            activeGenerationOwner = nil
+            activeGenerationOwnerRevision = nil
+            activeGenerationStartRequestID = nil
         }
         if backendRecording != wasRecordingLocally {
             logger.warn(
@@ -344,6 +371,16 @@ extension AgentAppDelegate {
         stateVerified: Bool
     ) {
         let snapshot = await recordingStateSnapshot()
+        return applyRecordingStateSnapshot(snapshot)
+    }
+
+    /// UI синхронизируется из того же снимка, по которому проверяется lease.
+    func applyRecordingStateSnapshot(_ snapshot: RecordingStateSnapshot) -> (
+        recording: Bool,
+        owner: String?,
+        ownerFieldPresent: Bool,
+        stateVerified: Bool
+    ) {
         guard snapshot.stateVerified else {
             return (isRecording, nil, false, false)
         }
@@ -377,7 +414,17 @@ extension AgentAppDelegate {
             )
             return
         }
+        // Между двумя toggle мог задержаться read-only idle response. Gate
+        // сериализует start, но не даёт права заменить lease уже открытой G1.
+        guard dictationDuckingLease == nil, promotedMeetingDucking == nil else {
+            recordingStartGate.release()
+            logger.warn("Поздний start не заменяет существующий audio lease")
+            return
+        }
         let startRequestID = UUID().uuidString
+        let audioLease = AudioDuckingLease()
+        dictationDuckingLease = audioLease
+        recordingStartRequestMayBeActive = false
         recordingStartInFlight = true
         recordingStopRequestedDuringStart = false
         recordingStartRequestID = startRequestID
@@ -386,6 +433,7 @@ extension AgentAppDelegate {
         recordingStopRequestedDuringAmbiguousStart = false
         defer {
             recordingStartInFlight = false
+            recordingStartRequestMayBeActive = false
             recordingStopRequestedDuringStart = false
             recordingStartGate.release()
         }
@@ -403,10 +451,26 @@ extension AgentAppDelegate {
             } else {
                 effectiveDuckingPercent = settings.audioDuckingPercent
             }
-            audioDuckingService.duckForRecording(
+            let audioPreparation = await audioDuckingService.prepare(
+                lease: audioLease,
                 enabled: settings.audioDuckingEnabled,
                 duckPercent: effectiveDuckingPercent
             )
+            guard !Task.isCancelled,
+                  !recordingStopRequestedDuringStart,
+                  recordingStartRequestID == startRequestID,
+                  dictationDuckingLease == audioLease else {
+                releaseDictationDucking(expectedLease: audioLease)
+                if recordingStartRequestID == startRequestID { recordingStartRequestID = nil }
+                return
+            }
+            if case let .failed(reason) = audioPreparation {
+                releaseDictationDucking(expectedLease: audioLease)
+                recordingStartRequestID = nil
+                notify(title: "Krab Ear", body: "Не удалось подготовить системный звук: \(reason.rawValue)")
+                return
+            }
+            recordingStartRequestMayBeActive = true
             // start_recording имеет side-effect. В отличие от read-only query
             // его нельзя прогонять через generic recovery: повтор получит
             // новый IPC-id и может скрыть уже открытый G1.
@@ -447,7 +511,7 @@ extension AgentAppDelegate {
                 // позволяло следующему тапу остановить чужую встречу или заметку.
                 logger.warn("start_recording: запись уже идёт — не перехватываем")
                 recordingStartRequestID = nil
-                audioDuckingService.restoreAfterRecording()
+                releaseDictationDucking(expectedLease: audioLease)
                 notify(
                     title: "Krab Ear",
                     body: "Запись уже идёт — новая не начата."
@@ -457,7 +521,7 @@ extension AgentAppDelegate {
             if status != "recording" {
                 logger.warn("start_recording вернул неожиданный статус: \(status)")
                 recordingStartRequestID = nil
-                audioDuckingService.restoreAfterRecording()
+                releaseDictationDucking(expectedLease: audioLease)
                 notify(
                     title: "Krab Ear",
                     body: "Не удалось начать запись: неожиданный статус backend."
@@ -529,12 +593,19 @@ extension AgentAppDelegate {
             // Ducking включается до IPC; любой отказ старта обязан восстановить
             // системный звук, а не только отдельный already_recording.
             recordingStartRequestID = nil
-            audioDuckingService.restoreAfterRecording()
+            releaseDictationDucking(expectedLease: audioLease)
             notify(
                 title: "Krab Ear",
                 body: "Не удалось начать запись: \(error.localizedDescription)"
             )
         }
+    }
+
+    func releaseDictationDucking(expectedLease: AudioDuckingLease?) {
+        guard let expectedLease, dictationDuckingLease == expectedLease else { return }
+        guard promotedMeetingDucking?.lease != expectedLease else { return }
+        dictationDuckingLease = nil
+        audioDuckingService.requestRestore(lease: expectedLease)
     }
 
     /// Только transport/декодирование оставляют неопределённость о side-effect
@@ -562,7 +633,9 @@ extension AgentAppDelegate {
             || recordingStopRequestedDuringStart
         )
 
+        let audioLease = dictationDuckingLease
         let snapshot = await recordingStateSnapshot()
+        guard recordingStartAmbiguousRequestID == requestID else { return }
         let decision = RecordingStartAmbiguityPolicy.decide(
             snapshot: snapshot,
             expectedOwner: "dictation",
@@ -631,7 +704,7 @@ extension AgentAppDelegate {
             // Не вызываем consume здесь: meeting_start callback мог ещё быть
             // в пути, и pending-token служит его единственным доказательством.
             pendingMeetingPromotionToken = generationToken
-            meetingInheritedDictationDucking = true
+            inheritDictationDuckingForMeeting(token: generationToken, confirmed: true)
             recordingStartAmbiguous = false
             recordingStartAmbiguousRequestID = nil
             recordingStartRequestID = nil
@@ -662,13 +735,31 @@ extension AgentAppDelegate {
                 )
                 return
             }
+            // Early meeting.finished мог опередить потерянный start response.
+            // Только эта попытка и доказанное отсутствие её G1 разрешают provisional lease.
+            if let binding = promotedMeetingDucking,
+               !binding.confirmed, binding.lease == audioLease {
+                guard binding.startRequestID == requestID else { return }
+                let provesDifferentGeneration = snapshot.generationToken.map {
+                    !$0.isEmpty && $0 != binding.generationToken
+                } ?? false
+                guard snapshot.provesTerminalIdle || provesDifferentGeneration else {
+                    // Active/legacy snapshot того же token не доказывает terminal G1.
+                    return
+                }
+                promotedMeetingDucking = nil
+                meetingInheritedDictationDucking = false
+                if pendingMeetingPromotionToken == binding.generationToken {
+                    pendingMeetingPromotionToken = nil
+                }
+            }
             // Подтверждённый idle/foreign snapshot означает, что G1 этого
             // request ID не существует. Ничего физически не останавливаем.
             recordingStartAmbiguous = false
             recordingStartAmbiguousRequestID = nil
             recordingStartRequestID = nil
             recordingStopRequestedDuringAmbiguousStart = false
-            audioDuckingService.restoreAfterRecording()
+            releaseDictationDucking(expectedLease: audioLease)
             notify(
                 title: "Krab Ear",
                 body: "Старт записи не подтвердился; текущая запись не тронута."
@@ -705,6 +796,7 @@ extension AgentAppDelegate {
         refreshStatusItemTitle()
         rebuildStatusMenu()
 
+        let stopAudioLease = dictationDuckingLease
         let stopToken = activeGenerationToken
         let stopOwner = "dictation"
         let stopOwnerRevision = activeGenerationOwnerRevision
@@ -924,7 +1016,7 @@ extension AgentAppDelegate {
             dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
             isRecording = false
             recordingTargetApp = nil
-            audioDuckingService.restoreAfterRecording()
+            releaseDictationDucking(expectedLease: stopAudioLease)
             refreshStatusItemTitle()
             rebuildStatusMenu()
         }
@@ -949,7 +1041,7 @@ extension AgentAppDelegate {
         dictationStopAutoRetryBudget = DictationStopAutoRetryGate.fullBudget
         isRecording = false
         isProcessing = false
-        audioDuckingService.restoreAfterRecording()
+        releaseDictationDucking(expectedLease: dictationDuckingLease)
         let rawPreview = (result?["preview_text"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let preview = rawPreview.isEmpty
