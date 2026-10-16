@@ -1,5 +1,50 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-16 — Finalizing idle: локально318 PASS, audit/CI pending
+
+В отдельной ветке на merged2098 `8dc5e48d` подготовлен фикс lifecycle-пробы:
+`get_recording_state` теперь включает finalizing_count/is_finalizing под тем
+же lock, что active owner/token. Оба shell-gate требуют явного доказательства
+пустого tail; старый backend без полей получает UNKNOWN/HOLD.
+Actual stop + barrier phase C: **RED2** по отсутствующим полям. Настоящие
+private Unix IPC + оба shell/parser gate: **RED32 / 2 controls PASS**.
+GREEN:318 PASS в12 последовательных файлах (174.31s), включая оба новых
+регрессионных файла, прежние shell/IPC gates, recording lifecycle и privacy.
+Own children reaped, timeout/group leaks нет. Preliminary independent review:
+новых production P0–P2 не найдено; финальный frozen review/CI ещё pending.
+`make audit-all` дошёл до последнего scanner, но bounded wrapper завершился
+с PermissionError на post-wait process-group probe; итогового receipt/PASS нет.
+Повтор полного аудита требует отдельного локального окна. Чужие процессы
+не затрагивались; сейчас только source/RO во время VG CI.
+
+Audio ducking [#2098](https://github.com/Pavua/Krab-Ear/pull/2098) MERGED в
+`8dc5e48d88b9357e4782ae87ea5686c936618530`:27 exact-head checks SUCCESS,
+оба Ubuntu1110files/16chunks/Aggregate0/noFallback/noIsofail. Source и artifact
+Astra Ultra PASS; postmerge38845989548/38845989582 pending. **Не выкачено.**
+Release-idle gate заблокирован отсутствием авторитетного finalizing signal
+у уже работающего e996; новое source API не доказывает старый runtime.
+
+Native acoustic one-shot05:23–05:25CEST: UI start/stop, mic RMS0.01579,
+afplay exit0/reaped, история23279→23280. TextEdit остался пустым: Cua Raise/AX
+не активировал его на уровне OS, captured target был Telegram; agent log
+отметил paste-success туда. Send-команд не было. RO-проверка compose через
+Cua не дала читаемого поля: draft state UNKNOWN, ничего не очищалось.
+Приглушение восстановлено **true/15 в UI и IPC**, mic закрыт, own guard reaped.
+Native TextEdit/autopaste acceptance **FAIL**, повтор не выполняется до
+достоверной квалификации foreground. Причинность старых AppHang/504 UNKNOWN.
+[Карточка](superpowers/plans/2026-10-16-finalizing-idle.md).
+
+Отдельный свежий REST-инцидент05:34–05:35CEST: request
+`3e674564-3b95-423c-957b-e7f257c0d109`, STT504 после29.290s при бюджете25s;
+engine завершился29.31s, затем REST self-failfast exit70. Launchd поднял
+REST20891 в05:35:02/runs2; backend1247 и Swift9366 прежние. Свежий RO health
+IPC/REST PASS, REST20891 слушает5005, физическая запись/встреча неактивны,
+история23280. Это не finalization-idle proof. Caller/profile UNKNOWN;
+обработки аудио/текста и повторного запроса для диагностики не было.
+Время старта запроса предшествует запуску pytest соседнего VG CI;
+совпадение окон не доказывает источник. Operator lifecycle не выполнялся.
+
+
 ## 2026-10-16 — Audio ducking lifecycle: локальные проверки PASS, выпуск pending
 
 На базе `be390073` реализован off-main сервис приглушения: одна serial queue,

@@ -55,11 +55,11 @@ def test_busy_reason_detects_active_recording(tmp_path: Path) -> None:
 
 
 def test_busy_reason_detects_active_meeting(tmp_path: Path) -> None:
+    from test_restart_unknown_activity_2026_09_07 import reply
+
     result = _run_busy_reason(
         tmp_path,
-        recording_response=json.dumps(
-            {"id": "1", "ok": True, "result": {"is_recording": False}}
-        ),
+        recording_response=reply(is_recording=False),
         meeting_response=json.dumps({"id": "1", "ok": True, "result": {"active": True}}),
     )
     assert result.stdout.strip() == "BLOCK:meeting", result.stdout + result.stderr
@@ -67,11 +67,11 @@ def test_busy_reason_detects_active_meeting(tmp_path: Path) -> None:
 
 def test_busy_reason_free_when_idle(tmp_path: Path) -> None:
     """Свободная ветка — обе IPC-схемы говорят «не занято»."""
+    from test_restart_unknown_activity_2026_09_07 import reply
+
     result = _run_busy_reason(
         tmp_path,
-        recording_response=json.dumps(
-            {"id": "1", "ok": True, "result": {"is_recording": False}}
-        ),
+        recording_response=reply(is_recording=False),
         meeting_response=json.dumps({"id": "1", "ok": True, "result": {"active": False}}),
     )
     assert result.returncode == 0, result.stdout + result.stderr

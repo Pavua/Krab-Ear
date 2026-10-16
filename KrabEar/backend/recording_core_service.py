@@ -1732,6 +1732,9 @@ class RecordingCoreService:
                 if generation is not None
                 else None
             )
+            # Phase A освобождает active-slot до STT/history tail. Физический
+            # idle не даёт права на lifecycle, пока остаётся finalizing G1.
+            finalizing_count = len(self._finalizing_generations_locked())
         with self._preview_lock:
             preview_text = self._preview_text
             preview_duration = self._preview_duration_sec
@@ -1758,6 +1761,8 @@ class RecordingCoreService:
             "owner": active_owner,
             "generation_token": generation_token,
             "start_request_id": start_request_id,
+            "finalizing_count": finalizing_count,
+            "is_finalizing": finalizing_count > 0,
             "duration_sec": preview_duration,
             "preview_text": preview_text,
             "audio_rms": audio_rms,

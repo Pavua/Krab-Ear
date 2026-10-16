@@ -90,6 +90,18 @@ try:
         value = result.get(field)
         if type(value) is not bool or result.get("privacy_mode_active") is True:
             raise ValueError("activity unknown")
+        if method == "get_recording_state" and value is False:
+            # Capture уже остановлен, но STT/history tail может ещё владеть G1.
+            count = result.get("finalizing_count")
+            finalizing = result.get("is_finalizing")
+            if (type(count) is not int or count < 0
+                    or type(finalizing) is not bool
+                    or finalizing != (count > 0)):
+                raise ValueError("finalization unknown")
+            active_fields = ("owner", "generation_token", "start_request_id")
+            if any(key not in result for key in active_fields):
+                raise ValueError("generation unknown")
+            value = finalizing or any(result[key] is not None for key in active_fields)
         print("busy" if value else "idle")
 except Exception:
     if method != "ping":
