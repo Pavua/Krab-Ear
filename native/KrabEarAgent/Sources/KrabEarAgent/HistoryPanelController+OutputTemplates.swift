@@ -576,6 +576,7 @@ extension HistoryPanelController {
 
             DispatchQueue.main.async {
                 let pb = NSPasteboard.general
+                InputAutomationQueue.shared.invalidatePending()
                 pb.clearContents()
                 pb.setString(rendered, forType: .string)
                 BackendToast.shared.show("Скопировано", duration: 2.0)

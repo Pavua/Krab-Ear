@@ -1,0 +1,175 @@
+# Общая очередь input/clipboard: продолжение async paste
+
+База ветки: `d4768539ce4177b8e23b19d645dd5ea3c8244804`, remote base
+`origin/codex/krab-ear-v2` = `19124f51`. Исполнитель один, inline executing-plans.
+Авторитетный контракт: `2026-10-16-paste-async.md` в предыдущем изолированном
+worktree; пункты 1–6 сохраняются. Независимый финальный gate: Astra Ultra.
+
+## Границы
+
+Только source/tests/docs/commits в текущем изолированном worktree. Нет push,
+merge/deploy/restart, пользовательского clipboard, реальных клавиш/AX writes,
+микрофона, настроек или моделей. Чужой WIP не трогать. Тесты и сборки только
+после ROOT GO; до него допустимы чтение и тестовый код. `git add` явными путями.
+
+## Контракты
+
+1. Paste/replay/delete/revision async; одна bounded очередь и lease для clipboard
+   и input. Revision delete→insert под одной lease, deadline monotonic включает
+   очередь. Подменяются только OS leaves, приватный named NSPasteboard.
+2. Target/operation identity неизменяемы до await; captured dictation/QuickEdit A
+   сохраняется после старта B. Streaming target выбирается для каждого принятого
+   chunk; revision отказывает при другом владельце ранее вставленного текста.
+   После await проверяются operation/target/secure/concealed/changeCount.
+3. Clipboard записывается непосредственно перед CmdV. Explicit writers получают
+   lease либо инвалидируют pending. Key-down всегда получает key-up. Outcome:
+   noEffects/completed/partial/unknown, точное число backspace-пар. Partial/unknown
+   запрещают полный fallback/redelete и paste_status=ok.
+4. Единственный bounded off-main runner переиспользует AudioDuckingCommandRunner;
+   сохраняет original target, не использует sync NSAppleScript/Process.waitUntilExit.
+   Child удерживает lease до cleanup; cleanupUnconfirmed quarantines automation.
+   Переданный AppleEvent с неопределённым исходом запрещает второй канал.
+5. Streaming serial внутри generation. Final barrier возвращает immutable итог
+   своей session; G1 completion не читает/сбрасывает G2. Delegate использует этот
+   итог вместо общего didStreamThisRecording. Только noEffects разрешает fallback.
+6. PasteTargetActivation behavior/13 тестов сохраняются. AX messaging bounded.
+   SelectionTranslator copy/paste/restore в той же очереди, translation IPC вне
+   lease, restore CAS changeCount. Устранение всех AppKit hangs не обещается.
+
+### Task 1: Правдивое уведомление P3
+
+Сначала actual handlePasteFailure + real PasteService с fake notification process
+и private pasteboard: nil text и never_copy не обещают clipboard; concealed
+refusal сохраняет буфер; successful copy вправе обещать запись.
+
+RED/GREEN: из `native/KrabEarAgent`:
+`swift test -j 1 --filter PasteFailureNotificationTests`.
+Expected RED: 2 assertions nil/never_copy; successful/concealed controls PASS.
+Минимальный production fix только после RED; отдельный commit после GREEN.
+ROOT GO ограничен этим фильтром с `-j 1`; после коммита ресурсный checkpoint.
+Heartbeat/queue tests, audit и release требуют отдельного GO.
+
+Checkpoint 2026-10-18: P3 commit `b4aead38813aa4fb07e0dc3518009ad25edbf5ae`.
+Actual handler/service RED: 4 теста, 2 ожидаемых assertion failures (nil/never_copy),
+concealed/successful-copy controls PASS. После минимального fix тот же фильтр:
+GREEN 4/4. Первая compilation 63.04s, incremental GREEN 7.60s; tests0.580/0.100s.
+Логи и `p3-receipt.json` в owning ignored SDD workspace. Pending OS-leaf instrumentation
+в этот коммит не включена. После P3 — STOP до отдельного resource GO для Task2.
+
+### Task 2: Actual async service + общая lease
+
+API: общий thread-safe `InputAutomationQueue`,
+`acquire(deadline:) async -> Result<InputAutomationLease, InputAutomationFailure>`,
+синхронные `release`, `invalidatePending`, `quarantine`. FIFO, максимум 8 ожидающих
+и 1 активная операция. Lease берётся delegate ДО activator; service принимает её
+либо самостоятельно получает ту же очередь. Истёкшие/отменённые tickets удаляются.
+
+Обычная вставка: общий budget 5s. Revision: `4s + count * 35ms`, арифметика с
+проверкой переполнения; deadline фиксируется до enqueue. В текущем source нет max
+count (только `count > 0`), каждая backspace-пара занимает `15ms + 15ms`; поэтому
+новый фиксированный 15s timeout незаметно обрезал бы длинную поддержанную revision.
+Перед первым delete требуется remaining `>= count * 30ms + 150ms` для вставки,
+иначе отказ noEffects до первого down. Scheduler/AX способны израсходовать запас
+после preflight; тогда truthful partial + exact pairs, без полного fallback.
+Key-up обязателен даже после deadline. Overflow/invalid count и queue-wait
+insufficiency проверяются до effects.
+
+RED matrix: heartbeat создаётся внутри первого held-state leaf; deletion heartbeat;
+bounded queue full/deadline/cancel до effects; target/concealed/clipboard drift;
+key-up после cancel; N/M partial deletion без повтора; живой child удерживает lease.
+Команда: `swift test -j 1 --filter 'PasteService|InputAutomationQueue'`.
+Expected RED: behavior assertion, не compile error. GREEN: та же команда.
+
+### Task 3: Streaming/delegate/translator wiring
+
+RED: actual delegate→service и controller→adapter→service; QuickEdit A после B;
+revision единой lease; translator не вклинивается; G1→G2 immutable final outcome.
+Команда: `swift test -j 1 --filter 'StreamingPaste|PasteHandling|PasteTargetActivation|DictationPasteTarget|SelectionTranslator'`.
+Expected RED: соответствующие behavior assertions. GREEN: тот же фильтр.
+
+### Task 4: Финальная проверка и передача
+
+Swift affected groups + актуальный hosted filter, зависимые Python source tests,
+`make audit-all`, `swift build -c release -j 2`; логи в owning ignored SDD workspace.
+Full backend hosted CI запускает root после final diff. Root получает commits,
+source seal, RED/GREEN logs, rulings и границы для независимого whole-diff review.
+Local evidence не выдаётся за native acceptance. Push/PR только через root.
+
+## Текущие rulings и границы проверки
+
+После ROOT GO выполняются только узкие Swift filters с `-j 1`; source/test
+заморожены на весь compiler/linker/test process. Release/full backend/audit-all
+требуют отдельного ресурсного допуска root. Прежние compile/ABI диагностики
+не считаются causal RED. Новая queue API получила postimplementation coverage,
+а heartbeat, translator yield/CAS, concealed-after-copy и own-write edge chain
+имеют отдельные behavior RED.
+
+Legacy `didStreamThisRecording` после explicit reset отражает новые effects:
+неудачная revision без effects его не выставляет; partial/unknown попытка —
+выставляет. Авторитетный immutable final outcome при ранее вставленных chunks
+остаётся partial и запрещает полный fallback независимо от legacy property.
+G1 update меняет activity только при сохранении того же owner у controller.
+
+Clipboard continuity — bounded цепь собственных `(before, after)` edges плюс
+проверка generation. User copy, затем собственная вставка не способны связать
+старый snapshot через пользовательский gap. Explicit own copy инвалидирует
+pending и не добавляет automation-safe edge. Переполнение 64 edges приводит
+к безопасному отказу старых операций; очередь ограничена 8 waiting + active,
+включая concurrent admission при отсутствии active.
+
+Подтверждение пары CG down/up означает отправку пары в captured PID, а не
+физическую доставку текста. После await отмена/target/focus/secure/clipboard
+проверяются повторно; необязательный collapse при drift пропускается. Nil
+injected AX facts не вызывают настоящий AX. Backspace pairs считаются точно.
+AppleEvent failure после запуска консервативно unknown: второго канала нет,
+cleanupUnconfirmed закрывает automation queue до перезапуска приложения.
+
+SelectionTranslator использует ту же очередь для AX/copy/write/restore, IPC вне
+lease. Target process object удерживается до await, перед записью сверяется
+captured AX element и secure role; clipboard restore только CAS. Изменение
+concealed после copy не уходит в IPC. Явные UI writers инвалидируют pending.
+QuickEdit presenter/activation factory/frontmost/audio — точечные OS leaves с
+прежними production defaults; actual delegate/service/controller не подменяются.
+
+Harmless own child test отдельно разрешён root: System runner запускает только
+свой `/bin/sh` → `exec /bin/sleep`, проверяет bounded fixture PID и cleanup;
+нет osascript, реальных key events, AX writes или пользовательского pasteboard.
+
+## Финальный source checkpoint перед независимым gate
+
+Оба hosted workflow выбирают behavioral input tests вместе с wiring/source
+контрактами. Локально exact hosted regex: **293/293 PASS** (build7.35s,
+tests17.249s, `hosted-sealed-green.log`). Отдельный существующий filter
+`SelectionTranslator.*Tests|PasteHandlingTests|DictationPasteTargetTests`:
+**56/56 PASS** (`existing-sealed-green.log`). Этот корректный filter учитывает
+раздельные классы SelectionTranslator; прежний `SelectionTranslatorTests` их
+не выбирал и доказательством покрытия не считается.
+
+Последние whole-path causal RED→GREEN:
+
+- queued delegate snapshot → explicit copy: отказ ДО activation, затем public
+  autopaste refusal не копирует stale text поверх нового пользовательского clipboard;
+- always_copy+autoPaste+QuickEdit не пишет до accept; clipboard-only always_copy
+  остаётся рабочим контрольным сценарием;
+- runner.success после copy/target/cancel/secure/deadline drift: unknown,
+  подтверждённые script backspace pairs сохранены, второго канала и replay record нет.
+
+Автоматический failure path теперь history-only. Только явный отдельный copy
+handler может обещать clipboard после фактической успешной записи (P3 controls).
+Перед activation проверяются lease/cancel/total deadline/epoch/continuous edges
+и original target liveness; foreground до activator не требуется. После него
+service проверяет полный набор условий; activation budget ограничен общей lease.
+
+`make audit-all` PASS был получен ДО единственной последней Swift поправки
+post-runner-success validate. После неё выполнены final hosted/existing и
+`make audit-dead-swift`: selftest PASS, scanner exit0, мёртвых0. Остальные
+Python static scanners не зависят от этой ветки Swift success outcome.
+Pure Python source/settings: 47/47 PASS, dev Python3.14, без BackendService
+warmup fixtures/inference. Нефатальный pyannote/torchcodec import warning не
+исправлялся в этой source волне. Release `swift build --package-path native/KrabEarAgent -c release -j 1`: PASS,
+38.30s, `release-build.log`.
+
+Остались внешний whole-diff gate Astra Ultra и hosted CI точного нового SHA
+через root. Native acceptance, runtime/deploy/restart и устранение всех AppHang
+не заявляются. Source/test после final success-validate больше не меняются до
+независимого review; docs/ignored ledger только фиксируют результаты проверок.

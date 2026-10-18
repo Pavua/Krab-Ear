@@ -8,19 +8,21 @@
 входе в сессию не было. Ниже — исторические snapshots, их прежние pending/PID
 не считать текущим состоянием. Runtime после перезагрузки здесь не квалифицирован.
 
-В изолированной ветке `codex/ear-paste-activation-20261018` исправляется
-самостоятельная часть async-карточки: ожидание активации приложения освобождает
-MainActor; отказ/timeout/закрытие/cancel не вызывают PasteService. Адресат
-диктовки/QuickEdit и явной snapshot-вставки фиксируется до Task. Вставка после
-неподтверждённой активации запрещена; конкурентная смена target получает отказ.
-Actual helper RED5/12 assertions → GREEN5; targeted Swift64 и CI-filter229 PASS;
-Python source/settings contracts50 PASS. Release build `-j 2` и `audit-all` PASS.
-Независимый final review и hosted CI нового SHA ещё pending. [Карточка](superpowers/plans/2026-10-18-paste-target-activation.md).
+В изолированной ветке `codex/ear-paste-activation-20261018` продолжается общая
+async input/clipboard очередь. P3 исправлен отдельным `b4aead38`: clipboard
+обещается только после успешной записи. Paste/replay/revision, streaming final
+barrier и SelectionTranslator используют общую bounded lease; target фиксируется
+до await, revision delete→insert атомарна относительно других собственных input.
+Partial/unknown запрещают полный fallback и статус ok; подтверждённая CG пара
+не доказывает физическую доставку. Explicit copy инвалидирует pending, restore CAS.
+Активационный контракт и его13 тестов сохранены. [Текущая карточка](superpowers/plans/2026-10-18-paste-input-queue.md).
 
-Ожидания modifiers/backspace/AppleScript в PasteService, общая input/clipboard
-очередь, streaming final barrier/generation и SelectionTranslator остаются
-открыты. Этот slice не доказывает устранение исторических AppHang. Живые клавиши,
-микрофон, пользовательский clipboard, модели, настройки и lifecycle не менялись.
+Source checkpoint: exact hosted-filter293/293 и existing affected56/56 PASS,
+включая actual delegate/QuickEdit/snapshot, private pasteboard и harmless own child
+cleanup. Python source/settings47/47, audit-all и dead Swift scanner (0 мёртвых)
+PASS. Release build `-j 1` PASS; независимый Astra Ultra whole-diff gate pending. Это не release/runtime acceptance и не доказательство
+устранения всех исторических AppHang. Живые клавиши, микрофон, пользовательский
+clipboard, модели, настройки и lifecycle не менялись.
 
 ## 2026-10-16 — Finalizing idle: локально318 PASS, audit/CI pending
 

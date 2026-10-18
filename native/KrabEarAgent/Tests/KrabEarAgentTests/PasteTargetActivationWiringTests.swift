@@ -218,7 +218,7 @@ final class PasteTargetActivationWiringTests: XCTestCase {
             let lower = try XCTUnwrap(source.range(of: start)).lowerBound
             let upper = try XCTUnwrap(source.range(of: end)).lowerBound
             let body = String(source[lower..<upper])
-            let capture = try XCTUnwrap(body.range(of: "let activationTarget = PasteActivationTarget(application: targetApp)"))
+            let capture = try XCTUnwrap(body.range(of: "let activationTarget = pasteActivationTarget(targetApp)"))
             let task = try XCTUnwrap(body.range(of: "Task { @MainActor"))
             XCTAssertLessThan(capture.lowerBound, task.lowerBound)
             XCTAssertTrue(body.contains("await pasteToActivatedTarget(textToInsert, target: activationTarget)"))

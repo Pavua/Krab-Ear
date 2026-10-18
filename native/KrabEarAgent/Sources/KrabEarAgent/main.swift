@@ -171,7 +171,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     let pasteService: PasteService
     let pasteTargetActivator: PasteTargetActivator
-    let quickEditOverlay = QuickEditOverlay()
+    let quickEditOverlay: any QuickEditPresenting
+    let pasteActivationTarget: (NSRunningApplication) -> PasteActivationTarget
+    let pasteFrontmostApplication: () -> NSRunningApplication?
+    let playPasteCompletionSound: () -> Void
+    let pasteStatusUpdater: ((String, String) -> Void)?
     let audioDuckingService: SystemAudioDuckingService
     private let notificationService: NotificationService
     let realtimeOverlay = RealtimeOverlayController()
@@ -335,8 +339,20 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         audioDuckingService: SystemAudioDuckingService = SystemAudioDuckingService(),
         notificationService: NotificationService = NotificationService(),
         pasteService: PasteService = PasteService(),
-        pasteTargetActivator: PasteTargetActivator? = nil
+        pasteTargetActivator: PasteTargetActivator? = nil,
+        quickEditOverlay: (any QuickEditPresenting)? = nil,
+        pasteActivationTarget: ((NSRunningApplication) -> PasteActivationTarget)? = nil,
+        pasteFrontmostApplication: @escaping () -> NSRunningApplication? = { NSWorkspace.shared.frontmostApplication },
+        pasteStatusUpdater: ((String, String) -> Void)? = nil,
+        playPasteCompletionSound: @escaping () -> Void = {
+            DispatchQueue.global(qos: .userInitiated).async { NSSound(named: "Purr")?.play() }
+        }
     ) {
+        self.quickEditOverlay = quickEditOverlay ?? QuickEditOverlay()
+        self.pasteActivationTarget = pasteActivationTarget ?? { PasteActivationTarget(application: $0) }
+        self.pasteFrontmostApplication = pasteFrontmostApplication
+        self.pasteStatusUpdater = pasteStatusUpdater
+        self.playPasteCompletionSound = playPasteCompletionSound
         self.pasteService = pasteService
         self.pasteTargetActivator = pasteTargetActivator ?? PasteTargetActivator()
         self.audioDuckingService = audioDuckingService

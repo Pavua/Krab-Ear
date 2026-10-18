@@ -1,60 +1,271 @@
-/*
- Вставка текста в активное приложение macOS.
-
- Связи модуля:
- 1) main.swift: использует сервис после получения транскрибации.
- 2) Quick replay (Cmd+Option+V): repastLast() / recordLastPaste() / lastPastedText.
-*/
-
 import AppKit
 import ApplicationServices
 import Foundation
 
-/// Результат попытки вставки текста в активное приложение.
+enum PasteEffect: String, Sendable { case noEffects, completed, partial, unknown }
 struct PasteAttemptResult {
     let ok: Bool
     let reason: String
+    let effect: PasteEffect
+    let backspacePairs: Int
+    init(ok: Bool, reason: String, effect: PasteEffect? = nil, backspacePairs: Int = 0) {
+        self.ok = ok; self.reason = reason
+        self.effect = effect ?? (ok ? .completed : .noEffects)
+        self.backspacePairs = backspacePairs
+    }
 }
+struct PasteInputSnapshot { let pid: pid_t; let epoch: UInt64; let changeCount: Int; let isAlive: () -> Bool }
+struct PasteKeyEventPair { let down: () -> Void; let up: () -> Void }
 
-/// Нативная вставка текста в активное приложение через буфер обмена и Cmd+V.
+/// Один запрос владеет lease вплоть до key-up или подтверждённого cleanup child.
 final class PasteService {
-
-    /// Зависимости вынесены для изоляции unit-тестов от буфера и настроек пользователя.
+    let inputQueue: InputAutomationQueue
     private let pasteboard: NSPasteboard
     private let defaults: UserDefaults
     private let repastePerformer: ((String) -> PasteAttemptResult)?
-
-    /// В приложении используются системные зависимости; тесты передают приватные экземпляры.
-    init(
-        pasteboard: NSPasteboard = .general,
-        defaults: UserDefaults = .standard,
-        repastePerformer: ((String) -> PasteAttemptResult)? = nil
-    ) {
-        self.pasteboard = pasteboard
-        self.defaults = defaults
-        self.repastePerformer = repastePerformer
-    }
-
-    // MARK: - Smart field-aware paste
-
-    /// Управляет умной вставкой по типу поля (AX role-based). Обновляется из настроек.
-    var smartFieldFormatEnabled: Bool = false
-
-    /// Уведомительный хук для secure-field skip (вызывается синхронно на вызывающем потоке).
-    /// Позволяет внешнему коду (AgentAppDelegate) показать уведомление не создавая зависимость
-    /// от NotificationService напрямую в PasteService.
+    private let modifierKeysDown: () -> Bool
+    private let accessibilityTrusted: () -> Bool
+    private let keyEventFactory: (pid_t, CGKeyCode, CGEventFlags) -> PasteKeyEventPair?
+    private let frontmostPID: () -> pid_t?
+    private let captureTargetLiveness: (pid_t) -> (() -> Bool)
+    private let focusRole: ((pid_t) -> String?)?
+    private let focusEditable: ((pid_t) -> Bool?)?
+    private let collapseSelection: ((pid_t) -> Void)?
+    private let runner: any AudioDuckingCommandRunning
+    private let operationBudget: Duration
+    private let logger = AgentLogger.shared
+    var smartFieldFormatEnabled = false
     var onSecureFieldSkipped: (() -> Void)?
-
-    /// Уведомительный хук для пропуска записи в буфер обмена из-за защищённого
-    /// содержимого (S34, org.nspasteboard.ConcealedType). Тот же паттерн, что
-    /// onSecureFieldSkipped — вызывается синхронно, вызывающий код сам решает,
-    /// как уведомить пользователя.
     var onConcealedClipboardSkipped: (() -> Void)?
-
-    /// AX-роль сфокусированного элемента для указанного PID.
-    /// Зеркалит паттерн из `inspectFocusedElementState(pid:)` и `collapseSelectionIfNeeded(pid:)`.
+    private let lastPastedTextKey = "KrabEar_LastPastedText"
+    let repasteCooldownSec: TimeInterval = 1
+    private var lastPastedAt: Date?
+    init(pasteboard: NSPasteboard = .general, defaults: UserDefaults = .standard,
+         repastePerformer: ((String) -> PasteAttemptResult)? = nil,
+         modifierKeysDown: (() -> Bool)? = nil,
+         accessibilityTrusted: @escaping () -> Bool = { AXIsProcessTrusted() },
+         keyEventFactory: ((pid_t, CGKeyCode, CGEventFlags) -> PasteKeyEventPair?)? = nil,
+         inputQueue: InputAutomationQueue = .shared,
+         frontmostPID: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+         targetIsAlive: ((pid_t) -> Bool)? = nil,
+         focusRole: ((pid_t) -> String?)? = nil,
+         focusEditable: ((pid_t) -> Bool?)? = nil,
+         collapseSelection: ((pid_t) -> Void)? = nil,
+         runner: any AudioDuckingCommandRunning = SystemAudioDuckingCommandRunner(),
+         operationBudget: Duration = .seconds(5)) {
+        self.pasteboard = pasteboard; self.defaults = defaults; self.repastePerformer = repastePerformer
+        self.modifierKeysDown = modifierKeysDown ?? {
+            let rOpt = CGEventSource.keyState(.combinedSessionState, key: Keycode.rightOption.rawValue)
+            let lOpt = CGEventSource.keyState(.combinedSessionState, key: Keycode.leftOption.rawValue)
+            let lCmd = CGEventSource.keyState(.combinedSessionState, key: Keycode.leftCommand.rawValue)
+            let rCmd = CGEventSource.keyState(.combinedSessionState, key: Keycode.rightCommand.rawValue)
+            return rOpt || lOpt || lCmd || rCmd
+        }
+        self.accessibilityTrusted = accessibilityTrusted
+        self.keyEventFactory = keyEventFactory ?? Self.systemKeyEvents
+        self.inputQueue = inputQueue; self.frontmostPID = frontmostPID
+        self.captureTargetLiveness = { pid in
+            if let targetIsAlive { return { targetIsAlive(pid) } }
+            let application = NSRunningApplication(processIdentifier: pid)
+            return { application?.isTerminated == false }
+        }
+        self.focusRole = focusRole; self.focusEditable = focusEditable; self.collapseSelection = collapseSelection
+        self.runner = runner; self.operationBudget = operationBudget
+    }
+    var lastPastedText: String? {
+        get { defaults.string(forKey: lastPastedTextKey) }
+        set { defaults.set(newValue, forKey: lastPastedTextKey) }
+    }
+    func recordLastPaste(_ text: String) { lastPastedText = text; lastPastedAt = Date() }
+    @MainActor func repastLast() async -> PasteAttemptResult {
+        guard let text = lastPastedText, !text.isEmpty else { return refusal("no_last_paste") }
+        if let at = lastPastedAt, Date().timeIntervalSince(at) < repasteCooldownSec { return refusal("repaste_too_soon") }
+        if let repastePerformer { return repastePerformer(text) }
+        return await pasteToFrontmostApp(text)
+    }
+    private func pasteboardHoldsConcealedContent(_ board: NSPasteboard) -> Bool {
+        board.types?.contains(.init("org.nspasteboard.ConcealedType")) ?? false
+    }
+    @discardableResult func putToClipboard(_ text: String) -> Bool {
+        inputQueue.invalidatePending()
+        guard !pasteboardHoldsConcealedContent(pasteboard) else { onConcealedClipboardSkipped?(); return false }
+        pasteboard.clearContents(); return pasteboard.setString(text, forType: .string)
+    }
+    func putToClipboardUserInitiated(_ text: String) {
+        inputQueue.invalidatePending(); pasteboard.clearContents(); pasteboard.setString(text, forType: .string)
+    }
+    static func revisionBudget(count: Int) -> Duration? {
+        guard count >= 0 else { return nil }
+        let (millis, overflow) = Int64(count).multipliedReportingOverflow(by: 35)
+        let (total, overflow2) = millis.addingReportingOverflow(4000)
+        guard !overflow, !overflow2 else { return nil }
+        return .milliseconds(total)
+    }
+    private func refusal(_ reason: String, pairs: Int = 0, effect: PasteEffect? = nil) -> PasteAttemptResult {
+        PasteAttemptResult(ok: false, reason: reason, effect: effect ?? (pairs > 0 ? .partial : .noEffects), backspacePairs: pairs)
+    }
+    @MainActor func captureTargetPID() -> pid_t? { frontmostPID() }
+    @MainActor func captureInput(pid: pid_t) -> PasteInputSnapshot {
+        PasteInputSnapshot(pid: pid, epoch: inputQueue.generation, changeCount: pasteboard.changeCount, isAlive: captureTargetLiveness(pid))
+    }
+    func deadlineForPaste() -> ContinuousClock.Instant { .now + operationBudget }
+    @MainActor func pasteToFrontmostApp(_ text: String, targetPID: pid_t? = nil,
+                                      lease: InputAutomationLease? = nil, snapshot: PasteInputSnapshot? = nil) async -> PasteAttemptResult {
+        await perform(text: text, deleteCount: 0, targetPID: targetPID, lease: lease, snapshot: snapshot)
+    }
+    @MainActor func deleteBackward(count: Int, targetPID: pid_t? = nil) async -> PasteAttemptResult {
+        guard count > 0 else { return refusal("empty_count") }
+        return await perform(text: nil, deleteCount: count, targetPID: targetPID, lease: nil)
+    }
+    /// Очередь могла ждать чужой input. Проверка не требует foreground до активации.
+    @MainActor func validateQueuedSnapshot(_ snapshot: PasteInputSnapshot, lease: InputAutomationLease) -> String? {
+        if !inputQueue.owns(lease) { return "input_quarantined" }
+        if Task.isCancelled { return "input_cancelled" }
+        if ContinuousClock.now >= lease.deadline { return "input_deadlineExceeded" }
+        if inputQueue.generation != snapshot.epoch { return "clipboard_changed" }
+        if !inputQueue.ownsClipboardChanges(board: pasteboard.name.rawValue, from: snapshot.changeCount, to: pasteboard.changeCount) {
+            return "clipboard_changed"
+        }
+        return nil
+    }
+    @MainActor func revise(deleteCount: Int, text: String, targetPID: pid_t?) async -> PasteAttemptResult {
+        guard deleteCount >= 0 else { return refusal("invalid_count") }
+        return await perform(text: text, deleteCount: deleteCount, targetPID: targetPID, lease: nil)
+    }
+    @MainActor private func perform(text: String?, deleteCount: Int, targetPID: pid_t?, lease supplied: InputAutomationLease?, snapshot: PasteInputSnapshot? = nil) async -> PasteAttemptResult {
+        let clean = text?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if deleteCount == 0 && (clean?.isEmpty ?? true) { return refusal("empty_text") }
+        guard let budget: Duration = deleteCount > 0 ? Self.revisionBudget(count: deleteCount) : operationBudget else { return refusal("invalid_count") }
+        let deadline = supplied?.deadline ?? (.now + budget)
+        if pasteboardHoldsConcealedContent(pasteboard) { onConcealedClipboardSkipped?(); return refusal("concealed_clipboard_skipped") }
+        // Все значения принадлежат этому запросу и не перечитываются из delegate после await.
+        guard let pid = targetPID ?? frontmostPID(), pid != ProcessInfo.processInfo.processIdentifier else { return refusal("no_external_target") }
+        if let snapshot, snapshot.pid != pid { return refusal("operation_target_changed") }
+        let isAlive = snapshot?.isAlive ?? captureTargetLiveness(pid)
+        let epoch = snapshot?.epoch ?? inputQueue.generation
+        var clipboardCount = snapshot?.changeCount ?? pasteboard.changeCount
+        let lease: InputAutomationLease
+        if let supplied { lease = supplied }
+        else {
+            switch await inputQueue.acquire(deadline: deadline) {
+            case .failure(let why): return refusal("input_" + why.rawValue)
+            case .success(let acquired): lease = acquired
+            }
+        }
+        defer { if supplied == nil { inputQueue.release(lease) } }
+        func validate() -> String? {
+            if !inputQueue.owns(lease) { return "input_quarantined" }
+            if Task.isCancelled { return "input_cancelled" }
+            if ContinuousClock.now >= deadline { return "input_deadlineExceeded" }
+            if !isAlive() || frontmostPID() != pid { return "target_changed" }
+            if inputQueue.generation != epoch { return "clipboard_changed" }
+            if pasteboard.changeCount != clipboardCount {
+                guard inputQueue.ownsClipboardChanges(board: pasteboard.name.rawValue, from: clipboardCount, to: pasteboard.changeCount) else { return "clipboard_changed" }
+                clipboardCount = pasteboard.changeCount
+            }
+            if pasteboardHoldsConcealedContent(pasteboard) { onConcealedClipboardSkipped?(); return "concealed_clipboard_skipped" }
+            if accessibilityTrusted(), readRole(pid) == "AXSecureTextField" { onSecureFieldSkipped?(); return "secure_field_skipped" }
+            return nil
+        }
+        if let why = validate() { return refusal(why) }
+        let modifierDeadline = min(deadline, .now + .milliseconds(2500))
+        while modifierKeysDown() {
+            if let why = validate() { return refusal(why) }
+            if ContinuousClock.now >= modifierDeadline { return refusal("modifiers_stuck") }
+            do { try await Task.sleep(for: .milliseconds(20)) } catch { return refusal("input_cancelled") }
+        }
+        do { try await Task.sleep(for: .milliseconds(120)) } catch { return refusal("input_cancelled") }
+        if let why = validate() { return refusal(why) }
+        let trusted = accessibilityTrusted()
+        if trusted, readEditable(pid) == false { return refusal("no_editable_focus") }
+        var insert = text
+        if smartFieldFormatEnabled, trusted,
+           ["AXSearchField", "AXComboBox"].contains(readRole(pid) ?? "") {
+            insert = textForSearchField(clean ?? "")
+        }
+        if deleteCount > 0 {
+            // Checked budget выше гарантирует, что count*30 представимо.
+            if ContinuousClock.now.duration(to: deadline) < .milliseconds(Int64(deleteCount) * 30 + (insert == nil ? 0 : 150)) {
+                return refusal("input_insufficient_budget")
+            }
+        }
+        if !trusted {
+            // Один bounded канал. После старта AppleEvent любой неуспех консервативно unknown.
+            if let insert {
+                let beforeWrite = pasteboard.changeCount
+                pasteboard.clearContents()
+                guard pasteboard.setString(insert, forType: .string) else { return refusal("clipboard_write_failed") }
+                clipboardCount = pasteboard.changeCount
+                inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: beforeWrite, after: clipboardCount)
+            }
+            if let why = validate() { return refusal(why) }
+            let command = "tell application \"System Events\"\nset p to first application process whose unix id is \(pid)\nif frontmost of p is false then error \"target_changed\"\ntell p\n" +
+                (deleteCount > 0 ? "repeat \(deleteCount) times\nkey code 51\nend repeat\n" : "") +
+                (insert != nil ? "keystroke \"v\" using command down\n" : "") + "end tell\nend tell"
+            let runner = self.runner
+            let result = await Task.detached { runner.run(script: command, deadline: deadline) }.value
+            switch result {
+            case .success:
+                // Script подтвердил отправку команд, но за время await мог смениться
+                // target/clipboard. Это unknown результата, а не право на повтор ввода.
+                if let why = validate() { return refusal(why, pairs: deleteCount, effect: .unknown) }
+                if let insert { recordLastPaste(insert.trimmingCharacters(in: .whitespacesAndNewlines)) }
+                return PasteAttemptResult(ok: true, reason: "ok_via_osascript", backspacePairs: deleteCount)
+            case .failure(let why, let cleanup):
+                if !cleanup { inputQueue.quarantine() }
+                return refusal("automation_" + why.rawValue, effect: .unknown)
+            }
+        }
+        var pairs = 0
+        for _ in 0..<deleteCount {
+            if let why = validate() { return refusal(why, pairs: pairs) }
+            guard let events = keyEventFactory(pid, Keycode.delete.rawValue, []) else { return refusal("event_post_failed", pairs: pairs) }
+            events.down()
+            // Ошибка sleep/cancellation не может пропустить обязательный key-up.
+            try? await Task.sleep(for: .milliseconds(15))
+            events.up(); pairs += 1
+            try? await Task.sleep(for: .milliseconds(15))
+        }
+        if let why = validate() { return refusal(why, pairs: pairs) }
+        if let insert {
+            guard let events = keyEventFactory(pid, Keycode.v.rawValue, .maskCommand) else { return refusal("event_post_failed", pairs: pairs) }
+            let beforeWrite = pasteboard.changeCount
+            pasteboard.clearContents()
+            guard pasteboard.setString(insert, forType: .string) else { return refusal("clipboard_write_failed", pairs: pairs) }
+            clipboardCount = pasteboard.changeCount
+            inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: beforeWrite, after: clipboardCount)
+            if let why = validate() { return refusal(why, pairs: pairs) }
+            events.down()
+            try? await Task.sleep(for: .milliseconds(30))
+            events.up()
+            // Пара отправлена: отмена caller больше не доказывает отсутствие input.
+            if validate() == nil && readEditable(pid) == true {
+                if let collapseSelection { collapseSelection(pid) } else { collapseSelectionIfNeeded(pid: pid) }
+            }
+            recordLastPaste(insert.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return PasteAttemptResult(ok: true, reason: "ok", backspacePairs: pairs)
+    }
+    static func systemKeyEvents(pid: pid_t, key: CGKeyCode, flags: CGEventFlags) -> PasteKeyEventPair? {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: false) else { return nil }
+        down.flags = flags; up.flags = flags
+        return PasteKeyEventPair(down: { down.postToPid(pid) }, up: { up.postToPid(pid) })
+    }
+    private func readRole(_ pid: pid_t) -> String? {
+        if let focusRole { return focusRole(pid) }
+        return focusedElementRole(pid: pid)
+    }
+    private func readEditable(_ pid: pid_t) -> Bool? {
+        if let focusEditable { return focusEditable(pid) }
+        let state = inspectFocusedElementState(pid: pid)
+        return state == .unknown ? nil : state != .nonEditable
+    }
+    private enum FocusState { case editable, nonEditable, unknown }
     private func focusedElementRole(pid: pid_t) -> String? {
         let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
         var focusedRef: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(
             appElement,
@@ -89,387 +300,9 @@ final class PasteService {
         }
         return result
     }
-    // macOS virtual key codes for modifier keys
-    private let rightOptionKeyCode: CGKeyCode = Keycode.rightOption.rawValue
-    private let leftOptionKeyCode: CGKeyCode = Keycode.leftOption.rawValue
-    private let leftCommandKeyCode: CGKeyCode = Keycode.leftCommand.rawValue
-    private let rightCommandKeyCode: CGKeyCode = Keycode.rightCommand.rawValue
-    /// Max time to wait for modifier keys release before giving up on paste (ms)
-    private let modifierReleaseTimeoutMs = 2_500
-    /// Delay after modifier release before pasting, lets the OS finish key-up processing (µs)
-    private let prePasteDelayUs: useconds_t = 120_000
-    /// Delay between Cmd+V key-down and key-up events (µs)
-    private let cmdVKeypressDelayUs: useconds_t = 30_000
-    private let backspaceKeyCode: CGKeyCode = Keycode.delete.rawValue
-    /// Delay between individual Backspace key-down/key-up pairs when deleting a run (µs)
-    private let backspaceKeypressDelayUs: useconds_t = 15_000
-    private let logger = AgentLogger.shared
-    /// Throttle для Accessibility prompt'ов: показываем dialog не чаще чем раз
-    /// в 10 минут per app launch. Без этого каждый paste при missing AX = новый
-    /// блокирующий dialog (ad-hoc codesigned apps теряют TCC permission после
-    /// каждого rebuild из-за смены cdhash). Текст остаётся в clipboard —
-    /// пользователь может вставить вручную Cmd+V.
-    private var lastAXPromptAt: Date?
-    private let axPromptCooldownSec: TimeInterval = 600
-
-    // MARK: - Quick replay (Cmd+Option+V)
-
-    private let lastPastedTextKey = "KrabEar_LastPastedText"
-    /// Кулдаун между повторными вставками, предотвращает случайный дубль.
-    let repasteCooldownSec: TimeInterval = 1.0
-    private var lastPastedAt: Date?
-
-    /// Последний успешно вставленный текст. Читается из/записывается в UserDefaults.
-    var lastPastedText: String? {
-        get { defaults.string(forKey: lastPastedTextKey) }
-        set { defaults.set(newValue, forKey: lastPastedTextKey) }
-    }
-
-    /// Запоминает успешно вставленный текст для возможного быстрого повтора.
-    func recordLastPaste(_ text: String) {
-        lastPastedText = text
-        lastPastedAt = Date()
-    }
-
-    /// Повторяет последнюю вставку через `pasteToFrontmostApp`.
-    /// Возвращает PasteAttemptResult с reason "no_last_paste" или "repaste_too_soon"
-    /// при неудовлетворённых предусловиях.
-    func repastLast() -> PasteAttemptResult {
-        guard let text = lastPastedText, !text.isEmpty else {
-            return PasteAttemptResult(ok: false, reason: "no_last_paste")
-        }
-        if let lastAt = lastPastedAt,
-           Date().timeIntervalSince(lastAt) < repasteCooldownSec {
-            return PasteAttemptResult(ok: false, reason: "repaste_too_soon")
-        }
-        if let repastePerformer {
-            return repastePerformer(text)
-        }
-        return pasteToFrontmostApp(text)
-    }
-
-    private enum FocusState {
-        case editable
-        case nonEditable
-        case unknown
-    }
-
-    /// - Returns: true если буфер реально записан, false если пропущен из-за
-    ///   защищённого содержимого (S34) — вызывающая сторона ОБЯЗАНА проверять
-    ///   результат, если дальнейшая логика зависит от факта записи (напр.
-    ///   `pasteToFrontmostApp` не должен слать синтетический Cmd+V поверх СТАРОГО
-    ///   содержимого буфера, если новая запись была пропущена — Fable-ревью F1).
-    @discardableResult
-    func putToClipboard(_ text: String) -> Bool {
-        guard !pasteboardHoldsConcealedContent(pasteboard) else {
-            logger.warn("[Clipboard] Overwrite skipped — pasteboard holds concealed content")
-            onConcealedClipboardSkipped?()
-            return false
-        }
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-        return true
-    }
-
-    /// Явное пользовательское действие «Копировать» (кнопка/пункт меню) — пишет
-    /// БЕЗУСЛОВНО, минуя concealed-guard. Пользователь сам инициирует затирание
-    /// осознанно (спека S34 §2.4) — держать этот путь заблокированным было бы
-    /// хуже, чем не иметь guard'а вовсе, тем более что ~10 других explicit-copy
-    /// мест в проекте пишут в NSPasteboard напрямую мимо putToClipboard и этим
-    /// guard'ом не защищены вообще (Fable-ревью F3 — оставлять их непоследовательными
-    /// было бы хуже, чем дать всем explicit-copy местам единый предсказуемый bypass).
-    func putToClipboardUserInitiated(_ text: String) {
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
-    }
-
-    /// S34: org.nspasteboard.ConcealedType — де-факто стандарт (nspasteboard.org),
-    /// менеджеры паролей (1Password, Bitwarden, Keychain Access и др.) помечают
-    /// этим типом чувствительный контент рядом с .string, чтобы clipboard-утилиты
-    /// его не логировали/не затирали.
-    private func pasteboardHoldsConcealedContent(_ pasteboard: NSPasteboard) -> Bool {
-        pasteboard.types?.contains(NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType")) ?? false
-    }
-
-    func pasteToFrontmostApp(_ text: String, targetPID: pid_t? = nil) -> PasteAttemptResult {
-        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanText.isEmpty else {
-            return PasteAttemptResult(ok: false, reason: "empty_text")
-        }
-
-        // MARK: Smart field-aware paste gate
-        // Выполняется ТОЛЬКО при smartFieldFormatEnabled == true и при наличии AX доступа.
-        // Определяет роль сфокусированного поля и применяет соответствующий форматинг:
-        //   AXSecureTextField → пропускаем вставку полностью (пароль)
-        //   AXSearchField, AXComboBox → убираем хвостовую пунктуацию
-        //   всё остальное → текст не меняем
-        var textToInsert = text  // может быть переопределён для AXSearchField/AXComboBox
-        if smartFieldFormatEnabled, isAccessibilityTrusted() {
-            // Приоритет PID: явный targetPID → frontmost app.
-            let axPID: pid_t?
-            if let tpid = targetPID {
-                axPID = tpid
-            } else if let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                      frontmostPID != ProcessInfo.processInfo.processIdentifier {
-                axPID = frontmostPID
-            } else {
-                axPID = nil
-            }
-
-            if let pid = axPID, let role = focusedElementRole(pid: pid) {
-                switch role {
-                case "AXSecureTextField":
-                    // Никогда не вставляем в защищённое поле (пароль).
-                    logger.warn("[SmartPaste] Secure field (pid=\(pid)) — paste skipped")
-                    onSecureFieldSkipped?()
-                    return PasteAttemptResult(ok: false, reason: "secure_field_skipped")
-                case "AXSearchField", "AXComboBox":
-                    // Поисковые/комбо поля: убираем хвостовую пунктуацию.
-                    textToInsert = textForSearchField(cleanText)
-                    logger.info("[SmartPaste] Search/combo field (pid=\(pid), role=\(role)) — stripped trailing punct")
-                default:
-                    break
-                }
-            }
-        }
-
-        // S34 / Fable-ревью F1: если запись пропущена (буфер защищён), НЕ синтезируем
-        // Cmd+V — иначе в frontmost app вставится СТАРОЕ содержимое буфера (пароль)
-        // открытым текстом вместо просто «текст не скопирован». Прерываем ДО любых
-        // key events, до проверки модификаторов и до резолва целевого PID.
-        guard putToClipboard(textToInsert) else {
-            return PasteAttemptResult(ok: false, reason: "concealed_clipboard_skipped")
-        }
-        let axTrusted = isAccessibilityTrusted()
-
-        guard waitForModifierRelease(timeoutMs: modifierReleaseTimeoutMs) else {
-            logger.warn("Автовставка отменена: модификаторы не отпущены в таймаут")
-            return PasteAttemptResult(ok: false, reason: "modifiers_stuck")
-        }
-        usleep(prePasteDelayUs)
-
-        let resolvedPID: pid_t
-        if let targetPID {
-            resolvedPID = targetPID
-        } else if let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                  frontmostPID != ProcessInfo.processInfo.processIdentifier {
-            resolvedPID = frontmostPID
-        } else {
-            return PasteAttemptResult(ok: false, reason: "no_external_target")
-        }
-
-        let focusState = axTrusted ? inspectFocusedElementState(pid: resolvedPID) : .unknown
-        if focusState == .nonEditable {
-            logger.warn("Автовставка: фокус не на текстовом элементе (pid=\(resolvedPID))")
-            return PasteAttemptResult(ok: false, reason: "no_editable_focus")
-        }
-
-        // Ключевой принцип: одна попытка вставки = один канал ввода.
-        // Иначе часть приложений вставляет текст дубликатами (2-3 раза).
-        let inserted: Bool
-        let resultReason: String
-        if axTrusted {
-            inserted = postCommandVToPid(resolvedPID)
-            resultReason = inserted ? "ok" : "event_post_failed"
-        } else {
-            inserted = runAppleScriptPaste() || runExternalOsaScriptPaste()
-            if inserted {
-                logger.info("Автовставка выполнена через osascript fallback (AX=false)")
-                resultReason = "ok_via_osascript"
-            } else {
-                requestAccessibilityPromptIfNeeded()
-                logger.warn("Автовставка недоступна: AX=false и fallback osascript не сработал")
-                resultReason = "accessibility_not_granted"
-            }
-        }
-
-        guard inserted else {
-            return PasteAttemptResult(ok: false, reason: resultReason)
-        }
-
-        // Иногда после вставки UI оставляет выделение текста.
-        // Пытаемся аккуратно свернуть выделение в каретку в конце выделенного блока.
-        if axTrusted {
-            collapseSelectionIfNeeded(pid: resolvedPID)
-        }
-
-        // Запоминаем вставленный текст для быстрого повтора (Cmd+Option+V).
-        // Используем textToInsert (может отличаться от text после smartField trim).
-        let effectiveText = textToInsert.trimmingCharacters(in: .whitespacesAndNewlines)
-        recordLastPaste(effectiveText.isEmpty ? cleanText : effectiveText)
-
-        // Если фокус определить не удалось, считаем попытку условно успешной:
-        // в этом случае UI покажет статус ok, но в логе останется подробная диагностика.
-        if focusState == .unknown {
-            logger.info("Автовставка выполнена без AX-подтверждения фокуса (pid=\(resolvedPID))")
-            return PasteAttemptResult(ok: true, reason: resultReason)
-        }
-
-        return PasteAttemptResult(ok: true, reason: resultReason)
-    }
-
-    // MARK: - Streaming paste revision (delete-back)
-
-    /// Удаляет `count` символов ПЕРЕД курсором в целевом приложении через симулированные
-    /// Backspace-нажатия. В отличие от `pasteToFrontmostApp` НЕ трогает буфер обмена.
-    /// Используется `StreamingPasteController` для отката ранее вставленного текста,
-    /// когда backend "ревизует" уже вставленный partial (переосмысление сказанного).
-    func deleteBackward(count: Int, targetPID: pid_t? = nil) -> PasteAttemptResult {
-        guard count > 0 else {
-            return PasteAttemptResult(ok: false, reason: "empty_count")
-        }
-
-        let axTrusted = isAccessibilityTrusted()
-
-        guard waitForModifierRelease(timeoutMs: modifierReleaseTimeoutMs) else {
-            logger.warn("Откат вставки отменён: модификаторы не отпущены в таймаут")
-            return PasteAttemptResult(ok: false, reason: "modifiers_stuck")
-        }
-        usleep(prePasteDelayUs)
-
-        let resolvedPID: pid_t
-        if let targetPID {
-            resolvedPID = targetPID
-        } else if let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                  frontmostPID != ProcessInfo.processInfo.processIdentifier {
-            resolvedPID = frontmostPID
-        } else {
-            return PasteAttemptResult(ok: false, reason: "no_external_target")
-        }
-
-        let removed: Bool
-        let resultReason: String
-        if axTrusted {
-            removed = postBackspacesToPid(resolvedPID, count: count)
-            resultReason = removed ? "ok" : "event_post_failed"
-        } else {
-            removed = runAppleScriptBackspace(count: count)
-            if removed {
-                logger.info("Откат вставки выполнен через osascript fallback (AX=false)")
-                resultReason = "ok_via_osascript"
-            } else {
-                requestAccessibilityPromptIfNeeded()
-                logger.warn("Откат вставки недоступен: AX=false и fallback osascript не сработал")
-                resultReason = "accessibility_not_granted"
-            }
-        }
-
-        guard removed else {
-            return PasteAttemptResult(ok: false, reason: resultReason)
-        }
-        return PasteAttemptResult(ok: true, reason: resultReason)
-    }
-
-    private func postBackspacesToPid(_ targetPID: pid_t, count: Int) -> Bool {
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
-        for _ in 0..<count {
-            guard
-                let keyDown = CGEvent(keyboardEventSource: source, virtualKey: backspaceKeyCode, keyDown: true),
-                let keyUp = CGEvent(keyboardEventSource: source, virtualKey: backspaceKeyCode, keyDown: false)
-            else {
-                return false
-            }
-            keyDown.postToPid(targetPID)
-            usleep(backspaceKeypressDelayUs)
-            keyUp.postToPid(targetPID)
-            usleep(backspaceKeypressDelayUs)
-        }
-        return true
-    }
-
-    private func runAppleScriptBackspace(count: Int) -> Bool {
-        let scriptSource = """
-        tell application "System Events"
-            repeat \(count) times
-                key code 51
-            end repeat
-        end tell
-        """
-        guard let script = NSAppleScript(source: scriptSource) else {
-            return false
-        }
-
-        var errorDict: NSDictionary?
-        _ = script.executeAndReturnError(&errorDict)
-        if let errorDict {
-            logger.warn("AppleScript fallback отката вернул ошибку: \(errorDict)")
-            return false
-        }
-        return true
-    }
-
-    private func postCommandVToPid(_ targetPID: pid_t) -> Bool {
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
-        guard let (keyDown, keyUp) = makeCommandVEvents(source: source) else { return false }
-        keyDown.postToPid(targetPID)
-        usleep(cmdVKeypressDelayUs)
-        keyUp.postToPid(targetPID)
-        return true
-    }
-
-    private func makeCommandVEvents(source: CGEventSource) -> (CGEvent, CGEvent)? {
-        let vKeyCode = Keycode.v.rawValue
-        guard
-            let keyDown = CGEvent(
-                keyboardEventSource: source,
-                virtualKey: vKeyCode,
-                keyDown: true
-            ),
-            let keyUp = CGEvent(
-                keyboardEventSource: source,
-                virtualKey: vKeyCode,
-                keyDown: false
-            )
-        else {
-            return nil
-        }
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-        return (keyDown, keyUp)
-    }
-
-    private func runAppleScriptPaste() -> Bool {
-        let scriptSource = "tell application \"System Events\" to keystroke \"v\" using command down"
-        guard let script = NSAppleScript(source: scriptSource) else {
-            return false
-        }
-
-        var errorDict: NSDictionary?
-        _ = script.executeAndReturnError(&errorDict)
-        if let errorDict {
-            logger.warn("AppleScript fallback вставки вернул ошибку: \(errorDict)")
-            return false
-        }
-        return true
-    }
-
-    private func runExternalOsaScriptPaste() -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", "tell application \"System Events\" to keystroke \"v\" using command down"]
-
-        let stderrPipe = Pipe()
-        process.standardError = stderrPipe
-
-        do {
-            try process.run()
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                return true
-            }
-            let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            if let errText = String(data: errData, encoding: .utf8), !errText.isEmpty {
-                logger.warn("osascript fallback завершился с ошибкой: \(errText.trimmingCharacters(in: .whitespacesAndNewlines))")
-            }
-            return false
-        } catch {
-            logger.warn("Не удалось запустить osascript fallback: \(error.localizedDescription)")
-            return false
-        }
-    }
-
     private func inspectFocusedElementState(pid: pid_t) -> FocusState {
         let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
         var focusedRef: CFTypeRef?
         let focusedStatus = AXUIElementCopyAttributeValue(
             appElement,
@@ -514,12 +347,9 @@ final class PasteService {
         return editableRoles.contains(role) ? .editable : .nonEditable
     }
 
-    private func isAccessibilityTrusted() -> Bool {
-        AXIsProcessTrusted()
-    }
-
     private func collapseSelectionIfNeeded(pid: pid_t) {
         let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
         var focusedRef: CFTypeRef?
         let focusedStatus = AXUIElementCopyAttributeValue(
             appElement,
@@ -563,35 +393,5 @@ final class PasteService {
         }
     }
 
-    private func requestAccessibilityPromptIfNeeded() {
-        // Throttle: не чаще раз в 10 минут per app session.
-        // Иначе каждый paste при missing AX = новый blocking dialog,
-        // что критично для ad-hoc signed apps (cdhash меняется каждый rebuild).
-        if let lastPrompt = lastAXPromptAt,
-           Date().timeIntervalSince(lastPrompt) < axPromptCooldownSec {
-            logger.info("Accessibility prompt пропущен (cooldown \(Int(axPromptCooldownSec))s)")
-            return
-        }
-        let promptKey = "AXTrustedCheckOptionPrompt"
-        let options = [promptKey: true] as CFDictionary
-        _ = AXIsProcessTrustedWithOptions(options)
-        lastAXPromptAt = Date()
-    }
 
-    private func waitForModifierRelease(timeoutMs: Int) -> Bool {
-        let stepUs: useconds_t = 20_000
-        var waitedMs = 0
-        while waitedMs < timeoutMs {
-            let rightOptionDown = CGEventSource.keyState(.combinedSessionState, key: rightOptionKeyCode)
-            let leftOptionDown = CGEventSource.keyState(.combinedSessionState, key: leftOptionKeyCode)
-            let leftCommandDown = CGEventSource.keyState(.combinedSessionState, key: leftCommandKeyCode)
-            let rightCommandDown = CGEventSource.keyState(.combinedSessionState, key: rightCommandKeyCode)
-            if !rightOptionDown && !leftOptionDown && !leftCommandDown && !rightCommandDown {
-                return true
-            }
-            usleep(stepUs)
-            waitedMs += 20
-        }
-        return false
-    }
 }

@@ -82,6 +82,7 @@ extension HistoryPanelController {
         let selected = tableView.selectedRow
         guard selected >= 0, selected < items.count else { return }
         let text = items[selected].text
+        InputAutomationQueue.shared.invalidatePending()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
@@ -97,6 +98,7 @@ extension HistoryPanelController {
         guard selected >= 0, selected < items.count else { return }
         let item = items[selected]
         let text = item.sourceText.isEmpty ? item.text : item.sourceText
+        InputAutomationQueue.shared.invalidatePending()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
@@ -110,6 +112,7 @@ extension HistoryPanelController {
             showInfoAlert(title: "Копирование перевода", body: "Для этой записи перевод отсутствует.")
             return
         }
+        InputAutomationQueue.shared.invalidatePending()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
@@ -425,6 +428,7 @@ extension HistoryPanelController {
             \(bulletText)
             """
             DispatchQueue.main.async {
+                InputAutomationQueue.shared.invalidatePending()
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
                 self?.showInfoAlert(title: "Summary", body: "\(text)\n\n(Скопировано в буфер)")

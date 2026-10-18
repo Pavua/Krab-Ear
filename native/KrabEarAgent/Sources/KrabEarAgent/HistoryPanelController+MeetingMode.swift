@@ -244,6 +244,7 @@ final class MeetingReportViewController: NSViewController {
 
     @objc private func onCopyMarkdown() {
         let pb = NSPasteboard.general
+        InputAutomationQueue.shared.invalidatePending()
         pb.clearContents()
         pb.setString(markdown, forType: .string)
         BackendToast.shared.show("Скопировано")

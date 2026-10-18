@@ -799,6 +799,7 @@ final class RecordingChainDetailViewController: NSViewController {
                         BackendToast.shared.show("Недоступно в режиме приватности или текст пуст", duration: 3.5)
                     } else {
                         let pb = NSPasteboard.general
+                        InputAutomationQueue.shared.invalidatePending()
                         pb.clearContents()
                         pb.setString(text, forType: .string)
                         BackendToast.shared.show("Объединённый текст скопирован", duration: 2.5)

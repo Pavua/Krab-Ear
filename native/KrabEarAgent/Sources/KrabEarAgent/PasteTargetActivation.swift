@@ -37,12 +37,12 @@ final class PasteTargetActivator {
     }
 
     /// Владение сохраняется и на время paste: другая собственная активация не
-    /// вклинивается между подтверждением foreground и синхронным вызовом сервиса.
-    func perform(target: PasteActivationTarget, paste: (pid_t) -> PasteAttemptResult) async -> PasteAttemptResult {
+    /// вклинивается между подтверждением foreground и async вызовом сервиса.
+    func perform(target: PasteActivationTarget, deadline suppliedDeadline: ContinuousClock.Instant? = nil, paste: (pid_t) async -> PasteAttemptResult) async -> PasteAttemptResult {
         guard !inFlight else { return PasteAttemptResult(ok: false, reason: "target_activation_busy") }
         inFlight = true
         defer { inFlight = false }
-        let deadline = ContinuousClock.now + budget
+        let deadline = min(ContinuousClock.now + budget, suppliedDeadline ?? .now + budget)
         func refusal() -> PasteAttemptResult? {
             if Task.isCancelled { return PasteAttemptResult(ok: false, reason: "target_activation_cancelled") }
             if !target.isAlive() { return PasteAttemptResult(ok: false, reason: "target_activation_terminated") }
@@ -64,6 +64,6 @@ final class PasteTargetActivator {
             }
         }
         if let failure = refusal() { return failure }
-        return paste(target.pid)
+        return await paste(target.pid)
     }
 }

@@ -261,16 +261,14 @@ jobs:
         run: |
           swift build -c release --package-path native/KrabEarAgent
 
-      # Контракт-тесты проводки (WiringTests / SourceContract): 139 тестов, ~1 с
-      # прогона. Ловят класс «написано, но не подключено» — setupErrorBus и
-      # setupHealthMonitor месяцами были мёртвыми при 100% зелёных тестах, потому
-      # что Swift-тесты в CI не гонялись вовсе. Полный набор (1658) намеренно
-      # не здесь: под нагрузкой раннера флейкает — его место в nightly.
+      # Контракты проводки и bounded input: реальные service/controller/delegate
+      # с подменой OS leaves, очередь, cancellation, truthful partial/unknown.
+      # Полный Swift suite остаётся в nightly.
       - name: Swift wiring / source-contract tests
         run: |
           cd native/KrabEarAgent
           swift build --build-tests
-          swift test --skip-build --filter "WiringTests|SourceContract|PlaintextExportCoordinatorTests|HistoryMigrationObservationCoordinatorTests|HistoryEncryptionOutcomesTests|SecuritySettingsWiringContractTests|EncryptionToggleUnknownStateTests"
+          swift test --skip-build --filter "WiringTests|SourceContract|PlaintextExportCoordinatorTests|HistoryMigrationObservationCoordinatorTests|HistoryEncryptionOutcomesTests|SecuritySettingsWiringContractTests|EncryptionToggleUnknownStateTests|PasteService.*Tests|PasteFailureNotificationTests|InputAutomationIntegrationTests|SelectionInputQueueTests|StreamingPasteControllerTests"
 
   public-runner-isolation-guard:
     name: Public runner isolation guard

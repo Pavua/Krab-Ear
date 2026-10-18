@@ -469,6 +469,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
     private func copyToClipboard(_ text: String) {
         guard !text.isEmpty else { return }
+        InputAutomationQueue.shared.invalidatePending()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
         BackendToast.shared.show("Скопировано")
