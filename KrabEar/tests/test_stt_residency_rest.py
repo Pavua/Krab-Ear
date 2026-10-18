@@ -25,7 +25,8 @@ def rest(monkeypatch, tmp_path):
          patch("core.config._SETTINGS_JSON_FILE", tmp_path / "absent.json"):
         rs = importlib.import_module("backend.rest_server")
     engine = AudioEngine.__new__(AudioEngine)
-    engine.quality_profile = "balanced"; engine.current_model = "mlx-community/whisper-large-v3-turbo"
+    engine.quality_profile = "balanced"
+    engine.current_model = "mlx-community/whisper-large-v3-turbo"
     engine._router = STTRouter(SimpleNamespace(STT_GIGAAM_ENABLED=False))
     engine._router.get_gigaam_adapter = Mock(side_effect=AssertionError("lazy GigaAM lookup"))
     import core.mlx_whisper_session as whisper

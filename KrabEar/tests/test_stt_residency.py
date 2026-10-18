@@ -218,7 +218,8 @@ def test_contended_owner_snapshot_returns_busy_without_waiting_for_work(monkeypa
     values = []
     def hold():
         with lock:
-            entered.set(); assert release.wait(3)
+            entered.set()
+            assert release.wait(3)
     def observe():
         try:
             values.append(snapshot(engine))
@@ -232,7 +233,8 @@ def test_contended_owner_snapshot_returns_busy_without_waiting_for_work(monkeypa
         observer_thread.start()
         assert observed.wait(1), "Диагностика ждёт завершения inference/owner lock"
     finally:
-        release.set(); owner_thread.join(2)
+        release.set()
+        owner_thread.join(2)
         if observer_thread.ident is not None:
             observer_thread.join(2)
     assert not owner_thread.is_alive() and not observer_thread.is_alive()
@@ -288,7 +290,8 @@ def test_cached_mlx_owner_snapshot_is_busy_without_waiting_for_lock(monkeypatch,
     values = []
     def hold():
         with lock:
-            entered.set(); assert release.wait(3)
+            entered.set()
+            assert release.wait(3)
     def observe():
         try:
             values.append(service.handle_get_stt_residency({})["gigaam"])
@@ -302,7 +305,8 @@ def test_cached_mlx_owner_snapshot_is_busy_without_waiting_for_lock(monkeypatch,
         observer_thread.start()
         assert observed.wait(1), "MLX residency ждёт работу owner"
     finally:
-        release.set(); owner_thread.join(2)
+        release.set()
+        owner_thread.join(2)
         if observer_thread.ident is not None:
             observer_thread.join(2)
     assert not owner_thread.is_alive() and not observer_thread.is_alive()
