@@ -169,7 +169,10 @@ extension AgentAppDelegate {
             markPasteStatus(historyId: historyId, status: streamingOutcome.effect == .completed ? "ok" : "failed")
             historyPanel?.onHistoryDidUpdate()
             if streamingOutcome.effect != .completed {
-                notify(title: "Krab Ear", body: "Потоковая вставка завершилась частично или с неизвестным результатом. Текст сохранён в истории.")
+                let message = streamingOutcome.effect == .noEffects
+                    ? "Потоковая вставка не выполнена. Текст сохранён в истории."
+                    : "Потоковая вставка завершилась частично или с неизвестным результатом. Текст сохранён в истории."
+                notify(title: "Krab Ear", body: message)
             }
             return
         }

@@ -150,9 +150,11 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
             XCTAssertEqual(f.collapses, 0, drift); XCTAssertNil(service.lastPastedText, drift)
             let before = f.events, clipboard = f.board.string(forType: .string)
             _ = NSApplication.shared
+            let notifications = InputNotificationSpy()
             let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
-                userDefaults: f.defaults, notificationService: NotificationService(processRunner: NoInputNotifications()), pasteService: service)
+                userDefaults: f.defaults, notificationService: NotificationService(processRunner: notifications), pasteService: service)
             delegate.performAutoPaste(text: "full fallback", historyId: nil, target: nil, streamingOutcome: result)
+            XCTAssertTrue(notifications.scripts.contains { $0.contains("частично или с неизвестным результатом") })
             XCTAssertEqual(f.events, before, drift); XCTAssertEqual(f.board.string(forType: .string), clipboard, drift)
         }
     }
@@ -496,9 +498,11 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
         XCTAssertEqual(final.effect, .partial); XCTAssertEqual(final.backspacePairs, 2)
         let before = f.events
         _ = NSApplication.shared
+        let notifications = InputNotificationSpy()
         let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
-            userDefaults: f.defaults, notificationService: NotificationService(processRunner: NoInputNotifications()), pasteService: service)
+            userDefaults: f.defaults, notificationService: NotificationService(processRunner: notifications), pasteService: service)
         delegate.performAutoPaste(text: "different", historyId: nil, target: nil, streamingOutcome: final)
+        XCTAssertTrue(notifications.scripts.contains { $0.contains("частично или с неизвестным результатом") })
         XCTAssertEqual(f.events, before)
         XCTAssertEqual(f.board.string(forType: .string), "hello ")
         let repeated = await controller.handleFinal("different")
@@ -537,6 +541,11 @@ private struct NoInputNotifications: NotificationProcessRunning {
     func run(executableURL: URL, arguments: [String]) throws {}
 }
 
+private final class InputNotificationSpy: NotificationProcessRunning, @unchecked Sendable {
+    var scripts: [String] = []
+    func run(executableURL: URL, arguments: [String]) throws { scripts.append(arguments.last ?? "") }
+}
+
 @MainActor private final class CapturedQuickEdit: QuickEditPresenting {
     var completions: [(QuickEditResult) -> Void] = []
     func show(text: String, timeoutSec: Double, onAddToVocabulary: ((String) -> Void)?,
@@ -551,9 +560,10 @@ private struct NoInputNotifications: NotificationProcessRunning {
     func testFinalPublicEntryAfterUserCopyDoesNotFallbackWithFreshSnapshot() async {
         let f = InputFixture(); defer { f.close() }; _ = NSApplication.shared
         let service = f.service(), controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: f.service()))
+        let notifications = InputNotificationSpy()
         var statuses: [String] = []
         let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
-            userDefaults: f.defaults, notificationService: NotificationService(processRunner: NoInputNotifications()),
+            userDefaults: f.defaults, notificationService: NotificationService(processRunner: notifications),
             pasteService: service, pasteTargetActivator: PasteTargetActivator(frontmostPID: { 101 }),
             pasteActivationTarget: { _ in PasteActivationTarget(pid: 101, isAlive: { true }, requestActivation: { false }) },
             pasteFrontmostApplication: { nil }, pasteStatusUpdater: { _, status in statuses.append(status) }, playPasteCompletionSound: {})
@@ -567,6 +577,8 @@ private struct NoInputNotifications: NotificationProcessRunning {
         while statuses.isEmpty && ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(statuses, ["failed"]); XCTAssertTrue(f.events.isEmpty)
         XCTAssertEqual(f.board.string(forType: .string), "new user copy")
+        XCTAssertTrue(notifications.scripts.contains { $0.contains("Потоковая вставка не выполнена. Текст сохранён в истории.") })
+        XCTAssertFalse(notifications.scripts.contains { $0.contains("частично или с неизвестным результатом") })
     }
     func testDisabledStreamingLeavesOneOrdinaryPaste() async {
         await verifyFinalWiring(enabled: false)

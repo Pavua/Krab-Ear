@@ -241,3 +241,12 @@ clipboard. После deadline/quarantine restore не выполняется. N
 Свежий fetch после проверок подтвердил базу19124f51. Этот source cut передаётся
 root для нового Astra Ultra whole-diff gate; hosted exact-SHA CI, push, native
 acceptance и lifecycle остаются за пределами данного локального receipt.
+
+## Re-review: terminal noEffects notification
+
+Actual public final→explicit copy test теперь наблюдает notification OS leaf:
+causal RED1/2 assertions, GREEN9/9 с P3 manualcopy4 и real partial/unknown
+controls (`terminal-notification-red.log`, `terminal-notification-green.log`).
+Terminal noEffects сообщает «вставка не выполнена», без ложного partial/unknown
+и без обещания clipboard. Только message branch; full release не повторялся.
+Следующий подтверждённый P2: sync acceptance public auto/snapshot/replay до Task.
