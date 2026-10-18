@@ -294,3 +294,23 @@ scanner exit0/мёртвых0 (`acceptance-final-dead-swift.log`), release `-j 1
 разрешением fresh fallback. Native physical delivery, полное отсутствие AppKit hangs,
 exact-head hosted CI и runtime acceptance здесь не квалифицированы. Root организует
 закрывающий Astra Ultra whole-diff gate; push/lifecycle не выполнялись.
+
+
+## CI: синхронизация runner-success deadline test
+
+Exact be55c0f2 push/PR CI воспроизвели 1/306 failure: runner не стартовал.
+В deadline-фазе тест выделял350ms на весь paste, включая settle120ms до runner;
+под scheduler delay сервис вправе отказать noEffects до запуска канала. Revision
+фазы используют отдельный checked4.07s budget. Это ошибка предпосылки теста,
+production guard/budget не менялись. Fake modifier leaf с задержкой400ms дал
+локальный causal RED1/1 (`runner-ci-synchronization-red.log`,1.938s).
+
+Тест использует обычный5s budget, cooperative bounded ack runner (6s) вместо
+spin-yield, диагностирует drift/reason/effect при отсутствии ack. Deadline-phase
+после ack ждёт именно immutable deadline, полученный runner.run, и лишь затем
+разрешает success. Captured deadline защищён lock. Fake400ms задержка сохранена;
+unknown/okfalse/exactpairs/no secondchannel/no replay assertions неизменны.
+Focused GREEN1/1 + два обоснованных повтора:5.620/5.514/5.528s; затем exact hosted
+**306/306 PASS42.148s** (`runner-ci-final-hosted.log`). Production sources не менялись,
+повтор release/audit/backend не требовался по ruling root. Остальные CI не отменялись;
+новый exact-SHA CI и scoped Astra test-diff gate организует root. Push не выполнялся.

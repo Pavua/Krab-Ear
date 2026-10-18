@@ -6,8 +6,14 @@ import XCTest
 private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable {
     let entered = DispatchSemaphore(value: 0), finish = DispatchSemaphore(value: 0)
     var cleanup = false, calls = 0, succeeds = false
+    private let deadlineLock = NSLock()
+    private var capturedDeadline: ContinuousClock.Instant?
+    func deadlineOnEntry() -> ContinuousClock.Instant? {
+        deadlineLock.lock(); defer { deadlineLock.unlock() }; return capturedDeadline
+    }
     func hasEntered() -> Bool { entered.wait(timeout: .now()) == .success }
     func run(script: String, deadline: ContinuousClock.Instant) -> AudioDuckingCommandResult {
+        deadlineLock.lock(); capturedDeadline = deadline; deadlineLock.unlock()
         calls += 1; entered.signal(); finish.wait(); return succeeds ? .success("") : .failure(.commandFailed, cleanupConfirmed: cleanup)
     }
 }
@@ -337,21 +343,37 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
         for drift in ["copy", "target", "cancel", "secure", "deadline"] {
             let f = InputFixture(); defer { f.close() }
             let runner = InputRunner(); runner.succeeds = true
-            let service = f.service(runner: runner, trusted: false, budget: .milliseconds(350))
+            // Планировщик может задержать fake OS leaf до запуска runner.
+            if drift == "deadline" { f.onModifier = { Thread.sleep(forTimeInterval: 0.4) } }
+            let service = f.service(runner: runner, trusted: false)
             let count = drift == "deadline" ? 0 : 2
             let operation = Task { count > 0
                 ? await service.revise(deleteCount: count, text: "replacement", targetPID: 101)
                 : await service.pasteToFrontmostApp("replacement", targetPID: 101) }
-            let enteredEnd = ContinuousClock.now + .seconds(1)
+            // Ack должен предшествовать drift: проверяем именно результат уже запущенного
+            // канала, а не корректный pre-effect отказ из-за scheduler delay.
+            let enteredEnd = ContinuousClock.now + .seconds(6)
             var entered = runner.hasEntered()
-            while !entered && ContinuousClock.now < enteredEnd { await Task.yield(); entered = runner.hasEntered() }
-            guard entered else { runner.finish.signal(); _ = await operation.value; return XCTFail("Runner не стартовал") }
+            while !entered && ContinuousClock.now < enteredEnd {
+                try? await Task.sleep(for: .milliseconds(5)); entered = runner.hasEntered()
+            }
+            guard entered else {
+                runner.finish.signal(); let result = await operation.value
+                return XCTFail("Runner не стартовал: drift=\(drift), reason=\(result.reason), effect=\(result.effect)")
+            }
             switch drift {
             case "copy": f.board.clearContents(); f.board.setString("user copy", forType: .string)
             case "target": f.pid = 202
             case "cancel": operation.cancel()
             case "secure": f.trustedOverride = true; f.role = "AXSecureTextField"
-            default: try? await Task.sleep(for: .milliseconds(250))
+            default:
+                guard let deadline = runner.deadlineOnEntry() else {
+                    runner.finish.signal(); _ = await operation.value; return XCTFail("Runner не захватил deadline")
+                }
+                // Используем фактический immutable deadline, переданный сервисом runner,
+                // вместо предположения о времени, уже потраченном до его запуска.
+                try? await Task.sleep(until: deadline, clock: .continuous)
+                XCTAssertGreaterThanOrEqual(ContinuousClock.now, deadline)
             }
             runner.finish.signal()
             let result = await operation.value
