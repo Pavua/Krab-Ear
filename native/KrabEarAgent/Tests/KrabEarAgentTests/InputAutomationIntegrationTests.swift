@@ -451,6 +451,27 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
         let outcome = await final.value
         XCTAssertEqual(outcome.reason, "input_busy"); XCTAssertTrue(f.events.isEmpty)
     }
+    func testUndoCapturesTargetAndSnapshotAndStillSendsUpAfterCancellation() async {
+        for drift in ["target", "copy", "deadline"] {
+            let f = InputFixture(); defer { f.close() }
+            let service = f.service(budget: .milliseconds(40)), undo = PasteUndoService(pasteService: service)
+            guard case .success(let held) = await f.queue.acquire(deadline: .now + .seconds(1)) else { return XCTFail() }
+            guard let request = undo.sendCmdZ() else { return XCTFail() }
+            if drift == "target" { f.pid = 202 }
+            else if drift == "copy" { service.putToClipboardUserInitiated("new user copy") }
+            else { try? await Task.sleep(for: .milliseconds(60)) }
+            f.queue.release(held)
+            let result = await request.value
+            XCTAssertFalse(result.ok, drift); XCTAssertEqual(result.effect, .noEffects, drift); XCTAssertTrue(f.events.isEmpty, drift)
+        }
+        let f = InputFixture(); defer { f.close() }
+        let undo = PasteUndoService(pasteService: f.service())
+        var request: Task<PasteAttemptResult, Never>?
+        f.onDown = { _ in request?.cancel() }
+        request = undo.sendCmdZ()
+        let result = await request!.value
+        XCTAssertEqual(f.events, ["d6", "u6"]); XCTAssertEqual(result.effect, .unknown)
+    }
     func testActualUndoCannotInterleaveRevisionOrBypassQuarantine() async {
         let f = InputFixture(); defer { f.close() }; let service = f.service()
         let undo = PasteUndoService(pasteService: service)

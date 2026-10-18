@@ -17,12 +17,15 @@ Partial/unknown запрещают полный fallback и статус ok; п�
 не доказывает физическую доставку. Explicit copy инвалидирует pending, restore CAS.
 Активационный контракт и его13 тестов сохранены. [Текущая карточка](superpowers/plans/2026-10-18-paste-input-queue.md).
 
-Source checkpoint: exact hosted-filter293/293 и existing affected56/56 PASS,
-включая actual delegate/QuickEdit/snapshot, private pasteboard и harmless own child
-cleanup. Python source/settings47/47, audit-all и dead Swift scanner (0 мёртвых)
-PASS. Release build `-j 1` PASS; независимый Astra Ultra whole-diff gate pending. Это не release/runtime acceptance и не доказательство
-устранения всех исторических AppHang. Живые клавиши, микрофон, пользовательский
-clipboard, модели, настройки и lifecycle не менялись.
+Review-фиксы: CG drift после down → unknown; streaming резервирует общую FIFO
+при acceptance и не делает fresh fallback после terminal refusal; Undo использует
+тот же PasteService/queue; translator не показывает success после drift и сохраняет
+1s grace/CAS restore при cancellation. Source checkpoint: hosted302/302, existing
+affected56/56, dead Swift (0 мёртвых), release `-j 1` и повторный audit-all PASS.
+Python source/settings47/47 — прежний receipt, backend не менялся. Независимый
+Astra Ultra whole-diff gate текущих review-фиксов pending. Это не release/runtime
+acceptance и не доказательство устранения всех исторических AppHang. Живые клавиши,
+микрофон, пользовательский clipboard, модели, настройки и lifecycle не менялись.
 
 ## 2026-10-16 — Finalizing idle: локально318 PASS, audit/CI pending
 

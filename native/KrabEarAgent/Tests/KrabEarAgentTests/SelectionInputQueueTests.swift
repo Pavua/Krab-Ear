@@ -3,6 +3,8 @@ import XCTest
 @testable import KrabEarAgent
 @MainActor private final class NoSelectionAX: SelectionAccessibilityAccess {
     func readSelection() -> SelectionAXSelection? { nil }
+    var acceptsFocus = true
+    func acceptsCurrentFocus(element: SelectionAXElement?) -> Bool { acceptsFocus }
     func writeSelection(element: SelectionAXElement, text: String) -> Bool { XCTFail("Нет AX write"); return false }
 }
 @MainActor private struct NoSelectionMonitor: SelectionEventMonitoring {
@@ -12,17 +14,22 @@ import XCTest
 private struct NoSelectionNotifications: NotificationProcessRunning {
     func run(executableURL: URL, arguments: [String]) throws {}
 }
+private final class SelectionNotificationSpy: NotificationProcessRunning, @unchecked Sendable {
+    var scripts: [String] = []
+    func run(executableURL: URL, arguments: [String]) throws { scripts.append(arguments.joined(separator: " ")) }
+}
 @MainActor final class SelectionInputQueueTests: XCTestCase {
     func testCopyPairYieldsToMainActorAndRestoreDoesNotOverwriteNewUserCopy() async {
         let name = "SelectionInput.\(UUID().uuidString)"
         let board = NSPasteboard(name: .init(name)), defaults = UserDefaults(suiteName: name)!
         defer { board.clearContents(); board.releaseGlobally(); defaults.removePersistentDomain(forName: name) }
         board.clearContents(); board.setString("original", forType: .string)
+        let notifications = SelectionNotificationSpy()
         var copyUp = false, heartbeatDuringCopy = false
         var heartbeat: Task<Void, Never>?
         let translator = SelectionTranslator(
             ipcClient: IPCClient(socketPath: "/unused-fixture.sock"),
-            notificationService: NotificationService(processRunner: NoSelectionNotifications()),
+            notificationService: NotificationService(processRunner: notifications),
             defaults: defaults, eventMonitor: NoSelectionMonitor(), accessibilityAccess: NoSelectionAX(),
             pasteboard: board, inputQueue: InputAutomationQueue(), targetPID: { 101 }, targetIsAlive: { _ in true },
             keyEvents: { _, key, _ in
@@ -40,6 +47,43 @@ private struct NoSelectionNotifications: NotificationProcessRunning {
         XCTAssertTrue(heartbeatDuringCopy, "Настоящий translator блокирует MainActor между copy down/up")
         try? await Task.sleep(for: .milliseconds(1100))
         XCTAssertEqual(board.string(forType: .string), "new user copy", "Restore не вправе затирать пользовательское копирование")
+        XCTAssertFalse(notifications.scripts.contains { $0.contains("Перевод готов") }, "Copy drift после paste up запрещает success HUD")
+    }
+    func testPostPasteDriftNeverClaimsSuccessAndCancellationKeepsReadGrace() async {
+        for drift in ["target", "secure", "epoch", "cancel", "deadline", "none"] {
+            let name = "SelectionOutcome.\(UUID().uuidString)"
+            let board = NSPasteboard(name: .init(name)), defaults = UserDefaults(suiteName: name)!
+            defer { board.clearContents(); board.releaseGlobally(); defaults.removePersistentDomain(forName: name) }
+            board.clearContents(); board.setString("original", forType: .string)
+            let queue = InputAutomationQueue(), ax = NoSelectionAX(), notifications = SelectionNotificationSpy()
+            var pid: pid_t = 101, events: [String] = []
+            var operation: Task<Void, Never>?, pasteUp: ContinuousClock.Instant?
+            let translator = SelectionTranslator(ipcClient: IPCClient(socketPath: "/unused-fixture.sock"),
+                notificationService: NotificationService(processRunner: notifications), defaults: defaults,
+                eventMonitor: NoSelectionMonitor(), accessibilityAccess: ax, pasteboard: board, inputQueue: queue,
+                targetPID: { pid }, targetIsAlive: { _ in true }, keyEvents: { _, key, _ in
+                    PasteKeyEventPair(down: { events.append("d\(key)") }, up: {
+                        events.append("u\(key)")
+                        if key == 8 { board.clearContents(); board.setString("selected", forType: .string); return }
+                        pasteUp = .now
+                        switch drift {
+                        case "target": pid = 202
+                        case "secure": ax.acceptsFocus = false
+                        case "epoch": queue.invalidatePending()
+                        case "cancel": operation?.cancel()
+                        case "deadline": Thread.sleep(forTimeInterval: 5.05) // Только bounded fake OS leaf.
+                        default: break
+                        }
+                    })
+                }, translate: { _ in "translated" })
+            operation = Task { await translator.performTranslation() }
+            await operation!.value
+            XCTAssertEqual(events, ["d8", "u8", "d9", "u9"], drift)
+            XCTAssertEqual(notifications.scripts.contains { $0.contains("Перевод готов") }, drift == "none", drift)
+            if drift == "cancel", let pasteUp {
+                XCTAssertGreaterThanOrEqual(pasteUp.duration(to: .now), .milliseconds(950), "Cancellation не ускоряет clipboard restore до чтения target")
+            }
+        }
     }
     func testConcealedCopyAfterKeyUpIsNeverSentToTranslation() async {
         let name = "SelectionConcealed.\(UUID().uuidString)"

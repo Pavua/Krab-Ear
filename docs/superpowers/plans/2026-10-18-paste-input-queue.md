@@ -217,3 +217,27 @@ mandatory key-up и truthful unknown после down использует actual
 и replay record Undo не меняет. Interim seam удалён после wiring; OS defaults CG
 остаются в единственном factory. GREEN12/12 (`undo-queue-green.log`). Тест находится
 в уже выбранном обоими CI workflow InputAutomationIntegrationTests.
+
+## Независимый review: translator outcome и финальная перепроверка
+
+Actual translator с private pasteboard, fake AX/key leaves и notification runner:
+causal RED2/7 assertions (`translator-outcome-red.log`) подтвердил ложный success
+после copy/target/secure/epoch/cancel/deadline и ускоренный restore при cancellation.
+После mandatory up и перед HUD проверяются lease/deadline/target/focus/epoch/count.
+CAS restore сохранён; parent cancellation не сокращает bounded1s grace чтения
+clipboard. После deadline/quarantine restore не выполняется. No-success при drift,
+нет повтора input. Положительный контроль без drift продолжает показывать success.
+Дополнительные Undo tests подтверждают immutable target/snapshot, queue deadline
+и mandatory up после cancel. Targeted GREEN41/41 (`translator-undo-green.log`).
+
+После ВСЕХ review source changes последовательно: exact hosted **302/302 PASS**
+(`review-final-hosted.log`,36.599s), existing affected **56/56 PASS**
+(`review-final-existing.log`,0.052s), dead Swift selftest PASS/scanner exit0/
+мёртвых0 (`review-final-dead-swift.log`), release **PASS36.04s**
+(`review-final-release.log`), затем полный **audit-all PASS**
+(`review-final-audit-all.log`). Python47/47 — прежний source/settings receipt;
+повтор не запускался по ruling root, Python/backend behavior не менялся.
+
+Свежий fetch после проверок подтвердил базу19124f51. Этот source cut передаётся
+root для нового Astra Ultra whole-diff gate; hosted exact-SHA CI, push, native
+acceptance и lifecycle остаются за пределами данного локального receipt.

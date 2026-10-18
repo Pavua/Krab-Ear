@@ -372,9 +372,13 @@ final class SelectionTranslator {
         }
         guard case .success(let writeLease) = await inputQueue.acquire(deadline: .now + .seconds(5)) else { return }
         defer { inputQueue.release(writeLease) }
-        guard !Task.isCancelled, targetPID() == pid, isAlive(),
-              inputQueue.generation == epoch, pasteboard.changeCount == expectedCount,
-              !hasConcealedClipboard(), accessibilityAccess.acceptsCurrentFocus(element: selection?.1) else { return }
+        func canConfirm(_ count: Int) -> Bool {
+            !Task.isCancelled && ContinuousClock.now < writeLease.deadline && inputQueue.owns(writeLease)
+                && targetPID() == pid && isAlive() && inputQueue.generation == epoch
+                && pasteboard.changeCount == count && !hasConcealedClipboard()
+                && accessibilityAccess.acceptsCurrentFocus(element: selection?.1)
+        }
+        guard canConfirm(expectedCount) else { return }
         if let selection {
             // AX write — самостоятельный канал. False не разрешает повторный Cmd+V.
             guard writeSelectionViaAX(element: selection.1, text: translated) else {
@@ -388,15 +392,22 @@ final class SelectionTranslator {
             let ownCount = pasteboard.changeCount
             inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: beforeWrite, after: ownCount)
             events.down(); try? await Task.sleep(for: .milliseconds(30)); events.up()
-            // CAS: даже собственная новая запись пользователя не затирается restore.
-            // Lease удерживается на время чтения target clipboard из Cmd+V.
-            try? await Task.sleep(for: .seconds(1))
-            if pasteboard.changeCount == ownCount {
+            let confirmedAfterUp = canConfirm(ownCount)
+            // Parent cancellation не сокращает grace чтения clipboard target.
+            // Отдельный bounded timer не создаёт OS input и удерживает lease до конца.
+            await Task.detached { try? await Task.sleep(for: .seconds(1)) }.value
+            let confirmedAfterRead = canConfirm(ownCount)
+            // CAS: новая пользовательская запись не затирается даже при отказе outcome.
+            if inputQueue.owns(writeLease), ContinuousClock.now < writeLease.deadline,
+               pasteboard.changeCount == ownCount {
                 pasteboard.clearContents()
                 if let saved { pasteboard.setString(saved, forType: .string) }
-                inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: ownCount, after: pasteboard.changeCount)
+                expectedCount = pasteboard.changeCount
+                inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: ownCount, after: expectedCount)
             }
+            guard confirmedAfterUp && confirmedAfterRead else { return }
         }
+        guard canConfirm(expectedCount) else { return }
         showSuccessHUD(original: original, translated: translated, latency: Date().timeIntervalSince(started))
     }
     private func hasConcealedClipboard() -> Bool {
