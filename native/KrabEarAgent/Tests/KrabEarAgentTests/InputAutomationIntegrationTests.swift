@@ -118,8 +118,43 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
         let service = f.service()
         operation = Task { await service.pasteToFrontmostApp("text", targetPID: 101) }
         let result = await operation!.value
-        XCTAssertEqual(result.effect, .completed, "Подтверждена отправленная пара, не физическая доставка")
+        XCTAssertEqual(result.effect, .unknown, "Отправленная пара не подтверждает результат после смены состояния")
         XCTAssertEqual(f.events, ["d9", "u9"]); XCTAssertEqual(f.collapses, 0)
+    }
+    func testCGPasteAfterDownDriftIsUnknownWithoutReplayRecordOrFullFallback() async {
+        for drift in ["copy", "target", "secure", "cancel", "deadline"] {
+            let f = InputFixture(); defer { f.close() }
+            let service = f.service(budget: .milliseconds(500))
+            var operation: Task<PasteAttemptResult, Never>?
+            f.onDown = { key in
+                guard key == 9 else { return }
+                switch drift {
+                case "copy": f.board.clearContents(); f.board.setString("user copy", forType: .string)
+                case "target": f.pid = 202
+                case "secure": f.role = "AXSecureTextField"
+                case "cancel": operation?.cancel()
+                default:
+                    // Только fake OS leaf: bounded latency пересекает общий deadline
+                    // после down. Это не проверка responsiveness реального OS вызова.
+                    Thread.sleep(forTimeInterval: 0.55)
+                }
+            }
+            let count = drift == "deadline" ? 0 : 2
+            operation = Task { count > 0
+                ? await service.revise(deleteCount: count, text: "replacement", targetPID: 101)
+                : await service.pasteToFrontmostApp("replacement", targetPID: 101) }
+            let result = await operation!.value
+            XCTAssertEqual(result.effect, .unknown, drift); XCTAssertFalse(result.ok, drift)
+            XCTAssertEqual(result.backspacePairs, count, drift)
+            XCTAssertEqual(f.events, Array(repeating: ["d51", "u51"], count: count).flatMap { $0 } + ["d9", "u9"], drift)
+            XCTAssertEqual(f.collapses, 0, drift); XCTAssertNil(service.lastPastedText, drift)
+            let before = f.events, clipboard = f.board.string(forType: .string)
+            _ = NSApplication.shared
+            let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+                userDefaults: f.defaults, notificationService: NotificationService(processRunner: NoInputNotifications()), pasteService: service)
+            delegate.performAutoPaste(text: "full fallback", historyId: nil, target: nil, streamingOutcome: result)
+            XCTAssertEqual(f.events, before, drift); XCTAssertEqual(f.board.string(forType: .string), clipboard, drift)
+        }
     }
     func testUnknownInjectedFocusDoesNotFallThroughToSystemAX() async {
         let f = InputFixture(); defer { f.close() }; f.role = nil; f.editable = nil

@@ -173,3 +173,17 @@ warmup fixtures/inference. Нефатальный pyannote/torchcodec import war
 через root. Native acceptance, runtime/deploy/restart и устранение всех AppHang
 не заявляются. Source/test после final success-validate больше не меняются до
 независимого review; docs/ignored ledger только фиксируют результаты проверок.
+
+## Независимый review: CG outcome после key-up
+
+Astra подтвердил P2: CG success ветка игнорировала post-await отказ и записывала
+replay record. Actual service matrix copy/target/secure/cancel/deadline после down:
+causal RED 2 tests/16 failures (`cg-postawait-red.log`), GREEN 2/2. После
+обязательного up отказ даёт unknown/ok=false, точные backspace pairs, без collapse,
+recordLastPaste и полного delegate fallback. Bounded sleep только fake OS leaf
+моделирует истечение deadline, не доказывает latency реального OS.
+
+Проверки этой поправки: hosted 294/294, existing affected 56/56, release PASS
+(`cg-hosted-green.log`, `cg-existing-green.log`, `cg-release-build.log`).
+Остальные подтверждённые замечания streaming acceptance/terminal fallback,
+Undo queue и translator success будут отдельными последовательными срезами.

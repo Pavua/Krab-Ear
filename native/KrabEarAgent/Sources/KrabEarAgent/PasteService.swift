@@ -238,8 +238,9 @@ final class PasteService {
             events.down()
             try? await Task.sleep(for: .milliseconds(30))
             events.up()
-            // Пара отправлена: отмена caller больше не доказывает отсутствие input.
-            if validate() == nil && readEditable(pid) == true {
+            // Key-up обязателен, но drift после down оставляет результат неизвестным.
+            if let why = validate() { return refusal(why, pairs: pairs, effect: .unknown) }
+            if readEditable(pid) == true {
                 if let collapseSelection { collapseSelection(pid) } else { collapseSelectionIfNeeded(pid: pid) }
             }
             recordLastPaste(insert.trimmingCharacters(in: .whitespacesAndNewlines))
