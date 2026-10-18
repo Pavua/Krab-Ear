@@ -169,7 +169,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private var plaintextExportTerminationPending = false
     private var plaintextExportTerminationReplied = false
 
-    let pasteService = PasteService()
+    let pasteService: PasteService
+    let pasteTargetActivator: PasteTargetActivator
     let quickEditOverlay = QuickEditOverlay()
     let audioDuckingService: SystemAudioDuckingService
     private let notificationService: NotificationService
@@ -332,8 +333,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     init(
         options: LaunchOptions, userDefaults: UserDefaults = .standard,
         audioDuckingService: SystemAudioDuckingService = SystemAudioDuckingService(),
-        notificationService: NotificationService = NotificationService()
+        notificationService: NotificationService = NotificationService(),
+        pasteService: PasteService = PasteService(),
+        pasteTargetActivator: PasteTargetActivator? = nil
     ) {
+        self.pasteService = pasteService
+        self.pasteTargetActivator = pasteTargetActivator ?? PasteTargetActivator()
         self.audioDuckingService = audioDuckingService
         self.notificationService = notificationService
         self.options = options

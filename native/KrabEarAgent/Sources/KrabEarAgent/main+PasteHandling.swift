@@ -188,7 +188,6 @@ extension AgentAppDelegate {
             handlePasteFailure(reason: "no_external_target")
             return
         }
-        let targetPID = activateTargetForPaste(targetApp)
 
         // Применяем per-app профиль вставки если настроен
         let (textToInsert, appliedProfile) = applyPasteProfileIfNeeded(text: text, targetApp: targetApp)
@@ -196,20 +195,25 @@ extension AgentAppDelegate {
             logger.info("PasteAppMemory: применён профиль '\(prof)' для \(targetApp.bundleIdentifier ?? "unknown")")
         }
 
-        let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
-        logger.info(
-            "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
-        )
-        markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
-        historyPanel?.onHistoryDidUpdate()
+        let activationTarget = PasteActivationTarget(application: targetApp)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let targetPID = activationTarget.pid
+            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget)
+            logger.info(
+                "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
+            )
+            markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
+            historyPanel?.onHistoryDidUpdate()
 
-        if !pasteResult.ok {
-            handlePasteFailure(reason: pasteResult.reason, text: text)
-        }
+            if !pasteResult.ok {
+                handlePasteFailure(reason: pasteResult.reason, text: text)
+            }
 
-        // Звук завершения транскрибации (off main thread: AudioQueueXPC.Start синхронный).
-        DispatchQueue.global(qos: .userInitiated).async {
-            NSSound(named: "Purr")?.play()
+            // Звук завершения транскрибации (off main thread: AudioQueueXPC.Start синхронный).
+            DispatchQueue.global(qos: .userInitiated).async {
+                NSSound(named: "Purr")?.play()
+            }
         }
     }
 
@@ -237,7 +241,6 @@ extension AgentAppDelegate {
             return
         }
 
-        pasteService.putToClipboard(cleanText)
         guard let targetApp = resolvePreferredPasteTargetApp() else {
             markPasteStatus(historyId: historyId, status: "failed")
             historyPanel?.onHistoryDidUpdate()
@@ -246,23 +249,33 @@ extension AgentAppDelegate {
             return
         }
 
-        let targetPID = activateTargetForPaste(targetApp)
-
         // Применяем per-app профиль вставки если настроен
         let (textToInsert, _) = applyPasteProfileIfNeeded(text: cleanText, targetApp: targetApp)
 
-        let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
-        logger.info(
-            "Быстрая вставка \(sourceTag): bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
-        )
-        markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
-        historyPanel?.onHistoryDidUpdate()
-        if !pasteResult.ok {
-            handlePasteFailure(reason: pasteResult.reason)
+        let activationTarget = PasteActivationTarget(application: targetApp)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let targetPID = activationTarget.pid
+            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget)
+            logger.info(
+                "Быстрая вставка \(sourceTag): bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
+            )
+            markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
+            historyPanel?.onHistoryDidUpdate()
+            if !pasteResult.ok {
+                handlePasteFailure(reason: pasteResult.reason)
+            }
         }
     }
 
     func handlePasteFailure(reason: String, text: String? = nil) {
+        // До PasteService дело не дошло: clipboard не обещаем и не перезаписываем.
+        if reason.hasPrefix("target_activation_") {
+            logger.warn("Вставка остановлена до отправки текста: \(reason)")
+            notify(title: "Krab Ear", body: "Не удалось подтвердить приложение для вставки. Текст сохранён в истории.")
+            return
+        }
+
         // Защищённое поле: тихое уведомление, НЕ ошибка — это ожидаемое поведение.
         if reason == "secure_field_skipped" {
             logger.info("[SmartPaste] Вставка в защищённое поле пропущена — показываем тихое уведомление")
@@ -425,23 +438,10 @@ extension AgentAppDelegate {
         return nil
     }
 
-    func activateTargetForPaste(_ target: NSRunningApplication) -> pid_t {
-        let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if currentPID != target.processIdentifier {
-            logger.info("Активация target app перед вставкой: \(target.bundleIdentifier ?? "unknown")")
-            _ = target.activate(options: [.activateIgnoringOtherApps])
-
-            var attempts = 0
-            while attempts < 10 {
-                let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-                if pid == target.processIdentifier {
-                    break
-                }
-                usleep(40_000)
-                attempts += 1
-            }
+    func pasteToActivatedTarget(_ text: String, target: PasteActivationTarget) async -> PasteAttemptResult {
+        await pasteTargetActivator.perform(target: target) { pid in
+            pasteService.pasteToFrontmostApp(text, targetPID: pid)
         }
-        return target.processIdentifier
     }
 
     /// Async resolve history_id: fast-path возвращает existingId сразу,

@@ -1,5 +1,27 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-18 — продолжение source: активация адресата вставки
+
+Свежая удалённая база: `origin/codex/krab-ear-v2` = `19124f51` (#2099).
+Оба post-merge workflow этого SHA перепроверены в GitHub: CI `38850476587`
+и krab-ear-ci `38850476647` SUCCESS. #2097–2099 смержены; открытых PR при
+входе в сессию не было. Ниже — исторические snapshots, их прежние pending/PID
+не считать текущим состоянием. Runtime после перезагрузки здесь не квалифицирован.
+
+В изолированной ветке `codex/ear-paste-activation-20261018` исправляется
+самостоятельная часть async-карточки: ожидание активации приложения освобождает
+MainActor; отказ/timeout/закрытие/cancel не вызывают PasteService. Адресат
+диктовки/QuickEdit и явной snapshot-вставки фиксируется до Task. Вставка после
+неподтверждённой активации запрещена; конкурентная смена target получает отказ.
+Actual helper RED5/12 assertions → GREEN5; targeted Swift64 и CI-filter229 PASS;
+Python source/settings contracts50 PASS. Release build `-j 2` и `audit-all` PASS.
+Независимый final review и hosted CI нового SHA ещё pending. [Карточка](superpowers/plans/2026-10-18-paste-target-activation.md).
+
+Ожидания modifiers/backspace/AppleScript в PasteService, общая input/clipboard
+очередь, streaming final barrier/generation и SelectionTranslator остаются
+открыты. Этот slice не доказывает устранение исторических AppHang. Живые клавиши,
+микрофон, пользовательский clipboard, модели, настройки и lifecycle не менялись.
+
 ## 2026-10-16 — Finalizing idle: локально318 PASS, audit/CI pending
 
 В отдельной ветке на merged2098 `8dc5e48d` подготовлен фикс lifecycle-пробы:
