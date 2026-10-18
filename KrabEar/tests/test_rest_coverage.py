@@ -163,6 +163,14 @@ class ReadinessNotReadyTest(unittest.TestCase):
     """/v1/readiness must return 503 when overall_ready is False."""
 
     def setUp(self):
+        # Cached REST модуль мог создать другой test-file: pin actual deps
+        # на время request и восстановить его после теста, даже при assertion.
+        self.readiness_snapshot = {"owner": "rest", "state": "unknown"}
+        self.readiness_engine = MagicMock(spec=["stt_residency"])
+        self.readiness_engine.stt_residency.return_value = self.readiness_snapshot
+        engine_patch = patch.object(_rest_mod, "engine", self.readiness_engine)
+        engine_patch.start()
+        self.addCleanup(engine_patch.stop)
         self.client = _client()
 
     def test_readiness_503_when_not_ready(self):
@@ -174,6 +182,8 @@ class ReadinessNotReadyTest(unittest.TestCase):
             mock_svc._build_readiness_report_static.return_value = not_ready_report
             resp = self.client.get("/v1/readiness")
         self.assertEqual(resp.status_code, 503)
+        self.assertEqual(resp.get_json()["stt_residency"], self.readiness_snapshot)
+        self.readiness_engine.stt_residency.assert_called_once_with(owner="rest")
 
     def test_readiness_503_body_has_overall_ready_false(self):
         not_ready_report = {
@@ -195,6 +205,8 @@ class ReadinessNotReadyTest(unittest.TestCase):
             mock_svc._build_readiness_report_static.return_value = ready_report
             resp = self.client.get("/v1/readiness")
         self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["stt_residency"], self.readiness_snapshot)
+        self.readiness_engine.stt_residency.assert_called_once_with(owner="rest")
 
 
 # ---------------------------------------------------------------------------
