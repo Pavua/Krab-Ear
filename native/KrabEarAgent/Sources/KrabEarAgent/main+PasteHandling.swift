@@ -319,8 +319,7 @@ extension AgentAppDelegate {
         // S34 / Fable-ревью F2: putToClipboard(text) может тихо пропустить запись
         // (буфер защищён) — финальное уведомление не должно лгать про «буфер
         // обмена», если запись реально не прошла. Различаем «не пытались» (nil
-        // text / never_copy — исходное, не тронутое этим диффом поведение) от
-        // «пытались и пропустили» (новый concealed-guard).
+        // text / never_copy) от «пытались и пропустили» (concealed-guard).
         var attemptedClipboardWrite = false
         var clipboardCopied = false
         if let text, settings.clipboardMode != "never_copy" {
@@ -336,9 +335,14 @@ extension AgentAppDelegate {
             openHistoryPanel(forceMenubar: false)
         }
         logger.warn("Вставка не удалась: \(details)")
-        let clipboardNote = (attemptedClipboardWrite && !clipboardCopied)
-            ? "Текст сохранён в истории (буфер обмена защищён — не скопирован)."
-            : "Текст сохранён в истории и буфере обмена."
+        let clipboardNote: String
+        if clipboardCopied {
+            clipboardNote = "Текст сохранён в истории и буфере обмена."
+        } else if attemptedClipboardWrite {
+            clipboardNote = "Текст сохранён в истории (буфер обмена защищён — не скопирован)."
+        } else {
+            clipboardNote = "Текст сохранён в истории."
+        }
         notify(
             title: "Krab Ear",
             body: "Вставка не удалась. \(details) \(clipboardNote)"
