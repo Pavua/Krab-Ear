@@ -138,9 +138,12 @@ final class PasteService {
         guard deleteCount >= 0 else { return refusal("invalid_count") }
         return await perform(text: text, deleteCount: deleteCount, targetPID: targetPID, lease: lease, snapshot: snapshot)
     }
-    @MainActor private func perform(text: String?, deleteCount: Int, targetPID: pid_t?, lease supplied: InputAutomationLease?, snapshot: PasteInputSnapshot? = nil) async -> PasteAttemptResult {
+    @MainActor func undo(snapshot: PasteInputSnapshot, lease: InputAutomationLease) async -> PasteAttemptResult {
+        await perform(text: nil, deleteCount: 0, targetPID: snapshot.pid, lease: lease, snapshot: snapshot, commandKey: 6)
+    }
+    @MainActor private func perform(text: String?, deleteCount: Int, targetPID: pid_t?, lease supplied: InputAutomationLease?, snapshot: PasteInputSnapshot? = nil, commandKey: CGKeyCode? = nil) async -> PasteAttemptResult {
         let clean = text?.trimmingCharacters(in: .whitespacesAndNewlines)
-        if deleteCount == 0 && (clean?.isEmpty ?? true) { return refusal("empty_text") }
+        if commandKey == nil && deleteCount == 0 && (clean?.isEmpty ?? true) { return refusal("empty_text") }
         guard let budget: Duration = deleteCount > 0 ? Self.revisionBudget(count: deleteCount) : operationBudget else { return refusal("invalid_count") }
         let deadline = supplied?.deadline ?? (.now + budget)
         if pasteboardHoldsConcealedContent(pasteboard) { onConcealedClipboardSkipped?(); return refusal("concealed_clipboard_skipped") }
@@ -182,6 +185,12 @@ final class PasteService {
         }
         do { try await Task.sleep(for: .milliseconds(120)) } catch { return refusal("input_cancelled") }
         if let why = validate() { return refusal(why) }
+        if let commandKey {
+            guard let events = keyEventFactory(pid, commandKey, .maskCommand) else { return refusal("event_post_failed") }
+            events.down(); try? await Task.sleep(for: .milliseconds(30)); events.up()
+            if let why = validate() { return refusal(why, effect: .unknown) }
+            return PasteAttemptResult(ok: true, reason: "ok_undo")
+        }
         let trusted = accessibilityTrusted()
         if trusted, readEditable(pid) == false { return refusal("no_editable_focus") }
         var insert = text

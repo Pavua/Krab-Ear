@@ -9,7 +9,7 @@
  Логика:
  - Hotkey Cmd+Control+Z зарегистрирован ВСЕГДА (через NSEvent global monitor).
  - Если pasteUndoEnabled == false — handler делает return (no-op).
- - При срабатывании: шлёт Cmd+Z во frontmost app через CGEvent.postToPid.
+ - При срабатывании: захватывает target и резервирует общую input FIFO для Cmd+Z.
  - Не трогает clipboard, не делает IPC — pure keystroke replay.
 */
 
@@ -30,9 +30,8 @@ final class PasteUndoService {
 
     private var globalMonitor: Any?
     private let logger = AgentLogger.shared
-
-    // Задержка между key-down и key-up синтетического Cmd+Z (микросекунды)
-    private let keyPressDelayUs: useconds_t = 30_000
+    private let pasteService: PasteService
+    init(pasteService: PasteService = PasteService()) { self.pasteService = pasteService }
 
     // MARK: - Lifecycle
 
@@ -78,40 +77,18 @@ final class PasteUndoService {
 
     // MARK: - Send Cmd+Z
 
-    /// Отправляет Cmd+Z во frontmost app через CGEvent.postToPid.
-    /// Fallback на .cghidEventTap если frontmostApplication недоступен.
-    private func sendCmdZ() {
-        guard let source = CGEventSource(stateID: .hidSystemState) else {
-            logger.warn("PasteUndoService: не удалось создать CGEventSource")
-            return
-        }
-
-        let zKeyCode: CGKeyCode = 6 // kVK_ANSI_Z
-
-        guard
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: zKeyCode, keyDown: true),
-            let keyUp   = CGEvent(keyboardEventSource: source, virtualKey: zKeyCode, keyDown: false)
-        else {
-            logger.warn("PasteUndoService: не удалось создать CGEvent для Cmd+Z")
-            return
-        }
-
-        // Только Command — посылаем стандартный Undo (Cmd+Z), не Cmd+Ctrl+Z.
-        keyDown.flags = .maskCommand
-        keyUp.flags   = .maskCommand
-
-        if let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-           pid != ProcessInfo.processInfo.processIdentifier {
-            keyDown.postToPid(pid)
-            usleep(keyPressDelayUs)
-            keyUp.postToPid(pid)
-            logger.info("PasteUndoService: Cmd+Z отправлен в pid=\(pid)")
-        } else {
-            // Fallback: HID event tap (когда frontmost — сам агент или неизвестен).
-            keyDown.post(tap: .cghidEventTap)
-            usleep(keyPressDelayUs)
-            keyUp.post(tap: .cghidEventTap)
-            logger.info("PasteUndoService: Cmd+Z отправлен через cghidEventTap (fallback)")
+    /// Target/snapshot/deadline и место общей очереди фиксируются до Task/await.
+    /// Unknown target не разрешает глобальный HID fallback в произвольное приложение.
+    @discardableResult func sendCmdZ() -> Task<PasteAttemptResult, Never>? {
+        guard let pid = pasteService.captureTargetPID(), pid != ProcessInfo.processInfo.processIdentifier else { return nil }
+        let snapshot = pasteService.captureInput(pid: pid), queue = pasteService.inputQueue
+        guard case .success(let ticket) = queue.reserve(deadline: pasteService.deadlineForPaste()) else { return nil }
+        return Task { @MainActor in
+            defer { queue.release(ticket) }
+            switch await queue.awaitReady(ticket) {
+            case .failure(let why): return PasteAttemptResult(ok: false, reason: "input_" + why.rawValue)
+            case .success(let lease): return await pasteService.undo(snapshot: snapshot, lease: lease)
+            }
         }
     }
 }

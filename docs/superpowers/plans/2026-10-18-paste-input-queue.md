@@ -205,3 +205,15 @@ RED1/2. GREEN47/47 (`stream-reserved-green.log`): включая FIFO8+active п
 chunk callers, accepted final tail deadline, prior completed→final busy→partial,
 copy before execution/за partial и public failed status без full repeat. Новые
 reservation API edge tests добавлены после реализации, не заявляются fail-before.
+
+## Независимый review: Undo — владелец общей input очереди
+
+Actual Undo OS-leaf seam сначала сохранил старые sync пары/usleep и воспроизвёл
+вставку CmdZ между revision backspaces, а также обход quarantine: RED1/2 assertions
+(`undo-queue-red.log`). Затем Undo подключён к тому же PasteService и shared
+FIFO через synchronous reserve, captured target/snapshot/deadline до Task. Unknown
+target больше не разрешает HID tap в произвольный frontmost. Guard/modifier wait,
+mandatory key-up и truthful unknown после down использует actual service. Clipboard
+и replay record Undo не меняет. Interim seam удалён после wiring; OS defaults CG
+остаются в единственном factory. GREEN12/12 (`undo-queue-green.log`). Тест находится
+в уже выбранном обоими CI workflow InputAutomationIntegrationTests.

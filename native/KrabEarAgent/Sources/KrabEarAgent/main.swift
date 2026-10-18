@@ -600,7 +600,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         startQuickCaptureHotkeyMonitor()
         logger.info("Quick Capture hotkey активирован (Cmd+Shift+N)")
 
-        pasteUndoService = PasteUndoService()
+        pasteUndoService = PasteUndoService(pasteService: pasteService)
         pasteUndoService?.pasteUndoEnabled = settings.pasteUndoEnabled
         pasteUndoService?.start()
         logger.info("PasteUndoService запущен (Cmd+Ctrl+Z). enabled=\(settings.pasteUndoEnabled)")

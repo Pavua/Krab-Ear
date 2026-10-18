@@ -451,6 +451,20 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
         let outcome = await final.value
         XCTAssertEqual(outcome.reason, "input_busy"); XCTAssertTrue(f.events.isEmpty)
     }
+    func testActualUndoCannotInterleaveRevisionOrBypassQuarantine() async {
+        let f = InputFixture(); defer { f.close() }; let service = f.service()
+        let undo = PasteUndoService(pasteService: service)
+        var requested = false
+        f.onUp = { key in if key == 51 && !requested { requested = true; undo.sendCmdZ() } }
+        let revision = await service.revise(deleteCount: 2, text: "replacement", targetPID: 101)
+        let end = ContinuousClock.now + .seconds(1)
+        while !f.events.contains("u6") && ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertTrue(revision.ok)
+        XCTAssertEqual(f.events, ["d51", "u51", "d51", "u51", "d9", "u9", "d6", "u6"])
+        f.queue.quarantine(); let before = f.events
+        undo.sendCmdZ(); try? await Task.sleep(for: .milliseconds(50))
+        XCTAssertEqual(f.events, before, "Undo обязан уважать quarantine общей очереди")
+    }
     func testRealStreamingPartialRevisionDoesNotRepeatDeleteOrFullFallback() async {
         let f = InputFixture(); defer { f.close() }; let service = f.service()
         let controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: service))
