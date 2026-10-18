@@ -37,6 +37,7 @@ try:
 
     _mock_engine = MagicMock()
     _mock_engine.quality_profile = "balanced"
+    _mock_engine.stt_residency.return_value = {"owner": "rest", "state": "unknown"}
     _mock_engine.normalize_audio = MagicMock()
 
     _mock_store = MagicMock()

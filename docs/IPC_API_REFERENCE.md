@@ -1350,7 +1350,8 @@ prompt-контекста владельца и multipass. Предварите�
 | Метод | Описание |
 |---|---|
 | `warmup_stt` | Ручной STT warmup |
-| `unload_stt_model` | Выгрузить STT-модель из памяти (парная к warmup_stt) |
+| `unload_stt_model` | Подтвердить освобождение GigaAM owner (не всех STT-моделей) |
+| `get_stt_residency` | Наблюдательный nonwarming snapshot собственного backend STT owner |
 | `warmup_rewriter` | Ручной LLM warmup probe |
 | `select_model` | Умный выбор STT модели |
 | `get_stt_routing_decision` | Debug: результат scored adapter selection |
@@ -1369,13 +1370,28 @@ Returns: `{ok, model, duration_ms}`
 
 ### `unload_stt_model`
 *(stt_management_service.py)*  
-Выгружает STT-модель из памяти по явной команде — парная операция к `warmup_stt`.
-Кэш адаптера сбрасывается, следующая транскрибация поднимает модель заново,
-поэтому вызов не ломает диктовку, а лишь возвращает память до следующего
-использования. Ошибка выгрузки приходит в поле `error`, а не исключением: память
-освободить не удалось, но движок обязан продолжать работать.  
-Нет params.  
-Returns: `{unloaded: bool, error: str | null}`
+Подтверждает освобождение GigaAM owner. Busy/inflight/call pin или неподтверждённый
+cleanup дают `unloaded:false`; cache сохраняется до подтверждённого close.
+`unloaded:true` означает подтверждённое освобождение/отсутствие этого owner,
+не замер освобождённой RAM и не выгрузку Whisper/pyannote/REST worker.
+Нет params. Returns: `{unloaded: bool, error: str | null}`.
+
+### `get_stt_residency`
+*(stt_management_service.py)*
+Только наблюдение собственного backend owner, без модели/worker creation,
+MLX import, warmup, inference, history или Keychain. Нет params.
+Returns: `{owner:"backend", owner_pid:int, configured:{profile,model}, whisper,
+gigaam}`; при отсутствии engine: `{owner:"backend",state:"unavailable"}`.
+Component snapshot: `{state,model,transport,pid,inflight}`; cached GigaAM также
+`call_pins`. State: `unloaded|loaded|busy|unknown`. `model` — безопасное имя/repo ID
+или null; локальные пути не выдаются. Configured model отдельно от observed model.
+Занятый lock даёт busy, live Whisper child без model metadata даёт unknown/null.
+Это момент наблюдения, не атомарная гарантия готовности следующего запроса/звонка.
+
+REST: существующий auth-gated `GET /v1/readiness` добавляет `stt_residency` с
+`owner:"rest"` только после auth. Legacy `overall_ready`, `components` и HTTP
+200/503 по наличию cache не меняются. Backend snapshot не сообщает состояние
+отдельного REST процесса; child metadata protocol не расширялся.
 
 ### `warmup_rewriter`
 *(service.py)*  

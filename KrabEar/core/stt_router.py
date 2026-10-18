@@ -532,6 +532,18 @@ class STTRouter:
             logger.warning("STTRouter.get_gigaam_adapter: ошибка создания адаптера: %s", exc)
             return None
 
+    def residency_snapshot(self) -> dict:
+        """Читает только cached adapter; не выполняет lazy lookup."""
+        from core.stt_residency import empty_snapshot
+
+        if not self._gigaam_adapter_lock.acquire(blocking=False):
+            return empty_snapshot("busy")
+        try:
+            adapter = self._gigaam_adapter
+            return adapter.residency_snapshot() if adapter is not None else empty_snapshot()
+        finally:
+            self._gigaam_adapter_lock.release()
+
     def close(self) -> bool:
         """Публичная точка входа для владельца (AudioEngine) при остановке.
 

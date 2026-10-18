@@ -809,6 +809,7 @@ class ReadinessResponseSchema(Schema):
     """Pydantic schema для ответа /readiness endpoint — общая готовность и статусы компонентов."""
     overall_ready = ma_fields.Boolean(metadata={"description": "True when all required components are available"})
     components = ma_fields.Dict(keys=ma_fields.String(), values=ma_fields.Boolean())
+    stt_residency = ma_fields.Dict(metadata={"description": "Owner-local observational snapshot, not a readiness guarantee"})
 
 
 class MetricsResponseSchema(Schema):
@@ -1563,7 +1564,10 @@ def readiness():
 
     Response 200/503: {"overall_ready": bool, "components": {stt, diarization, translation}}
     """
-    report = BackendService._build_readiness_report_static()
+    report = dict(BackendService._build_readiness_report_static())
+    # Отдельный наблюдательный снимок owner; не меняет legacy cache readiness.
+    # Auth decorator уже выполнен, snapshot не создаёт модели/worker.
+    report["stt_residency"] = _deps().engine.stt_residency(owner="rest")
     status_code = 200 if report["overall_ready"] else 503
     return jsonify(report), status_code
 

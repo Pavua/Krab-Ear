@@ -117,8 +117,15 @@ class STTManagementService:
     # STT warmup
     # ------------------------------------------------------------------
 
+    def handle_get_stt_residency(self, params: dict) -> dict:
+        """Только metadata собственного engine, без history/Keychain/загрузки."""
+        engine = getattr(self._transcriber, "engine", None) if self._transcriber else None
+        if engine is None:
+            return {"owner": "backend", "state": "unavailable"}
+        return engine.stt_residency(owner="backend")
+
     def handle_unload_stt_model(self, params: dict) -> dict:
-        """Выгружает STT-модели из памяти по явной команде из панели.
+        """Выгружает GigaAM owner по явной команде из панели.
 
         Парная операция к ``warmup_stt``. Кэш адаптера сбрасывается, следующая
         транскрибация поднимает модель заново — поэтому «выгрузить» не ломает
@@ -135,9 +142,11 @@ class STTManagementService:
         if not callable(unload):
             return {"unloaded": False, "error": "engine not available"}
         try:
-            unload()
+            confirmed = unload()
         except Exception as exc:  # noqa: BLE001 — сообщаем причину, не роняем IPC
             return {"unloaded": False, "error": str(exc)}
+        if confirmed is not True:
+            return {"unloaded": False, "error": "Выгрузка GigaAM не подтверждена: busy или незавершённый cleanup"}
         return {"unloaded": True, "error": None}
 
     def handle_warmup_stt(self, params: dict) -> dict:

@@ -46,6 +46,7 @@ try:
 
     _engine_mock = MagicMock()
     _engine_mock.quality_profile = "balanced"
+    _engine_mock.stt_residency.return_value = {"owner": "rest", "state": "unknown"}
 
     _store_mock = MagicMock()
     _store_mock.load_vocabulary.return_value = []

@@ -1,5 +1,18 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-18 — STT residency: source checkpoint, runtime не менялся
+
+В изолированной ветке от `19124f51` реализованы truthful GigaAM unload bool и
+nonwarming snapshot собственного STT owner: backend IPC `get_stt_residency`,
+REST — metadata в существующем auth-gated `/v1/readiness`. Busy/неподтверждённый
+cleanup не превращаются в успешную выгрузку. Configured model отделена от
+observed; live Whisper child без model metadata остаётся unknown. Снимок не
+обещает call readiness/latency и не доказывает освобождение backend Metal.
+Source tests используют fake sessions/OS leaves; модели, конфигурация,
+процессы и call-ready policy не менялись. Linux3.12 CI и независимый review
+ещё pending. [Owning card](superpowers/plans/2026-10-18-stt-residency.md).
+
+
 ## 2026-10-16 — Finalizing idle: локально318 PASS, audit/CI pending
 
 В отдельной ветке на merged2098 `8dc5e48d` подготовлен фикс lifecycle-пробы:

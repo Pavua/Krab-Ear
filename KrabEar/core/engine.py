@@ -569,19 +569,27 @@ class AudioEngine:
         elif getattr(settings, "STT_GIGAAM_ENABLED", False) and skip_gigaam_warmup:
             logger.info("GigaAM warmup пропущен (skip_gigaam_warmup=True) — этот engine не spawn'ит worker")
 
-    def unload_stt_models(self) -> None:
-        """Отпускает загруженные STT-модели, оставляя движок рабочим.
+    def stt_residency(self, owner: str = "backend") -> dict:
+        """Owner-local metadata, без warmup и обещания готовности звонка."""
+        from core.stt_residency import empty_snapshot, public_model_id, whisper_snapshot
 
-        Отличие от ``close()``: тот нужен при остановке владельца, а этот —
-        для кнопки «выгрузить сейчас» в панели. Кэш адаптера сбрасывается,
-        следующая транскрибация поднимет его заново, поэтому вызов безопасен
-        в любой момент, кроме идущей записи (её гейтит вызывающая сторона).
+        router = getattr(self, "_router", None)
+        return {
+            "owner": "rest" if owner == "rest" else "backend",
+            "owner_pid": os.getpid(),
+            "configured": {"profile": self.quality_profile, "model": public_model_id(self.current_model)},
+            "whisper": whisper_snapshot(),
+            "gigaam": router.residency_snapshot() if router is not None else empty_snapshot(),
+        }
 
-        Возникло из просьбы владельца управлять жизнью модели в памяти из
-        интерфейса: загрузка (`warmup_stt`) была, выгрузки не было вовсе —
-        освободить память можно было только перезапуском бэкенда.
+    def unload_stt_models(self) -> bool:
+        """Подтверждает освобождение GigaAM owner, сохраняя занятый cache.
+
+        Это не выгрузка Whisper/pyannote и не доказательство освобождения всей
+        STT-памяти. False означает busy или неподтверждённый cleanup; существующие
+        router/adapter locks и call pins остаются авторитетными guards.
         """
-        self._router.close()
+        return self._router.close() is True
 
     def close(self) -> bool:
         """Останавливает фоновые ресурсы движка (живой инцидент 2026-08-04).
