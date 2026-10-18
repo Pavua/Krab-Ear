@@ -20,8 +20,10 @@ Partial/unknown запрещают полный fallback и статус ok; п�
 Review-фиксы: CG drift после down → unknown; streaming резервирует общую FIFO
 при acceptance и не делает fresh fallback после terminal refusal; Undo использует
 тот же PasteService/queue; translator не показывает success после drift и сохраняет
-1s grace/CAS restore при cancellation. Source checkpoint: hosted302/302, existing
-affected56/56, dead Swift (0 мёртвых), release `-j 1` и повторный audit-all PASS.
+1s grace/CAS restore при cancellation. Public auto/snapshot/replay фиксируют request
+до Task; translator валидирует исходный clipboard snapshot до и после AX read.
+Source checkpoint: hosted306/306, existing affected56/56, dead Swift (0 мёртвых),
+release `-j 1` и повторный audit-all после всех source changes PASS.
 Python source/settings47/47 — прежний receipt, backend не менялся. Независимый
 Astra Ultra whole-diff gate текущих review-фиксов pending. Это не release/runtime
 acceptance и не доказательство устранения всех исторических AppHang. Живые клавиши,

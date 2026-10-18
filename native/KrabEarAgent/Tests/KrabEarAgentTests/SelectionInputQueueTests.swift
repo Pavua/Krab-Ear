@@ -2,9 +2,11 @@ import AppKit
 import XCTest
 @testable import KrabEarAgent
 @MainActor private final class NoSelectionAX: SelectionAccessibilityAccess {
-    func readSelection() -> SelectionAXSelection? { nil }
+    var reads = 0, focusReads = 0
+    var onRead: (() -> Void)?
+    func readSelection() -> SelectionAXSelection? { reads += 1; onRead?(); return nil }
     var acceptsFocus = true
-    func acceptsCurrentFocus(element: SelectionAXElement?) -> Bool { acceptsFocus }
+    func acceptsCurrentFocus(element: SelectionAXElement?) -> Bool { focusReads += 1; return acceptsFocus }
     func writeSelection(element: SelectionAXElement, text: String) -> Bool { XCTFail("Нет AX write"); return false }
 }
 @MainActor private struct NoSelectionMonitor: SelectionEventMonitoring {
@@ -83,6 +85,48 @@ private final class SelectionNotificationSpy: NotificationProcessRunning, @unche
             if drift == "cancel", let pasteUp {
                 XCTAssertGreaterThanOrEqual(pasteUp.duration(to: .now), .milliseconds(950), "Cancellation не ускоряет clipboard restore до чтения target")
             }
+        }
+    }
+    func testExternalCopyWhileReadLeaseWaitsRefusesBeforeAXKeysAndIPC() async {
+        for writer in ["external", "own", "duringAX"] {
+            let name = "SelectionAccepted.\(UUID().uuidString)"
+            let board = NSPasteboard(name: .init(name)), defaults = UserDefaults(suiteName: name)!
+            defer { board.clearContents(); board.releaseGlobally(); defaults.removePersistentDomain(forName: name) }
+            board.clearContents(); board.setString("original", forType: .string)
+            let queue = InputAutomationQueue(), ax = NoSelectionAX(), notifications = SelectionNotificationSpy()
+            guard case .success(let held) = await queue.acquire(deadline: .now + .seconds(3)) else { return XCTFail() }
+            var events: [String] = [], translated = false
+            let translator = SelectionTranslator(ipcClient: IPCClient(socketPath: "/unused-fixture.sock"),
+                notificationService: NotificationService(processRunner: notifications), defaults: defaults,
+                eventMonitor: NoSelectionMonitor(), accessibilityAccess: ax, pasteboard: board, inputQueue: queue,
+                targetPID: { 101 }, targetIsAlive: { _ in true }, keyEvents: { _, key, _ in
+                    PasteKeyEventPair(down: { events.append("d\(key)") }, up: {
+                        events.append("u\(key)")
+                        if key == 8 { board.clearContents(); board.setString("selected", forType: .string) }
+                    })
+                }, translate: { text in XCTAssertEqual(text, "selected"); translated = true; return "translated" })
+            let operation = Task { await translator.performTranslation() }
+            let end = ContinuousClock.now + .seconds(1)
+            while queue.pendingCount == 0 && ContinuousClock.now < end { await Task.yield() }
+            guard queue.pendingCount == 1 else { queue.release(held); await operation.value; return XCTFail("Нет accepted translator request") }
+            let epoch = queue.generation, before = board.changeCount
+            if writer == "duringAX" {
+                ax.onRead = { board.clearContents(); board.setString("new duringAX copy", forType: .string) }
+            } else { board.clearContents(); board.setString("new \(writer) copy", forType: .string) }
+            if writer == "own" { queue.recordClipboardWrite(board: board.name.rawValue, before: before, after: board.changeCount) }
+            XCTAssertEqual(queue.generation, epoch, "External clipboard не требует нашего invalidate")
+            queue.release(held); await operation.value
+            if writer != "own" {
+                XCTAssertEqual(ax.reads, writer == "duringAX" ? 1 : 0)
+                if writer == "external" { XCTAssertEqual(ax.focusReads, 0) }
+                XCTAssertTrue(events.isEmpty); XCTAssertFalse(translated)
+                XCTAssertFalse(notifications.scripts.contains { $0.contains("Перевод готов") })
+            } else {
+                XCTAssertEqual(ax.reads, 1); XCTAssertTrue(translated)
+                XCTAssertEqual(events, ["d8", "u8", "d9", "u9"])
+                XCTAssertTrue(notifications.scripts.contains { $0.contains("Перевод готов") })
+            }
+            XCTAssertEqual(board.string(forType: .string), "new \(writer) copy", "Saved clipboard читается после validated own chain")
         }
     }
     func testConcealedCopyAfterKeyUpIsNeverSentToTranslation() async {

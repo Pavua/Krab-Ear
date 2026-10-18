@@ -332,21 +332,29 @@ final class SelectionTranslator {
         guard isAlive() else { return }
         isTranslating = true; defer { isTranslating = false }
         let epoch = inputQueue.generation
-        let started = Date()
-        guard case .success(let readLease) = await inputQueue.acquire(deadline: .now + .seconds(5)) else { return }
-        guard !Task.isCancelled, targetPID() == pid, isAlive(), inputQueue.generation == epoch else {
-            inputQueue.release(readLease); return
+        let snapshot = PasteInputSnapshot(pid: pid, epoch: epoch, changeCount: pasteboard.changeCount, isAlive: isAlive)
+        let deadline = ContinuousClock.now + .seconds(5), started = Date()
+        guard case .success(let ticket) = inputQueue.reserve(deadline: deadline) else { return }
+        let request = PasteInputReservation(queue: inputQueue, ticket: ticket, snapshot: snapshot)
+        defer { request.cancel() }
+        guard case .success(let readLease) = await inputQueue.awaitReady(ticket) else { return }
+        func acceptsReadSnapshot() -> Bool {
+            !Task.isCancelled && ContinuousClock.now < deadline && inputQueue.owns(readLease)
+                && targetPID() == snapshot.pid && snapshot.isAlive() && inputQueue.generation == snapshot.epoch
+                && inputQueue.ownsClipboardChanges(board: pasteboard.name.rawValue, from: snapshot.changeCount, to: pasteboard.changeCount)
         }
+        guard acceptsReadSnapshot() else { inputQueue.release(readLease); return }
         guard !hasConcealedClipboard(), accessibilityAccess.acceptsCurrentFocus(element: nil) else {
             inputQueue.release(readLease); return
         }
         let selection = readSelectionViaAX()
+        guard acceptsReadSnapshot() else { inputQueue.release(readLease); return }
         let saved = pasteboard.string(forType: .string)
         let original: String
         var expectedCount = pasteboard.changeCount
         if let selection { original = selection.0 }
         else {
-            guard !hasConcealedClipboard(), let events = keyEvents(pid, 8, .maskCommand) else {
+            guard acceptsReadSnapshot(), !hasConcealedClipboard(), let events = keyEvents(pid, 8, .maskCommand) else {
                 inputQueue.release(readLease); return
             }
             let before = pasteboard.changeCount

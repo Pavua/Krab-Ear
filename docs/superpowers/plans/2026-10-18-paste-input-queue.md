@@ -265,3 +265,32 @@ Task/helper early-return снимает reserved ticket, active lease живёт
 service/key-up/child cleanup. Existing sound OS leaf переиспользован вместо
 эквивалентного inline Dispatch/Purr; fake не запускает аудио. Default сохранён.
 Следующий confirmed sibling: translator read acceptance changeCount до lease wait.
+
+
+## Re-review F7: immutable translator read acceptance
+
+Actual performTranslation с удержанной общей lease: внешняя запись private clipboard
+без invalidate даёт causal RED1/5 assertions (`translator-acceptance-red.log`).
+Дополнительная фаза записи внутри AX leaf даёт RED1/3 assertions
+(`translator-ax-acceptance-red.log`). Snapshot count/epoch/target/liveness и deadline
+теперь фиксируются до synchronous reserve/awaitReady; один guard проверяет их до AX,
+после AX и перед CmdC. Внешняя запись до grant не вызывает AX/keys/IPC; запись во время
+AX не вызывает keys/IPC. Непрерывная bounded own-edge цепь остаётся разрешённой:
+ранняя собственная automation проходит, saved clipboard читается после validation.
+GREEN40/40 (`translator-acceptance-final-green.log`,15.495s). Отдельной очереди нет.
+
+Итоговый source freeze после notification/public acceptance/F7: exact hosted
+**306/306 PASS** (`acceptance-final-hosted.log`,37.471s), existing affected
+**56/56 PASS** (`acceptance-final-existing.log`,0.046s), dead Swift selftest PASS,
+scanner exit0/мёртвых0 (`acceptance-final-dead-swift.log`), release `-j 1`
+**PASS35.92s** (`acceptance-final-release.log`), затем **audit-all PASS**
+(`acceptance-final-audit-all.log`) после ВСЕХ source changes. Оба CI filters
+сохранены; рост302→306 — три public acceptance tests и один F7 test с тремя фазами.
+Свежий fetch подтвердил base19124f51. Python47/47 — прежний receipt, не повторялся
+по ruling root; Python/backend behavior не менялся. После checks меняются только docs
+и commit metadata. Логи/manifest/receipt — в ignored owning SDD каталоге.
+
+Единая shared FIFO8+1 покрывает reservations всех input owners; noEffects не является
+разрешением fresh fallback. Native physical delivery, полное отсутствие AppKit hangs,
+exact-head hosted CI и runtime acceptance здесь не квалифицированы. Root организует
+закрывающий Astra Ultra whole-diff gate; push/lifecycle не выполнялись.
