@@ -1,14 +1,34 @@
 import AppKit
 import Foundation
 
+/// Один accepted запрос хранит исходные clipboard/target/deadline и место общей FIFO.
+@MainActor final class StreamingPasteReservation {
+    let queue: InputAutomationQueue
+    let ticket: InputAutomationLease?
+    let snapshot: PasteInputSnapshot?
+    let failure: PasteAttemptResult?
+    init(queue: InputAutomationQueue, ticket: InputAutomationLease? = nil,
+         snapshot: PasteInputSnapshot? = nil, failure: PasteAttemptResult? = nil) {
+        self.queue = queue; self.ticket = ticket; self.snapshot = snapshot; self.failure = failure
+    }
+    func cancel() { if let ticket { queue.release(ticket) } }
+    nonisolated func cancelWaiting() { if let ticket { queue.cancelReserved(ticket) } }
+}
 @MainActor protocol StreamingPasteTarget: AnyObject {
     func pasteToFrontmostApp(_ text: String) async -> PasteAttemptResult
     func deleteBackward(count: Int) async -> PasteAttemptResult
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> StreamingPasteReservation?
+    func paste(_ text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult
+    func revise(count: Int, text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult
     func captureTarget() -> pid_t?
     func paste(_ text: String, target: pid_t?) async -> PasteAttemptResult
     func revise(count: Int, text: String, target: pid_t?) async -> PasteAttemptResult
 }
 extension StreamingPasteTarget {
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> StreamingPasteReservation? { nil }
+    func paste(_ text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult { await paste(text, target: target) }
+    func revise(count: Int, text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult { await revise(count: count, text: text, target: target) }
+
     func captureTarget() -> pid_t? { nil }
     func paste(_ text: String, target: pid_t?) async -> PasteAttemptResult { await pasteToFrontmostApp(text) }
     func revise(count: Int, text: String, target: pid_t?) async -> PasteAttemptResult {
@@ -23,6 +43,31 @@ extension StreamingPasteTarget {
 @MainActor final class PasteServiceStreamingAdapter: StreamingPasteTarget {
     private let pasteService: PasteService
     init(pasteService: PasteService) { self.pasteService = pasteService }
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> StreamingPasteReservation? {
+        let queue = pasteService.inputQueue
+        guard let target else { return StreamingPasteReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "no_external_target")) }
+        let snapshot = pasteService.captureInput(pid: target)
+        guard let deadline = pasteService.deadlineForStreaming(maximumDeleteCount: maximumDeleteCount) else {
+            return StreamingPasteReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "invalid_count"))
+        }
+        switch queue.reserve(deadline: deadline) {
+        case .success(let ticket): return StreamingPasteReservation(queue: queue, ticket: ticket, snapshot: snapshot)
+        case .failure(let why): return StreamingPasteReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "input_" + why.rawValue))
+        }
+    }
+    func paste(_ text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult {
+        await revise(count: 0, text: text, target: target, reservation: reservation)
+    }
+    func revise(count: Int, text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult {
+        guard let reservation else { return await revise(count: count, text: text, target: target) }
+        if let failure = reservation.failure { return failure }
+        guard let ticket = reservation.ticket else { return PasteAttemptResult(ok: false, reason: "input_cancelled") }
+        switch await reservation.queue.awaitReady(ticket) {
+        case .failure(let why): return PasteAttemptResult(ok: false, reason: "input_" + why.rawValue)
+        case .success(let lease):
+            return await pasteService.revise(deleteCount: count, text: text, targetPID: target, lease: lease, snapshot: reservation.snapshot)
+        }
+    }
     func captureTarget() -> pid_t? { pasteService.captureTargetPID() }
     func pasteToFrontmostApp(_ text: String) async -> PasteAttemptResult { await pasteService.pasteToFrontmostApp(text) }
     func deleteBackward(count: Int) async -> PasteAttemptResult { await pasteService.deleteBackward(count: count) }
@@ -72,6 +117,9 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
         var multipleTargets = false
         var effect: PasteEffect = .noEffects
         var pairs = 0
+        var maximumAcceptedLength = 0
+        var lastReason = "stream_noEffects"
+        var finalResult: Task<PasteAttemptResult, Never>?
         var finalizing = false
         var tail: Task<Void, Never>?
     }
@@ -126,8 +174,13 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
     func handlePartial(_ text: String) async {
         let owner = session, target = pasteService.captureTarget()
         guard !owner.finalizing else { return }
+        let reservation = pasteService.reserveInput(target: target, maximumDeleteCount: owner.maximumAcceptedLength)
+        // Отказ admission не создаёт скрытую неограниченную цепь Task за owner.tail.
+        if let failure = reservation?.failure { owner.lastReason = failure.reason; return }
+        owner.maximumAcceptedLength = max(owner.maximumAcceptedLength, text.count)
         let previous = owner.tail
         let task = Task { @MainActor in
+            defer { reservation?.cancel() }
             await previous?.value
             guard owner.effect != .partial && owner.effect != .unknown else { return }
             let stable = trimToWordBoundary(longestCommonPrefix(owner.lastPartial, text))
@@ -137,42 +190,60 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
             let tail = String(stable.dropFirst(owner.committedText.count))
             let sentence = tail.last(where: { !$0.isWhitespace }).map { ".!?…".contains($0) } ?? false
             if revision || owner.lastFlushAt == nil || sentence || now().timeIntervalSince(owner.lastFlushAt!) >= debounceIntervalSec {
-                _ = await update(owner: owner, desired: stable, target: target)
+                _ = await update(owner: owner, desired: stable, target: target, reservation: reservation)
             }
         }
         owner.tail = task
-        await task.value
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: {
+            task.cancel(); reservation?.cancelWaiting()
+        })
     }
-    @discardableResult func handleFinal(_ text: String) async -> PasteAttemptResult { await finalBarrier(text).value }
+    @discardableResult func handleFinal(_ text: String) async -> PasteAttemptResult {
+        let final = finalBarrier(text)
+        return await withTaskCancellationHandler(operation: { await final.value }, onCancel: { final.cancel() })
+    }
     func finalBarrier(_ text: String) -> Task<PasteAttemptResult, Never> {
         // Захватывается до первого await; начало новой записи не заменяет owner.
         let owner = session, target = pasteService.captureTarget()
+        if let final = owner.finalResult { return final }
         owner.finalizing = true
+        let reservation = pasteService.reserveInput(target: target, maximumDeleteCount: owner.maximumAcceptedLength)
         let previous = owner.tail
         let task = Task { @MainActor in
+            defer { reservation?.cancel() }
             await previous?.value
-            if owner.effect != .partial && owner.effect != .unknown { _ = await update(owner: owner, desired: text, target: target) }
+            if let failure = reservation?.failure { owner.lastReason = failure.reason; return }
+            if owner.effect != .partial && owner.effect != .unknown {
+                _ = await update(owner: owner, desired: text, target: target, reservation: reservation)
+            }
         }
         owner.tail = task
-        return Task { @MainActor in
-        await task.value
-        let effect: PasteEffect = owner.committedText == text && owner.effect == .completed ? .completed
-            : (owner.effect == .completed ? .partial : owner.effect)
-        return PasteAttemptResult(ok: effect == .completed, reason: "stream_" + effect.rawValue, effect: effect, backspacePairs: owner.pairs)
+        let final = Task { @MainActor in
+            await withTaskCancellationHandler(operation: { await task.value }, onCancel: {
+                task.cancel(); reservation?.cancelWaiting()
+            })
+            let effect: PasteEffect = owner.committedText == text && owner.effect == .completed ? .completed
+                : (owner.effect == .completed ? .partial : owner.effect)
+            return PasteAttemptResult(ok: effect == .completed, reason: effect == .completed ? "stream_completed" : owner.lastReason,
+                effect: effect, backspacePairs: owner.pairs, permitsFreshFallback: false)
         }
+        owner.finalResult = final
+        return final
     }
-    private func update(owner: Session, desired: String, target: pid_t?) async -> PasteAttemptResult {
+    private func update(owner: Session, desired: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult {
         let common = longestCommonPrefix(owner.committedText, desired)
         let remove = owner.committedText.count - common.count
         let suffix = String(desired.dropFirst(common.count))
         if remove == 0 && suffix.isEmpty { return PasteAttemptResult(ok: true, reason: "unchanged", effect: owner.effect) }
         if remove > 0 && (owner.multipleTargets || owner.committedTarget != target) {
+            owner.lastReason = "revision_target_changed"
             owner.effect = owner.effect == .noEffects ? .noEffects : .partial
             return PasteAttemptResult(ok: false, reason: "revision_target_changed", effect: owner.effect)
         }
         let result = remove > 0
-            ? await pasteService.revise(count: remove, text: suffix, target: target)
-            : await pasteService.paste(suffix, target: target)
+            ? await pasteService.revise(count: remove, text: suffix, target: target, reservation: reservation)
+            : await pasteService.paste(suffix, target: target, reservation: reservation)
+        owner.lastReason = result.reason
         owner.pairs += result.backspacePairs
         if result.ok {
             if !owner.committedText.isEmpty && owner.committedTarget != target { owner.multipleTargets = true }

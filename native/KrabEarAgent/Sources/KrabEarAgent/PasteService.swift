@@ -8,9 +8,11 @@ struct PasteAttemptResult {
     let reason: String
     let effect: PasteEffect
     let backspacePairs: Int
-    init(ok: Bool, reason: String, effect: PasteEffect? = nil, backspacePairs: Int = 0) {
+    let permitsFreshFallback: Bool
+    init(ok: Bool, reason: String, effect: PasteEffect? = nil, backspacePairs: Int = 0, permitsFreshFallback: Bool = true) {
         self.ok = ok; self.reason = reason
         self.effect = effect ?? (ok ? .completed : .noEffects)
+        self.permitsFreshFallback = permitsFreshFallback
         self.backspacePairs = backspacePairs
     }
 }
@@ -108,6 +110,10 @@ final class PasteService {
     @MainActor func captureInput(pid: pid_t) -> PasteInputSnapshot {
         PasteInputSnapshot(pid: pid, epoch: inputQueue.generation, changeCount: pasteboard.changeCount, isAlive: captureTargetLiveness(pid))
     }
+    func deadlineForStreaming(maximumDeleteCount: Int) -> ContinuousClock.Instant? {
+        guard let revision = Self.revisionBudget(count: maximumDeleteCount) else { return nil }
+        return .now + (maximumDeleteCount > 0 ? max(operationBudget, revision) : operationBudget)
+    }
     func deadlineForPaste() -> ContinuousClock.Instant { .now + operationBudget }
     @MainActor func pasteToFrontmostApp(_ text: String, targetPID: pid_t? = nil,
                                       lease: InputAutomationLease? = nil, snapshot: PasteInputSnapshot? = nil) async -> PasteAttemptResult {
@@ -128,9 +134,9 @@ final class PasteService {
         }
         return nil
     }
-    @MainActor func revise(deleteCount: Int, text: String, targetPID: pid_t?) async -> PasteAttemptResult {
+    @MainActor func revise(deleteCount: Int, text: String, targetPID: pid_t?, lease: InputAutomationLease? = nil, snapshot: PasteInputSnapshot? = nil) async -> PasteAttemptResult {
         guard deleteCount >= 0 else { return refusal("invalid_count") }
-        return await perform(text: text, deleteCount: deleteCount, targetPID: targetPID, lease: nil)
+        return await perform(text: text, deleteCount: deleteCount, targetPID: targetPID, lease: lease, snapshot: snapshot)
     }
     @MainActor private func perform(text: String?, deleteCount: Int, targetPID: pid_t?, lease supplied: InputAutomationLease?, snapshot: PasteInputSnapshot? = nil) async -> PasteAttemptResult {
         let clean = text?.trimmingCharacters(in: .whitespacesAndNewlines)

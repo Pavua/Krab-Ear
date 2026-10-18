@@ -187,3 +187,21 @@ recordLastPaste и полного delegate fallback. Bounded sleep только 
 (`cg-hosted-green.log`, `cg-existing-green.log`, `cg-release-build.log`).
 Остальные подтверждённые замечания streaming acceptance/terminal fallback,
 Undo queue и translator success будут отдельными последовательными срезами.
+
+## Независимый review: accepted streaming input
+
+Общая FIFO теперь синхронно reserve при acceptance partial/final, затем awaitReady
+после previous. Snapshot/target/deadline принадлежат accepted request. Hidden tail
+не создаётся после admission refusal; повторный final использует тот же barrier.
+Deadline консервативно покрывает checked revisionBudget(max ранее accepted length),
+не создаётся заново после tail. Неизменившийся/backoff запрос снимает ticket.
+Caller cancel снимает только reserved ticket, активную lease удерживает service
+до key-up/cleanup. Final ждёт previous даже при admission refusal, агрегирует
+prior effects, сохраняет terminal reason и явно запрещает fresh fallback.
+Disabled streaming оставляет ordinary dictation paste (положительный контроль).
+
+Actual controller/adapter/service/public delegate: RED3/11 assertions; cancellation
+RED1/2. GREEN47/47 (`stream-reserved-green.log`): включая FIFO8+active при16
+chunk callers, accepted final tail deadline, prior completed→final busy→partial,
+copy before execution/за partial и public failed status без full repeat. Новые
+reservation API edge tests добавлены после реализации, не заявляются fail-before.

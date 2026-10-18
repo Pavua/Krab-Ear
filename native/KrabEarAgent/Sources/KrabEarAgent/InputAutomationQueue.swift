@@ -42,31 +42,49 @@ final class InputAutomationQueue: @unchecked Sendable {
     /// Даже writer без await инвалидирует ещё не отправленный собственный input.
     func invalidatePending() { lock.withLock { epoch &+= 1 } }
     func quarantine() { lock.withLock { quarantined = true } }
+    /// Отмена ожидания не вправе освободить активный input/child lease.
+    func cancelReserved(_ ticket: InputAutomationLease) { lock.withLock { waiting.removeAll { $0 == ticket.id } } }
     func release(_ lease: InputAutomationLease) {
-        lock.withLock { if active == lease.id { active = nil } }
+        lock.withLock {
+            if active == lease.id { active = nil }
+            waiting.removeAll { $0 == lease.id }
+        }
     }
     func owns(_ lease: InputAutomationLease) -> Bool { lock.withLock { active == lease.id && !quarantined } }
-    func acquire(deadline: ContinuousClock.Instant) async -> Result<InputAutomationLease, InputAutomationFailure> {
+    /// Резервирует место немедленно: accepted input не скрывается в другой Task очереди.
+    func reserve(deadline: ContinuousClock.Instant) -> Result<InputAutomationLease, InputAutomationFailure> {
         let lease = InputAutomationLease(deadline: deadline)
         let admission: InputAutomationFailure? = lock.withLock {
             if quarantined { return .quarantined }
+            if ContinuousClock.now >= deadline { return .deadlineExceeded }
             if active != nil ? waiting.count >= capacity : waiting.count > capacity { return .busy }
             waiting.append(lease.id)
             return nil
         }
         if let admission { return .failure(admission) }
+        return .success(lease)
+    }
+    func acquire(deadline: ContinuousClock.Instant) async -> Result<InputAutomationLease, InputAutomationFailure> {
+        switch reserve(deadline: deadline) {
+        case .failure(let failure): return .failure(failure)
+        case .success(let ticket): return await awaitReady(ticket)
+        }
+    }
+    func awaitReady(_ lease: InputAutomationLease) async -> Result<InputAutomationLease, InputAutomationFailure> {
         defer { lock.withLock { waiting.removeAll { $0 == lease.id } } }
         while true {
             if Task.isCancelled { return .failure(.cancelled) }
-            if ContinuousClock.now >= deadline { return .failure(.deadlineExceeded) }
+            if ContinuousClock.now >= lease.deadline { return .failure(.deadlineExceeded) }
             let state: Int = lock.withLock {
                 if quarantined { return -1 }
+                if !waiting.contains(lease.id) { return -2 }
                 if active == nil && waiting.first == lease.id {
                     waiting.removeFirst(); active = lease.id; return 1
                 }
                 return 0
             }
-            if state < 0 { return .failure(.quarantined) }
+            if state == -1 { return .failure(.quarantined) }
+            if state == -2 { return .failure(.cancelled) }
             if state > 0 { return .success(lease) }
             do { try await Task.sleep(for: .milliseconds(10)) }
             catch { return .failure(.cancelled) }

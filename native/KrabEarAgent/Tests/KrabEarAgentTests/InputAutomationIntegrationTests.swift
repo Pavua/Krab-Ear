@@ -386,6 +386,71 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
         XCTAssertEqual(results.filter { $0 == .busy }.count, 63)
     }
 
+    func testFinalAcceptedBehindPartialCannotRefreshClipboardSnapshot() async {
+        let f = InputFixture(); defer { f.close() }; f.held = true
+        let service = f.service(), controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: f.service()))
+        await controller.handlePartial("hello ")
+        let partial = Task { await controller.handlePartial("hello there ") }
+        // Дать partial войти в actual modifier wait; final принимается до copy.
+        try? await Task.sleep(for: .milliseconds(30))
+        let final = controller.finalBarrier("authoritative")
+        service.putToClipboardUserInitiated("new user copy"); f.held = false
+        await partial.value
+        let result = await final.value
+        XCTAssertEqual(result.effect, .noEffects); XCTAssertFalse(result.ok)
+        XCTAssertEqual(result.reason, "clipboard_changed")
+        XCTAssertTrue(f.events.isEmpty); XCTAssertEqual(f.board.string(forType: .string), "new user copy")
+    }
+    func testCancelledStreamingCallerReleasesReservedTicketBeforePriorLease() async {
+        let f = InputFixture(); defer { f.close() }
+        guard case .success(let held) = await f.queue.acquire(deadline: .now + .seconds(2)) else { return XCTFail() }
+        let controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: f.service()))
+        await controller.handlePartial("hello ")
+        let request = Task { await controller.handlePartial("hello there ") }
+        let end = ContinuousClock.now + .seconds(1)
+        while f.queue.pendingCount == 0 && ContinuousClock.now < end { await Task.yield() }
+        request.cancel()
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(f.queue.pendingCount, 0, "Caller cancellation должна снять reserved ticket")
+        f.queue.release(held); await request.value
+        XCTAssertTrue(f.events.isEmpty)
+    }
+    func testAcceptedFinalDeadlineIncludesTailWaitAndPriorEffectsSurviveAdmissionFailure() async {
+        let f = InputFixture(); defer { f.close() }
+        guard case .success(let held) = await f.queue.acquire(deadline: .now + .seconds(6)) else { return XCTFail() }
+        let controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: f.service(budget: .milliseconds(100))))
+        await controller.handlePartial("a ")
+        let partial = Task { await controller.handlePartial("a b ") }; await Task.yield()
+        let final = controller.finalBarrier("final")
+        try? await Task.sleep(for: .milliseconds(4300))
+        f.queue.release(held); await partial.value
+        let result = await final.value
+        XCTAssertEqual(result.reason, "input_deadlineExceeded"); XCTAssertEqual(result.effect, .noEffects)
+        XCTAssertFalse(result.permitsFreshFallback); XCTAssertTrue(f.events.isEmpty)
+
+        let previous = InputFixture(capacity: 0); defer { previous.close() }
+        let committed = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: previous.service()))
+        await committed.handlePartial("hello "); await committed.handlePartial("hello there ")
+        guard case .success(let block) = await previous.queue.acquire(deadline: .now + .seconds(1)) else { return XCTFail() }
+        let refused = await committed.handleFinal("different")
+        XCTAssertEqual(refused.reason, "input_busy"); XCTAssertEqual(refused.effect, .partial)
+        XCTAssertEqual(previous.events, ["d9", "u9"])
+        previous.queue.release(block)
+    }
+    func testStreamingAcceptanceSharesGlobalBoundIncludingTailWait() async {
+        let f = InputFixture(capacity: 8); defer { f.close() }
+        guard case .success(let held) = await f.queue.acquire(deadline: .now + .seconds(3)) else { return XCTFail() }
+        let controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: f.service()))
+        var requests: [Task<Void, Never>] = []
+        for i in 0..<16 { requests.append(Task { await controller.handlePartial("word \(i) ") }); await Task.yield() }
+        try? await Task.sleep(for: .milliseconds(30))
+        XCTAssertEqual(f.queue.pendingCount, 8, "Tail wait обязан резервировать общую bounded FIFO")
+        let final = controller.finalBarrier("final")
+        f.queue.invalidatePending(); f.queue.release(held)
+        for request in requests { await request.value }
+        let outcome = await final.value
+        XCTAssertEqual(outcome.reason, "input_busy"); XCTAssertTrue(f.events.isEmpty)
+    }
     func testRealStreamingPartialRevisionDoesNotRepeatDeleteOrFullFallback() async {
         let f = InputFixture(); defer { f.close() }; let service = f.service()
         let controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: service))
@@ -447,6 +512,26 @@ private struct NoInputNotifications: NotificationProcessRunning {
 @MainActor final class StreamingPasteFinalWiringSourceContractTests: XCTestCase {
     func testAuthoritativeFinalResultIsAwaitedAndCannotMutateNewGeneration() async {
         await verifyFinalWiring(enabled: true)
+    }
+    func testFinalPublicEntryAfterUserCopyDoesNotFallbackWithFreshSnapshot() async {
+        let f = InputFixture(); defer { f.close() }; _ = NSApplication.shared
+        let service = f.service(), controller = StreamingPasteController(pasteService: PasteServiceStreamingAdapter(pasteService: f.service()))
+        var statuses: [String] = []
+        let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+            userDefaults: f.defaults, notificationService: NotificationService(processRunner: NoInputNotifications()),
+            pasteService: service, pasteTargetActivator: PasteTargetActivator(frontmostPID: { 101 }),
+            pasteActivationTarget: { _ in PasteActivationTarget(pid: 101, isAlive: { true }, requestActivation: { false }) },
+            pasteFrontmostApplication: { nil }, pasteStatusUpdater: { _, status in statuses.append(status) }, playPasteCompletionSound: {})
+        delegate.streamingPasteController = controller
+        delegate.settings.streamingPasteEnabled = true; delegate.settings.autoPaste = true
+        delegate.settings.quickEditEnabled = false; delegate.settings.clipboardMode = "always_copy"
+        delegate.recordingTargetApp = NSRunningApplication.current
+        delegate.handleTranscriptionResult(text: "authoritative", historyId: "fixture")
+        service.putToClipboardUserInitiated("new user copy")
+        let end = ContinuousClock.now + .seconds(2)
+        while statuses.isEmpty && ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(statuses, ["failed"]); XCTAssertTrue(f.events.isEmpty)
+        XCTAssertEqual(f.board.string(forType: .string), "new user copy")
     }
     func testDisabledStreamingLeavesOneOrdinaryPaste() async {
         await verifyFinalWiring(enabled: false)

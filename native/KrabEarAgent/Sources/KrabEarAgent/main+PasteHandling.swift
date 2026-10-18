@@ -165,7 +165,7 @@ extension AgentAppDelegate {
     /// поле делегата (Fable-ревью M1, 2026-08-03) — исключает переналожение двух
     /// одновременных диктовок на общем изменяемом состоянии.
     func performAutoPaste(text: String, historyId: String?, target: NSRunningApplication?, streamingOutcome: PasteAttemptResult? = nil) {
-        if let streamingOutcome, streamingOutcome.effect != .noEffects {
+        if let streamingOutcome, streamingOutcome.effect != .noEffects || !streamingOutcome.permitsFreshFallback {
             markPasteStatus(historyId: historyId, status: streamingOutcome.effect == .completed ? "ok" : "failed")
             historyPanel?.onHistoryDidUpdate()
             if streamingOutcome.effect != .completed {
