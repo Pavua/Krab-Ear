@@ -202,6 +202,59 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
         while f.events.count < 2 && ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(10)) }
         XCTAssertEqual(f.events, ["d9", "u9"]); XCTAssertEqual(f.board.string(forType: .string), "edited A")
     }
+    func testPublicAutoAndSnapshotCaptureClipboardBeforeTaskStarts() async {
+        for entry in ["auto", "snapshot"] {
+            let f = InputFixture(); defer { f.close() }; _ = NSApplication.shared
+            let service = f.service(); var statuses: [String] = []
+            let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+                userDefaults: f.defaults, notificationService: NotificationService(processRunner: NoInputNotifications()),
+                pasteService: service, pasteTargetActivator: PasteTargetActivator(frontmostPID: { 101 }),
+                pasteActivationTarget: { _ in PasteActivationTarget(pid: 101, isAlive: { true }, requestActivation: { XCTFail(); return false }) },
+                pasteFrontmostApplication: { nil }, pasteStatusUpdater: { _, status in statuses.append(status) }, playPasteCompletionSound: {})
+            delegate.recordingTargetApp = NSRunningApplication.current
+            if entry == "auto" { delegate.performAutoPaste(text: "accepted A", historyId: "fixture", target: NSRunningApplication.current) }
+            else { delegate.pasteSnapshotText(text: "accepted A", historyId: "fixture", sourceTag: "fixture") }
+            // Намеренно без yield/ожидания pendingCount: copy в том же MainActor turn.
+            service.putToClipboardUserInitiated("new user copy")
+            let end = ContinuousClock.now + .seconds(1)
+            while statuses.isEmpty && ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertEqual(statuses, ["failed"], entry); XCTAssertTrue(f.events.isEmpty, entry)
+            XCTAssertEqual(f.board.string(forType: .string), "new user copy", entry)
+        }
+    }
+    func testPublicReplayCapturesClipboardAndOriginalTargetBeforeTaskStarts() async {
+        for drift in ["copy", "target"] {
+            let f = InputFixture(); defer { f.close() }; _ = NSApplication.shared
+            let service = f.service(), notifications = InputNotificationSpy(); var finished = false
+            service.lastPastedText = "replay A"
+            let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+                userDefaults: f.defaults, notificationService: NotificationService(processRunner: notifications),
+                pasteService: service, playPasteCompletionSound: { finished = true })
+            delegate.handleQuickReplayPaste()
+            service.lastPastedText = "replay B"
+            if drift == "copy" { service.putToClipboardUserInitiated("new user copy") } else { f.pid = 202 }
+            let end = ContinuousClock.now + .seconds(1)
+            while !finished && notifications.scripts.isEmpty && ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertFalse(finished, drift); XCTAssertTrue(f.events.isEmpty, drift)
+            XCTAssertEqual(f.board.string(forType: .string), drift == "copy" ? "new user copy" : "original", drift)
+        }
+    }
+    func testPublicReplayCapturesTextAndCooldownDecisionBeforeTaskStarts() async {
+        for drift in ["text", "cooldown"] {
+            let f = InputFixture(); defer { f.close() }; _ = NSApplication.shared
+            let service = f.service(), notifications = InputNotificationSpy(); var finished = false
+            service.lastPastedText = "replay A"
+            let delegate = AgentAppDelegate(options: LaunchOptions(arguments: [CommandLine.arguments[0]]),
+                userDefaults: f.defaults, notificationService: NotificationService(processRunner: notifications),
+                pasteService: service, playPasteCompletionSound: { finished = true })
+            delegate.handleQuickReplayPaste()
+            if drift == "text" { service.lastPastedText = "replay B" } else { service.recordLastPaste("replay B") }
+            let end = ContinuousClock.now + .seconds(1)
+            while !finished && notifications.scripts.isEmpty && ContinuousClock.now < end { try? await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertTrue(finished, drift); XCTAssertEqual(f.events, ["d9", "u9"], drift)
+            XCTAssertEqual(f.board.string(forType: .string), "replay A", drift)
+        }
+    }
     func testSnapshotEntryCapturesActivationTargetBeforeTaskRuns() async {
         let f = InputFixture(); defer { f.close() }; _ = NSApplication.shared
         var chosenPID: pid_t = 101, captures: [pid_t] = []

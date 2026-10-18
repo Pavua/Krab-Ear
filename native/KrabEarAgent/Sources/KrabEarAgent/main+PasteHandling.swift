@@ -192,10 +192,12 @@ extension AgentAppDelegate {
         }
 
         let activationTarget = pasteActivationTarget(targetApp)
+        let request = pasteService.reserveInput(target: activationTarget.pid)
         Task { @MainActor [weak self] in
+            defer { request.cancel() }
             guard let self else { return }
             let targetPID = activationTarget.pid
-            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget)
+            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget, request: request)
             logger.info(
                 "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
             )
@@ -248,10 +250,12 @@ extension AgentAppDelegate {
         let (textToInsert, _) = applyPasteProfileIfNeeded(text: cleanText, targetApp: targetApp)
 
         let activationTarget = pasteActivationTarget(targetApp)
+        let request = pasteService.reserveInput(target: activationTarget.pid)
         Task { @MainActor [weak self] in
+            defer { request.cancel() }
             guard let self else { return }
             let targetPID = activationTarget.pid
-            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget)
+            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget, request: request)
             logger.info(
                 "Быстрая вставка \(sourceTag): bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
             )
@@ -438,15 +442,18 @@ extension AgentAppDelegate {
         return nil
     }
 
-    func pasteToActivatedTarget(_ text: String, target: PasteActivationTarget) async -> PasteAttemptResult {
-        let snapshot = pasteService.captureInput(pid: target.pid)
-        let queue = pasteService.inputQueue
+    func pasteToActivatedTarget(_ text: String, target: PasteActivationTarget, request prepared: PasteInputReservation? = nil) async -> PasteAttemptResult {
+        let request = prepared ?? pasteService.reserveInput(target: target.pid)
+        defer { request.cancel() }
+        if let failure = request.failure { return failure }
+        guard let snapshot = request.snapshot, snapshot.pid == target.pid, let ticket = request.ticket else {
+            return PasteAttemptResult(ok: false, reason: "operation_target_changed")
+        }
         let lease: InputAutomationLease
-        switch await queue.acquire(deadline: pasteService.deadlineForPaste()) {
+        switch await request.queue.awaitReady(ticket) {
         case .failure(let why): return PasteAttemptResult(ok: false, reason: "input_" + why.rawValue)
         case .success(let acquired): lease = acquired
         }
-        defer { queue.release(lease) }
         if let reason = pasteService.validateQueuedSnapshot(snapshot, lease: lease) {
             return PasteAttemptResult(ok: false, reason: reason)
         }
@@ -501,8 +508,10 @@ extension AgentAppDelegate {
     // MARK: - Quick replay (Cmd+Option+V)
 
     func handleQuickReplayPaste() {
+        let request = pasteService.prepareReplay()
         Task { @MainActor in
-        let result = await pasteService.repastLast()
+        defer { request.input?.cancel() }
+        let result = await pasteService.executeReplay(request)
         switch result.reason {
         case "no_last_paste":
             notify(title: "Krab Ear", body: "Нет сохранённой вставки для повтора")
@@ -513,9 +522,7 @@ extension AgentAppDelegate {
         default:
             if result.ok {
                 logger.info("Quick replay: успешно вставлен текст (reason=\(result.reason))")
-                DispatchQueue.global(qos: .userInitiated).async {
-                    NSSound(named: "Purr")?.play()
-                }
+                playPasteCompletionSound()
             } else {
                 handlePasteFailure(reason: result.reason)
             }

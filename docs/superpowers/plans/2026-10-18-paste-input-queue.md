@@ -250,3 +250,18 @@ controls (`terminal-notification-red.log`, `terminal-notification-green.log`).
 Terminal noEffects сообщает «вставка не выполнена», без ложного partial/unknown
 и без обещания clipboard. Только message branch; full release не повторялся.
 Следующий подтверждённый P2: sync acceptance public auto/snapshot/replay до Task.
+
+## Re-review: public acceptance до Task
+
+Actual public auto/snapshot/replay: RED4/16 assertions (`public-acceptance-red.log`),
+GREEN41/41 с streaming/activation/replay controls (`public-acceptance-green.log`).
+Copy и смена replay target происходят в том же MainActor turn, без ожидания
+pendingCount; отдельные controls фиксируют replay text A и cooldown decision
+раньше B. Shared PasteInputReservation/service.reserveInput переиспользуются
+streaming adapter и delegate, отдельная очередь не добавлена. Auto/snapshot
+синхронно резервируют snapshot/deadline/slot до Task. Replay prepare фиксирует
+text/target/cooldown/snapshot/deadline, execute только валидирует original target.
+Task/helper early-return снимает reserved ticket, active lease живёт до завершения
+service/key-up/child cleanup. Existing sound OS leaf переиспользован вместо
+эквивалентного inline Dispatch/Purr; fake не запускает аудио. Default сохранён.
+Следующий confirmed sibling: translator read acceptance changeCount до lease wait.

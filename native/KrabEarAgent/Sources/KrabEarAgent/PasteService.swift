@@ -19,6 +19,25 @@ struct PasteAttemptResult {
 struct PasteInputSnapshot { let pid: pid_t; let epoch: UInt64; let changeCount: Int; let isAlive: () -> Bool }
 struct PasteKeyEventPair { let down: () -> Void; let up: () -> Void }
 
+/// Один accepted запрос хранит исходные clipboard/target/deadline и место общей FIFO.
+@MainActor final class PasteInputReservation {
+    let queue: InputAutomationQueue
+    let ticket: InputAutomationLease?
+    let snapshot: PasteInputSnapshot?
+    let failure: PasteAttemptResult?
+    init(queue: InputAutomationQueue, ticket: InputAutomationLease? = nil,
+         snapshot: PasteInputSnapshot? = nil, failure: PasteAttemptResult? = nil) {
+        self.queue = queue; self.ticket = ticket; self.snapshot = snapshot; self.failure = failure
+    }
+    func cancel() { if let ticket { queue.release(ticket) } }
+    nonisolated func cancelWaiting() { if let ticket { queue.cancelReserved(ticket) } }
+}
+struct PasteReplayRequest {
+    let text: String?
+    let input: PasteInputReservation?
+    let failure: PasteAttemptResult?
+}
+
 /// Один запрос владеет lease вплоть до key-up или подтверждённого cleanup child.
 final class PasteService {
     let inputQueue: InputAutomationQueue
@@ -79,12 +98,22 @@ final class PasteService {
         set { defaults.set(newValue, forKey: lastPastedTextKey) }
     }
     func recordLastPaste(_ text: String) { lastPastedText = text; lastPastedAt = Date() }
-    @MainActor func repastLast() async -> PasteAttemptResult {
-        guard let text = lastPastedText, !text.isEmpty else { return refusal("no_last_paste") }
-        if let at = lastPastedAt, Date().timeIntervalSince(at) < repasteCooldownSec { return refusal("repaste_too_soon") }
-        if let repastePerformer { return repastePerformer(text) }
-        return await pasteToFrontmostApp(text)
+    @MainActor func prepareReplay() -> PasteReplayRequest {
+        guard let text = lastPastedText, !text.isEmpty else { return PasteReplayRequest(text: nil, input: nil, failure: refusal("no_last_paste")) }
+        if let at = lastPastedAt, Date().timeIntervalSince(at) < repasteCooldownSec {
+            return PasteReplayRequest(text: nil, input: nil, failure: refusal("repaste_too_soon"))
+        }
+        return PasteReplayRequest(text: text, input: repastePerformer == nil ? reserveInput(target: captureTargetPID()) : nil, failure: nil)
     }
+    @MainActor func executeReplay(_ request: PasteReplayRequest) async -> PasteAttemptResult {
+        defer { request.input?.cancel() }
+        if let failure = request.failure { return failure }
+        guard let text = request.text else { return refusal("no_last_paste") }
+        if let repastePerformer { return repastePerformer(text) }
+        guard let input = request.input else { return refusal("input_cancelled") }
+        return await performReserved(text, request: input)
+    }
+    @MainActor func repastLast() async -> PasteAttemptResult { await executeReplay(prepareReplay()) }
     private func pasteboardHoldsConcealedContent(_ board: NSPasteboard) -> Bool {
         board.types?.contains(.init("org.nspasteboard.ConcealedType")) ?? false
     }
@@ -109,6 +138,27 @@ final class PasteService {
     @MainActor func captureTargetPID() -> pid_t? { frontmostPID() }
     @MainActor func captureInput(pid: pid_t) -> PasteInputSnapshot {
         PasteInputSnapshot(pid: pid, epoch: inputQueue.generation, changeCount: pasteboard.changeCount, isAlive: captureTargetLiveness(pid))
+    }
+    @MainActor func reserveInput(target: pid_t?, maximumDeleteCount: Int = 0) -> PasteInputReservation {
+        let queue = inputQueue
+        guard let target else { return PasteInputReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "no_external_target")) }
+        let snapshot = captureInput(pid: target)
+        guard let deadline = deadlineForStreaming(maximumDeleteCount: maximumDeleteCount) else {
+            return PasteInputReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "invalid_count"))
+        }
+        switch queue.reserve(deadline: deadline) {
+        case .success(let ticket): return PasteInputReservation(queue: queue, ticket: ticket, snapshot: snapshot)
+        case .failure(let why): return PasteInputReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "input_" + why.rawValue))
+        }
+    }
+    @MainActor func performReserved(_ text: String, deleteCount: Int = 0, request: PasteInputReservation) async -> PasteAttemptResult {
+        defer { request.cancel() }
+        if let failure = request.failure { return failure }
+        guard let ticket = request.ticket, let snapshot = request.snapshot else { return refusal("input_cancelled") }
+        switch await inputQueue.awaitReady(ticket) {
+        case .failure(let why): return refusal("input_" + why.rawValue)
+        case .success(let lease): return await revise(deleteCount: deleteCount, text: text, targetPID: snapshot.pid, lease: lease, snapshot: snapshot)
+        }
     }
     func deadlineForStreaming(maximumDeleteCount: Int) -> ContinuousClock.Instant? {
         guard let revision = Self.revisionBudget(count: maximumDeleteCount) else { return nil }

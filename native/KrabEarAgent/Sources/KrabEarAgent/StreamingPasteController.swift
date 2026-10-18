@@ -1,33 +1,20 @@
 import AppKit
 import Foundation
 
-/// Один accepted запрос хранит исходные clipboard/target/deadline и место общей FIFO.
-@MainActor final class StreamingPasteReservation {
-    let queue: InputAutomationQueue
-    let ticket: InputAutomationLease?
-    let snapshot: PasteInputSnapshot?
-    let failure: PasteAttemptResult?
-    init(queue: InputAutomationQueue, ticket: InputAutomationLease? = nil,
-         snapshot: PasteInputSnapshot? = nil, failure: PasteAttemptResult? = nil) {
-        self.queue = queue; self.ticket = ticket; self.snapshot = snapshot; self.failure = failure
-    }
-    func cancel() { if let ticket { queue.release(ticket) } }
-    nonisolated func cancelWaiting() { if let ticket { queue.cancelReserved(ticket) } }
-}
 @MainActor protocol StreamingPasteTarget: AnyObject {
     func pasteToFrontmostApp(_ text: String) async -> PasteAttemptResult
     func deleteBackward(count: Int) async -> PasteAttemptResult
-    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> StreamingPasteReservation?
-    func paste(_ text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult
-    func revise(count: Int, text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> PasteInputReservation?
+    func paste(_ text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult
+    func revise(count: Int, text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult
     func captureTarget() -> pid_t?
     func paste(_ text: String, target: pid_t?) async -> PasteAttemptResult
     func revise(count: Int, text: String, target: pid_t?) async -> PasteAttemptResult
 }
 extension StreamingPasteTarget {
-    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> StreamingPasteReservation? { nil }
-    func paste(_ text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult { await paste(text, target: target) }
-    func revise(count: Int, text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult { await revise(count: count, text: text, target: target) }
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> PasteInputReservation? { nil }
+    func paste(_ text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult { await paste(text, target: target) }
+    func revise(count: Int, text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult { await revise(count: count, text: text, target: target) }
 
     func captureTarget() -> pid_t? { nil }
     func paste(_ text: String, target: pid_t?) async -> PasteAttemptResult { await pasteToFrontmostApp(text) }
@@ -43,30 +30,15 @@ extension StreamingPasteTarget {
 @MainActor final class PasteServiceStreamingAdapter: StreamingPasteTarget {
     private let pasteService: PasteService
     init(pasteService: PasteService) { self.pasteService = pasteService }
-    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> StreamingPasteReservation? {
-        let queue = pasteService.inputQueue
-        guard let target else { return StreamingPasteReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "no_external_target")) }
-        let snapshot = pasteService.captureInput(pid: target)
-        guard let deadline = pasteService.deadlineForStreaming(maximumDeleteCount: maximumDeleteCount) else {
-            return StreamingPasteReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "invalid_count"))
-        }
-        switch queue.reserve(deadline: deadline) {
-        case .success(let ticket): return StreamingPasteReservation(queue: queue, ticket: ticket, snapshot: snapshot)
-        case .failure(let why): return StreamingPasteReservation(queue: queue, failure: PasteAttemptResult(ok: false, reason: "input_" + why.rawValue))
-        }
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> PasteInputReservation? {
+        pasteService.reserveInput(target: target, maximumDeleteCount: maximumDeleteCount)
     }
-    func paste(_ text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult {
+    func paste(_ text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult {
         await revise(count: 0, text: text, target: target, reservation: reservation)
     }
-    func revise(count: Int, text: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult {
+    func revise(count: Int, text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult {
         guard let reservation else { return await revise(count: count, text: text, target: target) }
-        if let failure = reservation.failure { return failure }
-        guard let ticket = reservation.ticket else { return PasteAttemptResult(ok: false, reason: "input_cancelled") }
-        switch await reservation.queue.awaitReady(ticket) {
-        case .failure(let why): return PasteAttemptResult(ok: false, reason: "input_" + why.rawValue)
-        case .success(let lease):
-            return await pasteService.revise(deleteCount: count, text: text, targetPID: target, lease: lease, snapshot: reservation.snapshot)
-        }
+        return await pasteService.performReserved(text, deleteCount: count, request: reservation)
     }
     func captureTarget() -> pid_t? { pasteService.captureTargetPID() }
     func pasteToFrontmostApp(_ text: String) async -> PasteAttemptResult { await pasteService.pasteToFrontmostApp(text) }
@@ -230,7 +202,7 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
         owner.finalResult = final
         return final
     }
-    private func update(owner: Session, desired: String, target: pid_t?, reservation: StreamingPasteReservation?) async -> PasteAttemptResult {
+    private func update(owner: Session, desired: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult {
         let common = longestCommonPrefix(owner.committedText, desired)
         let remove = owner.committedText.count - common.count
         let suffix = String(desired.dropFirst(common.count))
