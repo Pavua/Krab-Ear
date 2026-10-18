@@ -16,7 +16,7 @@
 - Call-ready policy не применяется. VG сейчас использует обычный balanced REST/Whisper; backend dictation и REST call owner различаются.
 - A не освобождает доказанно backend Metal: engine unload касается GigaAM router, не Whisper/pyannote.
 - B не импортирует MLX для наблюдения, не вызывает get_model/start/warmup/transcribe/get_gigaam_adapter.
-- Model IDs ограничены именем или repo/id; абсолютные/локальные пути, история, аудио, env и секреты не возвращаются.
+- Whisper model IDs — только finite exact allowlist двух source-default публичных IDs; неизвестные raw IDs/имена/пути дают null без FS/network probe. История, аудио, env и секреты не возвращаются.
 
 ## A — truthful unload
 
@@ -66,3 +66,23 @@ All audit checks passed. `git diff --check` exit0.
 Ни inference, ни настоящие unload/IPC, ни live call acceptance не запускались.
 Для следующего whole-diff gate рекомендована Astra Ultra; для механики CI —
 Sol6.1 Medium. Реализация A+B завершена, release/runtime acceptance вне scope.
+
+## Astra whole-diff remediation F1–F4
+
+- F1 RED4: actual cached GigaAMMLXAdapter через actual router имел AttributeError. Добавлен nonwarming snapshot под try model/global MLX locks; NoModelEvaluation сохраняется, inflight unknown. Model/global lock controls → busy без ожидания.
+- F2 RED2: MLX close(None) разрушал model/executor и давал unloadedTrue, unsupported owner тоже принимался. Engine manual unload теперь router.close(confirmed_only=True); capability explicit True только у GigaAMAdapter. MLX/unsupported отказ ДО close; lifecycle default unchanged.
+- F3 RED2: transport-флаг скрывал другой retained Whisper owner. Теперь оба observed snapshots независимы от configured_transport, aggregate unloaded требует обоих unloaded; busy/unknown сохраняются. Новые observed children описаны в IPC reference.
+- F4 RED4/controls8 PASS: относительный private path и private basename утекали и в configured, и в observed metadata. Regex заменён finite exact allowlist двух source-default public IDs, всё остальное null без provenance guessing/FS/network. Positive controls используют эти два разных публичных IDs.
+- Объединённый actual-chain GREEN39; последующие affected checks/audit-all и final seal — отдельный receipt. Эти четыре confirmed finding исчерпывают согласованную remediation волну; новых features не добавлялось.
+
+### Remediation frozen validation
+
+F1–F4 финальная source-матрица: **239 unique PASS в17 последовательных файлах/
+селекторах +10 router subtests**. Новые owner39/HTTP2; добавлены existing MLX
+adapter14/routerMLX6; прежние affected controls повторены на итоговом source.
+3 BackendService-init privacy cases по-прежнему deselected; ни warmup fixtures,
+ни настоящих моделей/IPC не было. Финальный `make audit-all` после всех четырёх
+исправлений: exit0, All audit checks passed. `git diff --check` exit0.
+Remediation logs/commands/seal: ignored `.superpowers/sdd/2026-10-18-stt-residency/`.
+Следующий gate — повторный Astra Ultra whole-diff; Linux3.12 остаётся remote CI,
+локальный parity unavailable без установки зависимостей. Никакого push/apply.

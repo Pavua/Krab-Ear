@@ -1372,6 +1372,9 @@ Returns: `{ok, model, duration_ms}`
 *(stt_management_service.py)*  
 Подтверждает освобождение GigaAM owner. Busy/inflight/call pin или неподтверждённый
 cleanup дают `unloaded:false`; cache сохраняется до подтверждённого close.
+Manual unload поддержан GigaAM PyTorch/subprocess owner с явным idle/cleanup
+контрактом; MLX/unsupported owner отклоняется ДО destructive close, с сохранением
+model/executor/cache. Lifecycle close этим API не меняется.
 `unloaded:true` означает подтверждённое освобождение/отсутствие этого owner,
 не замер освобождённой RAM и не выгрузку Whisper/pyannote/REST worker.
 Нет params. Returns: `{unloaded: bool, error: str | null}`.
@@ -1382,9 +1385,16 @@ cleanup дают `unloaded:false`; cache сохраняется до подтв�
 MLX import, warmup, inference, history или Keychain. Нет params.
 Returns: `{owner:"backend", owner_pid:int, configured:{profile,model}, whisper,
 gigaam}`; при отсутствии engine: `{owner:"backend",state:"unavailable"}`.
-Component snapshot: `{state,model,transport,pid,inflight}`; cached GigaAM также
-`call_pins`. State: `unloaded|loaded|busy|unknown`. `model` — безопасное имя/repo ID
-или null; локальные пути не выдаются. Configured model отдельно от observed model.
+GigaAM component snapshot: `{state,model,transport,pid,inflight}`; PyTorch owner
+также `call_pins`, MLX inflight неизвестен (null). Whisper: `{configured_transport,
+state,in_process,worker}`; оба observed owner имеют component schema и читаются
+независимо от текущего флага, чтобы hot reload не скрыл retained model/child.
+Aggregate precedence: busy→unknown→loaded→unloaded; unloaded требует обоих unloaded.
+State: `unloaded|loaded|busy|unknown`. Whisper `model` выдаётся только для двух
+точных публичных source-default IDs (`mlx-community/whisper-large-v3-mlx`,
+`mlx-community/whisper-large-v3-turbo`); произвольные raw ID/имена/относительные
+и абсолютные пути имеют неизвестное происхождение и дают null без FS/network
+probe. Configured model отдельно от observed model.
 Занятый lock даёт busy, live Whisper child без model metadata даёт unknown/null.
 Это момент наблюдения, не атомарная гарантия готовности следующего запроса/звонка.
 

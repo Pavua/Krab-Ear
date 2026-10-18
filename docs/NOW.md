@@ -5,7 +5,9 @@
 В изолированной ветке от `19124f51` реализованы truthful GigaAM unload bool и
 nonwarming snapshot собственного STT owner: backend IPC `get_stt_residency`,
 REST — metadata в существующем auth-gated `/v1/readiness`. Busy/неподтверждённый
-cleanup не превращаются в успешную выгрузку. Configured model отделена от
+cleanup не превращаются в успешную выгрузку; MLX manual unload отклоняется до
+close без idle proof. Whisper наблюдает оба retained owner независимо от
+transport-флага; произвольные raw model IDs/пути скрыты. Configured model отделена от
 observed; live Whisper child без model metadata остаётся unknown. Снимок не
 обещает call readiness/latency и не доказывает освобождение backend Metal.
 Source tests используют fake sessions/OS leaves; модели, конфигурация,

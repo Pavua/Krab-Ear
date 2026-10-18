@@ -586,10 +586,11 @@ class AudioEngine:
         """Подтверждает освобождение GigaAM owner, сохраняя занятый cache.
 
         Это не выгрузка Whisper/pyannote и не доказательство освобождения всей
-        STT-памяти. False означает busy или неподтверждённый cleanup; существующие
+        STT-памяти. False означает busy, неподтверждённый cleanup или owner без
+        подтверждаемого manual-unload контракта (например MLX); существующие
         router/adapter locks и call pins остаются авторитетными guards.
         """
-        return self._router.close() is True
+        return self._router.close(confirmed_only=True) is True
 
     def close(self) -> bool:
         """Останавливает фоновые ресурсы движка (живой инцидент 2026-08-04).

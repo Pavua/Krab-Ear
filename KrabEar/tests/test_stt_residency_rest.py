@@ -25,7 +25,7 @@ def rest(monkeypatch, tmp_path):
          patch("core.config._SETTINGS_JSON_FILE", tmp_path / "absent.json"):
         rs = importlib.import_module("backend.rest_server")
     engine = AudioEngine.__new__(AudioEngine)
-    engine.quality_profile = "balanced"; engine.current_model = "org/rest-configured"
+    engine.quality_profile = "balanced"; engine.current_model = "mlx-community/whisper-large-v3-turbo"
     engine._router = STTRouter(SimpleNamespace(STT_GIGAAM_ENABLED=False))
     engine._router.get_gigaam_adapter = Mock(side_effect=AssertionError("lazy GigaAM lookup"))
     import core.mlx_whisper_session as whisper
@@ -59,6 +59,6 @@ def test_authenticated_readiness_observes_rest_owner_without_loading(rest):
     assert "stt_residency" in result, "Actual auth-gated route не возвращает owner-local snapshot"
     state = result["stt_residency"]
     assert state["owner"] == "rest"
-    assert state["configured"]["model"] == "org/rest-configured"
+    assert state["configured"]["model"] == "mlx-community/whisper-large-v3-turbo"
     assert state["whisper"]["state"] == "unloaded"
     assert engine._router._gigaam_adapter is None

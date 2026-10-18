@@ -127,7 +127,9 @@ class STTManagementService:
     def handle_unload_stt_model(self, params: dict) -> dict:
         """Выгружает GigaAM owner по явной команде из панели.
 
-        Парная операция к ``warmup_stt``. Кэш адаптера сбрасывается, следующая
+        Подтверждённый manual unload поддержан PyTorch/subprocess owner; MLX
+        без idle/cleanup подтверждения отклоняется до close. При успехе cache
+        сбрасывается, следующая
         транскрибация поднимает модель заново — поэтому «выгрузить» не ломает
         диктовку, а лишь возвращает память до следующего использования.
 
@@ -146,7 +148,7 @@ class STTManagementService:
         except Exception as exc:  # noqa: BLE001 — сообщаем причину, не роняем IPC
             return {"unloaded": False, "error": str(exc)}
         if confirmed is not True:
-            return {"unloaded": False, "error": "Выгрузка GigaAM не подтверждена: busy или незавершённый cleanup"}
+            return {"unloaded": False, "error": "Выгрузка GigaAM не подтверждена: busy, незавершённый cleanup или неподдерживаемый owner"}
         return {"unloaded": True, "error": None}
 
     def handle_warmup_stt(self, params: dict) -> dict:

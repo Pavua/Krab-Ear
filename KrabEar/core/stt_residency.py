@@ -1,19 +1,21 @@
 """Наблюдение cached STT owner без загрузки моделей или child IPC."""
 from __future__ import annotations
 
-import re
 import sys
 from typing import Any
 
 
+# Точные публичные IDs стандартных Whisper-моделей из core/config.py.
+# Произвольный repo-подобный текст может быть относительным private path.
+_PUBLIC_MODEL_IDS = frozenset({
+    "mlx-community/whisper-large-v3-mlx",
+    "mlx-community/whisper-large-v3-turbo",
+})
+
+
 def public_model_id(value: Any) -> str | None:
-    """Только имя/repo ID: локальные пути в metadata не передаём."""
-    if not isinstance(value, str) or len(value) > 256:
-        return None
-    parts = value.split("/")
-    if len(parts) not in (1, 2) or any(p in ("", ".", "..") for p in parts):
-        return None
-    return value if re.fullmatch(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)?", value) else None
+    """Неизвестное происхождение raw path/name — неизвестная metadata."""
+    return value if isinstance(value, str) and value in _PUBLIC_MODEL_IDS else None
 
 
 def empty_snapshot(state: str = "unloaded", transport: str | None = None) -> dict:
@@ -21,11 +23,21 @@ def empty_snapshot(state: str = "unloaded", transport: str | None = None) -> dic
 
 
 def whisper_snapshot() -> dict:
-    """Снимок наблюдения, не гарантия готовности следующего запроса."""
+    """Наблюдает обоих existing owners, независимо от текущей настройки."""
     from core.mlx_whisper_session import mlx_whisper_worker_enabled, whisper_residency_snapshot
 
-    if mlx_whisper_worker_enabled():
-        return whisper_residency_snapshot()
+    configured = "worker" if mlx_whisper_worker_enabled() else "in_process"
+    in_process = _in_process_whisper_snapshot()
+    worker = whisper_residency_snapshot()
+    states = {in_process["state"], worker["state"]}
+    # Не скрываем retained owner после hot reload transport. Unknown/busy
+    # консервативнее loaded; unloaded требует двух наблюдений unloaded.
+    state = next(value for value in ("busy", "unknown", "loaded", "unloaded") if value in states)
+    return {"configured_transport": configured, "state": state,
+            "in_process": in_process, "worker": worker}
+
+
+def _in_process_whisper_snapshot() -> dict:
     from core.mlx_lock import mlx_lock
 
     lock = mlx_lock()

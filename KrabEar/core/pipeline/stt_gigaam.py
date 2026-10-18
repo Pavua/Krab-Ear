@@ -122,6 +122,9 @@ class GigaAMAdapter:
     Модель загружается лениво при первом вызове transcribe() — не в __init__.
     """
 
+    # close() подтверждает idle/pin guards и результат cleanup явным bool.
+    supports_confirmed_unload = True
+
     def __init__(
         self,
         device: str = "mps",
