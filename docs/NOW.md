@@ -9,6 +9,21 @@
 - **Память:** `CLAUDE.md` 173→109 КБ, подробности дословно в `docs/CLAUDE_ARCHIVE.md` (метка `§L<n>`); `NOW.md` 80→27 КБ, история в `docs/archive/NOW-history-2026-09-10.md`.
 - Voice Gateway (19.10): `hint_terms` не нужен (звонки шли на OpenAI Realtime); обычные звонки пойдут каскадом через Ear — нагрузка на call-STT вырастет. Рестарт `ai.krab.ear.*` — только после согласования с Крабом и VG.
 
+## 2026-10-18 — STT residency: source checkpoint, runtime не менялся
+
+В изолированной ветке от `19124f51` реализованы truthful GigaAM unload bool и
+nonwarming snapshot собственного STT owner: backend IPC `get_stt_residency`,
+REST — metadata в существующем auth-gated `/v1/readiness`. Busy/неподтверждённый
+cleanup не превращаются в успешную выгрузку; MLX manual unload отклоняется до
+close без idle proof. Whisper наблюдает оба retained owner независимо от
+transport-флага; произвольные raw model IDs/пути скрыты. Configured model отделена от
+observed; live Whisper child без model metadata остаётся unknown. Снимок не
+обещает call readiness/latency и не доказывает освобождение backend Metal.
+Source tests используют fake sessions/OS leaves; модели, конфигурация,
+процессы и call-ready policy не менялись. Linux3.12 CI и независимый review
+ещё pending. [Owning card](superpowers/plans/2026-10-18-stt-residency.md).
+
+
 ## 2026-10-16 — Finalizing idle: локально318 PASS, audit/CI pending
 
 В отдельной ветке на merged2098 `8dc5e48d` подготовлен фикс lifecycle-пробы:

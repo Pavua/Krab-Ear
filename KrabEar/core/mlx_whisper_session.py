@@ -89,6 +89,20 @@ def peek_session() -> Optional["MLXWhisperSession"]:
         return _session
 
 
+def whisper_residency_snapshot() -> dict:
+    """Наблюдает singleton без ожидания его создания/закрытия и без spawn."""
+    from core.stt_residency import empty_snapshot
+
+    if not _session_lock.acquire(blocking=False):
+        return empty_snapshot("busy", "worker")
+    try:
+        session = _session
+    finally:
+        _session_lock.release()
+    # Снимок observational: owner может измениться после захвата ссылки.
+    return session.residency_snapshot() if session is not None else empty_snapshot(transport="worker")
+
+
 def reset_mlx_whisper_session() -> None:
     """Тесты / shutdown: закрыть singleton, чтобы следующий get() сделал новый."""
     global _session
@@ -306,6 +320,26 @@ class MLXWhisperSession:
             with self._state_lock:
                 self._inflight -= 1
                 self._last_used_ts = time.monotonic()
+
+    def residency_snapshot(self) -> dict:
+        """Живой child не доказывает загруженную модель: её metadata нет."""
+        from core.stt_residency import empty_snapshot
+
+        if not self._lock.acquire(blocking=False):
+            return empty_snapshot("busy", "worker")
+        try:
+            if not self._state_lock.acquire(blocking=False):
+                return empty_snapshot("busy", "worker")
+            try:
+                proc = self._proc
+                alive = proc is not None and proc.poll() is None
+                result = empty_snapshot("busy" if self._inflight else "unknown" if alive else "unloaded", "worker")
+                result.update(pid=proc.pid if alive else None, inflight=self._inflight)
+                return result
+            finally:
+                self._state_lock.release()
+        finally:
+            self._lock.release()
 
     def close(self, timeout: float = 5.0) -> None:
         """Публичный close(): берёт self._lock С ТАЙМАУТОМ, чтобы залипший
