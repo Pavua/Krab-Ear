@@ -363,40 +363,56 @@ final class SelectionTranslator {
             while pasteboard.changeCount == before && ContinuousClock.now < copyDeadline && !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(10))
             }
+            let copiedCount = pasteboard.changeCount
             guard !Task.isCancelled, ContinuousClock.now < readLease.deadline,
                   isAlive(), targetPID() == pid, inputQueue.generation == epoch,
                   !hasConcealedClipboard(), accessibilityAccess.acceptsCurrentFocus(element: nil) else {
+                // Собственный Cmd+C уже затёр clipboard: возвращаем saved под удерживаемым lease.
+                if copiedCount != before { _ = restoreSaved(saved, ifCountIs: copiedCount) }
                 inputQueue.release(readLease); return
             }
             expectedCount = pasteboard.changeCount
             original = expectedCount != before ? (pasteboard.string(forType: .string) ?? "") : ""
         }
         inputQueue.release(readLease)
-        guard !original.isEmpty, !Task.isCancelled else { return }
+        guard !original.isEmpty, !Task.isCancelled else {
+            if selection == nil { await restoreClipboard(saved, expectedCount: expectedCount) }
+            return
+        }
         // Долгий IPC никогда не удерживает input lease.
         guard let translated = await callTranslateIPC(text: original) else {
             if selection == nil { await restoreClipboard(saved, expectedCount: expectedCount) }
             return
         }
-        guard case .success(let writeLease) = await inputQueue.acquire(deadline: .now + .seconds(5)) else { return }
+        guard case .success(let writeLease) = await inputQueue.acquire(deadline: .now + .seconds(5)) else {
+            if selection == nil { await restoreClipboard(saved, expectedCount: expectedCount) }
+            return
+        }
         defer { inputQueue.release(writeLease) }
+        // Выход до собственной записи: saved возвращается под уже удерживаемым lease.
+        func restoreBeforeOwnWrite() {
+            guard selection == nil, let after = restoreSaved(saved, ifCountIs: expectedCount) else { return }
+            expectedCount = after
+        }
         func canConfirm(_ count: Int) -> Bool {
             !Task.isCancelled && ContinuousClock.now < writeLease.deadline && inputQueue.owns(writeLease)
                 && targetPID() == pid && isAlive() && inputQueue.generation == epoch
                 && pasteboard.changeCount == count && !hasConcealedClipboard()
                 && accessibilityAccess.acceptsCurrentFocus(element: selection?.1)
         }
-        guard canConfirm(expectedCount) else { return }
+        guard canConfirm(expectedCount) else { restoreBeforeOwnWrite(); return }
         if let selection {
             // AX write — самостоятельный канал. False не разрешает повторный Cmd+V.
             guard writeSelectionViaAX(element: selection.1, text: translated) else {
                 showErrorHUD(reason: "Не удалось подтвердить замену выделения"); return
             }
         } else {
-            guard !hasConcealedClipboard(), let events = keyEvents(pid, Keycode.v.rawValue, .maskCommand) else { return }
+            guard !hasConcealedClipboard(), let events = keyEvents(pid, Keycode.v.rawValue, .maskCommand) else {
+                restoreBeforeOwnWrite(); return
+            }
             let beforeWrite = pasteboard.changeCount
             pasteboard.clearContents()
-            guard pasteboard.setString(translated, forType: .string) else { return }
+            guard pasteboard.setString(translated, forType: .string) else { restoreBeforeOwnWrite(); return }
             let ownCount = pasteboard.changeCount
             inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: beforeWrite, after: ownCount)
             events.down(); try? await Task.sleep(for: .milliseconds(30)); events.up()
@@ -424,8 +440,16 @@ final class SelectionTranslator {
     private func restoreClipboard(_ saved: String?, expectedCount: Int) async {
         guard case .success(let lease) = await inputQueue.acquire(deadline: .now + .seconds(5)) else { return }
         defer { inputQueue.release(lease) }
-        guard pasteboard.changeCount == expectedCount else { return }
+        _ = restoreSaved(saved, ifCountIs: expectedCount)
+    }
+    /// CAS-возврат saved: пользовательская запись после нашего Cmd+C не затирается.
+    /// Собственная запись фиксируется в цепочке, чтобы ждущие в очереди не увидели «чужой» clipboard.
+    private func restoreSaved(_ saved: String?, ifCountIs expected: Int) -> Int? {
+        guard pasteboard.changeCount == expected else { return nil }
         pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) }
+        let after = pasteboard.changeCount
+        inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: expected, after: after)
+        return after
     }
 
     // MARK: - AX path

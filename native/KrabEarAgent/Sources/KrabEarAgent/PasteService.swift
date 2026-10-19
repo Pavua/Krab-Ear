@@ -243,8 +243,10 @@ final class PasteService {
         }
         let trusted = accessibilityTrusted()
         if trusted, readEditable(pid) == false { return refusal("no_editable_focus") }
-        var insert = text
-        if smartFieldFormatEnabled, trusted,
+        // Чистое удаление (revision укоротила текст) не вставляет ничего: пустая строка
+        // не пишется в clipboard, не шлёт Cmd+V и не затирает lastPastedText.
+        var insert: String? = (text?.isEmpty ?? true) ? nil : text
+        if insert != nil, smartFieldFormatEnabled, trusted,
            ["AXSearchField", "AXComboBox"].contains(readRole(pid) ?? "") {
             insert = textForSearchField(clean ?? "")
         }

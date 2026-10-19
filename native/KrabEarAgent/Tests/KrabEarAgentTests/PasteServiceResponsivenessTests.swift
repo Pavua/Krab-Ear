@@ -70,6 +70,33 @@ final class PasteServiceResponsivenessTests: XCTestCase {
         XCTAssertEqual(fixture.pasteboard.changeCount, before)
         XCTAssertTrue(heartbeatDuringOperation, "Цикл удаления заблокировал MainActor между down/up")
     }
+    /// Чистое удаление (revision укорачивает уже вставленный текст): пустая вставка не
+    /// должна трогать clipboard, слать Cmd+V и затирать lastPastedText для Cmd+Opt+V.
+    func testDeleteOnlyRevisionDoesNotWriteClipboardNorPasteEmptyText() async {
+        let fixture = PasteResponsivenessFixture()
+        defer { fixture.close() }
+        fixture.pasteboard.clearContents()
+        fixture.pasteboard.setString("пользовательский буфер", forType: .string)
+        let before = fixture.pasteboard.changeCount
+        var keys: [CGKeyCode] = []
+        let service = PasteService(
+            pasteboard: fixture.pasteboard, defaults: fixture.defaults,
+            modifierKeysDown: { false }, accessibilityTrusted: { true },
+            keyEventFactory: { _, key, _ in
+                keys.append(key)
+                return PasteKeyEventPair(down: {}, up: {})
+            },
+            inputQueue: InputAutomationQueue(), frontmostPID: { 12345 }, targetIsAlive: { _ in true },
+            focusRole: { _ in "AXTextArea" }, focusEditable: { _ in true }, collapseSelection: { _ in }
+        )
+        service.recordLastPaste("прежняя вставка")
+        let result = await service.revise(deleteCount: 2, text: "", targetPID: 12345)
+        XCTAssertTrue(result.ok)
+        XCTAssertEqual(keys, [Keycode.delete.rawValue, Keycode.delete.rawValue], "только Backspace, без Cmd+V")
+        XCTAssertEqual(fixture.pasteboard.changeCount, before, "пустая вставка не пишет clipboard")
+        XCTAssertEqual(fixture.pasteboard.string(forType: .string), "пользовательский буфер")
+        XCTAssertEqual(service.lastPastedText, "прежняя вставка", "lastPastedText не затирается пустой строкой")
+    }
 }
 
 private final class PasteResponsivenessFixture {

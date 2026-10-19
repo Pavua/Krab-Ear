@@ -148,6 +148,39 @@ private final class SelectionNotificationSpy: NotificationProcessRunning, @unche
         XCTAssertFalse(translated, "Concealed drift после copy await запрещает передачу текста в IPC")
     }
 
+    /// Fallback через Cmd+C затирает пользовательский clipboard выделенным текстом:
+    /// любой выход после копирования (смена цели, drift, отмена) обязан вернуть saved.
+    func testClipboardFallbackRestoresSavedOnEveryExitAfterCopy() async {
+        for exit in ["targetChangedDuringIPC", "cancelledBeforeIPC"] {
+            let name = "SelectionRestore.\(UUID().uuidString)"
+            let board = NSPasteboard(name: .init(name)), defaults = UserDefaults(suiteName: name)!
+            defer { board.clearContents(); board.releaseGlobally(); defaults.removePersistentDomain(forName: name) }
+            board.clearContents(); board.setString("важный буфер", forType: .string)
+            var pid: pid_t = 101
+            var operation: Task<Void, Never>?
+            let translator = SelectionTranslator(
+                ipcClient: IPCClient(socketPath: "/unused-fixture.sock"),
+                notificationService: NotificationService(processRunner: NoSelectionNotifications()),
+                defaults: defaults, eventMonitor: NoSelectionMonitor(), accessibilityAccess: NoSelectionAX(),
+                pasteboard: board, inputQueue: InputAutomationQueue(), targetPID: { pid }, targetIsAlive: { _ in true },
+                keyEvents: { _, key, _ in
+                    PasteKeyEventPair(down: {}, up: {
+                        if key == 8 {
+                            board.clearContents(); board.setString("выделенное", forType: .string)
+                            if exit == "cancelledBeforeIPC" { operation?.cancel() }
+                        }
+                    })
+                },
+                translate: { _ in
+                    if exit == "targetChangedDuringIPC" { pid = 202 }
+                    return "перевод"
+                })
+            operation = Task { await translator.performTranslation() }
+            await operation!.value
+            XCTAssertEqual(board.string(forType: .string), "важный буфер", exit)
+        }
+    }
+
     func testTranslatorOwnsCopyPairButReleasesQueueDuringTranslation() async {
         let name = "SelectionLease.\(UUID().uuidString)"
         let board = NSPasteboard(name: .init(name)), defaults = UserDefaults(suiteName: name)!
