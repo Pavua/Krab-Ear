@@ -1,110 +1,57 @@
-/*
- StreamingPasteController.swift
-
- Потоковая вставка текста по мере диктовки (opt-in, streaming_paste_enabled).
-
- Архитектура:
- - Подписывается на SSE /v1/events (realtime.partial_transcript + realtime.final_transcript)
-   для partial-событий, используя тот же паттерн PartialSSEDelegate, что и
-   RealtimeOverlayController+PartialSSE.swift.
- - 🔴 Финализация сессии НЕ полагается на SSE realtime.final_transcript — этот путь
-   структурно недостижим в реальном recording-stop flow: `stopRecording()`
-   (main+HotkeyRecording.swift) вызывает `stopRealtimeOverlayPolling()` →
-   `recordingDidStop()` → `stopSSE()` СИНХРОННО и ДО IPC-вызова `stop_recording`, а backend
-   эмиттит `realtime.final_transcript` ТОЛЬКО ВНУТРИ обработки этого самого IPC-вызова
-   (recording_core_service.py, handle_stop_recording) — то есть строго ПОСЛЕ того как SSE
-   уже закрыт. Вместо этого `handleFinal()` вызывается НАПРЯМУЮ из `handleTranscriptionResult`
-   (main+PasteHandling.swift) с АВТОРИТЕТНЫМ текстом из результата IPC-ответа. Case
-   "realtime.final_transcript" в `handleSSEEvent` оставлен как безвредный defensive fallback.
- - Алгоритм stable-prefix commit с debounce-укрупнением чанков:
-     1. На каждый partial P вычисляем longestCommonPrefix(lastPartial, P), затем откатываем
-        к последней границе слова (не вставляем полуслова) → `stable`.
-     2. Если `stable` НЕ начинается с уже вставленного `committedText` — backend "ревизовал"
-        уже вставленный диапазон (переосмыслил сказанное). Выполняем performRevision:
-        откатываем разошедшийся хвост через `pasteService.deleteBackward()` (симулированные
-        Backspace) и вставляем исправленный хвост — полная замена диапазона, без silent skip.
-     3. Иначе копим новый хвост (`stable` минус `committedText`) и вставляем его НЕ на каждое
-        событие, а только когда: (a) с последней вставки прошло ≥debounceIntervalSec, ИЛИ
-        (b) хвост оканчивается знаком завершения предложения (.!?…). Это резко сокращает
-        число Cmd+V-вставок за одну фразу (с "много раз в секунду" до "раз на слово/фразу"),
-        так что Cmd+Z пользователя убирает осмысленный кусок, а не 1-2 символа.
-     4. На final F: если F начинается с committedText — вставляем остаток F[committedText.count...];
-        иначе (final тоже ревизовал) — performRevision(F). Сбрасываем сессию.
- - Каждый чанк вставляется через clipboard + Cmd+V (appendChunk → StreamingPasteTarget.pasteToFrontmostApp).
- - Если за текущую запись было вставлено/откачено ≥1 чанк, didStreamThisRecording = true.
-   main+PasteHandling.swift читает это свойство и пропускает финальную полную вставку.
- - 🔴 State (committedText/latestStable) продвигается ТОЛЬКО когда реальная paste/delete
-   операция вернула `ok == true` (maybeFlush/performRevision/handleFinal все проверяют
-   `PasteAttemptResult.ok` перед мутацией state). Если вставка/удаление провалились
-   (no_external_target/modifiers_stuck/accessibility_not_granted/event_post_failed),
-   state НЕ продвигается — иначе внутренняя модель "что на экране" разошлась бы с
-   реальностью, и следующая ревизия откатила бы неверное количество символов (в т.ч.
-   чужой текст, который эта сессия никогда не вставляла).
- - 🔴 Провал paste/delete продвигает ОТДЕЛЬНЫЙ `lastFailureAt` (НЕ `lastFlushAt`) — backoff-
-   таймер, гейтящий retry в maybeFlush И в performRevision (обе точки перевызываются на каждое
-   handlePartial, пока условие держится). Без этого разделения провал одной вставки замораживал
-   бы `lastFlushAt` навсегда → `elapsedEnough` всегда true → синхронный main-thread
-   `pasteService.pasteToFrontmostApp` (до 2.5с worst-case `waitForModifierRelease`) ретраился
-   бы на КАЖДОЕ последующее partial-событие до конца записи вместо соблюдения
-   `debounceIntervalSec` (review Important, 2026-07-09).
-
- Ограничения (известные артефакты):
- - Настоящий атомарный "один Cmd+Z отменяет вообще всё" в ЛЮБОМ стороннем macOS-приложении
-   недостижим через Accessibility/keystroke-симуляцию — цель здесь "предсказуемо", не
-   "идеально атомарно" (см. debounce выше).
- - Поведение (тайминг, курсор, ревизии) можно верифицировать только на реальном Mac с
-   живой записью — unit-тесты покрывают debounce/revision-логику через инжектируемый
-   StreamingPasteTarget + clock, но не реальный SSE latency/cursor position.
- - `PasteServiceStreamingAdapter` всегда резолвит `targetPID: nil` (frontmost app заново на
-   каждый вызов) — если фокус сместится МЕЖДУ чанками одной стриминг-сессии, следующий
-   чанк/delete уйдёт в другое приложение. Обычный (нестримингового) путь вставки пиннит
-   target ОДИН раз через `resolvePreferredPasteTargetApp()`/`activateTargetForPaste()`
-   (main+PasteHandling.swift). Известное ограничение, НЕ исправлено в этой сессии —
-   см. review Important #3 (2026-07-09).
-*/
-
 import AppKit
 import Foundation
-import ObjectiveC
 
-// MARK: - StreamingPasteTarget (test-isolation seam)
-
-/// Абстракция вставки/удаления текста в целевом приложении. `PasteServiceStreamingAdapter`
-/// реализует её поверх реального `PasteService` (см. ниже). Тесты подставляют fake,
-/// реализующий этот протокол, чтобы проверять debounce/revision-логику без реальных
-/// keystroke side-effects (тот же паттерн, что `ToastPanelFactory` для ErrorToastView).
-/// НЕ помечен `@MainActor`: методы `PasteService` сами по себе nonisolated (вызываются
-/// off-main из существующих call site'ов, см. main+PasteHandling.swift) — протокол должен
-/// сохранять ту же изоляцию (точнее, её отсутствие), иначе PasteService.repastLast() и
-/// другие nonisolated вызовы `pasteToFrontmostApp` перестанут компилироваться.
-protocol StreamingPasteTarget: AnyObject {
-    func pasteToFrontmostApp(_ text: String) -> PasteAttemptResult
-    func deleteBackward(count: Int) -> PasteAttemptResult
+@MainActor protocol StreamingPasteTarget: AnyObject {
+    func pasteToFrontmostApp(_ text: String) async -> PasteAttemptResult
+    func deleteBackward(count: Int) async -> PasteAttemptResult
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> PasteInputReservation?
+    func paste(_ text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult
+    func revise(count: Int, text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult
+    func captureTarget() -> pid_t?
+    func paste(_ text: String, target: pid_t?) async -> PasteAttemptResult
+    func revise(count: Int, text: String, target: pid_t?) async -> PasteAttemptResult
 }
+extension StreamingPasteTarget {
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> PasteInputReservation? { nil }
+    func paste(_ text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult { await paste(text, target: target) }
+    func revise(count: Int, text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult { await revise(count: count, text: text, target: target) }
 
-/// Тонкий адаптер PasteService → StreamingPasteTarget. Отдельный тип (а не extension
-/// PasteService: StreamingPasteTarget напрямую) — чтобы НЕ вводить новый однопараметрический
-/// overload `pasteToFrontmostApp(_:)`/`deleteBackward(count:)` на самом PasteService: такой
-/// overload перехватывал бы существующие 1-арг вызовы (например `repastLast()` вызывает
-/// `pasteToFrontmostApp(text)`), которые сейчас резолвятся в дефолт-параметрическую версию.
-final class PasteServiceStreamingAdapter: StreamingPasteTarget {
+    func captureTarget() -> pid_t? { nil }
+    func paste(_ text: String, target: pid_t?) async -> PasteAttemptResult { await pasteToFrontmostApp(text) }
+    func revise(count: Int, text: String, target: pid_t?) async -> PasteAttemptResult {
+        let removed = count > 0 ? await deleteBackward(count: count) : PasteAttemptResult(ok: true, reason: "ok")
+        guard removed.ok else { return removed }
+        if text.isEmpty { return removed }
+        let inserted = await pasteToFrontmostApp(text)
+        return PasteAttemptResult(ok: inserted.ok, reason: inserted.reason,
+            effect: !inserted.ok && count > 0 ? .partial : inserted.effect, backspacePairs: count)
+    }
+}
+@MainActor final class PasteServiceStreamingAdapter: StreamingPasteTarget {
     private let pasteService: PasteService
-
-    init(pasteService: PasteService) {
-        self.pasteService = pasteService
+    init(pasteService: PasteService) { self.pasteService = pasteService }
+    func reserveInput(target: pid_t?, maximumDeleteCount: Int) -> PasteInputReservation? {
+        pasteService.reserveInput(target: target, maximumDeleteCount: maximumDeleteCount)
     }
-
-    func pasteToFrontmostApp(_ text: String) -> PasteAttemptResult {
-        pasteService.pasteToFrontmostApp(text, targetPID: nil)
+    func paste(_ text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult {
+        await revise(count: 0, text: text, target: target, reservation: reservation)
     }
-
-    func deleteBackward(count: Int) -> PasteAttemptResult {
-        pasteService.deleteBackward(count: count, targetPID: nil)
+    func revise(count: Int, text: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult {
+        guard let reservation else { return await revise(count: count, text: text, target: target) }
+        return await pasteService.performReserved(text, deleteCount: count, request: reservation)
+    }
+    func captureTarget() -> pid_t? { pasteService.captureTargetPID() }
+    func pasteToFrontmostApp(_ text: String) async -> PasteAttemptResult { await pasteService.pasteToFrontmostApp(text) }
+    func deleteBackward(count: Int) async -> PasteAttemptResult { await pasteService.deleteBackward(count: count) }
+    func paste(_ text: String, target: pid_t?) async -> PasteAttemptResult {
+        guard let target else { return PasteAttemptResult(ok: false, reason: "no_external_target") }
+        return await pasteService.pasteToFrontmostApp(text, targetPID: target)
+    }
+    func revise(count: Int, text: String, target: pid_t?) async -> PasteAttemptResult {
+        guard let target else { return PasteAttemptResult(ok: false, reason: "no_external_target") }
+        return await pasteService.revise(deleteCount: count, text: text, targetPID: target)
     }
 }
-
-// MARK: - SSE delegate (reused pattern from PartialSSEDelegate in RealtimeOverlayController+PartialSSE)
-
 private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let onLine: (String) -> Void
     private var buffer = ""
@@ -124,394 +71,167 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        // SSE connection closed — lifecycle managed by start/stop.
+        // Жизненный цикл закрытого SSE соединения принадлежит start/stop.
     }
 }
 
-// MARK: - StreamingPasteController
 
-@MainActor
-final class StreamingPasteController {
-
-    // MARK: - Configuration
-
-    /// Включён ли режим потоковой вставки (из AgentSettings.streamingPasteEnabled).
-    var isEnabled: Bool = false
-
-    /// Минимальный интервал между вставками чанков (debounce), секунды.
-    /// Инжектируемый var (не let) — тесты подставляют маленькое значение вместо реального ожидания.
+/// Сессия — отдельный reference owner: поздний G1 completion не меняет G2.
+@MainActor final class StreamingPasteController {
+    var isEnabled = false
     var debounceIntervalSec: TimeInterval = 0.3
-
-    /// Источник текущего времени. Инжектируемый — тесты подставляют fake clock
-    /// для детерминированной проверки debounce-условий без реального sleep().
     var now: () -> Date = Date.init
-
-    /// Знаки завершения предложения — при их появлении в новом хвосте вставка
-    /// форсируется немедленно, даже если debounceIntervalSec ещё не истёк.
-    private let sentenceEndingChars: Set<Character> = [".", "!", "?", "…"]
-
-    // MARK: - Public state (read by main+PasteHandling.swift)
-
-    /// true если в этой записи было вставлено/откачено ≥1 чанка. Читается в performAutoPaste.
-    private(set) var didStreamThisRecording: Bool = false
-
-    // MARK: - Private session state
-
-    /// Последний RAW partial-текст от backend (используется для LCP-расчёта между событиями).
-    private var lastPartial: String = ""
-
-    /// Текст, который РЕАЛЬНО уже вставлен в целевое приложение в текущей сессии
-    /// (правда о состоянии экрана — используется и для debounce-diff, и для revision-detection).
-    private var committedText: String = ""
-
-    /// Последний вычисленный stable-текст (обрезанный до границы слова). Может содержать
-    /// хвост, ещё не вставленный (ожидает debounce-флаша).
-    private var latestStable: String = ""
-
-    /// Момент последней фактической вставки чанка. nil = ещё не вставляли в этой сессии
-    /// (первый доступный chunk вставляется без ожидания debounce).
-    private var lastFlushAt: Date?
-
-    /// Момент последней НЕУДАЧНОЙ попытки paste/delete — ОТДЕЛЬНО от `lastFlushAt`
-    /// (который означает "последний РЕАЛЬНЫЙ успешный флаш" и используется для diff'а
-    /// committedText). Используется ТОЛЬКО для backoff: без него провал вставки замораживает
-    /// `lastFlushAt`, из-за чего `elapsedEnough` в maybeFlush навсегда остаётся true и КАЖДОЕ
-    /// следующее partial-событие ретраит синхронный main-thread `pasteService.pasteToFrontmostApp`
-    /// (waitForModifierRelease — до 2.5с worst-case) — шторм блокирующих попыток до конца
-    /// записи вместо соблюдения debounceIntervalSec (review Important, 2026-07-09).
-    private var lastFailureAt: Date?
-
-    // MARK: - SSE connection state
-
+    private final class Session {
+        let id = UUID()
+        var lastPartial = "", committedText = "", latestStable = ""
+        var lastFlushAt: Date?, lastFailureAt: Date?
+        var committedTarget: pid_t?
+        var multipleTargets = false
+        var effect: PasteEffect = .noEffects
+        var pairs = 0
+        var maximumAcceptedLength = 0
+        var lastReason = "stream_noEffects"
+        var finalResult: Task<PasteAttemptResult, Never>?
+        var finalizing = false
+        var tail: Task<Void, Never>?
+    }
+    private var session = Session()
+    private let pasteService: any StreamingPasteTarget
     private var sseDelegate: StreamingSSEDelegate?
     private var sseSession: URLSession?
     private var sseTask: URLSessionDataTask?
-    private var sseEventTypeBuf: String = ""
-
-    // MARK: - Dependencies
-
-    private let pasteService: any StreamingPasteTarget
+    private var eventType = ""
     private let logger = AgentLogger.shared
-
-    // MARK: - Init
-
-    init(pasteService: any StreamingPasteTarget) {
-        self.pasteService = pasteService
-    }
-
-    // MARK: - Recording lifecycle
-
-    /// Вызывается при старте записи (миррор startRealtimeOverlayPolling).
+    private(set) var didStreamThisRecording = false
+    init(pasteService: any StreamingPasteTarget) { self.pasteService = pasteService }
     func recordingDidStart(restBaseURL: String = "http://127.0.0.1:5005") {
         guard isEnabled else { return }
-        resetSessionState()
+        beginSession()
         startSSE(restBaseURL: restBaseURL)
-        logger.info("[StreamingPaste] Сессия стартовала")
     }
-
-    /// Вызывается при остановке записи (миррор stopRealtimeOverlayPolling).
-    func recordingDidStop() {
-        stopSSE()
-        // didStreamThisRecording сохраняется до сброса вызовом resetAfterFinalPaste().
-        logger.info("[StreamingPaste] Сессия остановлена. didStreamThisRecording=\(didStreamThisRecording)")
-    }
-
-    /// Сбрасывает флаг didStreamThisRecording после того как main+PasteHandling принял решение.
-    /// Вызывается в performAutoPaste после чтения флага.
-    func resetAfterFinalPaste() {
-        didStreamThisRecording = false
-    }
-
-    // MARK: - SSE connection
-
+    func beginSession() { session = Session(); didStreamThisRecording = false }
+    func recordingDidStop() { stopSSE() }
+    func resetAfterFinalPaste() { didStreamThisRecording = false }
     private func startSSE(restBaseURL: String) {
         stopSSE()
-        let filter = "realtime.partial_transcript,realtime.final_transcript"
-        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
-
-        let delegate = StreamingSSEDelegate { [weak self] line in
-            Task { @MainActor [weak self] in
-                self?.handleSSELine(line)
+        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=realtime.partial_transcript,realtime.final_transcript") else { return }
+        let owner = session
+        let delegate = StreamingSSEDelegate { [weak self, weak owner] line in
+            Task { @MainActor [weak self, weak owner] in
+                guard let self, let owner, self.session === owner else { return }
+                await self.handleSSELine(line)
             }
         }
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let connection = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let task = session.dataTask(with: request)
-
-        sseDelegate = delegate
-        sseSession = session
-        sseTask = task
-        sseEventTypeBuf = ""
-        task.resume()
+        sseDelegate = delegate; sseSession = connection
+        sseTask = connection.dataTask(with: request); sseTask?.resume()
     }
-
     private func stopSSE() {
-        sseTask?.cancel()
-        sseSession?.invalidateAndCancel()
-        sseDelegate = nil
-        sseSession = nil
-        sseTask = nil
-        sseEventTypeBuf = ""
+        sseTask?.cancel(); sseSession?.invalidateAndCancel()
+        sseTask = nil; sseDelegate = nil; sseSession = nil; eventType = ""
     }
-
-    // MARK: - SSE line parsing (same protocol as PartialSSEDelegate pattern)
-
-    private func handleSSELine(_ line: String) {
-        if line.hasPrefix("event: ") {
-            sseEventTypeBuf = String(line.dropFirst(7)).trimmingCharacters(in: .whitespaces)
-        } else if line.hasPrefix("data: ") {
-            let eventType = sseEventTypeBuf
-            let jsonStr = String(line.dropFirst(6))
-            handleSSEEvent(type: eventType, json: jsonStr)
-            sseEventTypeBuf = ""
-        } else if line.isEmpty {
-            sseEventTypeBuf = ""
-        }
+    private func handleSSELine(_ line: String) async {
+        if line.hasPrefix("event: ") { eventType = String(line.dropFirst(7)); return }
+        guard line.hasPrefix("data: ") else { return }
+        let type = eventType; eventType = ""
+        guard let data = String(line.dropFirst(6)).data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
+        let payload = obj["data"] as? [String: Any] ?? obj
+        guard let text = payload["text"] as? String, !text.isEmpty else { return }
+        if type == "realtime.partial_transcript" { await handlePartial(text) }
+        else if type == "realtime.final_transcript" { _ = await handleFinal(text) }
     }
-
-    private func handleSSEEvent(type: String, json: String) {
-        guard let data = json.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
-
-        let eventData = obj["data"] as? [String: Any] ?? obj
-        let text = (eventData["text"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-
-        switch type {
-        case "realtime.partial_transcript":
-            guard !text.isEmpty else { return }
-            handlePartial(text)
-        case "realtime.final_transcript":
-            guard !text.isEmpty else { return }
-            handleFinal(text)
-        default:
-            break
-        }
-    }
-
-    // MARK: - Stable-prefix commit algorithm
-    // handlePartial/handleFinal умышленно НЕ private (internal) — тестовый seam, тот же
-    // паттерн, что dismissCurrentToast() в ErrorToastPresenter. Продовый вызов идёт через
-    // handleSSEEvent, тесты вызывают их напрямую с fake StreamingPasteTarget + fake clock.
-
-    /// Обрабатывает очередной partial (растущее лучшее предположение backend).
-    func handlePartial(_ partial: String) {
-        // 1. Longest common prefix с предыдущим partial.
-        let rawStable = longestCommonPrefix(lastPartial, partial)
-
-        // 2. Откатываем до последней границы слова (не вставляем полуслова).
-        let stable = trimToWordBoundary(rawStable)
-        lastPartial = partial
-
-        // 3. Если stable больше НЕ начинается с уже вставленного committedText — backend
-        //    ревизовал уже вставленный диапазон (переосмысление сказанного, короче/другое).
-        //    Выполняем полную замену диапазона вместо silent skip.
-        if !committedText.isEmpty && !stable.hasPrefix(committedText) {
-            performRevision(correctedStable: stable)
-            return
-        }
-
-        // 4. Иначе — копим новый хвост, но вставляем его не на каждое событие
-        //    (см. maybeFlush: debounce interval ИЛИ конец предложения).
-        latestStable = stable
-        maybeFlush(force: false)
-    }
-
-    /// Обрабатывает финальный transcript — вставляет оставшийся хвост (форсированно, без debounce),
-    /// либо, если final тоже ревизует уже вставленное, выполняет полную замену диапазона.
-    ///
-    /// Вызывается напрямую из `handleTranscriptionResult` (main+PasteHandling.swift) с
-    /// АВТОРИТЕТНЫМ текстом из ответа IPC `stop_recording` — НЕ полагается на SSE
-    /// `realtime.final_transcript`: backend эмиттит это событие ВНУТРИ обработки самого
-    /// `stop_recording`, строго ПОСЛЕ того как `stopRecording()` уже закрыл SSE-соединение
-    /// (`stopRealtimeOverlayPolling()` вызывается синхронно ДО IPC-вызова, см.
-    /// `main+HotkeyRecording.swift`). Поэтому SSE-путь (case "realtime.final_transcript" в
-    /// `handleSSEEvent`) в реальном recording-stop flow структурно недостижим — оставлен как
-    /// безвредный defensive fallback на случай, если SSE когда-нибудь останется живым дольше.
-    func handleFinal(_ finalText: String) {
-        if finalText.hasPrefix(committedText) {
-            let tail = String(finalText.dropFirst(committedText.count))
-            if !tail.isEmpty {
-                let result = appendChunk(tail)
-                if result.ok {
-                    committedText = finalText
-                    didStreamThisRecording = true
-                    logger.info("[StreamingPaste] Final tail вставлен: len=\(tail.count)")
-                } else {
-                    // Вставка провалилась — экран НЕ изменился, committedText НЕ продвигаем.
-                    // Сессия всё равно завершается ниже (resetSessionState) — это последнее
-                    // событие записи, повторять попытку в рамках ЭТОЙ сессии больше негде.
-                    logger.warn("[StreamingPaste] Final tail paste failed, state НЕ продвинут: \(result.reason)")
-                }
+    func handlePartial(_ text: String) async {
+        let owner = session, target = pasteService.captureTarget()
+        guard !owner.finalizing else { return }
+        let reservation = pasteService.reserveInput(target: target, maximumDeleteCount: owner.maximumAcceptedLength)
+        // Отказ admission не создаёт скрытую неограниченную цепь Task за owner.tail.
+        if let failure = reservation?.failure { owner.lastReason = failure.reason; return }
+        owner.maximumAcceptedLength = max(owner.maximumAcceptedLength, text.count)
+        let previous = owner.tail
+        let task = Task { @MainActor in
+            defer { reservation?.cancel() }
+            await previous?.value
+            guard owner.effect != .partial && owner.effect != .unknown else { return }
+            let stable = trimToWordBoundary(longestCommonPrefix(owner.lastPartial, text))
+            owner.lastPartial = text; owner.latestStable = stable
+            if let failure = owner.lastFailureAt, now().timeIntervalSince(failure) < debounceIntervalSec { return }
+            let revision = !stable.hasPrefix(owner.committedText)
+            let tail = String(stable.dropFirst(owner.committedText.count))
+            let sentence = tail.last(where: { !$0.isWhitespace }).map { ".!?…".contains($0) } ?? false
+            if revision || owner.lastFlushAt == nil || sentence || now().timeIntervalSince(owner.lastFlushAt!) >= debounceIntervalSec {
+                _ = await update(owner: owner, desired: stable, target: target, reservation: reservation)
             }
+        }
+        owner.tail = task
+        await withTaskCancellationHandler(operation: { await task.value }, onCancel: {
+            task.cancel(); reservation?.cancelWaiting()
+        })
+    }
+    @discardableResult func handleFinal(_ text: String) async -> PasteAttemptResult {
+        let final = finalBarrier(text)
+        return await withTaskCancellationHandler(operation: { await final.value }, onCancel: { final.cancel() })
+    }
+    func finalBarrier(_ text: String) -> Task<PasteAttemptResult, Never> {
+        // Захватывается до первого await; начало новой записи не заменяет owner.
+        let owner = session, target = pasteService.captureTarget()
+        if let final = owner.finalResult { return final }
+        owner.finalizing = true
+        let reservation = pasteService.reserveInput(target: target, maximumDeleteCount: owner.maximumAcceptedLength)
+        let previous = owner.tail
+        let task = Task { @MainActor in
+            defer { reservation?.cancel() }
+            await previous?.value
+            if let failure = reservation?.failure { owner.lastReason = failure.reason; return }
+            if owner.effect != .partial && owner.effect != .unknown {
+                _ = await update(owner: owner, desired: text, target: target, reservation: reservation)
+            }
+        }
+        owner.tail = task
+        let final = Task { @MainActor in
+            await withTaskCancellationHandler(operation: { await task.value }, onCancel: {
+                task.cancel(); reservation?.cancelWaiting()
+            })
+            let effect: PasteEffect = owner.committedText == text && owner.effect == .completed ? .completed
+                : (owner.effect == .completed ? .partial : owner.effect)
+            return PasteAttemptResult(ok: effect == .completed, reason: effect == .completed ? "stream_completed" : owner.lastReason,
+                effect: effect, backspacePairs: owner.pairs, permitsFreshFallback: false)
+        }
+        owner.finalResult = final
+        return final
+    }
+    private func update(owner: Session, desired: String, target: pid_t?, reservation: PasteInputReservation?) async -> PasteAttemptResult {
+        let common = longestCommonPrefix(owner.committedText, desired)
+        let remove = owner.committedText.count - common.count
+        let suffix = String(desired.dropFirst(common.count))
+        if remove == 0 && suffix.isEmpty { return PasteAttemptResult(ok: true, reason: "unchanged", effect: owner.effect) }
+        if remove > 0 && (owner.multipleTargets || owner.committedTarget != target) {
+            owner.lastReason = "revision_target_changed"
+            owner.effect = owner.effect == .noEffects ? .noEffects : .partial
+            return PasteAttemptResult(ok: false, reason: "revision_target_changed", effect: owner.effect)
+        }
+        let result = remove > 0
+            ? await pasteService.revise(count: remove, text: suffix, target: target, reservation: reservation)
+            : await pasteService.paste(suffix, target: target, reservation: reservation)
+        owner.lastReason = result.reason
+        owner.pairs += result.backspacePairs
+        if result.ok {
+            if !owner.committedText.isEmpty && owner.committedTarget != target { owner.multipleTargets = true }
+            owner.committedTarget = target; owner.committedText = desired
+            owner.lastFlushAt = now(); owner.lastFailureAt = nil; owner.effect = .completed
+            if session === owner { didStreamThisRecording = true }
         } else {
-            // Final короче/другой относительно committedText — та же ревизия, что и для partial.
-            // bypassBackoff: true — это ЕДИНСТВЕННЫЙ вызов ревизии за сессию (не storm), и
-            // последняя возможность поправить экран перед resetSessionState() ниже. Если ей
-            // помешает backoff, оставшийся от недавнего провалившегося partial-revision (тот
-            // же 300мс debounce-окна), коррекция не случится вообще — session заканчивается
-            // здесь безвозвратно (review Important, 2026-07-09).
-            performRevision(correctedStable: finalText, bypassBackoff: true)
-        }
-
-        // Сбрасываем сессию (запись завершена).
-        resetSessionState()
-        // didStreamThisRecording НЕ сбрасываем здесь — его читает main+PasteHandling.
-    }
-
-    // MARK: - Debounce flush
-
-    /// Флашит накопленный (но ещё не вставленный) хвост `latestStable`, если выполнено
-    /// одно из условий: (a) `force == true` (используется на final), (b) хвост оканчивается
-    /// знаком завершения предложения, (c) с последней вставки прошло ≥debounceIntervalSec
-    /// (или это первая вставка в сессии — не ждём).
-    private func maybeFlush(force: Bool) {
-        guard latestStable.count > committedText.count else { return }
-        let tail = String(latestStable.dropFirst(committedText.count))
-        guard !tail.isEmpty else { return }
-
-        // Backoff после провала: если предыдущая попытка вставки провалилась < debounceIntervalSec
-        // назад — не ретраим. Без этого guard'а lastFlushAt замирает на провале (Critical #2 fix
-        // намеренно НЕ продвигает его), elapsedEnough остаётся навсегда true, и КАЖДОЕ следующее
-        // partial-событие бьёт в синхронный main-thread paste — шторм retry (review Important, 2026-07-09).
-        if let lastFailureAt, now().timeIntervalSince(lastFailureAt) < debounceIntervalSec {
-            return
-        }
-
-        let elapsedEnough: Bool
-        if let lastFlushAt {
-            elapsedEnough = now().timeIntervalSince(lastFlushAt) >= debounceIntervalSec
-        } else {
-            elapsedEnough = true
-        }
-
-        guard force || elapsedEnough || endsWithSentenceBoundary(tail) else { return }
-
-        let result = appendChunk(tail)
-        guard result.ok else {
-            // Вставка провалилась (например no_external_target/modifiers_stuck/
-            // accessibility_not_granted) — экран, скорее всего, НЕ изменился. НЕ продвигаем
-            // committedText/lastFlushAt, иначе следующая ревизия/флаш посчитает diff против
-            // текста, которого физически нет на экране, и может откатить чужой контент.
-            // lastFailureAt продвигаем — это backoff-таймер (см. guard выше), а НЕ "последний
-            // успешный флаш". latestStable уже обновлён в handlePartial (последний известный
-            // кандидат от backend) — после истечения backoff maybeFlush попробует снова с тем
-            // же (или бОльшим) хвостом относительно неизменённого committedText.
-            lastFailureAt = now()
-            logger.warn("[StreamingPaste] Chunk paste failed, state НЕ продвинут: \(result.reason)")
-            return
-        }
-        committedText = latestStable
-        lastFlushAt = now()
-        lastFailureAt = nil
-        didStreamThisRecording = true
-        logger.info("[StreamingPaste] Chunk вставлен (debounce): len=\(tail.count), total committed=\(committedText.count)")
-    }
-
-    /// true если (обрезанный по пробелам) хвост оканчивается знаком завершения предложения.
-    private func endsWithSentenceBoundary(_ text: String) -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespaces)
-        guard let last = trimmed.last else { return false }
-        return sentenceEndingChars.contains(last)
-    }
-
-    // MARK: - Revision (full-range replace)
-
-    /// Полная замена диапазона: откатывает разошедшийся хвост уже вставленного текста
-    /// через `pasteService.deleteBackward()` (симулированные Backspace), затем вставляет
-    /// исправленный хвост `correctedStable`. Вызывается когда backend прислал partial/final,
-    /// который переосмыслил (укоротил/изменил) уже вставленный диапазон.
-    ///
-    /// State (committedText/latestStable) продвигается ТОЛЬКО по факту реально выполненной
-    /// операции — delete и insert проверяются раздельно, поскольку это две независимые
-    /// keystroke-операции и одна может провалиться, а другая пройти:
-    ///  - delete провалился → экран, скорее всего, не тронут вовсе → state остаётся прежним,
-    ///    дальше в ЭТОЙ ревизии не идём (иначе следующий diff посчитается против текста,
-    ///    которого нет на экране и может откатить чужой контент).
-    ///  - delete прошёл, insert провалился → экран = committedText БЕЗ откаченного хвоста
-    ///    (т.е. `common`) — именно это и фиксируем как новое state, новый (невставленный)
-    ///    суффикс НЕ добавляем ни в committedText, ни в latestStable.
-    ///  - оба прошли → state = correctedStable целиком, как и раньше.
-    ///
-    /// 🔴 Backoff (review Important, 2026-07-09): performRevision вызывается НАПРЯМУЮ из
-    /// handlePartial БЕЗ debounce-гейта — пока условие ревизии держится (committedText не
-    /// совпадает с новым stable), она перевызывалась бы на КАЖДОЕ последующее partial-событие.
-    /// Провал delete раньше НЕ продвигал ничего (включая lastFlushAt), поэтому без отдельного
-    /// backoff-таймера тот же "шторм синхронных retry" класс бага, что и в maybeFlush.
-    ///
-    /// - Parameter bypassBackoff: `true` только для вызова из `handleFinal` — это ЕДИНСТВЕННЫЙ
-    ///   вызов ревизии за сессию (не может быть storm), и последняя возможность поправить экран
-    ///   перед `resetSessionState()`. Гейтить его тем же backoff'ом, что защищает от retry-storm
-    ///   на `handlePartial`, было бы регрессом другого рода: провал revision-delete на
-    ///   `handlePartial`, за которым СРАЗУ (в пределах того же debounce-окна) следует
-    ///   `handleFinal`, глушил бы финальную коррекцию целиком — узкое окно (300мс), но реальный
-    ///   сценарий (провал paste прямо перед остановкой записи из-за смены фокуса/Accessibility).
-    ///   Вызов из `handlePartial` (обычный путь ревизии на лету) оставляет default `false`.
-    private func performRevision(correctedStable: String, bypassBackoff: Bool = false) {
-        if !bypassBackoff, let lastFailureAt, now().timeIntervalSince(lastFailureAt) < debounceIntervalSec {
-            return
-        }
-
-        let common = longestCommonPrefix(committedText, correctedStable)
-        let removeCount = committedText.count - common.count
-        let newSuffix = String(correctedStable.dropFirst(common.count))
-
-        logger.warn("[StreamingPaste] Ревизия: откат \(removeCount) симв., вставка \(newSuffix.count) симв. взамен")
-
-        if removeCount > 0 {
-            let deleteResult = pasteService.deleteBackward(count: removeCount)
-            guard deleteResult.ok else {
-                // Ничего реально не изменилось на экране — backoff-таймер, НЕ lastFlushAt
-                // (см. doc-комментарий lastFailureAt и guard в начале этого метода).
-                lastFailureAt = now()
-                logger.warn("[StreamingPaste] Revision delete failed, state НЕ продвинут: \(deleteResult.reason)")
-                return
-            }
-        }
-
-        if !newSuffix.isEmpty {
-            let insertResult = appendChunk(newSuffix)
-            guard insertResult.ok else {
-                // Delete (если был) уже реально прошёл — фиксируем экран как `common`,
-                // НЕ как полный correctedStable (новый хвост физически не вставлен). Реальное
-                // изменение экрана произошло → это lastFlushAt (успех), а не lastFailureAt.
-                committedText = common
-                latestStable = common
-                lastFlushAt = now()
-                lastFailureAt = nil
-                didStreamThisRecording = true
-                logger.warn("[StreamingPaste] Revision insert failed, откат зафиксирован без нового текста: \(insertResult.reason)")
-                return
-            }
-        }
-
-        committedText = correctedStable
-        latestStable = correctedStable
-        lastFlushAt = now()
-        lastFailureAt = nil
-        didStreamThisRecording = true
-    }
-
-    // MARK: - Chunk paste
-
-    /// Вставляет чанк текста через clipboard + Cmd+V (добавление в текущую позицию курсора).
-    /// Возвращает результат — вызывающая сторона решает, продвигать ли committedText/latestStable
-    /// (см. Critical #2 review: state НЕ должен коммититься оптимистично при провале paste).
-    private func appendChunk(_ text: String) -> PasteAttemptResult {
-        // pasteToFrontmostApp кладёт текст в clipboard и шлёт Cmd+V в frontmost app.
-        // Это тот же механизм, что и для полной вставки — cursor position зависит от
-        // target app (обычно в конце последнего paste). Дополнительная обёртка не нужна.
-        let result = pasteService.pasteToFrontmostApp(text)
-        if !result.ok {
-            logger.warn("[StreamingPaste] Chunk paste failed: \(result.reason)")
+            owner.lastFailureAt = now()
+            if session === owner && result.effect != .noEffects { didStreamThisRecording = true }
+            if result.effect == .unknown { owner.effect = .unknown }
+            else if result.effect == .partial { owner.effect = .partial }
+            // No-effect отказ допускает retry partial-событий; final truthful aggregate
+            // вычисляется из committedText, а не из общего флага delegate.
         }
         return result
     }
-
-    // MARK: - String helpers
-
-    /// Длиннейший общий префикс двух строк (Character-level, Unicode-safe).
     private func longestCommonPrefix(_ a: String, _ b: String) -> String {
         var result = ""
         var ia = a.startIndex
@@ -544,13 +264,5 @@ final class StreamingPasteController {
         return ""
     }
 
-    // MARK: - State reset
 
-    private func resetSessionState() {
-        lastPartial = ""
-        committedText = ""
-        latestStable = ""
-        lastFlushAt = nil
-        lastFailureAt = nil
-    }
 }

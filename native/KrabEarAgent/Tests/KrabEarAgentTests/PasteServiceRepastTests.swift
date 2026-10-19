@@ -69,29 +69,29 @@ final class PasteServiceRepastTests: XCTestCase {
 
     // MARK: - repastLast
 
-    func testRepastLastReturnsNoLastPasteWhenEmptyWithoutCallingPerformer() {
-        let result = service.repastLast()
+    @MainActor func testRepastLastReturnsNoLastPasteWhenEmptyWithoutCallingPerformer() async {
+        let result = await service.repastLast()
 
         XCTAssertFalse(result.ok)
         XCTAssertEqual(result.reason, "no_last_paste")
         XCTAssertTrue(repasteCalls.isEmpty)
     }
 
-    func testRepastLastReturnsRepasteTooSoonWithoutCallingPerformer() {
+    @MainActor func testRepastLastReturnsRepasteTooSoonWithoutCallingPerformer() async {
         service.recordLastPaste("Quick text")
 
-        let result = service.repastLast()
+        let result = await service.repastLast()
 
         XCTAssertFalse(result.ok)
         XCTAssertEqual(result.reason, "repaste_too_soon")
         XCTAssertTrue(repasteCalls.isEmpty)
     }
 
-    func testRepastLastAllowedAfterCooldownUsesInjectedPerformer() {
+    @MainActor func testRepastLastAllowedAfterCooldownUsesInjectedPerformer() async {
         // Отсутствие in-memory timestamp имитирует восстановление текста из прошлой сессии.
         service.lastPastedText = "Old text"
 
-        let result = service.repastLast()
+        let result = await service.repastLast()
 
         XCTAssertTrue(result.ok)
         XCTAssertEqual(result.reason, "fake_repaste")

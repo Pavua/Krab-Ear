@@ -157,6 +157,7 @@ extension HistoryPanelController {
                 alert.addButton(withTitle: "Закрыть")
                 presentAlertSheet(alert, for: self?.window) { resp in
                     guard resp == .alertFirstButtonReturn else { return }
+                    InputAutomationQueue.shared.invalidatePending()
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(textForCopy, forType: .string)
                 }

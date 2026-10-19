@@ -492,6 +492,7 @@ final class DiagnosticsTabViewController: NSViewController {
         let lines = filteredErrors.map { payload in
             "[\(payload.timestamp)] [\(payload.severity.uppercased())] [\(payload.component)] \(payload.message_user)"
         }
+        InputAutomationQueue.shared.invalidatePending()
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
     }

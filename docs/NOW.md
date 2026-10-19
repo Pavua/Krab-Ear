@@ -9,6 +9,35 @@
 - **Память:** `CLAUDE.md` 173→109 КБ, подробности дословно в `docs/CLAUDE_ARCHIVE.md` (метка `§L<n>`); `NOW.md` 80→27 КБ, история в `docs/archive/NOW-history-2026-09-10.md`.
 - Voice Gateway (19.10): `hint_terms` не нужен (звонки шли на OpenAI Realtime); обычные звонки пойдут каскадом через Ear — нагрузка на call-STT вырастет. Рестарт `ai.krab.ear.*` — только после согласования с Крабом и VG.
 
+## 2026-10-18 — продолжение source: активация адресата вставки
+
+Свежая удалённая база: `origin/codex/krab-ear-v2` = `19124f51` (#2099).
+Оба post-merge workflow этого SHA перепроверены в GitHub: CI `38850476587`
+и krab-ear-ci `38850476647` SUCCESS. #2097–2099 смержены; открытых PR при
+входе в сессию не было. Ниже — исторические snapshots, их прежние pending/PID
+не считать текущим состоянием. Runtime после перезагрузки здесь не квалифицирован.
+
+В изолированной ветке `codex/ear-paste-activation-20261018` продолжается общая
+async input/clipboard очередь. P3 исправлен отдельным `b4aead38`: clipboard
+обещается только после успешной записи. Paste/replay/revision, streaming final
+barrier и SelectionTranslator используют общую bounded lease; target фиксируется
+до await, revision delete→insert атомарна относительно других собственных input.
+Partial/unknown запрещают полный fallback и статус ok; подтверждённая CG пара
+не доказывает физическую доставку. Explicit copy инвалидирует pending, restore CAS.
+Активационный контракт и его13 тестов сохранены. [Текущая карточка](superpowers/plans/2026-10-18-paste-input-queue.md).
+
+Review-фиксы: CG drift после down → unknown; streaming резервирует общую FIFO
+при acceptance и не делает fresh fallback после terminal refusal; Undo использует
+тот же PasteService/queue; translator не показывает success после drift и сохраняет
+1s grace/CAS restore при cancellation. Public auto/snapshot/replay фиксируют request
+до Task; translator валидирует исходный clipboard snapshot до и после AX read.
+Source checkpoint: hosted306/306, existing affected56/56, dead Swift (0 мёртвых),
+release `-j 1` и повторный audit-all после всех source changes PASS.
+Python source/settings47/47 — прежний receipt, backend не менялся. Независимый
+Astra Ultra whole-diff gate текущих review-фиксов pending. Это не release/runtime
+acceptance и не доказательство устранения всех исторических AppHang. Живые клавиши,
+микрофон, пользовательский clipboard, модели, настройки и lifecycle не менялись.
+
 ## 2026-10-18 — STT residency: source checkpoint, runtime не менялся
 
 В изолированной ветке от `19124f51` реализованы truthful GigaAM unload bool и

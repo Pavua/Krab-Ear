@@ -54,21 +54,20 @@ extension AgentAppDelegate {
         // SSE realtime.final_transcript — тот структурно недостижим здесь: SSE уже закрыт
         // к моменту, когда backend успевает его эмиттировать внутри stop_recording; см.
         // doc-комментарий StreamingPasteController.swift). Коммитит хвост, накопленный за
-        // время записи, и выставляет didStreamThisRecording — performAutoPaste читает его
-        // ниже по цепочке (continueTranscriptionResult → performAutoPaste).
-        if settings.streamingPasteEnabled {
-            streamingPasteController?.handleFinal(cleanText)
-        }
+        // время записи. Неизменяемый итог этой сессии проходит через QuickEdit к
+        // performAutoPaste; общая activity property не разрешает fallback.
+        let streamingFinal = settings.streamingPasteEnabled
+            ? streamingPasteController?.finalBarrier(cleanText) : nil
 
         // Resolve history_id асинхронно — раньше тут sync IPC на main thread с 5s timeout
         // вешал AppHang (Sentry KRAB-EAR-AGENT-8). Continuation запускает полный paste flow
         // только после того, как IPC ответил (или не ответил → id == nil, fallback path).
         ensureHistoryItem(text: cleanText, existingId: historyId) { [weak self] effectiveHistoryId in
-            self?.continueTranscriptionResult(
-                cleanText: cleanText,
-                historyId: effectiveHistoryId,
-                pasteTarget: pasteTarget
-            )
+            Task { @MainActor [weak self] in
+                let outcome = await streamingFinal?.value
+                self?.continueTranscriptionResult(cleanText: cleanText, historyId: effectiveHistoryId,
+                                                  pasteTarget: pasteTarget, streamingOutcome: outcome)
+            }
         }
     }
 
@@ -81,7 +80,8 @@ extension AgentAppDelegate {
     func continueTranscriptionResult(
         cleanText: String,
         historyId effectiveHistoryId: String?,
-        pasteTarget: NSRunningApplication?
+        pasteTarget: NSRunningApplication?,
+        streamingOutcome: PasteAttemptResult? = nil
     ) {
         if lastResult == nil || lastResult?.finalText != cleanText {
             lastResult = LastTranscriptionSnapshot(
@@ -101,14 +101,11 @@ extension AgentAppDelegate {
             return
         }
 
-        // S34 / Fable-ревью F2: putToClipboard может тихо пропустить запись (буфер
-        // защищён) — уведомление ниже должно отражать реальный исход, не лгать.
-        var alwaysCopyWroteClipboard = false
-        if settings.clipboardMode == "always_copy" {
-            alwaysCopyWroteClipboard = pasteService.putToClipboard(cleanText)
-        }
-
         guard settings.autoPaste else {
+            // Clipboard-only режим: отдельное действие копирования. Автовставка
+            // пишет clipboard только внутри service lease непосредственно перед Cmd+V.
+            let alwaysCopyWroteClipboard = settings.clipboardMode == "always_copy"
+                ? pasteService.putToClipboard(cleanText) : false
             markPasteStatus(historyId: effectiveHistoryId, status: "failed")
             historyPanel?.onHistoryDidUpdate()
             logger.info("Автовставка выключена, текст сохранён в истории")
@@ -143,7 +140,7 @@ extension AgentAppDelegate {
                     switch result {
                     case .paste(let editedText):
                         self.logger.info("QuickEdit: пользователь отредактировал текст, paste")
-                        self.performAutoPaste(text: editedText, historyId: effectiveHistoryId, target: pasteTarget)
+                        self.performAutoPaste(text: editedText, historyId: effectiveHistoryId, target: pasteTarget, streamingOutcome: streamingOutcome)
                     case .cancel:
                         self.logger.info("QuickEdit: пользователь отменил вставку")
                         self.markPasteStatus(historyId: effectiveHistoryId, status: "failed")
@@ -151,14 +148,14 @@ extension AgentAppDelegate {
                         self.notify(title: "Krab Ear", body: "Вставка отменена")
                     case .timeout(let originalText):
                         self.logger.info("QuickEdit: таймаут — вставляем исходный текст")
-                        self.performAutoPaste(text: originalText, historyId: effectiveHistoryId, target: pasteTarget)
+                        self.performAutoPaste(text: originalText, historyId: effectiveHistoryId, target: pasteTarget, streamingOutcome: streamingOutcome)
                     }
                 }
             )
             return
         }
 
-        performAutoPaste(text: cleanText, historyId: effectiveHistoryId, target: pasteTarget)
+        performAutoPaste(text: cleanText, historyId: effectiveHistoryId, target: pasteTarget, streamingOutcome: streamingOutcome)
     }
 
     // MARK: - Core paste helper
@@ -167,17 +164,16 @@ extension AgentAppDelegate {
     /// и прокинутый через `continueTranscriptionResult`/QuickEdit-замыкания. Параметр, а не
     /// поле делегата (Fable-ревью M1, 2026-08-03) — исключает переналожение двух
     /// одновременных диктовок на общем изменяемом состоянии.
-    func performAutoPaste(text: String, historyId: String?, target: NSRunningApplication?) {
-        // Если streaming paste уже вставил текст по мере диктовки — пропускаем финальную
-        // полную вставку, чтобы не задваивать текст. Сбрасываем флаг после принятия решения.
-        if settings.streamingPasteEnabled,
-           let spc = streamingPasteController,
-           spc.didStreamThisRecording
-        {
-            spc.resetAfterFinalPaste()
-            markPasteStatus(historyId: historyId, status: "ok")
+    func performAutoPaste(text: String, historyId: String?, target: NSRunningApplication?, streamingOutcome: PasteAttemptResult? = nil) {
+        if let streamingOutcome, streamingOutcome.effect != .noEffects || !streamingOutcome.permitsFreshFallback {
+            markPasteStatus(historyId: historyId, status: streamingOutcome.effect == .completed ? "ok" : "failed")
             historyPanel?.onHistoryDidUpdate()
-            logger.info("[StreamingPaste] Финальная вставка пропущена — текст уже вставлен потоково")
+            if streamingOutcome.effect != .completed {
+                let message = streamingOutcome.effect == .noEffects
+                    ? "Потоковая вставка не выполнена. Текст сохранён в истории."
+                    : "Потоковая вставка завершилась частично или с неизвестным результатом. Текст сохранён в истории."
+                notify(title: "Krab Ear", body: message)
+            }
             return
         }
 
@@ -188,7 +184,6 @@ extension AgentAppDelegate {
             handlePasteFailure(reason: "no_external_target")
             return
         }
-        let targetPID = activateTargetForPaste(targetApp)
 
         // Применяем per-app профиль вставки если настроен
         let (textToInsert, appliedProfile) = applyPasteProfileIfNeeded(text: text, targetApp: targetApp)
@@ -196,20 +191,26 @@ extension AgentAppDelegate {
             logger.info("PasteAppMemory: применён профиль '\(prof)' для \(targetApp.bundleIdentifier ?? "unknown")")
         }
 
-        let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
-        logger.info(
-            "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
-        )
-        markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
-        historyPanel?.onHistoryDidUpdate()
+        let activationTarget = pasteActivationTarget(targetApp)
+        let request = pasteService.reserveInput(target: activationTarget.pid)
+        Task { @MainActor [weak self] in
+            defer { request.cancel() }
+            guard let self else { return }
+            let targetPID = activationTarget.pid
+            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget, request: request)
+            logger.info(
+                "Попытка вставки: bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
+            )
+            markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
+            historyPanel?.onHistoryDidUpdate()
 
-        if !pasteResult.ok {
-            handlePasteFailure(reason: pasteResult.reason, text: text)
-        }
+            if !pasteResult.ok {
+                // Отказ очереди/target/clipboard не разрешает позднюю запись stale text.
+                handlePasteFailure(reason: pasteResult.reason)
+            }
 
-        // Звук завершения транскрибации (off main thread: AudioQueueXPC.Start синхронный).
-        DispatchQueue.global(qos: .userInitiated).async {
-            NSSound(named: "Purr")?.play()
+            // Звук завершения транскрибации (off main thread: AudioQueueXPC.Start синхронный).
+            playPasteCompletionSound()
         }
     }
 
@@ -237,7 +238,6 @@ extension AgentAppDelegate {
             return
         }
 
-        pasteService.putToClipboard(cleanText)
         guard let targetApp = resolvePreferredPasteTargetApp() else {
             markPasteStatus(historyId: historyId, status: "failed")
             historyPanel?.onHistoryDidUpdate()
@@ -246,23 +246,35 @@ extension AgentAppDelegate {
             return
         }
 
-        let targetPID = activateTargetForPaste(targetApp)
-
         // Применяем per-app профиль вставки если настроен
         let (textToInsert, _) = applyPasteProfileIfNeeded(text: cleanText, targetApp: targetApp)
 
-        let pasteResult = pasteService.pasteToFrontmostApp(textToInsert, targetPID: targetPID)
-        logger.info(
-            "Быстрая вставка \(sourceTag): bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
-        )
-        markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
-        historyPanel?.onHistoryDidUpdate()
-        if !pasteResult.ok {
-            handlePasteFailure(reason: pasteResult.reason)
+        let activationTarget = pasteActivationTarget(targetApp)
+        let request = pasteService.reserveInput(target: activationTarget.pid)
+        Task { @MainActor [weak self] in
+            defer { request.cancel() }
+            guard let self else { return }
+            let targetPID = activationTarget.pid
+            let pasteResult = await pasteToActivatedTarget(textToInsert, target: activationTarget, request: request)
+            logger.info(
+                "Быстрая вставка \(sourceTag): bundle=\(targetApp.bundleIdentifier ?? "unknown"), pid=\(targetPID), ok=\(pasteResult.ok), reason=\(pasteResult.reason)"
+            )
+            markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
+            historyPanel?.onHistoryDidUpdate()
+            if !pasteResult.ok {
+                handlePasteFailure(reason: pasteResult.reason)
+            }
         }
     }
 
     func handlePasteFailure(reason: String, text: String? = nil) {
+        // До PasteService дело не дошло: clipboard не обещаем и не перезаписываем.
+        if reason.hasPrefix("target_activation_") {
+            logger.warn("Вставка остановлена до отправки текста: \(reason)")
+            notify(title: "Krab Ear", body: "Не удалось подтвердить приложение для вставки. Текст сохранён в истории.")
+            return
+        }
+
         // Защищённое поле: тихое уведомление, НЕ ошибка — это ожидаемое поведение.
         if reason == "secure_field_skipped" {
             logger.info("[SmartPaste] Вставка в защищённое поле пропущена — показываем тихое уведомление")
@@ -306,8 +318,7 @@ extension AgentAppDelegate {
         // S34 / Fable-ревью F2: putToClipboard(text) может тихо пропустить запись
         // (буфер защищён) — финальное уведомление не должно лгать про «буфер
         // обмена», если запись реально не прошла. Различаем «не пытались» (nil
-        // text / never_copy — исходное, не тронутое этим диффом поведение) от
-        // «пытались и пропустили» (новый concealed-guard).
+        // text / never_copy) от «пытались и пропустили» (concealed-guard).
         var attemptedClipboardWrite = false
         var clipboardCopied = false
         if let text, settings.clipboardMode != "never_copy" {
@@ -323,9 +334,14 @@ extension AgentAppDelegate {
             openHistoryPanel(forceMenubar: false)
         }
         logger.warn("Вставка не удалась: \(details)")
-        let clipboardNote = (attemptedClipboardWrite && !clipboardCopied)
-            ? "Текст сохранён в истории (буфер обмена защищён — не скопирован)."
-            : "Текст сохранён в истории и буфере обмена."
+        let clipboardNote: String
+        if clipboardCopied {
+            clipboardNote = "Текст сохранён в истории и буфере обмена."
+        } else if attemptedClipboardWrite {
+            clipboardNote = "Текст сохранён в истории (буфер обмена защищён — не скопирован)."
+        } else {
+            clipboardNote = "Текст сохранён в истории."
+        }
         notify(
             title: "Krab Ear",
             body: "Вставка не удалась. \(details) \(clipboardNote)"
@@ -334,6 +350,7 @@ extension AgentAppDelegate {
 
     func markPasteStatus(historyId: String?, status: String) {
         guard let historyId else { return }
+        if let pasteStatusUpdater { pasteStatusUpdater(historyId, status); return }
         logger.info("Обновление paste_status: history_id=\(historyId), status=\(status)")
         // Fire-and-forget: вызывается из handleTranscriptionResult на main thread.
         // Без async wrap'а IPC socket read блокирует main → AppHang (>2s).
@@ -378,7 +395,7 @@ extension AgentAppDelegate {
     func resolveDictationPasteTargetApp(captured: NSRunningApplication?) -> NSRunningApplication? {
         let selfPID = ProcessInfo.processInfo.processIdentifier
         let captured = captured.flatMap { $0.isTerminated ? nil : $0 }
-        let frontmost = NSWorkspace.shared.frontmostApplication.flatMap {
+        let frontmost = pasteFrontmostApplication().flatMap {
             ($0.processIdentifier != selfPID && $0.activationPolicy == .regular) ? $0 : nil
         }
         let lastExternal = lastExternalApp.flatMap { $0.isTerminated ? nil : $0 }
@@ -411,7 +428,7 @@ extension AgentAppDelegate {
 
     func resolvePreferredPasteTargetApp() -> NSRunningApplication? {
         let selfPID = ProcessInfo.processInfo.processIdentifier
-        if let current = NSWorkspace.shared.frontmostApplication,
+        if let current = pasteFrontmostApplication(),
            current.processIdentifier != selfPID,
            current.activationPolicy == .regular {
             return current
@@ -425,23 +442,25 @@ extension AgentAppDelegate {
         return nil
     }
 
-    func activateTargetForPaste(_ target: NSRunningApplication) -> pid_t {
-        let currentPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-        if currentPID != target.processIdentifier {
-            logger.info("Активация target app перед вставкой: \(target.bundleIdentifier ?? "unknown")")
-            _ = target.activate(options: [.activateIgnoringOtherApps])
-
-            var attempts = 0
-            while attempts < 10 {
-                let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-                if pid == target.processIdentifier {
-                    break
-                }
-                usleep(40_000)
-                attempts += 1
-            }
+    func pasteToActivatedTarget(_ text: String, target: PasteActivationTarget, request prepared: PasteInputReservation? = nil) async -> PasteAttemptResult {
+        let request = prepared ?? pasteService.reserveInput(target: target.pid)
+        defer { request.cancel() }
+        if let failure = request.failure { return failure }
+        guard let snapshot = request.snapshot, snapshot.pid == target.pid, let ticket = request.ticket else {
+            return PasteAttemptResult(ok: false, reason: "operation_target_changed")
         }
-        return target.processIdentifier
+        let lease: InputAutomationLease
+        switch await request.queue.awaitReady(ticket) {
+        case .failure(let why): return PasteAttemptResult(ok: false, reason: "input_" + why.rawValue)
+        case .success(let acquired): lease = acquired
+        }
+        if let reason = pasteService.validateQueuedSnapshot(snapshot, lease: lease) {
+            return PasteAttemptResult(ok: false, reason: reason)
+        }
+        guard target.isAlive() else { return PasteAttemptResult(ok: false, reason: "target_activation_terminated") }
+        return await pasteTargetActivator.perform(target: target, deadline: lease.deadline) { pid in
+            await pasteService.pasteToFrontmostApp(text, targetPID: pid, lease: lease, snapshot: snapshot)
+        }
     }
 
     /// Async resolve history_id: fast-path возвращает existingId сразу,
@@ -489,7 +508,10 @@ extension AgentAppDelegate {
     // MARK: - Quick replay (Cmd+Option+V)
 
     func handleQuickReplayPaste() {
-        let result = pasteService.repastLast()
+        let request = pasteService.prepareReplay()
+        Task { @MainActor in
+        defer { request.input?.cancel() }
+        let result = await pasteService.executeReplay(request)
         switch result.reason {
         case "no_last_paste":
             notify(title: "Krab Ear", body: "Нет сохранённой вставки для повтора")
@@ -500,13 +522,13 @@ extension AgentAppDelegate {
         default:
             if result.ok {
                 logger.info("Quick replay: успешно вставлен текст (reason=\(result.reason))")
-                DispatchQueue.global(qos: .userInitiated).async {
-                    NSSound(named: "Purr")?.play()
-                }
+                playPasteCompletionSound()
             } else {
                 handlePasteFailure(reason: result.reason)
             }
         }
+    }
+
     }
 
     func normalizePlainText(_ text: String) -> String {

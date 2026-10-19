@@ -31,7 +31,13 @@ enum QuickEditResult {
 // MARK: - QuickEditOverlay
 
 @MainActor
-final class QuickEditOverlay: NSObject {
+protocol QuickEditPresenting: AnyObject {
+    func show(text: String, timeoutSec: Double, onAddToVocabulary: ((String) -> Void)?,
+              completion: @escaping (QuickEditResult) -> Void)
+}
+
+@MainActor
+final class QuickEditOverlay: NSObject, QuickEditPresenting {
 
     // MARK: Private state
 

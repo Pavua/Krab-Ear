@@ -122,6 +122,10 @@ struct SelectionAXSelection {
 protocol SelectionAccessibilityAccess: AnyObject {
     func readSelection() -> SelectionAXSelection?
     func writeSelection(element: SelectionAXElement, text: String) -> Bool
+    func acceptsCurrentFocus(element: SelectionAXElement?) -> Bool
+}
+extension SelectionAccessibilityAccess {
+    func acceptsCurrentFocus(element: SelectionAXElement?) -> Bool { true }
 }
 
 /// Рабочая реализация пути AX. Все прежние системные вызовы остаются здесь
@@ -136,6 +140,7 @@ final class SystemSelectionAccessibilityAccess: SelectionAccessibilityAccess {
             return nil
         }
         let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
 
         var focusedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
@@ -146,6 +151,9 @@ final class SystemSelectionAccessibilityAccess: SelectionAccessibilityAccess {
         guard CFGetTypeID(focusedRef) == AXUIElementGetTypeID() else { return nil }
         let focusedElement = focusedRef as! AXUIElement
 
+        var roleRef: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &roleRef)
+        if (roleRef as? String) == "AXSecureTextField" { return nil }
         var selectedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             focusedElement,
@@ -161,6 +169,22 @@ final class SystemSelectionAccessibilityAccess: SelectionAccessibilityAccess {
             text: selected,
             element: SelectionAXElement(systemElement: focusedElement)
         )
+    }
+
+    func acceptsCurrentFocus(element: SelectionAXElement?) -> Bool {
+        guard AXIsProcessTrusted() else { return element == nil }
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return false }
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.1)
+        var focused: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() else { return element == nil }
+        let current = focused as! AXUIElement
+        var role: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role)
+        guard role as? String != "AXSecureTextField" else { return false }
+        if let element { return element.systemElement.map { CFEqual(current, $0) } ?? false }
+        return true
     }
 
     func writeSelection(element: SelectionAXElement, text: String) -> Bool {
@@ -188,6 +212,12 @@ final class SelectionTranslator {
 
     // MARK: - Dependencies
 
+    private let pasteboard: NSPasteboard
+    private let inputQueue: InputAutomationQueue
+    private let targetPID: () -> pid_t?
+    private let captureTargetLiveness: (pid_t) -> (() -> Bool)
+    private let keyEvents: (pid_t, CGKeyCode, CGEventFlags) -> PasteKeyEventPair?
+    private let translate: ((String) async -> String?)?
     private let ipcClient: IPCClient
     private let notificationService: NotificationService
     private let eventMonitor: any SelectionEventMonitoring
@@ -210,8 +240,19 @@ final class SelectionTranslator {
         notificationService: NotificationService,
         defaults: UserDefaults = .standard,
         eventMonitor: any SelectionEventMonitoring = SystemSelectionEventMonitor(),
-        accessibilityAccess: any SelectionAccessibilityAccess = SystemSelectionAccessibilityAccess()
+        accessibilityAccess: any SelectionAccessibilityAccess = SystemSelectionAccessibilityAccess(),
+        pasteboard: NSPasteboard = .general, inputQueue: InputAutomationQueue = .shared,
+        targetPID: @escaping () -> pid_t? = { NSWorkspace.shared.frontmostApplication?.processIdentifier },
+        targetIsAlive: ((pid_t) -> Bool)? = nil,
+        keyEvents: @escaping (pid_t, CGKeyCode, CGEventFlags) -> PasteKeyEventPair? = PasteService.systemKeyEvents,
+        translate: ((String) async -> String?)? = nil
     ) {
+        self.pasteboard = pasteboard; self.inputQueue = inputQueue; self.targetPID = targetPID
+        self.keyEvents = keyEvents; self.translate = translate; self.captureTargetLiveness = { pid in
+            if let targetIsAlive { return { targetIsAlive(pid) } }
+            let application = NSRunningApplication(processIdentifier: pid)
+            return { application?.isTerminated == false }
+        }
         self.ipcClient = ipcClient
         self.notificationService = notificationService
         self.eventMonitor = eventMonitor
@@ -285,48 +326,130 @@ final class SelectionTranslator {
     // MARK: - Translation pipeline
 
     @MainActor
-    private func performTranslation() async {
-        isTranslating = true
-        defer { isTranslating = false }
-
-        let startTime = Date()
-
-        // 1. Попытаться AX path
-        if let (text, element) = readSelectionViaAX() {
-            logger.info("SelectionTranslator: AX path — выделено \(text.count) символов")
-            guard let translated = await callTranslateIPC(text: text) else { return }
-            let latency = Date().timeIntervalSince(startTime)
-
-            // Пробуем записать обратно через AX
-            if writeSelectionViaAX(element: element, text: translated) {
-                logger.info("SelectionTranslator: AX path успешен (\(String(format: "%.2f", latency))s)")
-                showSuccessHUD(original: text, translated: translated, latency: latency)
-            } else {
-                // AX write не удалась — fallback на clipboard paste
-                logger.info("SelectionTranslator: AX write failed, fallback на clipboard paste")
-                _savedClipboard = NSPasteboard.general.string(forType: .string)
-                await clipboardPasteFallback(translatedText: translated)
-                showSuccessHUD(original: text, translated: translated, latency: Date().timeIntervalSince(startTime))
+    func performTranslation() async {
+        guard !isTranslating, let pid = targetPID() else { return }
+        let isAlive = captureTargetLiveness(pid)
+        guard isAlive() else { return }
+        isTranslating = true; defer { isTranslating = false }
+        let epoch = inputQueue.generation
+        let snapshot = PasteInputSnapshot(pid: pid, epoch: epoch, changeCount: pasteboard.changeCount, isAlive: isAlive)
+        let deadline = ContinuousClock.now + .seconds(5), started = Date()
+        guard case .success(let ticket) = inputQueue.reserve(deadline: deadline) else { return }
+        let request = PasteInputReservation(queue: inputQueue, ticket: ticket, snapshot: snapshot)
+        defer { request.cancel() }
+        guard case .success(let readLease) = await inputQueue.awaitReady(ticket) else { return }
+        func acceptsReadSnapshot() -> Bool {
+            !Task.isCancelled && ContinuousClock.now < deadline && inputQueue.owns(readLease)
+                && targetPID() == snapshot.pid && snapshot.isAlive() && inputQueue.generation == snapshot.epoch
+                && inputQueue.ownsClipboardChanges(board: pasteboard.name.rawValue, from: snapshot.changeCount, to: pasteboard.changeCount)
+        }
+        guard acceptsReadSnapshot() else { inputQueue.release(readLease); return }
+        guard !hasConcealedClipboard(), accessibilityAccess.acceptsCurrentFocus(element: nil) else {
+            inputQueue.release(readLease); return
+        }
+        let selection = readSelectionViaAX()
+        guard acceptsReadSnapshot() else { inputQueue.release(readLease); return }
+        let saved = pasteboard.string(forType: .string)
+        let original: String
+        var expectedCount = pasteboard.changeCount
+        if let selection { original = selection.0 }
+        else {
+            guard acceptsReadSnapshot(), !hasConcealedClipboard(), let events = keyEvents(pid, 8, .maskCommand) else {
+                inputQueue.release(readLease); return
             }
+            let before = pasteboard.changeCount
+            events.down(); try? await Task.sleep(for: .milliseconds(30)); events.up()
+            let copyDeadline = min(readLease.deadline, .now + .milliseconds(300))
+            while pasteboard.changeCount == before && ContinuousClock.now < copyDeadline && !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(10))
+            }
+            let copiedCount = pasteboard.changeCount
+            guard !Task.isCancelled, ContinuousClock.now < readLease.deadline,
+                  isAlive(), targetPID() == pid, inputQueue.generation == epoch,
+                  !hasConcealedClipboard(), accessibilityAccess.acceptsCurrentFocus(element: nil) else {
+                // Собственный Cmd+C уже затёр clipboard: возвращаем saved под удерживаемым lease.
+                if copiedCount != before { _ = restoreSaved(saved, ifCountIs: copiedCount) }
+                inputQueue.release(readLease); return
+            }
+            expectedCount = pasteboard.changeCount
+            original = expectedCount != before ? (pasteboard.string(forType: .string) ?? "") : ""
+        }
+        inputQueue.release(readLease)
+        guard !original.isEmpty, !Task.isCancelled else {
+            if selection == nil { await restoreClipboard(saved, expectedCount: expectedCount) }
             return
         }
-
-        // 2. Fallback — clipboard path
-        logger.info("SelectionTranslator: AX read failed, clipboard fallback")
-        guard let (originalText, clipboardChanged) = await readSelectionViaClipboard() else {
-            showErrorHUD(reason: "Нет выделенного текста")
+        // Долгий IPC никогда не удерживает input lease.
+        guard let translated = await callTranslateIPC(text: original) else {
+            if selection == nil { await restoreClipboard(saved, expectedCount: expectedCount) }
             return
         }
-        guard clipboardChanged else {
-            showErrorHUD(reason: "Нет выделенного текста")
+        guard case .success(let writeLease) = await inputQueue.acquire(deadline: .now + .seconds(5)) else {
+            if selection == nil { await restoreClipboard(saved, expectedCount: expectedCount) }
             return
         }
-
-        guard let translated = await callTranslateIPC(text: originalText) else { return }
-        let latency = Date().timeIntervalSince(startTime)
-
-        await clipboardPasteFallback(translatedText: translated)
-        showSuccessHUD(original: originalText, translated: translated, latency: latency)
+        defer { inputQueue.release(writeLease) }
+        // Выход до собственной записи: saved возвращается под уже удерживаемым lease.
+        func restoreBeforeOwnWrite() {
+            guard selection == nil, let after = restoreSaved(saved, ifCountIs: expectedCount) else { return }
+            expectedCount = after
+        }
+        func canConfirm(_ count: Int) -> Bool {
+            !Task.isCancelled && ContinuousClock.now < writeLease.deadline && inputQueue.owns(writeLease)
+                && targetPID() == pid && isAlive() && inputQueue.generation == epoch
+                && pasteboard.changeCount == count && !hasConcealedClipboard()
+                && accessibilityAccess.acceptsCurrentFocus(element: selection?.1)
+        }
+        guard canConfirm(expectedCount) else { restoreBeforeOwnWrite(); return }
+        if let selection {
+            // AX write — самостоятельный канал. False не разрешает повторный Cmd+V.
+            guard writeSelectionViaAX(element: selection.1, text: translated) else {
+                showErrorHUD(reason: "Не удалось подтвердить замену выделения"); return
+            }
+        } else {
+            guard !hasConcealedClipboard(), let events = keyEvents(pid, Keycode.v.rawValue, .maskCommand) else {
+                restoreBeforeOwnWrite(); return
+            }
+            let beforeWrite = pasteboard.changeCount
+            pasteboard.clearContents()
+            guard pasteboard.setString(translated, forType: .string) else { restoreBeforeOwnWrite(); return }
+            let ownCount = pasteboard.changeCount
+            inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: beforeWrite, after: ownCount)
+            events.down(); try? await Task.sleep(for: .milliseconds(30)); events.up()
+            let confirmedAfterUp = canConfirm(ownCount)
+            // Parent cancellation не сокращает grace чтения clipboard target.
+            // Отдельный bounded timer не создаёт OS input и удерживает lease до конца.
+            await Task.detached { try? await Task.sleep(for: .seconds(1)) }.value
+            let confirmedAfterRead = canConfirm(ownCount)
+            // CAS: новая пользовательская запись не затирается даже при отказе outcome.
+            if inputQueue.owns(writeLease), ContinuousClock.now < writeLease.deadline,
+               pasteboard.changeCount == ownCount {
+                pasteboard.clearContents()
+                if let saved { pasteboard.setString(saved, forType: .string) }
+                expectedCount = pasteboard.changeCount
+                inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: ownCount, after: expectedCount)
+            }
+            guard confirmedAfterUp && confirmedAfterRead else { return }
+        }
+        guard canConfirm(expectedCount) else { return }
+        showSuccessHUD(original: original, translated: translated, latency: Date().timeIntervalSince(started))
+    }
+    private func hasConcealedClipboard() -> Bool {
+        pasteboard.types?.contains(.init("org.nspasteboard.ConcealedType")) ?? false
+    }
+    private func restoreClipboard(_ saved: String?, expectedCount: Int) async {
+        guard case .success(let lease) = await inputQueue.acquire(deadline: .now + .seconds(5)) else { return }
+        defer { inputQueue.release(lease) }
+        _ = restoreSaved(saved, ifCountIs: expectedCount)
+    }
+    /// CAS-возврат saved: пользовательская запись после нашего Cmd+C не затирается.
+    /// Собственная запись фиксируется в цепочке, чтобы ждущие в очереди не увидели «чужой» clipboard.
+    private func restoreSaved(_ saved: String?, ifCountIs expected: Int) -> Int? {
+        guard pasteboard.changeCount == expected else { return nil }
+        pasteboard.clearContents(); if let saved { pasteboard.setString(saved, forType: .string) }
+        let after = pasteboard.changeCount
+        inputQueue.recordClipboardWrite(board: pasteboard.name.rawValue, before: expected, after: after)
+        return after
     }
 
     // MARK: - AX path
@@ -344,94 +467,13 @@ final class SelectionTranslator {
         accessibilityAccess.writeSelection(element: element, text: text)
     }
 
-    // MARK: - Clipboard fallback path
-
-    /// Сохраняет clipboard, шлёт Cmd+C, ждёт 60ms, читает clipboard.
-    /// Returns (selectedText, changed) или nil при ошибке.
-    @MainActor
-    private func readSelectionViaClipboard() async -> (String, Bool)? {
-        let pasteboard = NSPasteboard.general
-        let savedContents = pasteboard.string(forType: .string)
-        let savedChangeCount = pasteboard.changeCount
-
-        // Синтетический Cmd+C к frontmost app
-        guard let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else {
-            return nil
-        }
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return nil }
-
-        let cKeyCode: CGKeyCode = 8 // kVK_ANSI_C
-        guard
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: true),
-            let keyUp   = CGEvent(keyboardEventSource: source, virtualKey: cKeyCode, keyDown: false)
-        else { return nil }
-
-        keyDown.flags = .maskCommand
-        keyUp.flags   = .maskCommand
-        keyDown.postToPid(targetPID)
-        let keyPressUs: useconds_t = 30_000
-        usleep(keyPressUs)
-        keyUp.postToPid(targetPID)
-
-        // Ждём пока clipboard изменится (≤ 300ms, шаг 10ms)
-        let waitMs = 300
-        let stepUs: useconds_t = 10_000
-        for _ in 0..<(waitMs / 10) {
-            usleep(stepUs)
-            if pasteboard.changeCount != savedChangeCount { break }
-        }
-
-        let newText = pasteboard.string(forType: .string) ?? ""
-        let changed = !newText.isEmpty && newText != savedContents
-
-        // Сохраняем исходный clipboard для восстановления (используется позже)
-        _savedClipboard = savedContents
-        return (newText, changed)
-    }
-
-    private var _savedClipboard: String?
-
-    /// Вставляет текст через clipboard: ставит текст → Cmd+V → восстанавливает через 1s.
-    @MainActor
-    private func clipboardPasteFallback(translatedText: String) async {
-        let pasteboard = NSPasteboard.general
-        pasteboard.clearContents()
-        pasteboard.setString(translatedText, forType: .string)
-
-        guard let targetPID = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
-        guard let source = CGEventSource(stateID: .hidSystemState) else { return }
-
-        let vKeyCode: CGKeyCode = Keycode.v.rawValue
-        guard
-            let keyDown = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: true),
-            let keyUp   = CGEvent(keyboardEventSource: source, virtualKey: vKeyCode, keyDown: false)
-        else { return }
-
-        keyDown.flags = .maskCommand
-        keyUp.flags   = .maskCommand
-        keyDown.postToPid(targetPID)
-        usleep(30_000)
-        keyUp.postToPid(targetPID)
-
-        // Восстанавливаем старый clipboard через 1s (чтобы Cmd+V успел завершиться)
-        let savedClipboard = _savedClipboard
-        _savedClipboard = nil
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            if let saved = savedClipboard {
-                pasteboard.clearContents()
-                pasteboard.setString(saved, forType: .string)
-            } else {
-                pasteboard.clearContents()
-            }
-        }
-    }
-
     // MARK: - IPC
 
     /// Вызывает translate_selection IPC, возвращает переведённый текст или nil при ошибке.
     /// При ошибке показывает error HUD.
     @MainActor
     func callTranslateIPC(text: String) async -> String? {
+        if let translate { return await translate(text) }
         var params: [String: Any] = ["text": text]
         if config.targetLang != "auto" {
             params["target_lang"] = config.targetLang

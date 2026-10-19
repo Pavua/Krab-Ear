@@ -89,13 +89,13 @@ final class PasteServiceClipboardSafetyTests: XCTestCase {
 
     // MARK: - 4b. При concealed-буфере вставка завершается до синтетического Cmd+V
 
-    func test_pasteToFrontmostApp_aborts_before_key_events_when_concealed() {
+    @MainActor func test_pasteToFrontmostApp_aborts_before_key_events_when_concealed() async {
         pasteboard.clearContents()
         pasteboard.declareTypes([.string, concealedType], owner: nil)
         pasteboard.setString("super-secret-password", forType: .string)
         pasteboard.setData(Data(), forType: concealedType)
 
-        let result = service.pasteToFrontmostApp("dictated text")
+        let result = await service.pasteToFrontmostApp("dictated text")
 
         XCTAssertFalse(result.ok)
         XCTAssertEqual(result.reason, "concealed_clipboard_skipped")
