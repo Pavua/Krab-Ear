@@ -727,7 +727,7 @@ python3 scripts/status_dashboard.py --serve 8777
 
 Claude (Opus/Sonnet) дорогой/быстро кончается → ТОЛЬКО для: брифов, **гейтинга** находок, синтеза, архитектурных решений, единственного критичного HIGH. Весь breadth/исполнение → не-Claude работники. Харнесс: `scripts/draft_audit.py` (fan-out adversarial-аудита одного модуля на free-провайдера; ключи в переменные, НЕ печатать).
 
-**Роутинг в `scripts/draft_audit.py`:** **github** (`gh auth token`) — для security. **hf** (`hf_token` из `settings.json`) режет security (403), только нейтральные задачи. Free-ключи хранить в `lens_keys.env` (chmod 600, не коммитить). **nvidia** (`NVIDIA_API_KEY`) логирует I/O → строго code-review ONLY, запрещены приватные данные. Реестр воркеров: `~/.openclaw/krab_runtime_state/free_workers.md`. ⟶ [CLAUDE_ARCHIVE §L774]
+**Роутинг в `scripts/draft_audit.py`:** **github** (`gh auth token`) — для security. **hf** (`hf_token` из settings.json (runtime-файл вне репо)) режет security (403), только нейтральные задачи. Free-ключи хранить в `lens_keys.env` (chmod 600, не коммитить). **nvidia** (`NVIDIA_API_KEY`) логирует I/O → строго code-review ONLY, запрещены приватные данные. Реестр воркеров: `~/.openclaw/krab_runtime_state/free_workers.md`. ⟶ [CLAUDE_ARCHIVE §L774]
 
 **🔴 Уроки:** (1) Security-аудиты проводить ТОЛЬКО на `github/mistral/openrouter` (cerebras/groq/hf режут 403-фильтром). (2) Free-модели — только скауты: каждую находку обязательно верифицировать против реального кода (Claude-гейт), никогда не шипить без проверки. (3) Приватные данные (`mlx-whisper`, голос) — ТОЛЬКО провайдерам без обучения на данных. (4) Anti-rebuild: всегда грепать точное имя перед постройкой. ⟶ [CLAUDE_ARCHIVE §L776]
 
