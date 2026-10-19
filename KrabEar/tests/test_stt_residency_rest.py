@@ -63,3 +63,28 @@ def test_authenticated_readiness_observes_rest_owner_without_loading(rest):
     assert state["configured"]["model"] == "mlx-community/whisper-large-v3-turbo"
     assert state["whisper"]["state"] == "unloaded"
     assert engine._router._gigaam_adapter is None
+
+
+@pytest.mark.parametrize("failure", ["raises", "missing"])
+def test_readiness_survives_unavailable_owner_snapshot(rest, monkeypatch, failure):
+    """Наблюдательное поле не вправе превратить health-проба в 500/потерять overall_ready."""
+    client, engine = rest
+    if failure == "raises":
+        monkeypatch.setattr(engine, "stt_residency", Mock(side_effect=RuntimeError("snapshot broke")), raising=False)
+    else:
+        monkeypatch.setattr(type(engine), "stt_residency", property(lambda self: (_ for _ in ()).throw(AttributeError("old engine"))))
+    response = client.get("/v1/readiness", headers={"Authorization": "Bearer test-residency-key"})
+    assert response.status_code == 200
+    result = response.get_json()
+    assert result["overall_ready"] is True
+    assert result["components"] == {"stt": True}
+    assert result["stt_residency"] == {"owner": "rest", "state": "unavailable"}
+
+
+def test_readiness_rejects_non_dict_owner_snapshot(rest, monkeypatch):
+    """Не-dict (чужой фейк/мок) не сериализуется в JSON и не ломает ответ."""
+    client, engine = rest
+    monkeypatch.setattr(engine, "stt_residency", Mock(return_value=Mock()), raising=False)
+    response = client.get("/v1/readiness", headers={"Authorization": "Bearer test-residency-key"})
+    assert response.status_code == 200
+    assert response.get_json()["stt_residency"] == {"owner": "rest", "state": "unavailable"}

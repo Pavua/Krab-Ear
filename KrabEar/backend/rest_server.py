@@ -1567,7 +1567,16 @@ def readiness():
     report = dict(BackendService._build_readiness_report_static())
     # Отдельный наблюдательный снимок owner; не меняет legacy cache readiness.
     # Auth decorator уже выполнен, snapshot не создаёт модели/worker.
-    report["stt_residency"] = _deps().engine.stt_residency(owner="rest")
+    # Поле чисто наблюдательное: сбой снимка не должен ронять health-пробу (500)
+    # и скрывать overall_ready — только честно помечается как недоступное.
+    try:
+        snapshot = _deps().engine.stt_residency(owner="rest")
+        if not isinstance(snapshot, dict):
+            raise TypeError("stt_residency must return dict")
+        report["stt_residency"] = snapshot
+    except Exception:  # noqa: BLE001 — health-эндпоинт обязан отвечать
+        logger.warning("readiness: stt_residency snapshot недоступен", exc_info=True)
+        report["stt_residency"] = {"owner": "rest", "state": "unavailable"}
     status_code = 200 if report["overall_ready"] else 503
     return jsonify(report), status_code
 
