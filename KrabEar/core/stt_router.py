@@ -532,7 +532,19 @@ class STTRouter:
             logger.warning("STTRouter.get_gigaam_adapter: ошибка создания адаптера: %s", exc)
             return None
 
-    def close(self) -> bool:
+    def residency_snapshot(self) -> dict:
+        """Читает только cached adapter; не выполняет lazy lookup."""
+        from core.stt_residency import empty_snapshot
+
+        if not self._gigaam_adapter_lock.acquire(blocking=False):
+            return empty_snapshot("busy")
+        try:
+            adapter = self._gigaam_adapter
+            return adapter.residency_snapshot() if adapter is not None else empty_snapshot()
+        finally:
+            self._gigaam_adapter_lock.release()
+
+    def close(self, *, confirmed_only: bool = False) -> bool:
         """Публичная точка входа для владельца (AudioEngine) при остановке.
 
         Живой инцидент 2026-08-04: кэшированный GigaAM-адаптер держит реальный
@@ -543,6 +555,11 @@ class STTRouter:
         if not self._gigaam_adapter_lock.acquire(blocking=False):
             return False
         try:
+            adapter = self._gigaam_adapter
+            # Manual unload требует подтверждённого idle/cleanup контракта ДО
+            # close: legacy MLX close(None) уже разрушает cache/executor.
+            if confirmed_only and adapter is not None and getattr(adapter, "supports_confirmed_unload", False) is not True:
+                return False
             return self._close_cached_gigaam_adapter()
         finally:
             self._gigaam_adapter_lock.release()

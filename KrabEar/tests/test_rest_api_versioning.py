@@ -46,6 +46,7 @@ try:
 
     _engine_mock = MagicMock()
     _engine_mock.quality_profile = "balanced"
+    _engine_mock.stt_residency.return_value = {"owner": "rest", "state": "unknown"}
 
     _store_mock = MagicMock()
     _store_mock.load_vocabulary.return_value = []
@@ -120,6 +121,14 @@ class TestV1PathBehaviour(unittest.TestCase):
     """GET /v1/health returns a real response and X-API-Version: v1."""
 
     def setUp(self):
+        # Cached REST модуль мог создать другой test-file: pin actual deps
+        # на время request и восстановить его после теста, даже при assertion.
+        self.readiness_snapshot = {"owner": "rest", "state": "unknown"}
+        self.readiness_engine = MagicMock(spec=["stt_residency"])
+        self.readiness_engine.stt_residency.return_value = self.readiness_snapshot
+        engine_patch = patch.object(_rest_mod, "engine", self.readiness_engine)
+        engine_patch.start()
+        self.addCleanup(engine_patch.stop)
         self.client = _get_client()
 
     # test_v1_path_returns_200
@@ -130,6 +139,8 @@ class TestV1PathBehaviour(unittest.TestCase):
             resp.status_code, (200, 503),
             f"Expected 200 or 503 from /v1/readiness, got {resp.status_code}",
         )
+        self.assertEqual(resp.get_json()["stt_residency"], self.readiness_snapshot)
+        self.readiness_engine.stt_residency.assert_called_once_with(owner="rest")
 
     def test_v1_vocabulary_returns_200(self):
         """GET /v1/vocabulary is registered and returns 200."""

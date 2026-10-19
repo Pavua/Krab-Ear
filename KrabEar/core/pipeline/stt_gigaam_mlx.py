@@ -224,6 +224,27 @@ class GigaAMMLXAdapter:
     def is_loaded(self) -> bool:
         return self._model is not None
 
+    def residency_snapshot(self) -> dict:
+        """Наблюдает cached model без вычисления GPU object и lazy lookup."""
+        from core.stt_residency import empty_snapshot
+
+        if not self._model_lock.acquire(blocking=False):
+            return empty_snapshot("busy", "mlx")
+        try:
+            lock = mlx_lock()
+            if not lock.acquire(blocking=False):
+                return empty_snapshot("busy", "mlx")
+            try:
+                loaded = self._model is not None
+                result = empty_snapshot("loaded" if loaded else "unloaded", "mlx")
+                result["model"] = f"gigaam-mlx-{self._mlx_model_type}" if loaded else None
+                # У этого owner нет точного inflight/call-pin accounting.
+                return result
+            finally:
+                lock.release()
+        finally:
+            self._model_lock.release()
+
     def close(self) -> None:
         """Выгружает модель (память вернёт GC/Metal при потере ссылок)."""
         with self._model_lock:
