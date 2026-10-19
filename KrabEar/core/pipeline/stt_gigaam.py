@@ -122,6 +122,9 @@ class GigaAMAdapter:
     Модель загружается лениво при первом вызове transcribe() — не в __init__.
     """
 
+    # close() подтверждает idle/pin guards и результат cleanup явным bool.
+    supports_confirmed_unload = True
+
     def __init__(
         self,
         device: str = "mps",
@@ -337,6 +340,23 @@ class GigaAMAdapter:
         if self._subprocess is not None and self._subprocess.is_loaded():
             return True
         return False
+
+    def residency_snapshot(self) -> dict:
+        """Наблюдение owner state под lock без lazy transport/model lookup."""
+        from core.stt_residency import empty_snapshot
+
+        if not self._spawn_lock.acquire(blocking=False):
+            result = empty_snapshot("busy")
+            result["call_pins"] = None
+            return result
+        try:
+            loaded = self.is_loaded()
+            result = empty_snapshot("busy" if self.inflight else "loaded" if loaded else "unloaded", self._active_transport)
+            result.update(model=f"gigaam-{self._mode}" if loaded else None,
+                          inflight=self.inflight, call_pins=self._call_pins)
+            return result
+        finally:
+            self._spawn_lock.release()
 
     def close(self) -> bool:
         """Не закрывает pipes, пока диктовка или телефонный lease ещё живы."""

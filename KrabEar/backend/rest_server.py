@@ -809,6 +809,7 @@ class ReadinessResponseSchema(Schema):
     """Pydantic schema для ответа /readiness endpoint — общая готовность и статусы компонентов."""
     overall_ready = ma_fields.Boolean(metadata={"description": "True when all required components are available"})
     components = ma_fields.Dict(keys=ma_fields.String(), values=ma_fields.Boolean())
+    stt_residency = ma_fields.Dict(metadata={"description": "Owner-local observational snapshot, not a readiness guarantee"})
 
 
 class MetricsResponseSchema(Schema):
@@ -1563,7 +1564,19 @@ def readiness():
 
     Response 200/503: {"overall_ready": bool, "components": {stt, diarization, translation}}
     """
-    report = BackendService._build_readiness_report_static()
+    report = dict(BackendService._build_readiness_report_static())
+    # Отдельный наблюдательный снимок owner; не меняет legacy cache readiness.
+    # Auth decorator уже выполнен, snapshot не создаёт модели/worker.
+    # Поле чисто наблюдательное: сбой снимка не должен ронять health-пробу (500)
+    # и скрывать overall_ready — только честно помечается как недоступное.
+    try:
+        snapshot = _deps().engine.stt_residency(owner="rest")
+        if not isinstance(snapshot, dict):
+            raise TypeError("stt_residency must return dict")
+        report["stt_residency"] = snapshot
+    except Exception:  # noqa: BLE001 — health-эндпоинт обязан отвечать
+        logger.warning("readiness: stt_residency snapshot недоступен", exc_info=True)
+        report["stt_residency"] = {"owner": "rest", "state": "unavailable"}
     status_code = 200 if report["overall_ready"] else 503
     return jsonify(report), status_code
 

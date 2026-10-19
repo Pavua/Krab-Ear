@@ -23,6 +23,7 @@ try:
 
     _mock_engine = MagicMock()
     _mock_engine.quality_profile = "balanced"
+    _mock_engine.stt_residency.return_value = {"owner": "rest", "state": "unknown"}
 
     _mock_store = MagicMock()
     _mock_store.load_vocabulary.return_value = []
@@ -41,7 +42,8 @@ try:
             patch("backend.state_store.StateStore", return_value=_mock_store), \
             patch("backend.transcriber.Transcriber", return_value=_mock_transcriber), \
             patch("backend.metrics_collector.metrics", _mock_metrics):
-        from backend.rest_server import app
+        import backend.rest_server as _rest_mod
+        app = _rest_mod.app
     _REST_AVAILABLE = True
 except Exception:
     app = None  # type: ignore[assignment]
@@ -180,12 +182,22 @@ class ReadinessEndpointTest(unittest.TestCase):
     """Тесты эндпоинта /v1/readiness."""
 
     def setUp(self):
+        # Cached REST модуль мог создать другой test-file: pin actual deps
+        # на время request и восстановить его после теста, даже при assertion.
+        self.readiness_snapshot = {"owner": "rest", "state": "unknown"}
+        self.readiness_engine = MagicMock(spec=["stt_residency"])
+        self.readiness_engine.stt_residency.return_value = self.readiness_snapshot
+        engine_patch = patch.object(_rest_mod, "engine", self.readiness_engine)
+        engine_patch.start()
+        self.addCleanup(engine_patch.stop)
         app.config["TESTING"] = True
         self.client = app.test_client()
 
     def test_readiness_returns_valid_status_code(self):
         resp = self.client.get("/v1/readiness")
         self.assertIn(resp.status_code, (200, 503))
+        self.assertEqual(resp.get_json()["stt_residency"], self.readiness_snapshot)
+        self.readiness_engine.stt_residency.assert_called_once_with(owner="rest")
 
     def test_readiness_json_has_overall_ready(self):
         resp = self.client.get("/v1/readiness")

@@ -30,6 +30,7 @@ class UnloadSTTModelTest(unittest.TestCase):
 
     def test_unload_calls_engine_and_reports_success(self):
         engine = MagicMock()
+        engine.unload_stt_models.return_value = True
         svc = self._service(engine)
         result = svc.handle_unload_stt_model({})
         engine.unload_stt_models.assert_called_once_with()
