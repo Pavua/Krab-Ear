@@ -8,6 +8,7 @@
 """
 
 from __future__ import annotations
+import backend.ipc_timing as ipc_timing
 from __version__ import __version__ as APP_VERSION  # noqa: E402
 from backend.model_cache_manager import ModelCacheManager
 from backend.model_downloader import ModelDownloader
@@ -2866,6 +2867,7 @@ class BackendService:
         """
         return {
             "ping": self._handle_ping,  # VERIFIED: called from Swift (BackendSupervisor)
+            "get_ipc_timing": ipc_timing.snapshot,
             "get_plaintext_export_policy": self._plaintext_export_ipc.handle_get_policy,
             "grant_plaintext_export_session": self._plaintext_export_ipc.handle_grant,
             "revoke_plaintext_export_session": self._plaintext_export_ipc.handle_revoke,
@@ -3371,6 +3373,7 @@ class BackendService:
             )
 
         _t0 = time.monotonic()
+        ipc_timing.mark("handler_started")
         try:
             result = handler(params)
             response = {"id": request_id, "ok": True, "result": result}
@@ -3407,16 +3410,32 @@ class BackendService:
             )
             response = self._error(request_id, "internal_error", message)
 
+        finally:
+            ipc_timing.mark("handler_finished")
+
+        # Чтение собственного metadata-only буфера не требует audit I/O.
+        # Auth/throttle выше остаются общими с остальными методами.
+        if method == "get_ipc_timing":
+            return response
+
         # Audit log — пропускаем в privacy_mode (настройка считывается из кэша)
         try:
-            _privacy_on = bool(self._get_runtime_setting("privacy_mode_enabled", False))
+            ipc_timing.mark("privacy_check_started")
+            try:
+                _privacy_on = bool(self._get_runtime_setting("privacy_mode_enabled", False))
+            finally:
+                ipc_timing.mark("privacy_check_finished")
             if not _privacy_on:
-                self._audit_logger.log_request(
-                    method=method,
-                    params=params if isinstance(params, dict) else {},
-                    result=response,
-                    duration_ms=(time.monotonic() - _t0) * 1000,
-                )
+                ipc_timing.mark("audit_started")
+                try:
+                    self._audit_logger.log_request(
+                        method=method,
+                        params=params if isinstance(params, dict) else {},
+                        result=response,
+                        duration_ms=(time.monotonic() - _t0) * 1000,
+                    )
+                finally:
+                    ipc_timing.mark("audit_finished")
         except Exception:
             pass  # audit logging никогда не должен ронять IPC-ответ
 

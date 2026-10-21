@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from backend.socket_ownership import SocketOwnershipClaim
+import backend.ipc_timing as ipc_timing
 from backend.plaintext_export_redaction import safe_error, safe_request_id
 from backend.ipc_constants import (
     IPC_MAX_MESSAGE_BYTES,
@@ -213,6 +214,7 @@ class IPCServer:
             ):
                 try:
                     conn, _ = server.accept()
+                    accepted_at = ipc_timing.clock()
                 except socket.timeout:
                     continue
                 except OSError:
@@ -241,7 +243,7 @@ class IPCServer:
                     conn.close()
                     continue
 
-                self._start_connection_handler(conn)
+                self._start_connection_handler(conn, accepted_at=accepted_at)
         finally:
             server.close()
             # Удаляем ТОЛЬКО собственный bound inode (тип + st_dev/st_ino);
@@ -252,7 +254,9 @@ class IPCServer:
                 claim.release()
             logger.info("IPC сервер остановлен")
 
-    def _start_connection_handler(self, conn: socket.socket) -> bool:
+    def _start_connection_handler(
+        self, conn: socket.socket, *, accepted_at: tuple[int, int] | None = None,
+    ) -> bool:
         """Регистрирует и запускает handler для уже занятого semaphore-slot.
 
         Регистрация происходит до ``start()`` под lifecycle-lock. При shutdown
@@ -267,7 +271,7 @@ class IPCServer:
                 try:
                     handler = threading.Thread(
                         target=self._handle_connection,
-                        args=(conn,),
+                        args=(conn, accepted_at or ipc_timing.clock()),
                         name="ipc-conn",
                         daemon=True,
                     )
@@ -302,15 +306,28 @@ class IPCServer:
             перехватить это исключение и вернуть клиенту честный ответ.
         """
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        timing_trace = ipc_timing.current()
+
+        def run_request() -> dict:
+            with ipc_timing.bind(timing_trace):
+                ipc_timing.mark("worker_started")
+                try:
+                    return self.service.handle_request(payload)
+                finally:
+                    ipc_timing.mark("dispatch_finished")
+
         try:
-            future = pool.submit(self.service.handle_request, payload)
+            ipc_timing.record(timing_trace, "worker_submitted")
+            future = pool.submit(run_request)
             return future.result(timeout=self._request_timeout_sec)
         finally:
             # wait=False: НЕ ждём абандонённый воркер — иначе backstop
             # бессмысленен (снова заблокируемся на той же зависшей операции).
             pool.shutdown(wait=False)
 
-    def _handle_connection(self, conn: socket.socket) -> None:
+    def _handle_connection(
+        self, conn: socket.socket, accepted_at: tuple[int, int] | None = None,
+    ) -> None:
         """Чтение одной JSON-команды и возврат JSON-ответа.
 
         Выполняется в отдельном потоке на коннект. Socket закрываем здесь же
@@ -319,6 +336,8 @@ class IPCServer:
         W1767 #1: семафор освобождается в finally-блоке независимо от исхода.
         W1767 #4: recv заменён на цикл до '\\n' с защитой от memory-DoS.
         """
+        connection_started = ipc_timing.clock()
+        timing_trace = None
         try:
             # W1767 #1 (HIGH): принятый коннект получает явный recv-таймаут.
             # Без этого peer, который подключился но молчит, навсегда паркует
@@ -338,6 +357,10 @@ class IPCServer:
                     payload = json.loads(text)
                     if not isinstance(payload, dict):
                         raise ValueError("payload должен быть JSON-объектом")
+                    timing_trace = ipc_timing.STORE.begin(payload)
+                    ipc_timing.record(timing_trace, "accepted", accepted_at or connection_started)
+                    ipc_timing.record(timing_trace, "connection_started", connection_started)
+                    ipc_timing.record(timing_trace, "request_decoded")
                 except socket.timeout:
                     # W1767 #1 (HIGH): slow-loris guard — тихо закрываем коннект.
                     logger.debug(
@@ -363,8 +386,10 @@ class IPCServer:
                     return
 
                 try:
-                    response = self._call_handle_request_bounded(payload)
+                    with ipc_timing.bind(timing_trace):
+                        response = self._call_handle_request_bounded(payload)
                 except concurrent.futures.TimeoutError:
+                    ipc_timing.record(timing_trace, "backstop_timeout")
                     # Имя берём только из реальной таблицы, а не отражаем input.
                     method = payload.get("method")
                     dispatch = getattr(self.service, "_dispatch_table", {})
@@ -399,8 +424,13 @@ class IPCServer:
                         "error": {"code": "internal_error", "message": message},
                     }
                 try:
-                    conn.sendall((json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8"))
+                    encoded_response = (json.dumps(response, ensure_ascii=False) + "\n").encode("utf-8")
+                    ipc_timing.record(timing_trace, "response_serialized")
+                    ipc_timing.record(timing_trace, "send_started")
+                    conn.sendall(encoded_response)
+                    ipc_timing.record(timing_trace, "send_finished")
                 except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                    ipc_timing.record(timing_trace, "send_failed")
                     # Swift client disconnected before response sent — common when the
                     # agent crashes or quits mid-call.  Log at debug, not error.
                     logger.debug(
@@ -408,6 +438,7 @@ class IPCServer:
                         safe_error(exc, context={"request": payload, "response": response})[0],
                     )
                 except Exception as exc:
+                    ipc_timing.record(timing_trace, "send_failed")
                     message, trace = safe_error(
                         exc, context={"request": payload, "response": response}, with_traceback=True,
                     )

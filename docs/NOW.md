@@ -1,5 +1,21 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-21 — source: IPC stage timing, runtime-корреляция ожидает релиза
+
+Карточка `superpowers/plans/2026-10-21-ipc-stage-timing.md`, база `0ff399bc`
+(#2106). Opt-in UUID для ping/recording/meeting связывает metadata-only этапы
+accept/worker/handler/privacy/audit/send с клиентским ID Main. Ограниченный
+неблокирующий буфер и обычный auth/throttle query `get_ipc_timing`; при потере
+приёма ID completeness всей эпохи UNKNOWN. Исходные RPC/тайм-ауты сохранены.
+Локально 110 тестов в девяти отдельных процессах, новые 15 также на Python3.12,
+Ruff/audit-all и независимый Astra whole-diff source review PASS. Exact-head CI
+проверяется отдельно. Полный локальный parity harness не запускался: готового
+venv нет, установка backend/ML dependencies отложена ради текущего memory HOLD.
+Main/Gateway получили контракт и сохраняют паузу модельных окон. До релиза
+runtime не знает query; причина прежнего 3s recv timeout остаётся UNKNOWN.
+REST retry/deadline и decoder compatibility — отдельные карточки. ES после
+стабилизации памяти; эта source-карточка не меняет lifecycle/config/модели.
+
 ## 2026-10-21 — source: advisory activity/lease diagnostics
 
 Ветка `codex/ear-activity-diagnostics` от052b6c9, интегрирована на ab61bf45 (#2104/#2105): strict readonly lease observation,
