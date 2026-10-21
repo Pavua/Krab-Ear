@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -22,6 +23,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.memory_conductor import MemoryConductor  # noqa: E402
+
+_SHADOW_TMP = tempfile.TemporaryDirectory(prefix="ear-conductor-tests-")
 
 
 def _settings(**over):
@@ -61,9 +64,11 @@ def _mk(settings=None, *, pressure=0, recording=False, meeting=False,
         unload_model_fn=MagicMock(),
         load_model_fn=MagicMock(),
         model_loaded_fn=MagicMock(return_value=model_loaded),
+        models_share_loaded_instance_fn=MagicMock(return_value=False),
         lease_holder_fn=lambda: lease,
         verify_timeout_sec=0.2,
         verify_poll_sec=0.02,
+        shadow_marker_path=Path(_SHADOW_TMP.name) / "shadow.json",
     )
     return c
 

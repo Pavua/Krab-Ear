@@ -1381,6 +1381,7 @@ class RecordingCoreService:
                     unload_model_async(
                         base_url, brain_model,
                         api_key=str(settings.get("llm_api_key", "") or ""),
+                        protected_model_id=str(settings.get("llm_model", "") or "").strip(),
                     )
         except Exception as exc:
             logger.debug("LM Studio brain unload hook failed: %s", exc)
