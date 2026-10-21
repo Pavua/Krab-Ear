@@ -2256,10 +2256,15 @@ API сохраняет прежнюю семантику. Чтение bounded64
 REST: auth-gated `GET /v1/readiness` добавляет те же `activity`/`lease_observation`.
 Owner `rest`, component `native_stt` учитывает reservations, queued, inflight, unknown
 и собственную generation с `generation_scope:"native_stt_after_singleflight"`.
-HTTP504/disconnect не снимает reservation: actual worker finally/Future completion либо
-подтверждённый cancel-before-start завершают её. Учитываются POST и native WS windows;
+HTTP504/disconnect не снимает reservation: finally внешнего transcriber callable,
+Future completion либо подтверждённый cancel-before-start завершают её.
+`completion_scope:"transcriber_callable"` ограничивает known:true/idle внешними вызовами,
+а не физическим завершением native/GPU-работы. Вложенные adapter futures после timeout
+и WS translation/emit после STT-участка явно перечислены в coverage.untracked как
+`nested_adapter_futures` и `ws_translation_emit`. Учитываются POST и STT-участки native WS;
 pending WS windows до admission остаются вне tracked subset. Metadata cap256, overflow
-делает coverage_lost:true. Owner generation остаётся unknown; это не drain/eviction grant
+делает coverage_lost:true; false означает сохранность token-учёта, не полноту coverage.
+Owner generation остаётся unknown; это не drain/eviction grant
 и не новая readiness-модель. `stt_residency`/overall_ready сохраняют отдельный смысл.
 
 ---

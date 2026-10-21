@@ -80,13 +80,16 @@ def rest_activity_snapshot(observer: Any) -> dict:
             raise ValueError("invalid activity metadata")
     except Exception:
         native = unknown_component()
-    return owner_activity_snapshot("rest", {"native_stt": native}, ["native_stt_after_singleflight"])
+    result = owner_activity_snapshot("rest", {"native_stt": native}, ["native_stt_after_singleflight"])
+    result["coverage"]["untracked"].extend(["nested_adapter_futures", "ws_translation_emit"])
+    return result
 
 
 class ActivityReservations:
     """Bounded observer существующего native STT admission, не очередь/гейт.
 
-    Token принадлежит server work, а не HTTP response/client. Здесь нет
+    Token принадлежит внешнему transcriber callable, а не HTTP response/client.
+    Вложенные adapter futures и WS translation/emit остаются вне coverage. Здесь нет
     model lifecycle и возможности разрешить eviction. Generation относится
     только к этому tracked subset; overflow консервативно теряет coverage.
     """
@@ -163,7 +166,7 @@ class ActivityReservations:
             self.mark_unknown(token)
 
     def slot_callbacks(self, acquire: Callable, release: Callable, channel: str) -> tuple:
-        """Native WS worker держит token до фактического finally, не ws.close()."""
+        """WS держит token до finally STT-участка, до translation/emit; не ws.close()."""
         local = threading.local()
 
         def tracked_acquire(timeout):
@@ -195,6 +198,7 @@ class ActivityReservations:
                     "reservations": len(states), "queued": states.count("reserved"),
                     "inflight": states.count("running"), "unknown": unknown,
                     "generation": self._generation, "generation_scope": "native_stt_after_singleflight",
+                    "completion_scope": "transcriber_callable",
                     "coverage_lost": self._coverage_lost,
                     "busy_reasons": ["native_stt"] if states else []}
 

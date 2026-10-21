@@ -56,6 +56,25 @@ class RestCompletionTests(unittest.TestCase):
         self.assertTrue(future.cancel())
         self.assertEqual(tracker.snapshot()['reservations'], 0)
 
+    def test_callable_completion_does_not_claim_nested_adapter_completion(self):
+        tracker = self.tracker()
+        nested = Future()
+        self.assertTrue(nested.set_running_or_notify_cancel())
+        token = tracker.reserve('post_stt')
+        try:
+            with self.assertRaises(TimeoutError):
+                tracker.run(token, Mock(side_effect=TimeoutError))
+            self.assertFalse(nested.cancel())
+            result = activity.rest_activity_snapshot(tracker)
+            native = result['components']['native_stt']
+            self.assertEqual(native['state'], 'idle')
+            self.assertEqual(native['completion_scope'], 'transcriber_callable')
+            self.assertEqual(result['state'], 'unknown')
+            self.assertIn('nested_adapter_futures', result['coverage']['untracked'])
+            self.assertIn('ws_translation_emit', result['coverage']['untracked'])
+        finally:
+            nested.set_result(None)
+
     def test_worker_exception_and_duplicate_completion_are_safe(self):
         tracker = self.tracker()
         token = tracker.reserve('post_stt')

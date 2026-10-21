@@ -2,9 +2,10 @@
 
 ## 2026-10-21 — source: advisory activity/lease diagnostics
 
-Ветка `codex/ear-activity-diagnostics` от052b6c9: strict readonly lease observation,
+Ветка `codex/ear-activity-diagnostics` от052b6c9, интегрирована на ab61bf45 (#2104/#2105): strict readonly lease observation,
 неблокирующие metadata recording/finalizing/meeting/capture worker, REST native POST/WS
-server-owned completion reservations. `get_memory_ledger` и `/v1/readiness` получают
+server-owned reservations внешнего transcriber callable (`completion_scope`).
+Вложенные adapter futures и WS translation/emit явно остаются в untracked coverage. `get_memory_ledger` и `/v1/readiness` получают
 additive поля; component idle не превращается в global owner-idle. Неполное coverage
 явно оставляет owner generation:null/known:false; drain/admission/enforce не добавлены.
 HTTPtimeout/disconnect не завершает native работу. Контракт:
