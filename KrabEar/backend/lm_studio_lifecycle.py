@@ -582,12 +582,19 @@ def probe_loaded_chat_models(
     return None
 
 
-def unload_model_async(base_url: str, model_id: str, api_key: str | None = None) -> None:
+def unload_model_async(
+    base_url: str, model_id: str, api_key: str | None = None,
+    *, protected_model_id: str | None = None,
+) -> None:
     """Fire-and-forget unload. Не блокирует caller, errors silently logged.
 
     Args:
         base_url: LLM_BASE_URL из settings (например "http://localhost:1234/v1").
         model_id: model identifier как видит LM Studio (lowercase, e.g. "qwen3.6-35b-a3b").
+        protected_model_id: другая роль для автоматического recording hook.
+            Shared/unknown блокируют REST и CLI; пустая строка = unknown.
+            None сохраняет explicit/manual API. Metadata читается в worker,
+            не задерживая caller. Это identity guard, не ownership admission.
     """
     if not model_id:
         return
@@ -599,6 +606,11 @@ def unload_model_async(base_url: str, model_id: str, api_key: str | None = None)
         return
 
     def _worker() -> None:
+        if protected_model_id is not None and models_share_loaded_instance(
+            base_url, model_id, protected_model_id, api_key=api_key,
+        ) is not False:
+            logger.info("LM Studio: automatic unload blocked by shared/unknown instance identity")
+            return
         if _try_rest_unload(base_url, model_id, api_key=api_key):
             logger.info("LM Studio: unloaded brain model '%s' via REST", model_id)
             return

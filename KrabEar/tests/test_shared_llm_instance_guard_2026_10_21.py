@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import json
+import ast
 import tempfile
+import threading
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from backend.memory_conductor import MemoryConductor
 from backend.lm_studio_lifecycle import models_share_loaded_instance
+from backend.lm_studio_lifecycle import unload_model_async
 
 BASE = "http://localhost:1234/v1"
 SHARED = {"models": [{"key": "shared-qwen", "loaded_instances": [
@@ -218,6 +222,88 @@ class LoadedInstanceMetadataTest(unittest.TestCase):
             with patch("backend.lm_studio_lifecycle._SAFE_OPENER.open") as http:
                 self.assertIsNone(models_share_loaded_instance(base, first, second))
                 http.assert_not_called()
+
+
+class LegacyRecordingUnloadTest(unittest.TestCase):
+    def test_legacy_recording_hook_forwards_protected_role_without_conductor(self):
+        # Исполняем точный try-block hook из source без импорта audio/ML всего сервиса.
+        source = Path(__file__).parents[1] / "backend" / "recording_core_service.py"
+        tree = ast.parse(source.read_text())
+        blocks = [node for node in ast.walk(tree) if isinstance(node, ast.Try)
+                  and any(isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                          and call.func.id == "unload_model_async" for call in ast.walk(node))]
+        hook = min(blocks, key=lambda node: node.end_lineno - node.lineno)
+        namespace = {"self": types.SimpleNamespace(_memory_conductor=None),
+                     "settings": {"llm_model": "shared-runtime", "llm_brain_model": "shared-qwen"},
+                     "bump_stt_activity": lambda: None, "logger": MagicMock()}
+        threads = []
+        real_thread = threading.Thread
+
+        def thread_factory(**kwargs):
+            worker = real_thread(**kwargs)
+            threads.append(worker)
+            return worker
+
+        with patch("backend.lm_studio_lifecycle.unload_model_async", wraps=unload_model_async) as unload, \
+             patch("backend.lm_studio_lifecycle.threading.Thread", side_effect=thread_factory), \
+             patch("backend.lm_studio_lifecycle._SAFE_OPENER.open", return_value=response(SHARED)), \
+             patch("backend.lm_studio_lifecycle._try_rest_unload") as rest, \
+             patch("backend.lm_studio_lifecycle._try_cli") as cli:
+            exec(compile(ast.Module(body=[hook], type_ignores=[]), str(source), "exec"), namespace)
+            for worker in threads:
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+            rest.assert_not_called()
+            cli.assert_not_called()
+        self.assertEqual(unload.call_count, 1)
+        self.assertEqual(unload.call_args.kwargs.get("protected_model_id"), "shared-runtime")
+
+    def test_legacy_worker_blocks_shared_unknown_and_missing_protected_role(self):
+        for payload, protected in ((SHARED, "shared-runtime"), ({}, "shared-runtime"), (SHARED, "")):
+            with self.subTest(payload=payload, protected=protected):
+                threads = []
+                real_thread = threading.Thread
+
+                def thread_factory(**kwargs):
+                    worker = real_thread(**kwargs)
+                    threads.append(worker)
+                    return worker
+
+                with patch("backend.lm_studio_lifecycle.threading.Thread", side_effect=thread_factory), \
+                     patch("backend.lm_studio_lifecycle._SAFE_OPENER.open", return_value=response(payload)), \
+                     patch("backend.lm_studio_lifecycle._try_rest_unload") as rest, \
+                     patch("backend.lm_studio_lifecycle._try_cli") as cli:
+                    unload_model_async(BASE, "shared-qwen", protected_model_id=protected)
+                    for worker in threads:
+                        worker.join(2)
+                        self.assertFalse(worker.is_alive())
+                    rest.assert_not_called()
+                    cli.assert_not_called()
+
+    def test_distinct_metadata_runs_in_worker_and_preserves_auth(self):
+        threads = []
+        metadata_threads = []
+        real_thread = threading.Thread
+
+        def thread_factory(**kwargs):
+            worker = real_thread(**kwargs)
+            threads.append(worker)
+            return worker
+
+        def metadata(*args, **kwargs):
+            metadata_threads.append(threading.get_ident())
+            return response(DISTINCT)
+
+        with patch("backend.lm_studio_lifecycle.threading.Thread", side_effect=thread_factory), \
+             patch("backend.lm_studio_lifecycle._SAFE_OPENER.open", side_effect=metadata), \
+             patch("backend.lm_studio_lifecycle._try_rest_unload", return_value=True) as rest:
+            unload_model_async(BASE, "shared-qwen", api_key="test-only-token", protected_model_id="small-rewriter")
+            for worker in threads:
+                worker.join(2)
+                self.assertFalse(worker.is_alive())
+            rest.assert_called_once_with(BASE, "shared-qwen", api_key="test-only-token")
+        self.assertEqual(len(metadata_threads), 1)
+        self.assertNotEqual(metadata_threads[0], threading.get_ident())
 
 
 if __name__ == "__main__":
