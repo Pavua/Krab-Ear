@@ -41,6 +41,7 @@ import json
 import logging
 import math
 import os
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -306,3 +307,90 @@ def current_lease_holder(
     except Exception as exc:
         logger.warning("BrainLease: current_lease_holder error (returning None): %s", exc)
         return None
+
+
+def _lease_file_version(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _strict_lease_pairs(pairs: list) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate lease field")
+        result[key] = value
+    return result
+
+
+def observe_brain_lease(lock_path: Optional[Path] = None) -> dict:
+    """Read-only качество наблюдения lease; никогда не ownership/idle grant.
+
+    Legacy current_lease_holder намеренно сохраняет bool/None семантику.
+    Здесь contention не разрешает читать без lock, повреждение не равно noholder.
+    Rename/in-place изменение замечаются по inode/version, но снимок остаётся
+    advisory: следующий writer может изменить файл сразу после проверки.
+    """
+    result = {"schema": 1, "advisory": True, "known": False, "state": "unavailable"}
+    fd = None
+    try:
+        path = _resolve_lock_path(lock_path)
+        # O_NONBLOCK нужен для FIFO; O_NOFOLLOW не позволяет диагностике читать
+        # произвольную цель symlink. Никаких mkdir/O_CREAT/записей shared lease.
+        fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            return result
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return {**result, "state": "contention"}
+        if before.st_size > 65536:
+            return {**result, "state": "malformed"}
+        raw = bytearray()
+        while len(raw) <= 65536:
+            chunk = os.read(fd, min(4096, 65537 - len(raw)))
+            if not chunk:
+                break
+            raw.extend(chunk)
+        try:
+            stable = (_lease_file_version(before) == _lease_file_version(os.fstat(fd))
+                      == _lease_file_version(os.lstat(path)))
+        except FileNotFoundError:
+            stable = False
+        if not stable:
+            return {**result, "state": "replaced"}
+        if len(raw) > 65536:
+            return {**result, "state": "malformed"}
+        if not raw.strip():
+            return {**result, "known": True, "state": "empty"}
+        try:
+            payload = json.loads(raw, object_pairs_hook=_strict_lease_pairs)
+            if not isinstance(payload, dict):
+                raise ValueError("invalid lease object")
+            owner, pid = payload.get("owner"), payload.get("pid")
+            if not isinstance(owner, str) or not owner.strip() or len(owner) > 128:
+                raise ValueError("invalid lease owner")
+            if type(pid) is not int or pid <= 0:
+                raise ValueError("invalid lease pid")
+            for field in ("acquired_ts", "exp_ts"):
+                if type(payload.get(field)) not in (int, float):
+                    raise ValueError("invalid lease time")
+            acquired = _finite_float(payload["acquired_ts"])
+            expires = _finite_float(payload["exp_ts"])
+        except (TypeError, ValueError, OverflowError, UnicodeError):
+            return {**result, "state": "malformed"}
+        now = _finite_float(time.time())
+        return {**result, "known": True, "state": "held" if now < expires else "expired",
+                "holder": {"owner": owner, "pid": pid, "acquired_ts": acquired, "exp_ts": expires}}
+    except FileNotFoundError:
+        return {**result, "known": True, "state": "absent"}
+    except PermissionError:
+        return {**result, "state": "unreadable"}
+    except Exception:
+        return result
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass

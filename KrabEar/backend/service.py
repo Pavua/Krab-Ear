@@ -2476,6 +2476,9 @@ class BackendService:
 
     def _handle_get_memory_ledger(self, params: dict) -> dict:
         """Витрина дирижёра памяти: леджер (nowait — health-probe урок) + диагностика."""
+        from backend.activity_diagnostics import ipc_activity_snapshot
+        from backend.brain_lease import observe_brain_lease
+
         ledger = {}
         try:
             ledger = self._memory_ledger.read_all(nowait=True)
@@ -2484,7 +2487,9 @@ class BackendService:
         return {
             "ok": True,
             "ledger": ledger,
-            "conductor": self._memory_conductor.get_diagnostics(),
+            "conductor": self._memory_conductor.get_diagnostics(read_only=True),
+            "activity": ipc_activity_snapshot(getattr(self, "_recording_core_svc", None), getattr(self, "_meeting_svc", None)),
+            "lease_observation": observe_brain_lease(),
         }
 
     def close(self) -> bool:

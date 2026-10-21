@@ -122,6 +122,21 @@ class AudioRecorder:
         with self._lock:
             return self._is_recording
 
+    def activity_snapshot(self) -> dict:
+        """Неблокирующая metadata capture/retained worker, без audio buffers."""
+        from backend.activity_diagnostics import nonblocking_snapshot
+
+        def read():
+            recording = self._is_recording
+            if type(recording) is not bool:
+                raise TypeError("recording metadata unavailable")
+            alive = self._thread is not None and self._thread.is_alive()
+            reasons = (["capturing"] if recording else []) + (["capture_worker"] if alive else [])
+            return {"known": True, "state": "busy" if reasons else "idle",
+                    "recording": recording, "worker_alive": alive, "busy_reasons": reasons}
+
+        return nonblocking_snapshot((getattr(self, "_lifecycle_lock", None), getattr(self, "_lock", None)), read)
+
     @property
     def is_worker_thread_alive(self) -> bool:
         """Физическая живость фонового потока захвата — НЕЗАВИСИМО от is_recording.

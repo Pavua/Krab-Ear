@@ -1715,6 +1715,25 @@ class RecordingCoreService:
             except Exception:
                 logger.warning("resume_realtime_partials: resume() упал", exc_info=True)
 
+    def activity_snapshot(self) -> dict:
+        """Только generation/capture metadata; не старый blocking UI handler."""
+        from backend.activity_diagnostics import component_activity, nonblocking_snapshot
+
+        def read():
+            recorder = component_activity(self.recorder)
+            finalizing = len(self._finalizing_generations)
+            active = self._active_generation is not None
+            reasons = (["active_generation"] if active else []) + (["finalizing"] if finalizing else [])
+            if recorder["state"] == "busy":
+                reasons.append("recorder_busy")
+            known = recorder["known"] is True
+            return {"known": known, "state": "busy" if reasons else ("idle" if known else "unknown"),
+                    "finalizing_count": finalizing, "active_generation": active,
+                    "recorder": recorder, "busy_reasons": reasons}
+
+        lock = getattr(self, "_recording_lifecycle_lock", None)
+        return nonblocking_snapshot((lock,), read)
+
     def handle_get_recording_state(self, params: dict[str, Any]) -> dict[str, Any]:
         # is_recording+generation — один протокольный снимок. recorder.start()
         # публикует физический флаг раньше generation; без lifecycle-lock клиент

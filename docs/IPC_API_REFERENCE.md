@@ -2237,7 +2237,35 @@ Returns: `{ndjson_mb, transcripts_mb, audio_mb, total_mb, oldest_item_age_days}`
 *(service.py)*  
 Витрина дирижёра памяти: леджер (nowait) + диагностика кондуктора.  
 Нет params.  
-Returns: `{ok, ledger, conductor}`
+Returns: `{ok, ledger, conductor, activity, lease_observation}`
+
+Additive diagnostics (2026-10-21): `activity` schema1 содержит `owner:"backend"`,
+`owner_pid`, `owner_epoch` (UUID инкарнации процесса), `advisory:true`,
+`generation:null`, `generation_known:false`, `components:{recording,meeting}` и
+`coverage:{complete:false,tracked,untracked}`. Component state — `idle|busy|unknown`;
+owner state — только `busy|unknown`, пока warmup/batch/прочие admission не покрыты.
+Recording учитывает active generation, finalizing count и capture worker; meeting —
+setup/stopping/recovery/session/retained worker. Contended lock или ошибка → unknown
+без ожидания. Тексты, аудио, токены поколений и settings не читаются этими helpers.
+
+`lease_observation` — отдельное read-only наблюдение общего lease: `held|expired|empty|absent`
+с known:true либо `contention|replaced|malformed|unreadable|unavailable` с known:false.
+Это качество наблюдения: expired/noholder не означает завершения inference. Legacy lease
+API сохраняет прежнюю семантику. Чтение bounded64KiB, без создания файла/parent/записи.
+
+REST: auth-gated `GET /v1/readiness` добавляет те же `activity`/`lease_observation`.
+Owner `rest`, component `native_stt` учитывает reservations, queued, inflight, unknown
+и собственную generation с `generation_scope:"native_stt_after_singleflight"`.
+HTTP504/disconnect не снимает reservation: finally внешнего transcriber callable,
+Future completion либо подтверждённый cancel-before-start завершают её.
+`completion_scope:"transcriber_callable"` ограничивает known:true/idle внешними вызовами,
+а не физическим завершением native/GPU-работы. Вложенные adapter futures после timeout
+и WS translation/emit после STT-участка явно перечислены в coverage.untracked как
+`nested_adapter_futures` и `ws_translation_emit`. Учитываются POST и STT-участки native WS;
+pending WS windows до admission остаются вне tracked subset. Metadata cap256, overflow
+делает coverage_lost:true; false означает сохранность token-учёта, не полноту coverage.
+Owner generation остаётся unknown; это не drain/eviction grant
+и не новая readiness-модель. `stt_residency`/overall_ready сохраняют отдельный смысл.
 
 ---
 
@@ -3958,3 +3986,4 @@ Returns: `{context_words: [...], recent_topics: [...], size}`
 
 Memory Conductor (2026-08-19). Params: `{}` → `{ok, ledger: {v, entries: {"<owner>/<resident>": {owner, resident, size_mb, state, idle_since_ts?, reload_cost, pid, updated_ts}}}, conductor: {enabled, thread_alive, last_tick_ts, shadow_since, pressure_streak, would_skip_brain_reload, residents, decisions}}`.
 Леджер читается nowait (health-probe урок): под контеншеном возвращается пустой документ, не ожидание.
+Additive activity/lease_observation: см. основной раздел `get_memory_ledger` выше.
