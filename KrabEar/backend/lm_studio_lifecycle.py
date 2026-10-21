@@ -329,6 +329,66 @@ CATALOG_ENDPOINTS: tuple[str, ...] = ("/api/v0/models", "/api/v1/models", "/v1/m
 LOADED_STATE_ENDPOINTS: tuple[str, ...] = ("/api/v0/models", "/api/v1/models")
 
 
+def models_share_loaded_instance(
+    base_url: str,
+    model_id: str,
+    protected_model_id: str,
+    timeout: float = _REST_TIMEOUT_SEC,
+    api_key: str | None = None,
+) -> bool | None:
+    """Пересекаются ли загруженные экземпляры двух ролей в одном снимке?
+
+    Только native v1 несёт canonical ``loaded_instances[].id``. Точный key
+    обозначает все экземпляры модели, точный instance ID — один экземпляр.
+    Неизвестный/неоднозначный alias, пустые sets и ошибка metadata → None,
+    а не разрешение выгрузки. GET не прогревает модель. Снимок не является
+    атомарной межпроцессной лизой и не доказывает отсутствие активных клиентов.
+    """
+    if not model_id or not protected_model_id or not _scheme_allowed(base_url):
+        return None
+    api_root = base_url.rstrip("/").removesuffix("/v1")
+    try:
+        req = urllib.request.Request(f"{api_root}/api/v1/models", method="GET")
+        _add_bearer(req, api_key)
+        with _SAFE_OPENER.open(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                return None
+            raw = resp.read(1024 * 1024 + 1)
+        if len(raw) > 1024 * 1024:
+            return None
+        payload = json.loads(raw)
+    except Exception:
+        logger.debug("LM Studio: loaded instance identity unavailable")
+        return None
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return None
+    matches: list[list[set[str]]] = [[], []]
+    seen_keys: set[str] = set()
+    seen_instances: set[str] = set()
+    for item in payload["models"]:
+        if not isinstance(item, dict):
+            return None
+        key, instances = item.get("key"), item.get("loaded_instances")
+        if not isinstance(key, str) or not key or key in seen_keys or not isinstance(instances, list):
+            return None
+        seen_keys.add(key)
+        ids: set[str] = set()
+        for instance in instances:
+            instance_id = instance.get("id") if isinstance(instance, dict) else None
+            if not isinstance(instance_id, str) or not instance_id or instance_id in seen_instances:
+                return None
+            seen_instances.add(instance_id)
+            ids.add(instance_id)
+        for name, resolved in zip((model_id, protected_model_id), matches):
+            if name == key:
+                resolved.append(ids)
+            elif name in ids:
+                resolved.append({name})
+    if any(len(resolved) != 1 or not resolved[0] for resolved in matches):
+        return None
+    return bool(matches[0][0] & matches[1][0])
+
+
 def parse_lm_studio_catalog(payload: object) -> list[dict] | None:
     """Нормализует любую из трёх форм каталога в ``[{"id": str, "loaded": bool|None}]``.
 

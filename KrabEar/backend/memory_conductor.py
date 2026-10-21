@@ -81,6 +81,7 @@ class MemoryConductor:
         unload_model_fn=None,
         load_model_fn=None,
         model_loaded_fn=None,
+        models_share_loaded_instance_fn=None,
         lease_holder_fn=None,
         verify_timeout_sec: float = 10.0,
         verify_poll_sec: float = 0.5,
@@ -93,6 +94,9 @@ class MemoryConductor:
             unload_model_fn = unload_model_fn or unload_model_async
             load_model_fn = load_model_fn or load_model_async
             model_loaded_fn = model_loaded_fn or model_loaded
+        if models_share_loaded_instance_fn is None:
+            from backend.lm_studio_lifecycle import models_share_loaded_instance
+            models_share_loaded_instance_fn = models_share_loaded_instance
         if lease_holder_fn is None:
             from backend.brain_lease import current_lease_holder
             lease_holder_fn = current_lease_holder
@@ -113,6 +117,7 @@ class MemoryConductor:
         self.unload_model_fn = unload_model_fn
         self.load_model_fn = load_model_fn
         self.model_loaded_fn = model_loaded_fn
+        self.models_share_loaded_instance_fn = models_share_loaded_instance_fn
         self._lease_holder_fn = lease_holder_fn
         self._verify_timeout = float(verify_timeout_sec)
         self._verify_poll = float(verify_poll_sec)
@@ -412,6 +417,10 @@ class MemoryConductor:
         if not model_id:
             c["skipped_gate"] += 1
             return
+        if resident == "rewriter" and not self._distinct_llm_instances(
+            resident, base, model_id, self._get("llm_brain_model", ""),
+        ):
+            return
         c["attempted"] += 1
         try:
             self.unload_model_fn(base, model_id, api_key=self._llm_api_key())
@@ -440,6 +449,38 @@ class MemoryConductor:
             self._note("evict %s: still loaded after %.0fs" % (resident, self._verify_timeout))
         if resident == "brain":
             self._update_brain_state(outcome)
+
+    def _distinct_llm_instances(self, resident: str, base: str, first: str, second: str) -> bool:
+        """Fail-closed stopgap: общий/неизвестный instance нельзя выселять.
+
+        Работает в собственном conductor/sequence потоке, не в event loop.
+        Разные instances не означают свободную модель: enforce по-прежнему
+        требует отдельной политики владельца и межпроцессного admission.
+        """
+        try:
+            shared = self.models_share_loaded_instance_fn(
+                base, first, second, api_key=self._llm_api_key(),
+            )
+        except Exception:
+            shared = None
+        reason = "shared instance identity" if shared is True else "unknown instance identity"
+        if shared is False:
+            # GET мог занять 1.5с: запись/встреча/чужая лиза уже могли начаться.
+            # Это повторная локальная проверка, не атомарный interprocess claim.
+            reason = "active or unknown LLM owner"
+            try:
+                holder = self._lease_holder_fn()
+                own_or_empty = holder is None or (
+                    isinstance(holder, dict) and holder.get("owner") == _OWN_LEASE_OWNER
+                )
+                if (own_or_empty and not self._is_meeting_active()
+                        and (resident != "rewriter" or not self._is_recording())):
+                    return True
+            except Exception:
+                pass  # неизвестная активность не разрешает lifecycle
+        self._counters[resident]["skipped_gate"] += 1
+        self._note("LLM lifecycle blocked: %s" % reason)
+        return False
 
     def _update_brain_state(self, loaded: Optional[bool]) -> None:
         """Обновляет кэш последнего ДОСТОВЕРНОГО состояния brain для _publish.
@@ -514,6 +555,8 @@ class MemoryConductor:
         base = self._get("llm_base_url", "http://localhost:1234/v1")
         brain = self._get("llm_brain_model", "")
         rewriter = self._get("llm_model", "")
+        if not self._distinct_llm_instances("brain", base, rewriter, brain):
+            return
         if brain:
             try:
                 self.unload_model_fn(base, brain, api_key=self._llm_api_key())
