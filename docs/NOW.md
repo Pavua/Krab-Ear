@@ -1,5 +1,16 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-21 — source: TTS activity, runtime не меняется
+
+Карточка `superpowers/plans/2026-10-21-tts-activity.md`, база `3f08c9dc` (#2107).
+Auth REST readiness получает отдельный process-wide TTS handler observer через
+существующий bounded ActivityReservations. Синтез/cleanup/конкурирующий отказ
+наблюдаются без probe-acquire семафора. Caller attribution, direct bytes API,
+SSE reconnect, global drain и memory stability не доказаны; coverage false.
+110 целевых тестов, Ruff/diff/audit-all и Astra whole-diff SOURCE PASS. Hosted CI
+pending; local Python3.12 проверен только stdlib smoke, parity venv отсутствует. Runtime0ff399bc
+не менялся, release/27B/ES остаются HOLD.
+
 ## 2026-10-21 — source: IPC stage timing, runtime-корреляция ожидает релиза
 
 Карточка `superpowers/plans/2026-10-21-ipc-stage-timing.md`, база `0ff399bc`

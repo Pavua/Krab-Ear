@@ -2307,6 +2307,18 @@ pending WS windows до admission остаются вне tracked subset. Metada
 Owner generation остаётся unknown; это не drain/eviction grant
 и не новая readiness-модель. `stt_residency`/overall_ready сохраняют отдельный смысл.
 
+Component `tts` наблюдает process-wide `TTSService.handle_synthesize_speech`,
+включая validation/отказ, синхронный синтез и cleanup до возврата handler.
+`generation_scope:"tts_handler"`, `completion_scope:"synthesis_handler"`;
+reservations/queued/inflight относятся к этому handler, а не к HTTP response.
+При конкурирующем отказе `tts_busy` активная reservation первого вызова остаётся.
+Семафор допуска не захватывается диагностикой. Snapshot nonblocking; contention,
+ошибка provider или overflow не дают known idle. Прямой bytes API остаётся
+`tts_direct_synthesis` в coverage.untracked; вложенные асинхронные работы/модели
+не считаются завершёнными по возврату handler. Текст, голос, caller и результат
+не сохраняются. `tts` не устанавливает владельца HTTP-запроса; coverage.complete
+остаётся false, owner idle/drain/restart grant не добавлен.
+
 ---
 
 ## Analytics & Trends
