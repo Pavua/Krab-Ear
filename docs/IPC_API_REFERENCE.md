@@ -184,6 +184,46 @@ Request:  {"id":"1","method":"ping","params":{}}
 Response: {"id":"1","ok":true,"result":{"status":"ok","service":"krab-ear-backend","version":"2.0.4","uptime_sec":3721,"is_recording":false,"history_count":142}}
 ```
 
+### `get_ipc_timing`
+*(service.py → ipc_timing.py, source-only: требует отдельного релиза)*
+
+Метаданные этапов одного диагностического IPC-вызова. Для opt-in задайте новый
+`id = "ear-diag-" + uuid4().hex` на **каждый** `ping`, `get_recording_state` или
+`get_meeting_live_state`; `params` должны быть пустыми. Обычный ответ этих методов
+не изменяется. Произвольные ID/методы, непустые params и дополнительные поля
+не трассируются. Signing-поля `signature`, `timestamp`, `nonce` допускаются;
+ID, совпадающий с auth-значением, не трассируется.
+
+Query: `{"id":"query-1","method":"get_ipc_timing","params":{"request_id":"ear-diag-0123456789abcdef0123456789abcdef"}}`.
+Применяются обычные signing/throttle checks; query не выполняет audit I/O.
+
+Returns: `{schema:1, owner_pid, owner_epoch, request_id, known, state, events,
+method?}`. Каждый event содержит только `{stage, utc_ns, monotonic_ns}`.
+`utc_ns` — Unix epoch nanoseconds для сопоставления с клиентом;
+`monotonic_ns` — для разниц времени **в одном процессе/эпохе**. Часы UTC могут
+скакать. Время `accepted` начинается после возврата `accept()`, не измеряет
+предшествующее ожидание в kernel backlog. Connection/decode, submit/worker,
+handler, post-handler privacy/audit, serialize/send разделены. Время внутри
+handler не разделено на конкретные locks.
+
+Состояния: `partial` (этапы ещё идут), `complete` (вернулся `sendall`),
+`send_failed`, `backstop_timeout`, `incomplete` (`known=false`: потеря этапа,
+overflow или повтор ID), `not_found` (нет/вытеснен/не принят, `known=false`),
+`contended` (`known=false`: snapshot не стал ждать collector-lock).
+`complete` не доказывает получение ответа клиентом, успех handler или завершение
+STT/GPU/фоновых задач. После backstop поздний worker не превращает timeout в
+успех. Для независимых повторов всегда используйте новый ID.
+
+Буфер process-local: максимум64 ID ×24 этапа, без persistent storage, logging
+и background writer. После fork/restart новая epoch и пустой буфер.
+Если collector-lock занят при приёме opt-in ID, нельзя исключить пропущенный
+duplicate: все сохранённые и последующие trace этой epoch становятся
+`incomplete/known=false`. Сами доступные этапы сохраняются для анализа.
+Вытеснение очищает список событий даже у ещё работающего worker.
+Параметры, текст, response, exception и auth values в буфер не попадают. Это advisory
+наблюдение, **не** admission/unload/drain grant. До отдельного разрешённого
+релиза текущий runtime не обязан знать этот метод; source-тесты его не заменяют.
+
 ### `start_recording`
 *(service.py → recording_core_service.py)*  
 Начать захват микрофона.  
