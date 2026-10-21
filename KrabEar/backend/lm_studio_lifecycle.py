@@ -98,6 +98,13 @@ def _build_safe_opener() -> urllib.request.OpenerDirector:
 _SAFE_OPENER = _build_safe_opener()
 
 
+def _add_bearer(req: urllib.request.Request, api_key: str | None) -> None:
+    """LM Studio с включённой аутентификацией отвечает 401 без Bearer."""
+    key = (api_key or "").strip()
+    if key:
+        req.add_header("Authorization", f"Bearer {key}")
+
+
 def _rest_body_is_error(raw_body: bytes) -> bool:
     """Return True если тело ответа содержит JSON с ключом "error".
 
@@ -112,7 +119,7 @@ def _rest_body_is_error(raw_body: bytes) -> bool:
         return False
 
 
-def _try_rest_unload(base_url: str, model_id: str) -> bool:
+def _try_rest_unload(base_url: str, model_id: str, api_key: str | None = None) -> bool:
     """LM Studio REST: POST /api/v0/models/{model}/unload. Returns True on 2xx + no error body."""
     # SSRF guard (Wave 1768): отклоняем file://, ftp://, data:// и пр. до сети.
     if not _scheme_allowed(base_url):
@@ -126,6 +133,7 @@ def _try_rest_unload(base_url: str, model_id: str) -> bool:
     url = f"{api_root}/api/v0/models/{quote(model_id, safe='')}/unload"
     try:
         req = urllib.request.Request(url, method="POST")
+        _add_bearer(req, api_key)
         with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
             if not (200 <= resp.status < 300):
                 return False
@@ -147,7 +155,7 @@ def _try_rest_unload(base_url: str, model_id: str) -> bool:
         return False
 
 
-def _try_rest_load(base_url: str, model_id: str) -> bool:
+def _try_rest_load(base_url: str, model_id: str, api_key: str | None = None) -> bool:
     """LM Studio REST: POST /api/v0/models/load. Returns True on 2xx + no error body."""
     # SSRF guard (Wave 1768): отклоняем file://, ftp://, data:// и пр. до сети.
     if not _scheme_allowed(base_url):
@@ -164,6 +172,7 @@ def _try_rest_load(base_url: str, model_id: str) -> bool:
             url, data=req_body, method="POST",
             headers={"Content-Type": "application/json"},
         )
+        _add_bearer(req, api_key)
         with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
             if not (200 <= resp.status < 300):
                 return False
@@ -219,7 +228,9 @@ def _try_cli(action: str, model_id: str) -> bool:
         return False
 
 
-def load_model_sync(base_url: str, model_id: str, timeout_sec: float = 90.0) -> bool:
+def load_model_sync(
+    base_url: str, model_id: str, timeout_sec: float = 90.0, api_key: str | None = None,
+) -> bool:
     """Синхронная загрузка модели в LM Studio с ожиданием завершения.
 
     В отличие от load_model_async (fire-and-forget), этот метод блокирует
@@ -250,7 +261,7 @@ def load_model_sync(base_url: str, model_id: str, timeout_sec: float = 90.0) -> 
         return False
 
     # 1. REST attempt (быстро — возвращает 200 сразу при успехе)
-    if _try_rest_load(base_url, model_id):
+    if _try_rest_load(base_url, model_id, api_key=api_key):
         logger.info("LM Studio: load_model_sync '%s' via REST", model_id)
         return True
 
@@ -511,7 +522,7 @@ def probe_loaded_chat_models(
     return None
 
 
-def unload_model_async(base_url: str, model_id: str) -> None:
+def unload_model_async(base_url: str, model_id: str, api_key: str | None = None) -> None:
     """Fire-and-forget unload. Не блокирует caller, errors silently logged.
 
     Args:
@@ -528,7 +539,7 @@ def unload_model_async(base_url: str, model_id: str) -> None:
         return
 
     def _worker() -> None:
-        if _try_rest_unload(base_url, model_id):
+        if _try_rest_unload(base_url, model_id, api_key=api_key):
             logger.info("LM Studio: unloaded brain model '%s' via REST", model_id)
             return
         if _try_cli("unload", model_id):
@@ -547,7 +558,7 @@ def unload_model_async(base_url: str, model_id: str) -> None:
     ).start()
 
 
-def load_model_async(base_url: str, model_id: str) -> None:
+def load_model_async(base_url: str, model_id: str, api_key: str | None = None) -> None:
     """Fire-and-forget load. Не блокирует caller.
 
     Используется после stop_recording чтобы pre-warm brain к моменту когда
@@ -563,7 +574,7 @@ def load_model_async(base_url: str, model_id: str) -> None:
         return
 
     def _worker() -> None:
-        if _try_rest_load(base_url, model_id):
+        if _try_rest_load(base_url, model_id, api_key=api_key):
             logger.info("LM Studio: pre-loaded brain model '%s' via REST", model_id)
             return
         if _try_cli("load", model_id):

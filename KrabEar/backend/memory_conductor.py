@@ -414,7 +414,7 @@ class MemoryConductor:
             return
         c["attempted"] += 1
         try:
-            self.unload_model_fn(base, model_id)
+            self.unload_model_fn(base, model_id, api_key=self._llm_api_key())
         except Exception:
             c["failed"] += 1
             logger.exception("%s unload call failed", resident)
@@ -516,7 +516,7 @@ class MemoryConductor:
         rewriter = self._get("llm_model", "")
         if brain:
             try:
-                self.unload_model_fn(base, brain)
+                self.unload_model_fn(base, brain, api_key=self._llm_api_key())
             except Exception:
                 logger.exception("sequence: brain unload failed")
                 return
@@ -534,7 +534,7 @@ class MemoryConductor:
             self._update_brain_state(outcome)
         if rewriter:
             try:
-                self.load_model_fn(base, rewriter)
+                self.load_model_fn(base, rewriter, api_key=self._llm_api_key())
             except Exception:
                 logger.exception("sequence: rewriter load failed")
 

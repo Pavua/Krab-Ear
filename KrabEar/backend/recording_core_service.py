@@ -1378,7 +1378,10 @@ class RecordingCoreService:
                 else:
                     from backend.lm_studio_lifecycle import unload_model_async
                     base_url = str(settings.get("llm_base_url", "http://localhost:1234/v1"))
-                    unload_model_async(base_url, brain_model)
+                    unload_model_async(
+                        base_url, brain_model,
+                        api_key=str(settings.get("llm_api_key", "") or ""),
+                    )
         except Exception as exc:
             logger.debug("LM Studio brain unload hook failed: %s", exc)
         # Brain lease coordination: release the brain lease so Krab userbot can use
@@ -2880,7 +2883,10 @@ class RecordingCoreService:
                                 "http://localhost:1234/v1",
                             )
                         )
-                        load_model_async(base_url, brain_model)
+                        load_model_async(
+                            base_url, brain_model,
+                            api_key=str(settings.get("llm_api_key", "") or ""),
+                        )
                     else:
                         logger.info("brain reload skipped by memory conductor (pressure)")
             except Exception as exc:

@@ -52,7 +52,7 @@ class ActionDispatcherTests(unittest.TestCase):
         with patch("backend.error_actions.unload_model_async") as unload, \
                 patch("backend.error_actions.current_lease_holder", return_value=None):
             handle_action("unload_lm_studio_model", settings_service=svc)
-        unload.assert_called_once_with(distinctive_url, "qwen/qwen3.6-27b")
+        unload.assert_called_once_with(distinctive_url, "qwen/qwen3.6-27b", api_key="")
 
     @patch("backend.error_actions.subprocess.run")
     def test_open_privacy_settings_invokes_subprocess(self, mock_run):

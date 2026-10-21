@@ -110,7 +110,10 @@ def _unload_lm_studio_model(*, settings_service, **kwargs) -> dict:
             "side_effect": None,
         }
 
-    unload_model_async(base_url, model_id)
+    unload_model_async(
+        base_url, model_id,
+        api_key=str((settings or {}).get("llm_api_key") or ""),
+    )
     logger.info("mlx.oom action: запрошена выгрузка модели", extra={"model_id": model_id})
     return {
         "executed": True,
