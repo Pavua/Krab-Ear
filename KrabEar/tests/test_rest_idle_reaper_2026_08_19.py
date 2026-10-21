@@ -320,3 +320,49 @@ class WhisperReaperTickTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WhisperReaperHeartbeatTest(unittest.TestCase):
+    """Shadow-режим обязан быть видимым: без heartbeat «would evict» не пишется
+    до порога, и по логу нельзя отличить «реапер жив, ждёт порога» от «реапера нет»
+    (воркер 1,7 ГБ жил сутки при TTL 900 с, а в логе реапера не было ни строки)."""
+
+    def setUp(self):
+        _reset_reaper_singletons()
+        rest_server._whisper_ledger_client = MagicMock()
+        rest_server._whisper_reaper_last_heartbeat = 0.0
+
+    def tearDown(self):
+        _reset_reaper_singletons()
+        rest_server._whisper_reaper_last_heartbeat = 0.0
+
+    def _tick(self, last_used_age: float, values: dict | None = None):
+        sess = MagicMock()
+        sess.inflight = 0
+        sess.last_used_ts = time.monotonic() - last_used_age
+        sess.close_if_idle.return_value = True
+        store = _FakeStore({"whisper_idle_unload_sec": 900.0, **(values or {})})
+        with patch("core.mlx_whisper_session.peek_session", return_value=sess), \
+                patch.object(rest_server, "store", store):
+            rest_server._whisper_idle_reaper_tick()
+        return sess
+
+    def test_heartbeat_logged_below_threshold_with_mode(self):
+        with self.assertLogs(rest_server.logger, level="INFO") as cm:
+            self._tick(last_used_age=30.0)
+        text = "\n".join(cm.output)
+        self.assertIn("whisper idle-reaper: heartbeat", text)
+        self.assertIn("mode=shadow", text)
+
+    def test_heartbeat_reports_enforce_mode(self):
+        with self.assertLogs(rest_server.logger, level="INFO") as cm:
+            self._tick(30.0, {"memory_conductor_enabled": True,
+                              "memory_conductor_enforce_whisper": True})
+        self.assertIn("mode=enforce", "\n".join(cm.output))
+
+    def test_heartbeat_is_rate_limited(self):
+        with self.assertLogs(rest_server.logger, level="INFO") as cm:
+            self._tick(30.0)
+            self._tick(30.0)
+        beats = [m for m in cm.output if "whisper idle-reaper: heartbeat" in m]
+        self.assertEqual(len(beats), 1)

@@ -2890,6 +2890,10 @@ _whisper_ledger_client = None
 # повторно (restart = stop()+start()) — двойной вызов обязан дать РОВНО один
 # тред за жизнь процесса, а не респавнить второй параллельно с первым.
 _whisper_reaper_started = threading.Event()
+# Heartbeat: shadow-режим пишет «would evict» только после порога, поэтому без
+# периодической строки лог не отличает «реапер жив» от «реапера нет».
+_WHISPER_REAPER_HEARTBEAT_SEC = 600.0
+_whisper_reaper_last_heartbeat = 0.0
 _whisper_reaper_start_lock = threading.Lock()
 
 
@@ -2900,6 +2904,26 @@ def _whisper_ledger():
 
         _whisper_ledger_client = LedgerClient(owner=_WHISPER_LEDGER_OWNER)
     return _whisper_ledger_client
+
+
+def _whisper_reaper_heartbeat(state: str, elapsed: float, threshold: float) -> None:
+    """Раз в ``_WHISPER_REAPER_HEARTBEAT_SEC`` пишет режим и простой реапера."""
+    global _whisper_reaper_last_heartbeat
+    now = time.monotonic()
+    if (
+        _whisper_reaper_last_heartbeat
+        and now - _whisper_reaper_last_heartbeat < _WHISPER_REAPER_HEARTBEAT_SEC
+    ):
+        return
+    _whisper_reaper_last_heartbeat = now
+    enforce = bool(_load_settings_field("memory_conductor_enabled", False)) and (
+        bool(_load_settings_field("memory_conductor_enforce", False))
+        or bool(_load_settings_field("memory_conductor_enforce_whisper", False))
+    )
+    logger.info(
+        "whisper idle-reaper: heartbeat state=%s idle=%.0fs threshold=%.0fs mode=%s",
+        state, elapsed, threshold, "enforce" if enforce else "shadow",
+    )
 
 
 def _whisper_idle_reaper_tick() -> None:
@@ -2936,13 +2960,14 @@ def _whisper_idle_reaper_tick() -> None:
     except Exception:
         logger.exception("whisper idle-reaper: publish_own бросил")
 
-    if state != "idle":
-        return
-
     idle_threshold = float(
         _load_settings_field("whisper_idle_unload_sec", _DEFAULT_WHISPER_IDLE_UNLOAD_SEC)
     )
     elapsed = time.monotonic() - last_used
+    _whisper_reaper_heartbeat(state, elapsed, idle_threshold)
+    if state != "idle":
+        return
+
     if elapsed < idle_threshold:
         return
 
