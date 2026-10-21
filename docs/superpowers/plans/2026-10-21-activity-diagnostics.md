@@ -36,7 +36,7 @@
 
 ### Task 2: Nonblocking IPC component metadata
 
-**Files:** Create KrabEar/backend/activity_diagnostics.py; Modify recording_core_service.py, meeting_session_service.py, service.py; Create KrabEar/tests/test_activity_diagnostics_2026_10_21.py.
+**Files:** Create KrabEar/backend/activity_diagnostics.py; Modify recorder.py, recording_core_service.py, meeting_session_service.py, memory_conductor.py, service.py; Create KrabEar/tests/test_activity_diagnostics_2026_10_21.py. AudioRecorder.is_recording берёт внутренний data lock, поэтому нужен собственный metadata helper; conductor read_only=True не синхронизирует shadow marker из нового GET.
 **Interfaces:** activity_snapshot()->dict on both services; ipc_activity_snapshot(recording,meeting)->dict; process_identity()->dict. get_memory_ledger adds activity and lease_observation.
 - [ ] RED real service metadata tests: finalizing1→busy; provider missing/exception→unknown; locks held by another thread→unknown promptly; meeting reservation/stopping/recovery/retainedworker→busy; no recorder preview/settings/model calls. Aggregate no-busy→unknown with incomplete coverage, generationNone; per-process epoch stable and separate across incarnation.
 - [ ] Run new unittest file; expect missing methods.

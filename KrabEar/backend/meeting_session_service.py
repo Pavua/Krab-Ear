@@ -287,6 +287,27 @@ class MeetingSessionService:
 
     # ------------------------------------------------------------------ IPC
 
+    def activity_snapshot(self) -> dict:
+        """Setup/stop/recovery и retained worker — без transcript/providers."""
+        from backend.activity_diagnostics import nonblocking_snapshot
+
+        def read():
+            reasons = []
+            if not self._setup_done_event.is_set():
+                reasons.append("meeting_setup")
+            if self._stopping:
+                reasons.append("meeting_stopping")
+            if self._recovery_pending:
+                reasons.append("meeting_recovery")
+            if self._session is not None:
+                reasons.append("meeting_session")
+            if self._worker is not None and self._worker.is_alive():
+                reasons.append("meeting_worker")
+            return {"known": True, "state": "busy" if reasons else "idle", "busy_reasons": reasons}
+
+        locks = tuple(getattr(self, name, None) for name in ("_transition_lock", "_lock", "_worker_lock"))
+        return nonblocking_snapshot(locks, read)
+
     def handle_meeting_start(self, params: dict[str, Any]) -> dict[str, Any]:
         """Сериализовать полный setup встречи со stop и следующим start."""
         self._raise_if_closed()

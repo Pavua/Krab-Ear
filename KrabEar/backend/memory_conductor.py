@@ -659,10 +659,11 @@ class MemoryConductor:
         except Exception:
             logger.debug("ledger publish failed", exc_info=True)
 
-    def get_diagnostics(self) -> dict[str, Any]:
+    def get_diagnostics(self, *, read_only: bool = False) -> dict[str, Any]:
         # Витрина — главный потребитель счётчика дней; синхронизация здесь
         # держит его честным даже без запущенного тика.
-        self._sync_shadow_marker()
+        if not read_only:
+            self._sync_shadow_marker()
         t = self._thread
         return {
             "enabled": self._get("memory_conductor_enabled", True),
