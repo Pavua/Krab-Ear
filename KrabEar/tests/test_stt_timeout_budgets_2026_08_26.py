@@ -13,6 +13,7 @@ import os
 import sys
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 
@@ -913,35 +914,47 @@ class RestScopeWiringTests(unittest.TestCase):
     открывается в worker-треде пула, deadline_sec связан с бюджетом."""
 
     def test_rest_submits_transcribe_through_call_in_scope(self):
+        from backend.activity_diagnostics import ActivityReservations
+
         src = (PROJECT_ROOT / "backend" / "rest_server.py").read_text(
             encoding="utf-8"
         )
         tree = ast.parse(src)
-        found_scoped_submit = False
-        for node in ast.walk(tree):
-            if not (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "submit"
-            ):
-                continue
-            if not node.args:
-                continue
-            first = node.args[0]
-            if (
-                isinstance(first, ast.Attribute)
-                and first.attr == "call_in_scope"
-            ):
-                found_scoped_submit = True
-            # Голый submit(deps.transcriber.transcribe, ...) запрещён:
-            # ContextVar не наследуется worker-тредом (§4.1).
-            self.assertFalse(
-                isinstance(first, ast.Attribute)
-                and first.attr == "transcribe",
-                "rest_server сабмитит transcribe напрямую — scope не "
-                "доедет до worker-треда",
-            )
-        self.assertTrue(found_scoped_submit)
+        submits = [node for node in ast.walk(tree)
+                   if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Attribute)
+                   and node.func.attr == "submit"
+                   and any(isinstance(arg, ast.Attribute)
+                           and arg.attr == "transcribe" for arg in node.args)]
+        self.assertEqual(len(submits), 1, "Не найдена единственная REST submit wiring")
+        tracker = ActivityReservations()
+        token = tracker.reserve("post_stt")
+
+        def transcribe(path, **kwargs):
+            return (threading.get_ident(), stt_budget.current_profile(),
+                    stt_budget.remaining_sec(), tracker.snapshot()["inflight"])
+
+        # Исполняем настоящий submit-expression с настоящими обёртками и
+        # executor, заменив только STT leaf. Импорт Flask/ML owners не нужен.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            namespace = {
+                "_pool": pool, "_REST_ACTIVITY": tracker,
+                "_activity_token": token, "stt_budget": stt_budget,
+                "deps": SimpleNamespace(transcriber=SimpleNamespace(transcribe=transcribe)),
+                "_transcribe_path": "unused.wav", "_transcribe_timeout_sec": 30.0,
+                "_budget_settings_snapshot": {}, "_transcribe_kwargs": {},
+            }
+            expression = ast.Expression(body=submits[0])
+            future = eval(compile(expression, "<rest-submit-extract>", "eval"), namespace)
+            worker_id, profile, remaining, inflight = future.result(timeout=2)
+        self.assertNotEqual(worker_id, threading.get_ident())
+        self.assertEqual(profile, stt_budget.INTERACTIVE)
+        self.assertIsNotNone(remaining, "Бюджет не доехал до worker-треда")
+        self.assertGreater(remaining, 0)
+        self.assertLessEqual(remaining, 30.0)
+        self.assertEqual(inflight, 1, "Учёт занятости не охватывает transcribe")
+        self.assertEqual(tracker.snapshot()["reservations"], 0)
+        self.assertIsNone(stt_budget.remaining_sec(), "Worker scope протёк в caller")
 
 
 class RestDeadlineSecFloorTests(unittest.TestCase):
