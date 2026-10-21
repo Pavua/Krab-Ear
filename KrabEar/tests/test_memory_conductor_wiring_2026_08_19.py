@@ -45,7 +45,7 @@ class RecordingCoreWiringTest(unittest.TestCase):
     def test_start_keeps_legacy_unload_fallback(self):
         """🔴 H2: shadow-неделя не смеет отключить живую выгрузку 19 ГБ."""
         self.assertIn('enforce_for("recording_sequence")', RECORDING)
-        self.assertIn("unload_model_async(base_url, brain_model)", RECORDING,
+        self.assertIn("unload_model_async(\n                        base_url, brain_model,", RECORDING,
                       "легаси-путь обязан остаться как else-ветка")
 
     def test_stop_reload_gated_by_conductor(self):
