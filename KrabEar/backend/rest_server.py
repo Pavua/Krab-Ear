@@ -46,6 +46,7 @@ from backend.translator import Translator
 from backend.live_subs_service import LiveSubsService
 from backend.cloud_stt import get_cloud_stt_provider, MAX_CLOUD_AUDIO_BYTES
 from backend.tts_service import TTSService
+from backend.activity_diagnostics import ActivityReservations, rest_activity_snapshot
 
 # Настройка логирования
 # W10: единая настройка — время в строке + глушение дублирующего access-лога
@@ -626,6 +627,7 @@ def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | Non
 # P0 2026-08-16: один native STT в REST-процессе. Каждый POST раньше поднимал
 # свой ThreadPoolExecutor — два /v1/stt/transcribe грузили MLX параллельно.
 _STT_SINGLEFLIGHT = threading.Lock()
+_REST_ACTIVITY = ActivityReservations()
 
 
 def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
@@ -1577,6 +1579,9 @@ def readiness():
     except Exception:  # noqa: BLE001 — health-эндпоинт обязан отвечать
         logger.warning("readiness: stt_residency snapshot недоступен", exc_info=True)
         report["stt_residency"] = {"owner": "rest", "state": "unavailable"}
+    from backend.brain_lease import observe_brain_lease
+    report["activity"] = rest_activity_snapshot(_REST_ACTIVITY)
+    report["lease_observation"] = observe_brain_lease()
     status_code = 200 if report["overall_ready"] else 503
     return jsonify(report), status_code
 
@@ -2005,6 +2010,8 @@ def transcribe_audio():
             _transcribe_kwargs.update(context_free=True, single_pass=True)
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _pool_shutdown_nonblocking = False
+        _activity_token = _REST_ACTIVITY.reserve("post_stt")
+        _future = None
         # Спека 2026-08-26 §4.1/§6: scope открывается ВНУТРИ worker-треда
         # (call_in_scope) — ContextVar не наследуется тредом пула. Снапшот
         # настроек берётся здесь: engine в REST-процессе создан без
@@ -2019,6 +2026,8 @@ def transcribe_audio():
                 if _transcribe_timeout_sec <= 0:
                     return jsonify({"error": "call STT timeout"}), 504
             _future = _pool.submit(
+                _REST_ACTIVITY.run,
+                _activity_token,
                 stt_budget.call_in_scope,
                 deps.transcriber.transcribe,
                 _transcribe_path,
@@ -2027,6 +2036,7 @@ def transcribe_audio():
                 settings_snapshot=_budget_settings_snapshot,
                 **_transcribe_kwargs,
             )
+            _REST_ACTIVITY.follow_future(_activity_token, _future)
             try:
                 result = _future.result(timeout=(
                     max(0.0, call_deadline - time.monotonic())
@@ -2094,6 +2104,11 @@ def transcribe_audio():
                 # На success/error/cancelled-pending Future нет работающей
                 # задачи, поэтому wait=True гарантирует отсутствие хвоста.
                 _pool.shutdown(wait=True)
+                # Submit мог упасть после постановки native work в очередь.
+                # Без Future снимаем token только после подтверждённого drain
+                # executor, а не по факту exception/HTTP response.
+                if _future is None:
+                    _REST_ACTIVITY.complete(_activity_token)
         elapsed_sec = time.monotonic() - start_ts
 
         if call_profile and _call_profile_privacy_enabled():
@@ -2665,12 +2680,15 @@ def _ws_stream_handler(ws):
 
     # P0e: native WS делит REST STT-слот с POST; acquire(0) внутри _process_window.
     # Cloud-ветка ниже LiveSubsService не использует. IPC BackendService gate не получает.
+    observed_acquire, observed_release = _REST_ACTIVITY.slot_callbacks(
+        try_acquire_stt_singleflight, release_stt_singleflight, "native_ws",
+    )
     live_subs = LiveSubsService(
         transcriber=deps.transcriber,
         translator=deps.translator,
         settings_get=lambda k, d=None: deps.store.load_settings().get(k, d),
-        stt_acquire=try_acquire_stt_singleflight,
-        stt_release=release_stt_singleflight,
+        stt_acquire=observed_acquire,
+        stt_release=observed_release,
     )
 
     cloud_audio_buffer = bytearray()

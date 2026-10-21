@@ -143,6 +143,33 @@ class ComponentActivityTests(unittest.TestCase):
         shell._memory_conductor.get_diagnostics.assert_called_once_with(read_only=True)
         lease.assert_called_once_with()
 
+    def test_actual_dispatch_uses_additive_diagnostic_handler(self):
+        from backend.service import BackendService
+        shell = Mock()
+        shell._recording_core_svc, shell._meeting_svc = self.recording(), self.meeting()
+        shell._memory_ledger.read_all.return_value = {}
+        shell._memory_conductor.get_diagnostics.return_value = {}
+        shell._request_signer = shell._ipc_throttle = None
+        shell._get_runtime_setting = lambda *_: False
+        shell._handle_get_memory_ledger = lambda params: BackendService._handle_get_memory_ledger(shell, params)
+        shell._dispatch_table = BackendService._build_dispatch_table(shell)
+        with patch('backend.brain_lease.observe_brain_lease', return_value={'state': 'absent', 'known': True}):
+            result = BackendService.handle_request(shell, {'id': 'activity', 'method': 'get_memory_ledger', 'params': {}})
+        self.assertTrue(result['ok'])
+        self.assertEqual(result['result']['activity']['owner'], 'backend')
+
+    def test_read_only_conductor_does_not_sync_shadow_marker(self):
+        from backend.memory_conductor import MemoryConductor
+        conductor = MemoryConductor.__new__(MemoryConductor)
+        conductor._sync_shadow_marker = Mock(side_effect=AssertionError('diagnostic write'))
+        conductor._get = lambda key, default: default
+        conductor._thread = None
+        conductor._last_tick_ts = conductor._shadow_since = None
+        conductor._pressure_streak = conductor._would_skip_brain_reload = 0
+        conductor._counters, conductor._decisions = {}, []
+        self.assertEqual(conductor.get_diagnostics(read_only=True)['residents'], {})
+        conductor._sync_shadow_marker.assert_not_called()
+
 
 if __name__ == '__main__':
     unittest.main()

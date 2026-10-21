@@ -135,7 +135,7 @@ class AudioRecorder:
             return {"known": True, "state": "busy" if reasons else "idle",
                     "recording": recording, "worker_alive": alive, "busy_reasons": reasons}
 
-        return nonblocking_snapshot((self._lifecycle_lock, self._lock), read)
+        return nonblocking_snapshot((getattr(self, "_lifecycle_lock", None), getattr(self, "_lock", None)), read)
 
     @property
     def is_worker_thread_alive(self) -> bool:

@@ -390,4 +390,7 @@ def observe_brain_lease(lock_path: Optional[Path] = None) -> dict:
         return result
     finally:
         if fd is not None:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass

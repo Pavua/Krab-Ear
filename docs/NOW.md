@@ -1,5 +1,21 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-21 — source: advisory activity/lease diagnostics
+
+Ветка `codex/ear-activity-diagnostics` от052b6c9: strict readonly lease observation,
+неблокирующие metadata recording/finalizing/meeting/capture worker, REST native POST/WS
+server-owned completion reservations. `get_memory_ledger` и `/v1/readiness` получают
+additive поля; component idle не превращается в global owner-idle. Неполное coverage
+явно оставляет owner generation:null/known:false; drain/admission/enforce не добавлены.
+HTTPtimeout/disconnect не завершает native работу. Контракт:
+`docs/superpowers/specs/2026-10-21-activity-diagnostics-design.md`.
+
+Main/Gateway подтвердили semantics/coverage и owning границы. 21.10 05:49 владелец
+разрешил Ear deploy/restart после проверок и согласованного окна; ES остаётся после
+стабилизации памяти. Source validation/CI/review идут отдельно от release acceptance;
+никакие runtime права не следуют из одного ledger/readiness/PID. Соседние lifecycle окна
+серийные; Ear ждёт Main FINISH. Флаги и модельная политика не меняются этой карточкой.
+
 ## 2026-10-19 — Независимое ревью #2100/#2101, фиксы запушены; память сжата
 
 Ревью вели бесплатные воркеры (DeepSeek/GLM/Nemotron через opencode, Gemini через agy); каждую находку я проверил по коду.
