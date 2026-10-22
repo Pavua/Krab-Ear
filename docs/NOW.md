@@ -1,6 +1,21 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-22 — SSE recovery: Task 1 source, full app CI ожидает окна
+## 2026-10-22 — partial SSE: локальный source checkpoint, hosted gate впереди
+
+Отдельная ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568`.
+Фактический partial SSE extension больше не теряет подписку после clean EOF:
+использует общий transport, очищает event type между соединениями, stop/hide
+закрывает также retry. Render/text/paste semantics не менялись. Настоящий localhost
+HTTP EOF: RED (одно соединение вместо двух) → GREEN; bounded harness 35 PASS
+с actual extension/transport/parser, только UI leaf заменён stub. Проверены
+late callbacks, restart и stop в backoff. В оба CI filters добавлены новые
+controller tests и существующие RealtimeOverlayTailTests. Независимое whole-partial-diff source review и audit-all PASS. Полный AppKit/hosted
+следующей ветки ещё не запускался, runtime recovery NOT_TESTED.
+Это только partial-часть Task 2; streaming paste и Tasks 3 остаются впереди.
+Модели, процессы, микрофон и clipboard не затронуты. Новая ветка не пушится,
+пока не согласовано следующее окно Main/Gateway.
+
+## 2026-10-22 — SSE recovery: Task 1, PR #2109 exact-head CI SUCCESS
 
 Изолированная ветка `codex/ear-sse-recovery-1022`, база `3f08c9dc` + reviewed
 plan `9a97009e`. ProbeSSEBox теперь использует общий Foundation transport owner:
@@ -11,8 +26,8 @@ FIFO callbacks проверяют поколение/UUID, parser state сбра
 
 Локальный ограниченный harness: **31 PASS**, включая настоящий localhost
 TCP/HTTP/URLSession EOF/reconnect; actual HealthMonitor/transport/parser,
-StatusIndicatorView заменён leaf stub. Полный AppKit build и hosted CI пока не
-выполнялись: очередь согласована Gateway → Main → Ear. Независимое повторное
+StatusIndicatorView заменён leaf stub. Полный AppKit build и выбранный suite: 330 PASS; exact-head
+`f0b9f568` hosted CI: 27 SUCCESS / 0 failures. Независимое повторное
 source review PASS. Это только Task 1 плана `2026-10-21-sse-recovery.md`;
 partial/paste/status/translation ещё не переведены. Runtime recovery не доказан,
 production lifecycle, модели, clipboard и микрофон не затронуты. Main разбирает

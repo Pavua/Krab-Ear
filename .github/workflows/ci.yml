@@ -57,7 +57,7 @@ jobs:
         run: |
           cd native/KrabEarAgent
           swift build --build-tests
-          swift test --skip-build --filter "WiringTests|SourceContract|PlaintextExportCoordinatorTests|HistoryMigrationObservationCoordinatorTests|HistoryEncryptionOutcomesTests|SecuritySettingsWiringContractTests|EncryptionToggleUnknownStateTests|PasteService.*Tests|PasteFailureNotificationTests|InputAutomationIntegrationTests|SelectionInputQueueTests|StreamingPasteControllerTests|HealthMonitorTests|ProbeSSERecoveryTests|SSESubscriptionRecoveryTests|SSESubscriptionLoopbackTests"
+          swift test --skip-build --filter "WiringTests|SourceContract|PlaintextExportCoordinatorTests|HistoryMigrationObservationCoordinatorTests|HistoryEncryptionOutcomesTests|SecuritySettingsWiringContractTests|EncryptionToggleUnknownStateTests|PasteService.*Tests|PasteFailureNotificationTests|InputAutomationIntegrationTests|SelectionInputQueueTests|StreamingPasteControllerTests|HealthMonitorTests|ProbeSSERecoveryTests|SSESubscriptionRecoveryTests|SSESubscriptionLoopbackTests|RealtimePartialSSERecoveryTests|RealtimeOverlayTailTests"
 
   public-runner-isolation-guard:
     name: Public runner isolation guard

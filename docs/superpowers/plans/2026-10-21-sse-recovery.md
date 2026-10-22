@@ -62,8 +62,8 @@ Actual Probe clean EOF и queued-retry cancellation: RED → GREEN.
 31 PASS в ограниченном Foundation harness (HealthMonitor + shared owner +
 SSESessionDelegate; StatusIndicatorView leaf stub), включая настоящий localhost
 TCP/HTTP/URLSession reconnect. Независимый повторный source review PASS после
-исправления cancellation race. Полный AppKit/hosted CI ожидает серийного окна;
-runtime acceptance не выполнен. Tasks 2/3 остаются в очереди.
+исправления cancellation race. Полный AppKit build/selected330 PASS, exact-head CI PR2109
+`f0b9f568`: 27 SUCCESS / 0 failures; runtime acceptance не выполнен. Tasks 2/3 остаются в очереди.
 
 
 **Files:** Create `native/KrabEarAgent/Sources/KrabEarAgent/SSESubscriptionTransport.swift`;
@@ -105,6 +105,14 @@ Modify `HealthMonitorTests.swift`.
   downloaded or full local build during memory HOLD. A skipped command is recorded.
 
 ### Task 2: partial/paste owners
+
+**22.10 partial slice:** isolated stacked `codex/ear-partial-sse-1022` @
+`f0b9f568` base. Actual partial extension localhost clean EOF RED → GREEN;
+35 PASS bounded harness (UI leaf stub), including stop/backoff, stale callbacks,
+parser reset and replacement subscription. Full AppKit CI and tail regression
+await next coordinated window; filters explicitly include both suites.
+Task 2 remains incomplete: StreamingPasteController not migrated yet.
+
 
 **Files:** Modify `RealtimeOverlayController+PartialSSE.swift`,
 `StreamingPasteController.swift`, `StreamingPasteControllerTests.swift`;
