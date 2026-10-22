@@ -98,7 +98,11 @@ def check_diagnostics(ctx):
         r = ipc("get_diagnostics")
     except Exception as exc:
         return False, f"diagnostics failed: {type(exc).__name__}"
-    res = r.get("result") or {}
+    if r.get("ok") is not True:
+        return False, "diagnostics RPC failed"
+    res = r.get("result")
+    if not isinstance(res, dict):
+        return False, "diagnostics not a dict"
     missing = [k for k in REQUIRED_DIAG if k not in res]
     if missing:
         return False, f"sections missing: {missing}"
@@ -110,12 +114,19 @@ def check_diagnostics(ctx):
 
 def agent_count():
     try:
-        out = subprocess.run(["pgrep", "-f", AGENT_PATTERN],
-                             capture_output=True, text=True,
-                             timeout=10).stdout.strip()
+        result = subprocess.run(["pgrep", "-f", AGENT_PATTERN],
+                                capture_output=True, text=True, timeout=10)
     except Exception:
         return -1
-    return len([line for line in out.splitlines() if line.strip()])
+    # pgrep: 1 = нет совпадений, 2/3 = ошибка, которая не разрешает recovery.
+    lines = result.stdout.split()
+    if result.returncode == 1 and not lines:
+        return 0
+    if result.returncode != 0 or not lines:
+        return -1
+    if any(not line.isascii() or not line.isdecimal() or int(line) <= 0 for line in lines):
+        return -1
+    return len(set(lines))
 
 
 def check_agent(ctx):
@@ -129,9 +140,13 @@ def check_agent(ctx):
         except Exception as exc:
             return False, f"absent, recovery failed to run: {type(exc).__name__}"
         n2 = agent_count()
-        if n2 > 0:
+        if n2 == 1:
             ctx["recovered"] = True
             return True, f"auto-recovered ({n2})"
+        if n2 > 1:
+            return False, f"recovery left {n2} processes (expected 1)"
+        if n2 < 0:
+            return False, "recovery process query failed"
         return False, "absent, auto-recovery did not help"
     if n < 0:
         return False, "pgrep failed"
@@ -179,6 +194,8 @@ def check_audio(ctx):
         r = ipc("list_audio_inputs")
     except Exception as exc:
         return False, f"audio failed: {type(exc).__name__}"
+    if r.get("ok") is not True:
+        return False, "audio RPC failed"
     n = (r.get("result") or {}).get("count", 0)
     ctx["ndevices"] = n
     if n < 1:
@@ -191,6 +208,8 @@ def check_settings(ctx):
         r = ipc("get_settings")
     except Exception as exc:
         return False, f"settings failed: {type(exc).__name__}"
+    if r.get("ok") is not True:
+        return False, "settings RPC failed"
     res = r.get("result")
     if not isinstance(res, dict):
         return False, "settings not a dict"
