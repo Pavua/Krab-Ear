@@ -37,8 +37,8 @@ extension HistoryPanelController {
         // Делегируем toggle на AppDelegate.toggleLiveSubsCaptureFromMenu (Phase 2B
         // pipeline). Существующий path: SystemAudioCapture.start/stop + IPC
         // live_subs_push_chunk. UI просто отражает state.
-        view.onToggleCapture = { [weak self] in
-            guard let _ = self else { return }
+        view.onToggleCapture = { [weak self, weak view] in
+            guard let _ = self, let view else { return }
             if let app = NSApp.delegate as? AgentAppDelegate {
                 app.toggleLiveSubsCaptureFromMenu()
                 // Синхронизируем UI с capture state.
