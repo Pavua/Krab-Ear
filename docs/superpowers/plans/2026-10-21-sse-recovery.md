@@ -57,6 +57,15 @@ connection UUID/generation/backoff паттерна LiveSubtitlesOverlay. UI-в�
 
 ### Task 1: reusable transport owner и ProbeSSEBox
 
+**22.10 source status:** реализовано в `codex/ear-sse-recovery-1022`.
+Actual Probe clean EOF и queued-retry cancellation: RED → GREEN.
+31 PASS в ограниченном Foundation harness (HealthMonitor + shared owner +
+SSESessionDelegate; StatusIndicatorView leaf stub), включая настоящий localhost
+TCP/HTTP/URLSession reconnect. Независимый повторный source review PASS после
+исправления cancellation race. Полный AppKit/hosted CI ожидает серийного окна;
+runtime acceptance не выполнен. Tasks 2/3 остаются в очереди.
+
+
 **Files:** Create `native/KrabEarAgent/Sources/KrabEarAgent/SSESubscriptionTransport.swift`;
 Modify `HealthMonitor.swift`; Create
 `native/KrabEarAgent/Tests/KrabEarAgentTests/SSESubscriptionRecoveryTests.swift`;
