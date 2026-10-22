@@ -1,19 +1,26 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-22 — partial SSE: локальный source checkpoint, hosted gate впереди
+## 2026-10-23 — Task 2 partial/paste SSE: локальный source checkpoint
 
-Отдельная ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568`.
-Фактический partial SSE extension больше не теряет подписку после clean EOF:
-использует общий transport, очищает event type между соединениями, stop/hide
-закрывает также retry. Render/text/paste semantics не менялись. Настоящий localhost
-HTTP EOF: RED (одно соединение вместо двух) → GREEN; bounded harness 35 PASS
-с actual extension/transport/parser, только UI leaf заменён stub. Проверены
-late callbacks, restart и stop в backoff. В оба CI filters добавлены новые
-controller tests и существующие RealtimeOverlayTailTests. Независимое whole-partial-diff source review и audit-all PASS. Полный AppKit/hosted
-следующей ветки ещё не запускался, runtime recovery NOT_TESTED.
-Это только partial-часть Task 2; streaming paste и Tasks 3 остаются впереди.
-Модели, процессы, микрофон и clipboard не затронуты. Новая ветка не пушится,
-пока не согласовано следующее окно Main/Gateway.
+Ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568` (#2109,
+exact-head27 SUCCESS). Partial preview и streaming paste используют общий
+transport: clean/error EOF восстанавливает подписку, event type сбрасывается,
+stop/hide/recording stop отменяет retry, late callbacks прежней записи отклоняются.
+Reconnect сохраняет recording owner/final barrier без дублирования final paste.
+Приём partial и reservation синхронны до async input; порядок FIFO сохранён.
+Render/text/revision/debounce и native paste leaf не менялись.
+
+Оба actual controller EOF: localhost RED1connect вместо2 → GREEN. Ограниченный
+harness **56 PASS**, включая прежние14 streaming regressions; actual extensions/
+controller/transport/parser/InputAutomationQueue/result/reservation definitions,
+UI и native PasteService leaf заменены stub (native calls fatalError, не используются).
+Независимое повторное whole-diff source review + audit-all PASS; review-замечание
+о маскирующем handleFinal тесте закрыто: прямой SSE→real reservation/FIFO→spy,
+mutation dropped-final-dispatch RED → восстановленный whole56 GREEN. Полный AppKit/hosted Task2 и RealtimeOverlayTailTests впереди:
+в оба явных Swift CI filters добавлены новые suites и tail regression.
+Task3 status/translation остаётся впереди. Runtime recovery NOT_TESTED;
+модели, процессы, микрофон, clipboard и чужие проекты не затронуты.
+Новая ветка пока локальная; следующий push только в согласованном окне.
 
 ## 2026-10-22 — SSE recovery: Task 1, PR #2109 exact-head CI SUCCESS
 

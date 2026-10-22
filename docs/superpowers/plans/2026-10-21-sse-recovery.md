@@ -106,12 +106,18 @@ Modify `HealthMonitorTests.swift`.
 
 ### Task 2: partial/paste owners
 
-**22.10 partial slice:** isolated stacked `codex/ear-partial-sse-1022` @
-`f0b9f568` base. Actual partial extension localhost clean EOF RED → GREEN;
-35 PASS bounded harness (UI leaf stub), including stop/backoff, stale callbacks,
-parser reset and replacement subscription. Full AppKit CI and tail regression
-await next coordinated window; filters explicitly include both suites.
-Task 2 remains incomplete: StreamingPasteController not migrated yet.
+**23.10 source checkpoint:** `codex/ear-partial-sse-1022`, Task1 base
+`f0b9f568`. Partial and streaming actual controllers localhost EOF RED → GREEN;
+56 PASS bounded harness, including14 existing streaming business regressions,
+lateG1/new recording, stop/backoff, event-type reset and final deduplication.
+Partial UI and native PasteService are leaf stubs; actual shared transport,
+controllers, parser and InputAutomationQueue/result/reservation compile.
+SSE parse/admission now synchronous; async input task/reservation cancellation
+retains existing behavior. Independent repeated streaming SOURCE PASS and audit-all PASS. Direct
+SSE→real reservation/FIFO→fake paste test covers bounded admission and final
+deduplication, no extra handleFinal. Dropped SSE-final mutation RED3assertions,
+restored whole56 GREEN. Full AppKit CI/tail gate await next coordinated window. Runtime NOT_TESTED.
+Task2 source migrated, acceptance remains pending hosted actual-app gate.
 
 
 **Files:** Modify `RealtimeOverlayController+PartialSSE.swift`,
