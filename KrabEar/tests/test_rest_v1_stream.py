@@ -18,9 +18,9 @@ def dummy_route(self, path, **kwargs):
         return f
     return decorator
 
-patch("flask_sock.Sock.route", new=dummy_route).start()
-
-from backend.rest_server import app, ws_stream
+# Не оставляем process-wide patch: соседние component E2E используют реальный WS.
+with patch("flask_sock.Sock.route", new=dummy_route):
+    from backend.rest_server import app, ws_stream
 
 class MockWS:
     def __init__(self, receives):
@@ -58,6 +58,10 @@ class TestRestV1Stream(unittest.TestCase):
         self.mock_live_subs = MagicMock()
         self.live_subs_patch = patch.object(rs, "LiveSubsService", return_value=self.mock_live_subs)
         self.live_subs_patch.start()
+        replay = MagicMock()
+        replay.open.return_value = {"status": "unavailable"}
+        self.replay_patch = patch.object(rs, "_translation_replay_client", return_value=replay)
+        self.replay_patch.start()
 
         self.auth_patch = patch.object(rs, "_ws_check_auth", return_value=True)
         self.auth_patch.start()
@@ -67,6 +71,7 @@ class TestRestV1Stream(unittest.TestCase):
     def tearDown(self):
         self.store_patch.stop()
         self.live_subs_patch.stop()
+        self.replay_patch.stop()
         self.auth_patch.stop()
 
     def test_v1_stream_success(self):

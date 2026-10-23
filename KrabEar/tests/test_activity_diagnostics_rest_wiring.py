@@ -120,6 +120,9 @@ def test_actual_native_ws_handler_passes_tracked_slot_callbacks(route, monkeypat
     _, rs, tracker = route
     constructor = Mock(return_value=Mock())
     monkeypatch.setattr(rs, 'LiveSubsService', constructor)
+    replay = Mock()
+    replay.open.return_value = {'status': 'unavailable'}
+    monkeypatch.setattr(rs, '_translation_replay_client', lambda: replay)
     monkeypatch.setattr(rs, '_privacy_mode_enabled', lambda: False)
     monkeypatch.setattr(rs, '_ws_check_auth', lambda _: True)
     ws = Mock()

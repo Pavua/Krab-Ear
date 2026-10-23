@@ -978,6 +978,8 @@ class BackendService:
             persist_path=self.store.data_dir / "event_replay.ndjson",
             settings_provider=self._settings_svc.cached_settings,
         )
+        from backend.translation_replay_ingress import TranslationReplayIngress
+        self._translation_replay_ingress = TranslationReplayIngress(self._event_replay, self.store.data_dir)
         # W1687 F2 HIGH / W23 MED: wire settings_provider so privacy-mode redaction
         # in get_event_log / replay_events / get_event_stats is honoured at runtime.
         # W23 made this TRUE on the READ path too: get_events/replay_events/
@@ -3063,6 +3065,8 @@ class BackendService:
             "score_readability": self._text_processing_svc.handle_score_readability,  # оценка читабельности текста транскрибации
             "score_transcription": self._handle_score_transcription,  # оценка качества транскрибации (0–100, A–F)
             "get_event_log": self._event_replay.handle_get_event_log,  # лог событий для отладки (фильтрация по типу/времени)
+            "translation_replay_begin": self._translation_replay_ingress.begin,
+            "translation_replay_commit": self._translation_replay_ingress.commit,
             "get_event_stats": self._event_replay.handle_get_event_stats,  # статистика событий: счётчики, скорость/мин
             "replay_events": self._event_replay.handle_replay_events,  # воспроизведение событий в диапазоне времени
             "get_waveform": self._audio_analytics_svc.handle_get_waveform,  # генерация waveform-данных для GUI-визуализации
@@ -3337,8 +3341,13 @@ class BackendService:
 
         # IPC throttle: проверяем rate limit перед вызовом обработчика
         if self._ipc_throttle is not None:
-            if not self._ipc_throttle.check_rate(method):
-                wait_sec = self._ipc_throttle.get_wait_time(method)
+            # Cursor read ограничен 200 событиями, без чтения файла журнала. Light
+            # bucket оставляет бюджет для SSE hints и не ослабляет debug reads.
+            live_cursor = (method == "get_event_log" and params.get("cursor_mode") is True
+                           and params.get("event_type") == "live_subs.result")
+            rate_method = "get_event_log.cursor.live_subs" if live_cursor else method
+            if not self._ipc_throttle.check_rate(rate_method):
+                wait_sec = self._ipc_throttle.get_wait_time(rate_method)
                 logger.warning("IPC rate limit exceeded: method=%s wait=%.2fs", method, wait_sec)
                 # Wave 77: push ipc.rate_limit_exceeded (2779 occurrences in production logs)
                 try:
@@ -3413,9 +3422,9 @@ class BackendService:
         finally:
             ipc_timing.mark("handler_finished")
 
-        # Чтение собственного metadata-only буфера не требует audit I/O.
-        # Auth/throttle выше остаются общими с остальными методами.
-        if method == "get_ipc_timing":
+        # Timing не требует audit I/O; replay ingress содержит token и текст,
+        # которые нельзя сохранять в audit. Auth/throttle выше остаются общими.
+        if method in {"get_ipc_timing", "translation_replay_begin", "translation_replay_commit"}:
             return response
 
         # Audit log — пропускаем в privacy_mode (настройка считывается из кэша)
