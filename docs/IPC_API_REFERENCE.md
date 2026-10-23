@@ -3160,9 +3160,28 @@ Returns: `{ok, trigger, removed}`
 
 ### `get_event_log`
 *(event_replay.py)*  
-Лог событий для отладки (фильтрация по типу/времени).  
-Params: `{event_type?, from_ts?, to_ts?, limit?}`  
-Returns: `{events: [{type, ts, data}]}`
+Лог событий с фильтрацией по типу/времени.
+Params: `{event_type?, since?, limit?}`
+Returns: `{events: [{type, ts, data, seq}], count}`
+
+Для догрузки панели перевода: `{cursor_mode: true, event_type: "live_subs.result",
+limit: 1..200, cursor?: "<epoch>:<seq>"}`. Ответ: `{events, count, cursor,
+has_more, gap, privacy_mode, generation, reset_reason}`. Первый запрос возвращает последние `limit` доступных событий;
+следующие — страницы строго после курсора. `has_more` требует следующего запроса
+с возвращённым курсором. Номера пропускаются при фильтрации по типу — это нормально.
+`gap` равен `null`, `retention` (кольцо вытеснило старые события) или `reset`
+(новый процесс/очистка журнала). `reset_reason` — `restart` или `clear` только
+при `gap=reset`. `generation` — неперсональный идентификатор очистки, сохранённый
+в `event_replay.generation` (32 байта); обычный restart его сохраняет, clear
+заменяет атомарно. Изменение generation, `reset_reason=clear` и `privacy_mode=true`
+обязаны очищать показанные фразы. При неизвестном generation клиент очищает
+кэш при смене epoch. Данные до разрыва восстановить нельзя; клиент показывает
+разрыв. Privacy редактирует payload и при чтении; purge,
+совпавший с чтением, отклоняет снимок. Невалидный/будущий курсор возвращает
+`{ok: false, error}` без payload; клиент сохраняет прежний курсор и строки.
+Для `live_subs.result` cursor-read использует отдельный light-бюджет (120/мин);
+обычный debug-read и cursor-read остальных типов сохраняют medium-бюджет (30/мин).
+Старый режим без `cursor_mode: true` сохраняет прежний контракт.
 
 ### `get_event_stats`
 *(event_replay.py)*  

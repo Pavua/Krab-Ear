@@ -3337,8 +3337,13 @@ class BackendService:
 
         # IPC throttle: проверяем rate limit перед вызовом обработчика
         if self._ipc_throttle is not None:
-            if not self._ipc_throttle.check_rate(method):
-                wait_sec = self._ipc_throttle.get_wait_time(method)
+            # Cursor read ограничен 200 событиями, без чтения файла журнала. Light
+            # bucket оставляет бюджет для SSE hints и не ослабляет debug reads.
+            live_cursor = (method == "get_event_log" and params.get("cursor_mode") is True
+                           and params.get("event_type") == "live_subs.result")
+            rate_method = "get_event_log.cursor.live_subs" if live_cursor else method
+            if not self._ipc_throttle.check_rate(rate_method):
+                wait_sec = self._ipc_throttle.get_wait_time(rate_method)
                 logger.warning("IPC rate limit exceeded: method=%s wait=%.2fs", method, wait_sec)
                 # Wave 77: push ipc.rate_limit_exceeded (2779 occurrences in production logs)
                 try:

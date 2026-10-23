@@ -12,19 +12,19 @@
    └──────────────────────────────────┴─────────────────────────┘
 
  Архитектура:
- - Подписывается на SSE `/v1/events?filter=live_subs.result` (тот же
-   endpoint что использует LiveSubtitlesOverlay), парсит {original, translation}
-   из event.data, добавляет в two parallel scroll views.
+ - SSE `/v1/events?filter=live_subs.result` подаёт сигналы о новых данных.
+   Фразы догружаются через get_event_log с курсором epoch+seq: один источник,
+   без дублей между live и replay. Последние 200 фраз остаются после reconnect.
  - Reuse existing pipeline: AgentAppDelegate.systemAudioCapture +
    live_subs_push_chunk IPC (Phase 2B). Старт/стоп captures проксируется
    через delegate callbacks.
  - В отличие от LiveSubtitlesOverlay (transient HUD с 3 строками + fade),
-   этот view хранит **полную историю сессии** в обеих панелях, scroll up
+   этот view хранит **до 200 последних фраз** в обеих панелях, scroll up
    показывает прошлые фразы. После end of capture история остаётся видимой.
 
  Reuse:
- - SSESessionDelegate из LiveSubtitlesOverlay file-private — здесь
-   создаём свой инстанс (один URLSession делegate per consumer).
+ - SSESubscriptionTransport владеет session/EOF/retry, а
+   TranslationReplaySubscription — курсором и bounded IPC-догрузкой.
  - Layout pattern: ThemeCardView для each pane, KrabEarTheme.Metrics для spacing.
 */
 
@@ -90,17 +90,16 @@ final class TranslationStreamView: NSView {
 
     // MARK: - SSE
 
-    private var sseStreamTask: URLSessionDataTask?
-    private lazy var sseDelegate: SSESessionDelegate = SSESessionDelegate { [weak self] line in
-        Task { @MainActor [weak self] in
-            self?.handleSSELine(line)
-        }
+    private var sessionFactory: ProbeSSESessionFactory = { delegate in
+        let queue = OperationQueue()
+        queue.maxConcurrentOperationCount = 1
+        return URLSession(configuration: .default, delegate: delegate, delegateQueue: queue)
     }
-    private lazy var sseSession = URLSession(
-        configuration: .default,
-        delegate: sseDelegate,
-        delegateQueue: nil
-    )
+    private var replayFetch: TranslationReplaySubscription.Fetch?
+    private var replayPollInterval: TimeInterval = 2
+    private var sseTransport: SSESubscriptionTransport?
+    private var replaySubscription: TranslationReplaySubscription?
+    var displayedOriginals: [String] { entries.map { $0.original } }
 
     // Capture timer (для duration label).
     private var captureStartedAt: Date?
@@ -110,6 +109,22 @@ final class TranslationStreamView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        setupLayout()
+        captureButton.target = self
+        captureButton.action = #selector(onCaptureClick)
+        startSSE()
+        startGlossaryRefresh()
+    }
+
+    init(frame: NSRect, restBaseURL: String,
+         sessionFactory: @escaping ProbeSSESessionFactory,
+         replayFetch: @escaping TranslationReplaySubscription.Fetch,
+         pollInterval: TimeInterval = 2) {
+        self.restBaseURL = restBaseURL
+        self.sessionFactory = sessionFactory
+        self.replayFetch = replayFetch
+        self.replayPollInterval = pollInterval
+        super.init(frame: frame)
         setupLayout()
         captureButton.target = self
         captureButton.action = #selector(onCaptureClick)
@@ -127,7 +142,6 @@ final class TranslationStreamView: NSView {
     }
 
     deinit {
-        sseStreamTask?.cancel()
         // RunLoop удерживает repeating Timer даже со слабым callback.
         // deinit может идти не на main: переносим только ресурсы, без self.
         let timers = [captureTimer, glossaryRefreshTimer].compactMap { $0 }
@@ -319,50 +333,59 @@ final class TranslationStreamView: NSView {
 
     // MARK: - SSE
 
+    private static func fetchReplay(_ params: [String: Any]) async throws -> [String: Any] {
+        guard let app = NSApp.delegate as? AgentAppDelegate else { throw IPCError.invalidResponse }
+        let response = try await app.ipcClient.callAsync(
+            method: "get_event_log", params: params, timeoutSec: IPCClient.quickTimeoutSec)
+        guard let result = response["result"] as? [String: Any] else { throw IPCError.invalidResponse }
+        return result
+    }
+
     private func startSSE() {
-        guard sseStreamTask == nil else { return }
-        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=live_subs.result") else { return }
+        guard sseTransport == nil,
+              let url = URL(string: "\(restBaseURL)/v1/events?filter=live_subs.result") else { return }
+        let replay = TranslationReplaySubscription(fetch: replayFetch ?? Self.fetchReplay,
+            onEntries: { [weak self] in self?.appendEntries($0) },
+            onGap: { [weak self] reason in
+                let note = reason == "retention"
+                    ? "[Часть фраз недоступна: превышена глубина журнала.]"
+                    : "[Разрыв истории: журнал очищен или backend перезапущен.]"
+                self?.appendEntries([["text": note, "translation": note]])
+            }, onClear: { [weak self] in self?.clearEntries() })
+        replaySubscription = replay
+        replay.start(pollInterval: replayPollInterval)
+        let transport = SSESubscriptionTransport(sessionFactory: sessionFactory)
+        sseTransport = transport
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let task = sseSession.dataTask(with: request)
-        sseStreamTask = task
-        task.resume()
+        transport.start(request: request,
+            onConnectionReset: { [weak replay] in replay?.reconcile() },
+            onLine: { [weak replay] line in
+                if line.hasPrefix("data:") || line.hasPrefix(":") { replay?.reconcile() }
+            })
     }
 
-    private func handleSSELine(_ line: String) {
-        guard line.hasPrefix("data: ") else { return }
-        let json = String(line.dropFirst(6))
-        guard let data = json.data(using: .utf8),
-              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
-        let payload = obj["data"] as? [String: Any] ?? obj
-        // Backend LiveSubsResult emits "text" (not "original"); accept both for safety.
-        let original = (payload["original"] as? String) ?? (payload["text"] as? String) ?? ""
-        let translation = (payload["translation"] as? String)
-            ?? (payload["translated"] as? String)
-            ?? ""
-        guard !original.isEmpty || !translation.isEmpty else { return }
-        appendEntry(original: original, translation: translation)
+    private func clearEntries() {
+        entries.removeAll()
+        originalText.string = ""
+        translationText.string = ""
+        originalText.setGlossary([:])
+        translationText.setGlossary([:])
     }
 
-    /// Добавляет entry в обе панели + auto-scroll к низу.
-    private func appendEntry(original: String, translation: String) {
-        let entry = TranslationEntry(original: original, translation: translation, timestamp: Date())
-        entries.append(entry)
-        // Ring buffer — отрезаем top если слишком много.
-        if entries.count > maxEntriesShown {
-            let drop = entries.count - maxEntriesShown
-            entries.removeFirst(drop)
-            // Перерисовать с нуля — простая, быстрая стратегия для max 200 entries.
-            originalText.string = entries.map { $0.original }.joined(separator: "\n")
-            translationText.string = entries.map { $0.translation }.joined(separator: "\n")
-        } else {
-            // Append to existing text (faster).
-            if !originalText.string.isEmpty { originalText.string += "\n" }
-            originalText.string += original
-            if !translationText.string.isEmpty { translationText.string += "\n" }
-            translationText.string += translation
+    /// Один bounded batch рисуется один раз; повторы текста сохраняются.
+    private func appendEntries(_ payloads: [[String: Any]]) {
+        let batch = payloads.compactMap { payload -> TranslationEntry? in
+            let text = payload["text"] as? String ?? ""
+            let translation = payload["translation"] as? String ?? ""
+            guard !text.isEmpty || !translation.isEmpty else { return nil }
+            return TranslationEntry(original: text, translation: translation, timestamp: Date())
         }
-        // Auto-scroll bottom.
+        guard !batch.isEmpty else { return }
+        entries.append(contentsOf: batch)
+        if entries.count > maxEntriesShown { entries.removeFirst(entries.count - maxEntriesShown) }
+        originalText.string = entries.map { $0.original }.joined(separator: "\n")
+        translationText.string = entries.map { $0.translation }.joined(separator: "\n")
         originalText.scrollToEndOfDocument(nil)
         translationText.scrollToEndOfDocument(nil)
     }

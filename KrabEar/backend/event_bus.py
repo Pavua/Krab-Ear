@@ -157,6 +157,15 @@ class EventBus:
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "data": payload,
         }
+        # Replay должен быть виден до SSE hint: клиент читает журнал сразу.
+        # Forward to event replay ring buffer (late-injected, no-op when None).
+        # W1673 F4 LOW: pass the already-computed ts so the replay log carries
+        # the exact delivery timestamp, not a second clock read inside record_event.
+        if self._event_replay is not None:
+            try:
+                self._event_replay.record_event(event_type, payload, ts=event["ts"])
+            except Exception:
+                logger.warning("EventBus: не удалось записать событие %s в EventReplayManager", event_type, exc_info=True)
         with self._lock:
             active = list(self._subscribers)
         dropped = 0
@@ -167,14 +176,6 @@ class EventBus:
                 dropped += 1
         if dropped:
             logger.warning("EventBus: %d подписчик(ов) пропустили событие %s (очередь полна)", dropped, event_type)
-        # Forward to event replay ring buffer (late-injected, no-op when None).
-        # W1673 F4 LOW: pass the already-computed ts so the replay log carries
-        # the exact delivery timestamp, not a second clock read inside record_event.
-        if self._event_replay is not None:
-            try:
-                self._event_replay.record_event(event_type, payload, ts=event["ts"])
-            except Exception:
-                logger.warning("EventBus: не удалось записать событие %s в EventReplayManager", event_type, exc_info=True)
         # Synchronous push-listeners (e.g. webhook forwarder).  Snapshot under the lock
         # so a concurrent add_listener() during iteration can't mutate the list.
         # Each listener is called defensively — a raising listener must not break the
