@@ -46,7 +46,7 @@ EventBus записывает replay до публикации сигнала. �
   Legacy debug-read и курсоры остальных типов остаются medium30/мин.
 - Privacy и purge имеют приоритет над сохранением показанных фраз:
   ответ содержит privacy_mode и reset_reason (restart/clear); очистка
-  журнала должна очищать UIcache, а restart сохраняет предыдущие строки.
+  журнала и новый backend epoch должны очищать UIcache.
 - Backend snapshot invalidated by concurrent purge не возвращает payload.
 
 Whole-diff review выявил неопределённость durable marker при ошибке диска:
