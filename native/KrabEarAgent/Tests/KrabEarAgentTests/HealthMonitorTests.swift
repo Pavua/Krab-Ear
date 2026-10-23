@@ -27,9 +27,11 @@ final class HealthMonitorTests: XCTestCase {
     func testHealthyWhenPingSucceeds() async {
         let monitor = HealthMonitor(pingInterval: 0.05, hangThreshold: 2)
         monitor.setPingProvider { return true }
+        let pinged = XCTestExpectation(description: "успешный ping обработан")
+        await monitor.setOnHealthyPing { pinged.fulfill() }
 
         await monitor.start()
-        try? await Task.sleep(nanoseconds: 200_000_000) // ~4 пинга
+        await fulfillment(of: [pinged], timeout: 5.0)
         let state = await monitor.currentState()
         await monitor.stop()
 
@@ -40,27 +42,35 @@ final class HealthMonitorTests: XCTestCase {
     func testHungAfterTwoConsecutiveFailures() async {
         let monitor = HealthMonitor(pingInterval: 0.05, hangThreshold: 2)
         monitor.setPingProvider { return false }
+        let hung = XCTestExpectation(description: "два сбоя обработаны")
+        await monitor.setOnHangDetected { hung.fulfill() }
 
         await monitor.start()
-        try? await Task.sleep(nanoseconds: 300_000_000)
+        await fulfillment(of: [hung], timeout: 5.0)
         let state = await monitor.currentState()
         await monitor.stop()
 
         XCTAssertEqual(state, .hung)
     }
 
-    /// Один fail + один success → .healthy (счётчик сбрасывается).
+    /// fail, success, fail, fail → hung только на четвёртом ping.
     func testCounterResetsOnSuccess() async {
         let monitor = HealthMonitor(pingInterval: 0.05, hangThreshold: 2)
         let counter = TestCounter()
         monitor.setPingProvider { return counter.next() }
+        let hung = XCTestExpectation(description: "два сбоя после успешного ping")
+        await monitor.setOnHangDetected {
+            XCTAssertEqual(counter.callCount(), 4,
+                           "Успех должен сбросить первый сбой до следующей пары")
+            hung.fulfill()
+        }
 
         await monitor.start()
-        try? await Task.sleep(nanoseconds: 400_000_000)
+        await fulfillment(of: [hung], timeout: 5.0)
         let state = await monitor.currentState()
         await monitor.stop()
 
-        XCTAssertEqual(state, .healthy)
+        XCTAssertEqual(state, .hung)
     }
 
     /// onHangDetected callback вызывается ровно один раз при переходе → .hung.
@@ -205,14 +215,18 @@ final class HealthMonitorProbeTests: XCTestCase {
 
 // MARK: - Test helpers
 
-/// Helper: возвращает false на 1-м вызове, потом true всегда.
+/// Helper: fail, success, затем только fail; счётчик доступен в callback.
 final class TestCounter: @unchecked Sendable {
     private var calls = 0
     private let lock = NSLock()
     func next() -> Bool {
         lock.lock(); defer { lock.unlock() }
         calls += 1
-        return calls >= 2
+        return calls == 2
+    }
+    func callCount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return calls
     }
 }
 

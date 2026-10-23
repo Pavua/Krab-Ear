@@ -3,8 +3,8 @@
 **Goal:** сохранять последние 200 показанных фраз штатного IPC-пути панели
 и догружать пропущенные при разрыве SSE, не теряя легитимные повторы текста.
 
-**Base:** origin/codex/krab-ear-v2 через integration candidate05220ff2.
-До публикации требуется принятая интеграционная база и точный CI.
+**Base:** origin/codex/krab-ear-v2, интеграция #2118 c44db7d93f741237fc8ffb2746169c299d3232aa
+(27 exact-head checks SUCCESS перед merge). Post-merge CI проверяется отдельно.
 
 **Architecture:** существующий EventReplayManager остаётся единственным журналом.
 get_event_log получает opt-in cursor_mode: epoch+seq, страницы до200 событий,
@@ -29,8 +29,9 @@ EventBus записывает replay до публикации сигнала. �
   одна IPCоперация, отказ/поздний callback/деинициализация и ограничение200.
 - [x] Real loopback HTTP/URLSession reconnect + production replay IPCcontract,
   проверка пропущенного события и отсутствия дублей, без productionпроцессов.
-- [ ] Тесты зависимых Python/Swift файлов, Ubuntu parity, release jobs2.
-- [ ] Независимый whole-diff review (privacy/read-path включён).
+- [x] Тесты зависимых Python/Swift файлов: combined372 PASS, Python3.12 без MLX
+  17 файлов изолированно PASS, release jobs2 и audit-all PASS.
+- [x] Независимый whole-diff review (privacy/read-path включён), SOURCE PASS.
 - [ ] PR, точный CI; source/CI не выдавать за production memory acceptance.
 
 При исчерпании retention сохраняем показанные фразы и показываем явный разрыв.
@@ -63,3 +64,8 @@ REST-local пропуски во время обрыва не входят в IP
 
 Предыдущий checkpoint770e2a89: combined370PASS/releasePASS/Python3.12parity5filesPASS;
 после review дерево изменено, финальная квалификация требуется заново.
+
+Hosted CI checkpoint4f21e43f выявил старую гонку HealthMonitorTests: fixed300ms
+не гарантировали два timer tick. Три PhaseA теста переведены на ожидание реальных
+callbacks с предельным timeout5s; тест reset проверяет переход на четвёртом
+ping для fail/success/fail/fail. Production HealthMonitor не менялся.
