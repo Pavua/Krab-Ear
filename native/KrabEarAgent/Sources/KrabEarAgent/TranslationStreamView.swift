@@ -128,8 +128,12 @@ final class TranslationStreamView: NSView {
 
     deinit {
         sseStreamTask?.cancel()
-        // Note: Timer.invalidate must run on main; deinit not guaranteed main.
-        // Acceptable: Timer holds weak self, becomes no-op после dealloc.
+        // RunLoop удерживает repeating Timer даже со слабым callback.
+        // deinit может идти не на main: переносим только ресурсы, без self.
+        let timers = [captureTimer, glossaryRefreshTimer].compactMap { $0 }
+        DispatchQueue.main.async {
+            timers.forEach { $0.invalidate() }
+        }
     }
 
     // MARK: - Layout
