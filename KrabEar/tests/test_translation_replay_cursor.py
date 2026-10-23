@@ -204,47 +204,38 @@ def test_cursor_snapshot_distinguishes_clear_from_new_backend_and_reports_privac
     assert page(m, cleared["cursor"])["privacy_mode"] is True
 
 
-def test_purge_generation_survives_backend_restart_without_persisting_phrases(tmp_path):
-    path = tmp_path / "events.ndjson"
-    first = EventReplayManager(persist_path=path)
-    emit(first, "before purge")
-    before = page(first)
-    first.close()
-    second = EventReplayManager(persist_path=path)
-    assert page(second)["generation"] == before["generation"]
-    second.clear()
-    after = page(second)
-    assert after["generation"] != before["generation"]
-    second.close()
-    third = EventReplayManager(persist_path=path)
+def test_sse_translation_source_is_server_owned_and_preserves_legacy_payload(monkeypatch):
+    import json
+    import queue
+    from backend.event_bus import EventBus, sse_stream
+
+    for origin, expected in [(None, "rest"), ("ipc", "ipc")]:
+        bus = EventBus()
+        q = queue.Queue()
+        event = {"type": "live_subs.result", "ts": "now",
+                 "data": {"text": "repeat", "_replay_source": "spoofed"}}
+        if origin:
+            event["origin"] = origin
+        q.put(event)
+        monkeypatch.setattr(bus, "subscribe", lambda: q)
+        stream = sse_stream(bus)
+        try:
+            frame = next(stream)
+            payload = json.loads(frame.split("data: ", 1)[1])
+            assert payload == {"text": "repeat", "_replay_source": expected}
+            assert event["data"]["_replay_source"] == "spoofed"
+        finally:
+            stream.close()
+
+
+def test_ipc_journal_provenance_is_attached_after_record_before_fanout():
+    from backend.event_bus import EventBus
+    bus = EventBus()
+    bus._event_replay = EventReplayManager()
+    q = bus.subscribe()
     try:
-        assert page(third)["generation"] == after["generation"]
-        assert third.get_events() == []
-        marker = path.with_suffix(".generation")
-        assert marker.read_text().strip() == after["generation"]
-        assert marker.stat().st_size <= 33
-        assert "before purge" not in marker.read_text()
+        bus.emit("live_subs.result", {"text": "repeat"})
+        assert q.get_nowait()["origin"] == "ipc"
+        assert len(page(bus._event_replay)["events"]) == 1
     finally:
-        third.close()
-
-
-def test_generation_write_failure_reports_error_but_still_wipes_memory(
-    tmp_path, monkeypatch
-):
-    import pytest
-    import backend.event_replay as module
-
-    m = EventReplayManager(persist_path=tmp_path / "events.ndjson")
-    emit(m, "must disappear")
-
-    def fail(*args, **kwargs):
-        raise OSError("synthetic metadata write failure")
-
-    monkeypatch.setattr(module, "atomic_write_text", fail)
-    try:
-        with pytest.raises(OSError):
-            m.clear()
-        assert m.get_events() == []
-        assert page(m)["generation"] is None
-    finally:
-        m.close()
+        bus.unsubscribe(q)

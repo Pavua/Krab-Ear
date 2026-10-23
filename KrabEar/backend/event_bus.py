@@ -164,6 +164,7 @@ class EventBus:
         if self._event_replay is not None:
             try:
                 self._event_replay.record_event(event_type, payload, ts=event["ts"])
+                event["origin"] = "ipc"
             except Exception:
                 logger.warning("EventBus: не удалось записать событие %s в EventReplayManager", event_type, exc_info=True)
         with self._lock:
@@ -316,7 +317,12 @@ def sse_stream(bus: EventBus, event_filter: str | None = None) -> Iterator[str]:
             # but the public emit() API accepts arbitrary strings — future callers
             # forwarding user input would be exploitable without this guard.
             safe_type = event["type"].replace("\r", "").replace("\n", "")
-            yield f"event: {safe_type}\ndata: {json.dumps(event['data'])}\n\n"
+            payload = event["data"]
+            if event["type"] == "live_subs.result":
+                # REST-native WS не входит в IPC replay; provenance задаёт сервер,
+                # не caller payload. Старые потребители игнорируют новое поле.
+                payload = dict(payload, _replay_source="ipc" if event.get("origin") == "ipc" else "rest")
+            yield f"event: {safe_type}\ndata: {json.dumps(payload)}\n\n"
     finally:
         bus.unsubscribe(q)
 

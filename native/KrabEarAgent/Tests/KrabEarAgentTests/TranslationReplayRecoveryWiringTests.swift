@@ -20,7 +20,7 @@ private final class ReplayIPCBox: @unchecked Sendable {
 final class TranslationReplayRecoveryWiringTests: XCTestCase {
     nonisolated let epoch = String(repeating: "a", count: 32)
     nonisolated func page(_ seq: Int, texts: [String], more: Bool = false, gap: String? = nil) -> [String: Any] {
-        var result: [String: Any] = ["cursor": "\(epoch):\(seq)", "has_more": more, "privacy_mode": false, "generation": String(repeating: "c", count: 32),
+        var result: [String: Any] = ["cursor": "\(epoch):\(seq)", "has_more": more, "privacy_mode": false,
             "events": texts.enumerated().map { offset, text in
                 ["type": "live_subs.result", "seq": seq - texts.count + offset + 1,
                  "data": ["text": text, "translation": text]] as [String: Any]
@@ -311,9 +311,9 @@ extension TranslationPanelReplayWiringTests {
         disconnected = true
         factory.delegate(at: 0)._testComplete()
         await waitUntil { view?.displayedOriginals.last == "after reset" }
-        XCTAssertEqual(view?.displayedOriginals.first, "before reset")
-        XCTAssertEqual(view?.displayedOriginals.count, 3)
-        XCTAssertTrue(view?.displayedOriginals[1].contains("Разрыв истории") == true)
+        XCTAssertFalse(view?.displayedOriginals.contains("before reset") == true)
+        XCTAssertEqual(view?.displayedOriginals.count, 2)
+        XCTAssertTrue(view?.displayedOriginals[0].contains("Разрыв истории") == true)
         view = nil
     }
 }
@@ -338,7 +338,7 @@ extension TranslationPanelReplayWiringTests {
         view = nil
     }
 
-    func testPurgeClearsAlreadyDisplayedPhrasesWhileRestartPreservesThem() async {
+    func testPurgeClearsAlreadyDisplayedPhrases() async {
         _ = NSApplication.shared
         let factory = RecoverySessionFactory()
         let data = TranslationReplayRecoveryWiringTests()
@@ -380,7 +380,6 @@ extension TranslationPanelReplayWiringTests {
                 let first = params["cursor"] as? String != newCursor
                 var p = data.page(1, texts: first ? ["new session"] : [], gap: first ? "reset" : nil)
                 p["cursor"] = newCursor
-                p["generation"] = String(repeating: "d", count: 32)
                 return p
             }, pollInterval: 3600)
         await waitUntil { view?.displayedOriginals == ["purged before restart"] }
@@ -389,5 +388,48 @@ extension TranslationPanelReplayWiringTests {
         await waitUntil { view?.displayedOriginals.last == "new session" }
         XCTAssertFalse(view?.displayedOriginals.contains("purged before restart") == true)
         view = nil
+    }
+}
+
+
+extension TranslationPanelReplayWiringTests {
+    func testRESTLocalPhrasesRemainVisibleAndIPCSignalsDoNotDuplicateReplay() async {
+        _ = NSApplication.shared
+        let factory = RecoverySessionFactory()
+        let data = TranslationReplayRecoveryWiringTests()
+        var view: TranslationStreamView? = TranslationStreamView(frame: .zero,
+            restBaseURL: "http://translation.invalid", sessionFactory: { factory.make($0) },
+            replayFetch: { params in data.page(1, texts: params["cursor"] == nil ? ["IPC phrase"] : []) },
+            pollInterval: 3600)
+        await waitUntil { view?.displayedOriginals == ["IPC phrase"] }
+        let delegate = factory.delegate(at: 0)
+        delegate._testReceive("data: {\"text\":\"IPC phrase\",\"_replay_source\":\"ipc\"}\n\n")
+        for _ in 0..<2 {
+            delegate._testReceive("data: {\"text\":\"REST phrase\",\"_replay_source\":\"rest\"}\n\n")
+        }
+        await waitUntil { view?.displayedOriginals.count == 3 }
+        XCTAssertEqual(view?.displayedOriginals, ["IPC phrase", "REST phrase", "REST phrase"])
+        view = nil
+    }
+}
+
+
+extension TranslationPanelReplayWiringTests {
+    func testRealHTTPKeepsRESTLocalDeliveryAcrossTransportReconnect() async throws {
+        _ = NSApplication.shared
+        let line = "data: {\"text\":\"REST repeat\",\"_replay_source\":\"rest\"}\n\n"
+        let server = try SSELoopbackFixture(bodies: [line, line])
+        let serving = Task.detached { server.serveTwoStreams() }
+        let data = TranslationReplayRecoveryWiringTests()
+        var view: TranslationStreamView? = TranslationStreamView(frame: .zero,
+            restBaseURL: "http://127.0.0.1:\(server.port)", sessionFactory: { delegate in
+                let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
+                return URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: queue)
+            }, replayFetch: { _ in data.page(0, texts: []) }, pollInterval: 3600)
+        await waitUntil { view?.displayedOriginals.count == 2 }
+        XCTAssertEqual(view?.displayedOriginals, ["REST repeat", "REST repeat"])
+        view = nil
+        let connections = await serving.value
+        XCTAssertEqual(connections, 2)
     }
 }

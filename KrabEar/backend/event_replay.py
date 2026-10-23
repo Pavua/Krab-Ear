@@ -21,7 +21,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from core.atomic_io import atomic_write_text
 
 logger = logging.getLogger("KrabEar.Backend.EventReplay")
 
@@ -83,8 +82,6 @@ class EventReplayManager:
         self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
         self._epoch = uuid.uuid4().hex  # идентификатор журнала меняется при clear/restart
         self._epoch_reason = "restart"
-        self._generation: str | None = uuid.uuid4().hex
-        self._generation_path: Path | None = None
         self._seq: int = 0  # монотонный счётчик для восстановления порядка
         self._persist_path: Path | None = Path(persist_path) if persist_path else None
         self._settings_provider = settings_provider
@@ -97,20 +94,6 @@ class EventReplayManager:
 
         if self._persist_path:
             self._persist_path.parent.mkdir(parents=True, exist_ok=True)
-            # Неперсональный tombstone: purge должен пережить последующий restart.
-            self._generation_path = self._persist_path.with_suffix(".generation")
-            try:
-                try:
-                    value = self._generation_path.read_text(encoding="ascii").strip()
-                    if len(value) != 32 or any(c not in "0123456789abcdef" for c in value):
-                        raise ValueError("invalid generation")
-                    self._generation = value
-                except (OSError, ValueError):
-                    atomic_write_text(self._generation_path, self._generation)
-            except OSError:
-                # Не знаем поколение — клиент не вправе сохранять cache через restart.
-                self._generation = None
-                logger.warning("event_replay: generation unavailable; cache recovery must fail closed")
             # Открываем в режиме "w" (truncate), а не "a" (append):
             # файл ограничен событиями текущей сессии — in-memory кольцевой буфер
             # уже ограничивает их до 10 000. Режим "a" приводил к неограниченному
@@ -337,7 +320,7 @@ class EventReplayManager:
         # Снимок, epoch и верхняя граница должны относиться к одному состоянию.
         with self._lock:
             current_epoch, high = self._epoch, self._seq
-            generation, reset_reason = self._generation, self._epoch_reason
+            reset_reason = self._epoch_reason
             if epoch == current_epoch and after > high:
                 return {"ok": False, "error": "replay cursor is ahead of journal"}
             gap: str | None = None
@@ -370,7 +353,7 @@ class EventReplayManager:
                 return {"ok": False, "error": "replay snapshot invalidated"}
         return {"events": selected, "count": len(selected),
                 "cursor": f"{current_epoch}:{next_seq}", "has_more": more, "gap": gap,
-                "privacy_mode": privacy_mode, "generation": generation,
+                "privacy_mode": privacy_mode,
                 "reset_reason": reset_reason if gap == "reset" else None}
 
     def replay_events(self, from_ts: str, to_ts: str) -> list[dict[str, Any]]:
@@ -467,16 +450,7 @@ class EventReplayManager:
         события легли бы за нулями. Файл на диске сохраняется (не удаляется),
         содержимое обнуляется.
         """
-        generation_error: OSError | None = None
         with self._lock:
-            generation = uuid.uuid4().hex
-            if self._generation_path is not None:
-                try:
-                    atomic_write_text(self._generation_path, generation)
-                except OSError as exc:
-                    generation_error = exc
-            # Даже ошибка metadata I/O не вправе оставить PII в RAM.
-            self._generation = generation if generation_error is None else None
             self._buffer.clear()
             self._epoch = uuid.uuid4().hex
             self._epoch_reason = "clear"
@@ -495,8 +469,6 @@ class EventReplayManager:
                     self._file_bytes = 0
                 except OSError:
                     logger.warning("event_replay: failed to truncate persist file on clear")
-        if generation_error is not None:
-            raise generation_error  # purge не считается durable/успешным
 
     def close(self) -> None:
         """Закрывает файл персистенции, если он открыт."""

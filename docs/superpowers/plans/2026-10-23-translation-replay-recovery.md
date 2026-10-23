@@ -1,7 +1,7 @@
 # Translation: reconnect и догрузка пропущенных фраз
 
-**Goal:** сохранять последние 200 показанных фраз и догружать пропущенные
-при разрыве SSE, не теряя легитимные повторы одинакового текста.
+**Goal:** сохранять последние 200 показанных фраз штатного IPC-пути панели
+и догружать пропущенные при разрыве SSE, не теряя легитимные повторы текста.
 
 **Base:** origin/codex/krab-ear-v2 через integration candidate05220ff2.
 До публикации требуется принятая интеграционная база и точный CI.
@@ -33,8 +33,9 @@ EventBus записывает replay до публикации сигнала. �
 - [ ] Независимый whole-diff review (privacy/read-path включён).
 - [ ] PR, точный CI; source/CI не выдавать за production memory acceptance.
 
-При исчерпании retention или перезапуске сохраняем показанные фразы,
-показываем явный разрыв истории и догружаем доступные записи.
+При исчерпании retention сохраняем показанные фразы и показываем явный разрыв.
+Новый backend epoch очищает UI: purge мог пройти между чтениями; серверный
+журнал при restart сбрасывается. Обычный SSE reconnect сохраняет и догружает.
 Недоступность IPC не двигает cursor и не очищает панель; повтор ограничен timer.
 
 ## Уточнения после RED/совместного GREEN
@@ -48,14 +49,17 @@ EventBus записывает replay до публикации сигнала. �
   журнала должна очищать UIcache, а restart сохраняет предыдущие строки.
 - Backend snapshot invalidated by concurrent purge не возвращает payload.
 
-Generation хранится только как неперсональный 32байтный marker через существующий
-core.atomic_io.atomic_write_text. Он сохраняется через restart и меняется при
-clear; UI очищает cache при смене поколения. Неизвестное поколение => failclosed
-при новом epoch. Ошибка записи marker не мешает wipe RAM, но возвращает ошибку
-очистки; отсутствие stdout/exit0 не считается durable успехом.
+Whole-diff review выявил неопределённость durable marker при ошибке диска:
+после purge и restart прежний marker мог ложно подтверждать старый cache.
+RED: 7paneltests/4assertions. Решение: не добавлять durable metadata, очищать
+UI на любом новом backend epoch. Сетевой reconnect того же epoch сохраняет
+строки и догружает. Также обнаружен второй REST-native WS producer вне IPC journal.
+Compatibility сохранена прямым SSE с серверным `_replay_source`; caller не может
+подменить метку. IPC-сигналы не рисуют raw payload. RED2backend/2Swift(4assert),
+GREEN14backend/17Swift, включая настоящий HTTPRESTreconnect и повтор текста.
+REST-local пропуски во время обрыва не входят в IPC replay. Расширение этого
+контракта выделено отдельно; вопрос о включении в текущую карточку задан владельцу.
 
-Проверенный checkpoint перед whole-diff review: Swift367 общего набора PASS;
-после privacy дополнения15narrowPASS; release до privacyPASS. Новые14Python
-cursor/dispatch/privacy/IOfailuretestsPASS,старыеreplay/privacy/validationPASS,
-flake8PASS,makeaudit-allPASS. Финальныеcombined370/release/Ubuntuparity ещё
-не выполнены на текущем tree; CI/merge/runtime этим checkpoint не подтверждены.
+
+Предыдущий checkpoint770e2a89: combined370PASS/releasePASS/Python3.12parity5filesPASS;
+после review дерево изменено, финальная квалификация требуется заново.

@@ -8,7 +8,6 @@ final class TranslationReplaySubscription {
     private let onEntries: ([[String: Any]]) -> Void
     private let onGap: (String) -> Void
     private let onClear: () -> Void
-    private var generation: String?
     private(set) var cursor: String?
     private var active = false
     private var dirty = false
@@ -72,10 +71,8 @@ final class TranslationReplaySubscription {
                 guard self.active else { return }
                 let page = try self.validate(response, after: previousCursor)
                 let epochChanged = previousCursor?.split(separator: ":").first != page.cursor.split(separator: ":").first
-                let generationChanged = self.generation != nil && self.generation != page.generation
-                let unknownReset = previousCursor != nil && epochChanged && (self.generation == nil || page.generation == nil)
-                if page.reset_reason == "clear" || generationChanged || unknownReset { self.onClear() }
-                self.generation = page.generation
+                // Новый backend мог пропустить privacy/purge между чтениями.
+                if page.reset_reason == "clear" || (previousCursor != nil && epochChanged) { self.onClear() }
                 self.cursor = page.cursor
                 guard self.active, !page.privacy_mode else { return }
                 if let gap = page.gap { self.onGap(gap) }
@@ -117,7 +114,6 @@ final class TranslationReplaySubscription {
         let gap: String?
         let privacy_mode: Bool
         let reset_reason: String?
-        let generation: String?
     }
     private enum InvalidPage: Error { case malformed }
 
@@ -137,10 +133,6 @@ final class TranslationReplaySubscription {
         let next = try parseCursor(page.cursor)
         guard page.events.count <= 200, [nil, "retention", "reset"].contains(page.gap),
               !page.has_more || !page.events.isEmpty else { throw InvalidPage.malformed }
-        if let generation = page.generation {
-            guard generation.utf8.count == 32,
-                  generation.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else { throw InvalidPage.malformed }
-        }
         if page.gap == "reset" {
             guard ["restart", "clear"].contains(page.reset_reason) else { throw InvalidPage.malformed }
         } else if page.reset_reason != nil { throw InvalidPage.malformed }

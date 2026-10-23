@@ -15,6 +15,7 @@
  - SSE `/v1/events?filter=live_subs.result` подаёт сигналы о новых данных.
    Фразы догружаются через get_event_log с курсором epoch+seq: один источник,
    без дублей между live и replay. Последние 200 фраз остаются после reconnect.
+   REST-local WS сохраняет прямую SSE-доставку; его replay — отдельный контракт.
  - Reuse existing pipeline: AgentAppDelegate.systemAudioCapture +
    live_subs_push_chunk IPC (Phase 2B). Старт/стоп captures проксируется
    через delegate callbacks.
@@ -360,8 +361,18 @@ final class TranslationStreamView: NSView {
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         transport.start(request: request,
             onConnectionReset: { [weak replay] in replay?.reconcile() },
-            onLine: { [weak replay] line in
-                if line.hasPrefix("data:") || line.hasPrefix(":") { replay?.reconcile() }
+            onLine: { [weak self, weak replay] line in
+                if line.hasPrefix("data:") {
+                    let body = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                    if let bytes = body.data(using: .utf8),
+                       let payload = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
+                       payload["_replay_source"] as? String == "rest",
+                       payload["redacted"] as? Bool != true {
+                        // REST-native WS не входит в IPC-журнал: сохраняем live wiring.
+                        self?.appendEntries([payload])
+                    }
+                    replay?.reconcile()
+                } else if line.hasPrefix(":") { replay?.reconcile() }
             })
     }
 
