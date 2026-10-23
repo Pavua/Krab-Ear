@@ -1,5 +1,23 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-22 — SSE recovery: Task 1 source, full app CI ожидает окна
+
+Изолированная ветка `codex/ear-sse-recovery-1022`, база `3f08c9dc` + reviewed
+plan `9a97009e`. ProbeSSEBox теперь использует общий Foundation transport owner:
+clean/error EOF освобождает соединение и планирует один retry с backoff до 30s;
+FIFO callbacks проверяют поколение/UUID, parser state сбрасывается при reconnect.
+Отмена синхронно закрывает admission ещё до MainActor cleanup — независимое
+ревью обнаружило этот race, новый actual-owner тест воспроизвёл RED → GREEN.
+
+Локальный ограниченный harness: **31 PASS**, включая настоящий localhost
+TCP/HTTP/URLSession EOF/reconnect; actual HealthMonitor/transport/parser,
+StatusIndicatorView заменён leaf stub. Полный AppKit build и hosted CI пока не
+выполнялись: очередь согласована Gateway → Main → Ear. Независимое повторное
+source review PASS. Это только Task 1 плана `2026-10-21-sse-recovery.md`;
+partial/paste/status/translation ещё не переведены. Runtime recovery не доказан,
+production lifecycle, модели, clipboard и микрофон не затронуты. Main разбирает
+новые Telegram ответы; полнота их исправления этим source gate не заявляется.
+
 ## 2026-10-21 — source: IPC stage timing, runtime-корреляция ожидает релиза
 
 Карточка `superpowers/plans/2026-10-21-ipc-stage-timing.md`, база `0ff399bc`
