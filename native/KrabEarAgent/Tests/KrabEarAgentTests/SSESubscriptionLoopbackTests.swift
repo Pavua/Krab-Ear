@@ -25,11 +25,14 @@ final class SSESubscriptionLoopbackTests: XCTestCase {
     }
 }
 
-private final class SSELoopbackFixture: @unchecked Sendable {
+final class SSELoopbackFixture: @unchecked Sendable {
     let port: UInt16
     private let listener: Int32
+    private let bodies: [String]
 
-    init() throws {
+    init(bodies: [String] = ["data: first\n\n", "data: second\n\n"]) throws {
+        precondition(bodies.count == 2)
+        self.bodies = bodies
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         guard fd >= 0 else { throw POSIXError(.ENFILE) }
         var address = sockaddr_in()
@@ -63,7 +66,7 @@ private final class SSELoopbackFixture: @unchecked Sendable {
         while count < 2, Date() < deadline {
             let client = accept(listener, nil, nil)
             if client < 0 { usleep(10_000); continue }
-            serve(client, body: count == 0 ? "data: first\n\n" : "data: second\n\n")
+            serve(client, body: bodies[count])
             count += 1
         }
         return count
