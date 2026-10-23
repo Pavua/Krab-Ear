@@ -319,8 +319,8 @@ def sse_stream(bus: EventBus, event_filter: str | None = None) -> Iterator[str]:
             safe_type = event["type"].replace("\r", "").replace("\n", "")
             payload = event["data"]
             if event["type"] == "live_subs.result":
-                # REST-native WS не входит в IPC replay; provenance задаёт сервер,
-                # не caller payload. Старые потребители игнорируют новое поле.
+                # Подтверждённый REST-native commit помечен origin=ipc; остальные
+                # REST hints/live — rest. Provenance задаёт сервер, не payload.
                 payload = dict(payload, _replay_source="ipc" if event.get("origin") == "ipc" else "rest")
             yield f"event: {safe_type}\ndata: {json.dumps(payload)}\n\n"
     finally:

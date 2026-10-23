@@ -15,7 +15,7 @@
  - SSE `/v1/events?filter=live_subs.result` подаёт сигналы о новых данных.
    Фразы догружаются через get_event_log с курсором epoch+seq: один источник,
    без дублей между live и replay. Последние 200 фраз остаются после reconnect.
-   REST-local WS сохраняет прямую SSE-доставку; его replay — отдельный контракт.
+   REST-native WS записывает тот же журнал; legacy недоступность отмечается явно.
  - Reuse existing pipeline: AgentAppDelegate.systemAudioCapture +
    live_subs_push_chunk IPC (Phase 2B). Старт/стоп captures проксируется
    через delegate callbacks.
@@ -64,6 +64,7 @@ final class TranslationStreamView: NSView {
     // MARK: - State
 
     private var entries: [TranslationEntry] = []
+    private var replayWarningsShown = Set<String>()
     private let maxEntriesShown = 200  // history limit (ring buffer)
 
     // MARK: - UI
@@ -368,7 +369,21 @@ final class TranslationStreamView: NSView {
                        let payload = try? JSONSerialization.jsonObject(with: bytes) as? [String: Any],
                        payload["_replay_source"] as? String == "rest",
                        payload["redacted"] as? Bool != true {
-                        // REST-native WS не входит в IPC-журнал: сохраняем live wiring.
+                        // Confirmed REST-фразы приходят через общий IPC journal.
+                        // Raw REST остаётся только для явно legacy-live сеанса.
+                        if let status = payload["replay_status"] as? String,
+                           ["unknown", "unavailable", "stale", "busy", "rejected", "invalid", "conflict", "error"].contains(status),
+                           let self {
+                            let category = status == "unknown" ? "pending" : status == "unavailable" ? "legacy" : "denied"
+                            if self.replayWarningsShown.insert(category).inserted {
+                                let note = status == "unknown"
+                                    ? "[Ожидается подтверждение фразы; проверяем журнал.]"
+                                    : status == "unavailable"
+                                        ? "[Журнал недоступен: фразы этого сеанса показываются только вживую.]"
+                                        : "[Пропуск фразы: журнал не принял окно перевода. Перезапустите поток для переподключения.]"
+                                self.appendEntries([["text": note, "translation": note]])
+                            }
+                        }
                         self?.appendEntries([payload])
                     }
                     replay?.reconcile()
@@ -377,6 +392,7 @@ final class TranslationStreamView: NSView {
     }
 
     private func clearEntries() {
+        replayWarningsShown.removeAll()
         entries.removeAll()
         originalText.string = ""
         translationText.string = ""

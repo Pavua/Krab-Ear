@@ -263,6 +263,8 @@ extension TranslationPanelReplayWiringTests {
             return state["connections"] as? Int == 2 && view?.displayedOriginals == ["до обрыва", "повтор", "повтор"]
         }
         XCTAssertEqual(view?.displayedOriginals, ["до обрыва", "повтор", "повтор"])
+        let finalInfo = try JSONSerialization.jsonObject(with: Data(contentsOf: ready)) as! [String: Any]
+        XCTAssertEqual(finalInfo["rest_records"] as? Int, 2, "missed phrases must come from actual REST replay client")
         weak var released = view
         view = nil
         XCTAssertNil(released)
@@ -431,5 +433,87 @@ extension TranslationPanelReplayWiringTests {
         view = nil
         let connections = await serving.value
         XCTAssertEqual(connections, 2)
+    }
+}
+
+extension TranslationPanelReplayWiringTests {
+    func testUncertainRESTCommitShowsGapWithoutRawPhraseAndStillRepairs() async {
+        _ = NSApplication.shared
+        let factory = RecoverySessionFactory()
+        let data = TranslationReplayRecoveryWiringTests()
+        var view: TranslationStreamView? = TranslationStreamView(frame: .zero,
+            restBaseURL: "http://translation.invalid", sessionFactory: { factory.make($0) },
+            replayFetch: { params in data.page(1, texts: params["cursor"] == nil ? ["kept"] : []) },
+            pollInterval: 3600)
+        await waitUntil { view?.displayedOriginals == ["kept"] }
+        factory.delegate(at: 0)._testReceive("data: {\"replay_status\":\"unknown\",\"_replay_source\":\"rest\"}\n\n")
+        await waitUntil { view?.displayedOriginals.count == 2 }
+        XCTAssertEqual(view?.displayedOriginals.first, "kept")
+        XCTAssertTrue(view?.displayedOriginals.last?.contains("подтверждение") == true)
+        view = nil
+    }
+}
+
+extension TranslationReplayRecoveryWiringTests {
+    func testInitialByteLimitedTailAcceptsRetentionAndAdvancesPastOversizePlaceholder() async {
+        var texts: [String] = []
+        var gaps: [String] = []
+        let owner = TranslationReplaySubscription(fetch: { _ in
+            ["cursor": "\(self.epoch):2", "has_more": false, "privacy_mode": false,
+             "gap": "retention", "events": [
+                ["type": "live_subs.result", "seq": 1,
+                 "data": ["redacted": true, "reason": "replay_size_limit"]],
+                ["type": "live_subs.result", "seq": 2, "data": ["text": "retained tail"]]]]
+        }, onEntries: { texts += $0.compactMap { $0["text"] as? String } }, onGap: { gaps.append($0) })
+        defer { owner.stop() }
+        owner.start(pollInterval: 3600)
+        await settle { owner.cursor != nil }
+        XCTAssertEqual(texts, ["retained tail"])
+        XCTAssertEqual(gaps, ["retention"])
+        XCTAssertEqual(owner.cursor, "\(epoch):2")
+    }
+}
+
+
+extension TranslationPanelReplayWiringTests {
+    func testRejectedRESTWindowShowsVisibleGapOnceWithoutPhrase() async {
+        _ = NSApplication.shared
+        let factory = RecoverySessionFactory()
+        let data = TranslationReplayRecoveryWiringTests()
+        var view: TranslationStreamView? = TranslationStreamView(frame: .zero,
+            restBaseURL: "http://translation.invalid", sessionFactory: { factory.make($0) },
+            replayFetch: { _ in data.page(0, texts: []) }, pollInterval: 3600)
+        await waitUntil { view != nil }
+        let hint = "data: {\"replay_status\":\"stale\",\"reconnect_required\":true,\"_replay_source\":\"rest\"}\n\n"
+        factory.delegate(at: 0)._testReceive(hint + hint)
+        await waitUntil { view?.displayedOriginals.count == 1 }
+        XCTAssertEqual(view?.displayedOriginals.count, 1)
+        XCTAssertTrue(view?.displayedOriginals.first?.contains("переподключ") == true)
+        view = nil
+    }
+}
+
+
+extension TranslationPanelReplayWiringTests {
+    func testRESTReplayWarningsDistinguishRecoveryLegacyAndReconnectWithoutDuplicates() async {
+        _ = NSApplication.shared
+        let factory = RecoverySessionFactory()
+        let data = TranslationReplayRecoveryWiringTests()
+        var view: TranslationStreamView? = TranslationStreamView(frame: .zero,
+            restBaseURL: "http://translation.invalid", sessionFactory: { factory.make($0) },
+            replayFetch: { _ in data.page(1, texts: ["kept"]) }, pollInterval: 3600)
+        await waitUntil { view?.displayedOriginals == ["kept"] }
+        for status in ["unknown", "unavailable", "stale", "unknown", "unavailable", "busy"] {
+            let text = status == "unavailable" ? ",\"text\":\"legacy repeat\"" : ""
+            factory.delegate(at: 0)._testReceive("data: {\"replay_status\":\"\(status)\",\"_replay_source\":\"rest\"\(text)}\n\n")
+        }
+        await waitUntil { view?.displayedOriginals.count == 6 }
+        XCTAssertEqual(view?.displayedOriginals.count, 6)
+        XCTAssertEqual(view?.displayedOriginals.filter { $0 == "legacy repeat" }.count, 2)
+        let notices = view?.displayedOriginals ?? []
+        XCTAssertTrue(notices.contains { $0.contains("подтверждение") })
+        XCTAssertTrue(notices.contains { $0.contains("только вживую") })
+        XCTAssertTrue(notices.contains { $0.contains("переподключ") })
+        view = nil
     }
 }

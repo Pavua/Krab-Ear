@@ -9,9 +9,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from backend.event_replay import EventReplayManager
+from backend.translation_replay_ingress import TranslationReplayIngress
+from backend.translation_replay_client import TranslationReplayClient
 
 root = Path(sys.argv[1])
 manager = EventReplayManager()
+ingress = TranslationReplayIngress(manager, root)
+rest_records = 0
 manager.record_event("live_subs.result", {"text": "до обрыва", "translation": "before"})
 ipc = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
 ipc.bind(str(root / "ipc.sock"))
@@ -27,10 +31,11 @@ def rpc():
         conn, _ = ipc.accept()
         with conn, conn.makefile("rb") as stream:
             request = json.loads(stream.readline(65536))
-            if request.get("method") != "get_event_log":
-                raise RuntimeError("unexpected synthetic RPC")
-            result = manager.handle_get_event_log(request.get("params", {}))
-            response = {"id": request["id"], "result": result}
+            handlers = {"get_event_log": manager.handle_get_event_log,
+                        "translation_replay_begin": ingress.begin,
+                        "translation_replay_commit": ingress.commit}
+            result = handlers[request["method"]](request.get("params", {}))
+            response = {"id": request["id"], "ok": True, "result": result}
             conn.sendall((json.dumps(response) + "\n").encode())
             first_read.set()
 
@@ -38,7 +43,7 @@ def rpc():
 def ready(connections):
     temporary = root / "ready.tmp"
     temporary.write_text(
-        json.dumps({"port": http.getsockname()[1], "connections": connections})
+        json.dumps({"port": http.getsockname()[1], "connections": connections, "rest_records": rest_records})
     )
     temporary.replace(root / "ready.json")
 
@@ -70,8 +75,12 @@ for count in (1, 2):
                 pass
     if count == 1:
         # Эти две легитимные одинаковые фразы появились после закрытия TCP.
+        producer = TranslationReplayClient(root / "ipc.sock", root)
+        assert producer.open()["status"] == "ready"
         for _ in range(2):
-            manager.record_event(
-                "live_subs.result", {"text": "повтор", "translation": "repeat"}
-            )
+            ticket = producer.begin_window()
+            result = producer.commit_window(ticket, {"text": "повтор", "translation": "repeat",
+                "start_ts": 0., "end_ts": 3., "language_detected": "ru"})
+            assert result["status"] == "accepted"
+            rest_records += 1
 threading.Event().wait(10)

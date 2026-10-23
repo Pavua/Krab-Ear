@@ -11,6 +11,8 @@ EventReplayManager записывает все события в кольцев�
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import logging
 import os
 import threading
@@ -82,6 +84,7 @@ class EventReplayManager:
         self._buffer: deque[dict[str, Any]] = deque(maxlen=max_buffer)
         self._epoch = uuid.uuid4().hex  # идентификатор журнала меняется при clear/restart
         self._epoch_reason = "restart"
+        self._translation_tickets: dict[str, tuple[float, int | None, str | None]] = {}
         self._seq: int = 0  # монотонный счётчик для восстановления порядка
         self._persist_path: Path | None = Path(persist_path) if persist_path else None
         self._settings_provider = settings_provider
@@ -182,31 +185,108 @@ class EventReplayManager:
             "data": event_data,
         }
         with self._lock:
-            self._seq += 1
-            entry["seq"] = self._seq
-            self._buffer.append(entry)
-            if self._file_handle is not None:
-                line = json.dumps(entry, ensure_ascii=False) + "\n"
-                try:
-                    self._file_handle.write(line)
-                    # W23 LOW (NOTE — оставлено намеренно): per-event flush() —
-                    # это user-space flush (НЕ os.fsync, без syscall на диск), и
-                    # write/_file_bytes/компакция (close + os.replace + reopen)
-                    # обязаны оставаться под _lock: они мутируют общий дескриптор
-                    # и счётчик байт; вынесение flush наружу гонялось бы с
-                    # компакцией другого потока (close дескриптора mid-flush).
-                    # Существующий контракт (test_clear_truncates_persist_file и
-                    # др.) требует, чтобы данные были видны на диске сразу после
-                    # record_event без явного flush, поэтому flush остаётся здесь.
-                    self._file_handle.flush()
-                    # Учёт по фактическим UTF-8 байтам (кириллица многобайтовая).
-                    self._file_bytes += len(line.encode("utf-8"))
-                except OSError as exc:
-                    logger.warning("EventReplayManager: ошибка записи в файл: %s", exc)
-                # Файл перерос предел — атомарно пересобираем его из кольцевого
-                # буфера, чтобы он не рос без границ внутри одной сессии (W1770).
-                if self._file_bytes > self._max_file_bytes:
-                    self._compact_file_to_buffer_locked()
+            self._append_locked(entry)
+
+    def _append_locked(self, entry: dict[str, Any]) -> None:
+        """Единая запись под удерживаемым lock, включая ticket commit."""
+        self._seq += 1
+        entry["seq"] = self._seq
+        self._buffer.append(entry)
+        if self._file_handle is not None:
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            try:
+                self._file_handle.write(line)
+                # W23 LOW (NOTE — оставлено намеренно): per-event flush() —
+                # это user-space flush (НЕ os.fsync, без syscall на диск), и
+                # write/_file_bytes/компакция (close + os.replace + reopen)
+                # обязаны оставаться под _lock: они мутируют общий дескриптор
+                # и счётчик байт; вынесение flush наружу гонялось бы с
+                # компакцией другого потока (close дескриптора mid-flush).
+                # Существующий контракт (test_clear_truncates_persist_file и
+                # др.) требует, чтобы данные были видны на диске сразу после
+                # record_event без явного flush, поэтому flush остаётся здесь.
+                self._file_handle.flush()
+                # Учёт по фактическим UTF-8 байтам (кириллица многобайтовая).
+                self._file_bytes += len(line.encode("utf-8"))
+            except (OSError, ValueError) as exc:
+                logger.warning("EventReplayManager: ошибка записи в файл: %s", exc)
+            # Файл перерос предел — атомарно пересобираем его из кольцевого
+            # буфера, чтобы он не рос без границ внутри одной сессии (W1770).
+            if self._file_bytes > self._max_file_bytes:
+                self._compact_file_to_buffer_locked()
+
+    def translation_epoch(self) -> dict[str, Any]:
+        if self._is_privacy_mode():
+            return {"status": "privacy"}
+        with self._lock:
+            return {"status": "ready", "epoch": self._epoch}
+
+    def begin_translation_capture(self, expected_epoch: str | None = None) -> dict[str, Any]:
+        """Выдаёт ограниченный одноразовый ticket, привязанный к текущему журналу."""
+        if self._is_privacy_mode():
+            return {"status": "privacy"}
+        with self._lock:
+            if expected_epoch is not None and expected_epoch != self._epoch:
+                return {"status": "stale", "reconnect_required": True}
+            now = time.monotonic()
+            self._translation_tickets = {
+                key: value for key, value in self._translation_tickets.items() if value[0] > now
+            }
+            if len(self._translation_tickets) >= 256:
+                return {"status": "busy"}
+            ticket = uuid.uuid4().hex
+            self._translation_tickets[ticket] = (now + 300, None, None)
+            return {"status": "ready", "epoch": self._epoch, "ticket": ticket}
+
+    @staticmethod
+    def _translation_payload(payload: Any) -> tuple[dict[str, Any], str] | None:
+        fields = {"text", "translation", "start_ts", "end_ts", "language_detected"}
+        if not isinstance(payload, dict) or set(payload) != fields:
+            return None
+        if not isinstance(payload["text"], str) or not payload["text"].strip():
+            return None
+        if payload["translation"] is not None and not isinstance(payload["translation"], str):
+            return None
+        language = payload["language_detected"]
+        if language is not None and (not isinstance(language, str) or len(language) > 32):
+            return None
+        for key in ("start_ts", "end_ts"):
+            number = payload[key]
+            if type(number) not in (int, float) or not 0 <= number <= 1e12 or not math.isfinite(number):
+                return None
+        if payload["end_ts"] < payload["start_ts"]:
+            return None
+        try:
+            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False).encode("utf-8")
+        except (ValueError, UnicodeError, OverflowError):
+            return None
+        if len(encoded) > 16384:
+            return None
+        return dict(payload), hashlib.sha256(encoded).hexdigest()
+
+    def commit_translation_capture(self, ticket: Any, payload: Any) -> dict[str, Any]:
+        """Атомарные проверка ticket и append; повтор не создаёт новую фразу."""
+        if self._is_privacy_mode():
+            return {"status": "privacy"}
+        validated = self._translation_payload(payload)
+        if not isinstance(ticket, str) or len(ticket) != 32 or validated is None:
+            return {"status": "invalid"}
+        data, fingerprint = validated
+        with self._lock:
+            metadata = self._translation_tickets.get(ticket)
+            if metadata is None or metadata[0] <= time.monotonic():
+                self._translation_tickets.pop(ticket, None)
+                return {"status": "stale", "reconnect_required": True}
+            expiry, seq, original_fingerprint = metadata
+            if seq is not None:
+                if original_fingerprint != fingerprint:
+                    return {"status": "conflict"}
+                return {"status": "duplicate", "seq": seq}
+            data["event_id"] = ticket
+            # RAM append и consumed ticket предшествуют fallible file I/O.
+            self._translation_tickets[ticket] = (expiry, self._seq + 1, fingerprint)
+            self._append_locked({"type": "live_subs.result", "ts": _utc_now_iso(), "data": data})
+            return {"status": "accepted", "seq": self._seq}
 
     def _compact_file_to_buffer_locked(self) -> None:
         """Пересобирает файл персистенции из текущего кольцевого буфера.
@@ -330,17 +410,31 @@ class EventReplayManager:
                 gap = "retention"
             # Не копируем всё кольцо на каждом hint/таймере: в ответе максимум200.
             selected = []
+            byte_count = 0
+            byte_limited = False
             source = reversed(self._buffer) if cursor is None else iter(self._buffer)
             for entry in source:
                 if entry["seq"] > after and entry["type"] == event_type:
-                    selected.append(dict(entry))
+                    item = dict(entry)
+                    size = len(json.dumps(item, ensure_ascii=False).encode("utf-8"))
+                    if size > 480 * 1024:
+                        item = {**item, "data": {"redacted": True, "reason": "replay_size_limit"}}
+                        size = 256
+                        gap = gap or "retention"
+                    if byte_count + size > 480 * 1024:
+                        byte_limited = True
+                        break
+                    selected.append(item)
+                    byte_count += size
                     if len(selected) >= limit + (cursor is not None):
                         break
             if cursor is None:
                 selected.reverse()
                 more = False
+                if byte_limited:
+                    gap = gap or "retention"
             else:
-                more = len(selected) > limit
+                more = byte_limited or len(selected) > limit
                 selected = selected[:limit]
             next_seq = selected[-1]["seq"] if more else high
         # Проверка настроек вне локального lock: settings provider может брать flock.
@@ -452,6 +546,7 @@ class EventReplayManager:
         """
         with self._lock:
             self._buffer.clear()
+            self._translation_tickets.clear()
             self._epoch = uuid.uuid4().hex
             self._epoch_reason = "clear"
             if self._file_handle is not None:

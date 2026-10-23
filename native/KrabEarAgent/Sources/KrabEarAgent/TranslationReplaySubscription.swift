@@ -145,7 +145,7 @@ final class TranslationReplaySubscription {
             } else {
                 guard page.gap == "reset" else { throw InvalidPage.malformed }
             }
-        } else if page.gap != nil { throw InvalidPage.malformed }
+        } else if page.gap != nil && page.gap != "retention" { throw InvalidPage.malformed }
         for event in page.events {
             guard event.type == "live_subs.result", event.seq > previous, event.seq <= next.seq else {
                 throw InvalidPage.malformed

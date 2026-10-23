@@ -11,10 +11,10 @@ import re
 import traceback
 
 _REDACTED = "[REDACTED]"
-_AUTH_KEYS = frozenset({"capability", "receipt", "operation_receipt", "app_session_id"})
+_AUTH_KEYS = frozenset({"capability", "receipt", "operation_receipt", "app_session_id", "translation_token"})
 # JSON/repr и простые key=value сообщения; quoted values допускают escaping.
 _AUTH_TEXT = re.compile(
-    r'''(?i)(["']?(?:capability|operation_receipt|receipt|app_session_id)["']?\s*[:=]\s*)'''
+    r'''(?i)(["']?(?:capability|operation_receipt|receipt|app_session_id|translation_token)["']?\s*[:=]\s*)'''
     r'''("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,}\]]+)'''
 )
 

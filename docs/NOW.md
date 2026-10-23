@@ -1,5 +1,29 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-23 — Translation replay: IPC + REST, source qualification
+
+PR #2119 расширен по решению владельца на оба producer-пути. Основа —
+merged #2118 `c44db7d9`, предыдущий IPC checkpoint `5bf685b2`.
+REST-native WS открывает epoch до PCM; ограниченные begin/commit tickets
+идемпотентно пишут в существующий EventReplayManager, второго outbox нет.
+Панель и REST GET `/v1/translation/replay` догружают пропуски; identical phrases
+сохраняются. Privacy/purge/restart/retention остаются явной границей восстановления.
+Первоначально недоступный IPC оставляет явно обозначенный legacy-live сеанс.
+Unknown ACK и отказы worker дают metadata-only gap; предупреждения панели
+ограничены тремя категориями, без подавления последующих legacy-фраз.
+
+Локально: 29 зависимых файлов Python3.12/noMLX PASS по одному процессу;
+после последних правок ещё27 тестов/3файла PASS. Swift376 recovery/wiring PASS,
+затем21 translation PASS на финальном тестовом дереве; release jobs2 PASS.
+Audit-all PASS. Exact-SHA review/hosted CI фиксируются в плане и PR после завершения.
+Старые27CI SUCCESS относятся только к5bf, новый REST diff требует свежего CI.
+
+Следующий шаг: финальный audit/review → обновить2119 → terminal exact-head CI.
+Без merge, deploy/restart, запуска приложения, аудио и изменения моделей.
+Ресурсная очередь согласована с Main/Gateway; новые тяжёлые проверки — только
+в выделенном окне. Подробности: `docs/superpowers/plans/2026-10-23-translation-replay-recovery.md`.
+
+
 ## 2026-10-23 — Task 2 partial/paste SSE: локальный source checkpoint
 
 Ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568` (#2109,
