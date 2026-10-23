@@ -1,6 +1,28 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-22 — SSE recovery: Task 1 source, full app CI ожидает окна
+## 2026-10-23 — Task 2 partial/paste SSE: локальный source checkpoint
+
+Ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568` (#2109,
+exact-head27 SUCCESS). Partial preview и streaming paste используют общий
+transport: clean/error EOF восстанавливает подписку, event type сбрасывается,
+stop/hide/recording stop отменяет retry, late callbacks прежней записи отклоняются.
+Reconnect сохраняет recording owner/final barrier без дублирования final paste.
+Приём partial и reservation синхронны до async input; порядок FIFO сохранён.
+Render/text/revision/debounce и native paste leaf не менялись.
+
+Оба actual controller EOF: localhost RED1connect вместо2 → GREEN. Ограниченный
+harness **56 PASS**, включая прежние14 streaming regressions; actual extensions/
+controller/transport/parser/InputAutomationQueue/result/reservation definitions,
+UI и native PasteService leaf заменены stub (native calls fatalError, не используются).
+Независимое повторное whole-diff source review + audit-all PASS; review-замечание
+о маскирующем handleFinal тесте закрыто: прямой SSE→real reservation/FIFO→spy,
+mutation dropped-final-dispatch RED → восстановленный whole56 GREEN. Полный AppKit/hosted Task2 и RealtimeOverlayTailTests впереди:
+в оба явных Swift CI filters добавлены новые suites и tail regression.
+Task3 status/translation остаётся впереди. Runtime recovery NOT_TESTED;
+модели, процессы, микрофон, clipboard и чужие проекты не затронуты.
+Новая ветка пока локальная; следующий push только в согласованном окне.
+
+## 2026-10-22 — SSE recovery: Task 1, PR #2109 exact-head CI SUCCESS
 
 Изолированная ветка `codex/ear-sse-recovery-1022`, база `3f08c9dc` + reviewed
 plan `9a97009e`. ProbeSSEBox теперь использует общий Foundation transport owner:
@@ -11,8 +33,8 @@ FIFO callbacks проверяют поколение/UUID, parser state сбра
 
 Локальный ограниченный harness: **31 PASS**, включая настоящий localhost
 TCP/HTTP/URLSession EOF/reconnect; actual HealthMonitor/transport/parser,
-StatusIndicatorView заменён leaf stub. Полный AppKit build и hosted CI пока не
-выполнялись: очередь согласована Gateway → Main → Ear. Независимое повторное
+StatusIndicatorView заменён leaf stub. Полный AppKit build и выбранный suite: 330 PASS; exact-head
+`f0b9f568` hosted CI: 27 SUCCESS / 0 failures. Независимое повторное
 source review PASS. Это только Task 1 плана `2026-10-21-sse-recovery.md`;
 partial/paste/status/translation ещё не переведены. Runtime recovery не доказан,
 production lifecycle, модели, clipboard и микрофон не затронуты. Main разбирает

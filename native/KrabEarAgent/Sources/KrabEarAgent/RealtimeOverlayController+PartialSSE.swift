@@ -8,47 +8,16 @@
  - partial_transcript  → showPartialText() — italic font, alpha 0.7
  - final_transcript    → showFinalText()   — normal font, alpha 1.0
  - partial_disabled    → showDisabledState() — stops dot pulse, shows user message
- - Uses URLSession + PartialSSEDelegate (same pattern as LiveSubtitlesOverlay)
- - Associated object storage keeps delegate/task alive without stored properties
-   (which would require modifying the main file and potentially reverting).
+ - Общий SSESubscriptionTransport восстанавливает закрытый stream.
+ - Associated object хранит владельца подписки; show/hide управляют start/stop.
 */
 
 import AppKit
 import Foundation
 import ObjectiveC
 
-// MARK: - PartialSSEDelegate
-
-/// URLSession data delegate for SSE line-by-line streaming.
-private final class PartialSSEDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let onLine: (String) -> Void
-    private var buffer = ""
-
-    init(onLine: @escaping (String) -> Void) {
-        self.onLine = onLine
-        super.init()
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        buffer += String(decoding: data, as: UTF8.self)
-        let lines = buffer.components(separatedBy: "\n")
-        buffer = lines.last ?? ""
-        for line in lines.dropLast() {
-            onLine(line)
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        // SSE connection closed — not restarted (caller manages lifecycle via show/hide).
-    }
-}
-
 // MARK: - Associated object keys
-// UInt8 variables as key addresses — safe for &key UnsafeRawPointer use
-// (no string-representation exposure). Each unique address = unique key.
-private nonisolated(unsafe) var partialSSEDelegateKey: UInt8 = 0
-private nonisolated(unsafe) var partialSSESessionKey:  UInt8 = 0
-private nonisolated(unsafe) var partialSSETaskKey:     UInt8 = 0
+private nonisolated(unsafe) var partialSSETransportKey: UInt8 = 0
 private nonisolated(unsafe) var partialSSEEventBufKey: UInt8 = 0
 
 // MARK: - RealtimeOverlayController + PartialSSE extension
@@ -58,40 +27,30 @@ extension RealtimeOverlayController {
     // MARK: - Public API
 
     /// Start SSE subscription for partial/final transcript events.
-    func startPartialSSE(restBaseURL: String = "http://127.0.0.1:5005") {
+    func startPartialSSE(restBaseURL: String = "http://127.0.0.1:5005",
+                         transport: SSESubscriptionTransport? = nil) {
         stopPartialSSE()
         let filter = "realtime.partial_transcript,realtime.final_transcript,realtime.partial_disabled"
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
 
-        let delegate = PartialSSEDelegate { [weak self] line in
-            Task { @MainActor [weak self] in
-                self?.handlePartialSSELine(line)
-            }
-        }
-        let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
+        let owner = transport ?? SSESubscriptionTransport()
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        let task = session.dataTask(with: request)
-
-        objc_setAssociatedObject(self, &partialSSEDelegateKey, delegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        objc_setAssociatedObject(self, &partialSSESessionKey, session, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        objc_setAssociatedObject(self, &partialSSETaskKey, task, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        objc_setAssociatedObject(self, &partialSSEEventBufKey, NSMutableString(), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-
-        task.resume()
+        objc_setAssociatedObject(self, &partialSSETransportKey, owner, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        owner.start(request: request, onConnectionReset: { [weak self] in
+            guard let self else { return }
+            // Нельзя склеивать event из старого соединения с data нового.
+            objc_setAssociatedObject(self, &partialSSEEventBufKey, NSMutableString(), .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        }, onLine: { [weak self] line in
+            self?.handlePartialSSELine(line)
+        })
     }
 
     /// Stop SSE subscription and release resources.
     func stopPartialSSE() {
-        if let task = objc_getAssociatedObject(self, &partialSSETaskKey) as? URLSessionDataTask {
-            task.cancel()
-        }
-        if let session = objc_getAssociatedObject(self, &partialSSESessionKey) as? URLSession {
-            session.invalidateAndCancel()
-        }
-        objc_setAssociatedObject(self, &partialSSEDelegateKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        objc_setAssociatedObject(self, &partialSSESessionKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        objc_setAssociatedObject(self, &partialSSETaskKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        let owner = objc_getAssociatedObject(self, &partialSSETransportKey) as? SSESubscriptionTransport
+        objc_setAssociatedObject(self, &partialSSETransportKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+        owner?.stop()
         objc_setAssociatedObject(self, &partialSSEEventBufKey, nil, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
     }
 

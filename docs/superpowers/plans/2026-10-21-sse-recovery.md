@@ -62,8 +62,8 @@ Actual Probe clean EOF и queued-retry cancellation: RED → GREEN.
 31 PASS в ограниченном Foundation harness (HealthMonitor + shared owner +
 SSESessionDelegate; StatusIndicatorView leaf stub), включая настоящий localhost
 TCP/HTTP/URLSession reconnect. Независимый повторный source review PASS после
-исправления cancellation race. Полный AppKit/hosted CI ожидает серийного окна;
-runtime acceptance не выполнен. Tasks 2/3 остаются в очереди.
+исправления cancellation race. Полный AppKit build/selected330 PASS, exact-head CI PR2109
+`f0b9f568`: 27 SUCCESS / 0 failures; runtime acceptance не выполнен. Tasks 2/3 остаются в очереди.
 
 
 **Files:** Create `native/KrabEarAgent/Sources/KrabEarAgent/SSESubscriptionTransport.swift`;
@@ -105,6 +105,20 @@ Modify `HealthMonitorTests.swift`.
   downloaded or full local build during memory HOLD. A skipped command is recorded.
 
 ### Task 2: partial/paste owners
+
+**23.10 source checkpoint:** `codex/ear-partial-sse-1022`, Task1 base
+`f0b9f568`. Partial and streaming actual controllers localhost EOF RED → GREEN;
+56 PASS bounded harness, including14 existing streaming business regressions,
+lateG1/new recording, stop/backoff, event-type reset and final deduplication.
+Partial UI and native PasteService are leaf stubs; actual shared transport,
+controllers, parser and InputAutomationQueue/result/reservation compile.
+SSE parse/admission now synchronous; async input task/reservation cancellation
+retains existing behavior. Independent repeated streaming SOURCE PASS and audit-all PASS. Direct
+SSE→real reservation/FIFO→fake paste test covers bounded admission and final
+deduplication, no extra handleFinal. Dropped SSE-final mutation RED3assertions,
+restored whole56 GREEN. Full AppKit CI/tail gate await next coordinated window. Runtime NOT_TESTED.
+Task2 source migrated, acceptance remains pending hosted actual-app gate.
+
 
 **Files:** Modify `RealtimeOverlayController+PartialSSE.swift`,
 `StreamingPasteController.swift`, `StreamingPasteControllerTests.swift`;
