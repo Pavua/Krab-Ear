@@ -18,8 +18,11 @@ final class PasteTargetActivationWiringTests: XCTestCase {
             }
             return true
         })
-        let activator = PasteTargetActivator(budget: .milliseconds(150), frontmostPID: { frontmost })
+        // Это проверка yielding, а не latency benchmark. На hosted VM возврат
+        // MainActor может занять больше рабочего бюджета активации.
+        let activator = PasteTargetActivator(budget: .seconds(5), frontmostPID: { frontmost })
         let result = await activator.perform(target: target) { pid in
+            XCTAssertTrue(heartbeatRanDuringOperation, "Paste разрешён только после heartbeat на MainActor")
             pasted.append(pid)
             return PasteAttemptResult(ok: true, reason: "fake_paste")
         }
