@@ -54,7 +54,7 @@ def test_privacy_during_ws_handshake_cannot_silently_disable_replay(rest, monkey
     class WS:
         def __init__(self):
             self.messages = [json.dumps({"type": "config"}), json.dumps({"type": "audio",
-                "data": base64.b64encode(bytes(32000)).decode(), "is_final": True})]
+                                                                         "data": base64.b64encode(bytes(32000)).decode(), "is_final": True})]
             self.sent = []
         def receive(self):
             return self.messages.pop(0) if self.messages else None

@@ -126,4 +126,4 @@ class TranslationReplayClient:
 
     def replay(self, cursor: str | None = None, limit: int = 200) -> dict:
         return self._rpc("get_event_log", {"cursor_mode": True, "event_type": "live_subs.result",
-                                          "cursor": cursor, "limit": limit}, time.monotonic() + 1)
+                                           "cursor": cursor, "limit": limit}, time.monotonic() + 1)

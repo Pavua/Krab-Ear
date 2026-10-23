@@ -80,7 +80,7 @@ for count in (1, 2):
         for _ in range(2):
             ticket = producer.begin_window()
             result = producer.commit_window(ticket, {"text": "повтор", "translation": "repeat",
-                "start_ts": 0., "end_ts": 3., "language_detected": "ru"})
+                                                     "start_ts": 0., "end_ts": 3., "language_detected": "ru"})
             assert result["status"] == "accepted"
             rest_records += 1
 threading.Event().wait(10)
