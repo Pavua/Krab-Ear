@@ -4060,7 +4060,9 @@ Memory Conductor (2026-08-19). Params: `{}` → `{ok, ledger: {v, entries: {"<ow
 Additive activity/lease_observation: см. основной раздел `get_memory_ledger` выше.
 
 
-### REST translation replay ingress
+## REST translation replay ingress
+
+### `translation_replay_begin`
 
 `translation_replay_begin` требует `translation_token` из private owner file
 `translation_replay_token` в каноническом IPC data_dir (0600, без symlink).
@@ -4068,7 +4070,9 @@ Additive activity/lease_observation: см. основной раздел `get_me
 PCM в WS. С `epoch` выдаёт случайный одноразовый `ticket` (TTL300s, cap256).
 Epoch закреплён на весь WS-сеанс: `stale` требует нового подключения.
 
-`translation_replay_commit`: тот же token, `ticket`, фиксированный `payload`
+### `translation_replay_commit`
+
+Тот же token, `ticket`, фиксированный `payload`
 с ключами `text`, `translation`, `start_ts`, `end_ts`, `language_detected`.
 Строки/числа проверяются строго, суммарный JSON payload не больше16384 UTF8 bytes.
 Текст непустой; времена конечные, 0≤start≤end≤1e12; язык optional string≤32.
