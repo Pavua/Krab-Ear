@@ -129,6 +129,12 @@ def fetch_runner_status(repo: str, runner_name: str, token: str) -> str | None:
     return None
 
 
+def _http_error_summary(exc: httpx.HTTPError) -> str:
+    """Не форматировать exception: HTTPX может включать URL с bot token."""
+    status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else "unknown"
+    return f"error_type={type(exc).__name__} status={status}"
+
+
 def send_telegram(text: str) -> None:
     """Отправка digest владельцу через Telegram bot API. Best-effort, guarded."""
     if not TG_TOKEN or not TG_CHAT:
@@ -143,7 +149,7 @@ def send_telegram(text: str) -> None:
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         print(
-            f"WARN: telegram_send_failed error_type={type(exc).__name__} error={exc}",
+            f"WARN: telegram_send_failed {_http_error_summary(exc)}",
             file=sys.stderr,
         )
 
@@ -209,7 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         status = fetch_runner_status(args.repo, args.runner_name, token)
     except httpx.HTTPError as exc:
         print(
-            f"ERROR: github_api_failed error_type={type(exc).__name__} error={exc}",
+            f"ERROR: github_api_failed {_http_error_summary(exc)}",
             file=sys.stderr,
         )
         return 2

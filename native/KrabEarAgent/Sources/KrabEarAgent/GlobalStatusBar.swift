@@ -8,8 +8,8 @@
  - Idle:          скрыт
 
  Работает через SSE `/v1/events` (long-poll) + парсинг `app.status` event'а.
- Соединение жизненный цикл = жизненный цикл панели (start при viewDidAppear,
- stop при viewWillDisappear).
+ Соединение существует только при видимом окне панели; AppKit notifications
+ о скрытии/orderOut/закрытии/сворачивании освобождают stream и heartbeat.
 
  См. `KrabEar/backend/service.py::_handle_transcribe_paths_async` и
  `KrabEar/backend/obsidian_sync.py::sync()` — точки emit'а.
@@ -93,31 +93,77 @@ final class GlobalStatusBar: NSView {
 
     // MARK: - SSE
 
-    private var sseTask: URLSessionDataTask?
-    private lazy var sseDelegate: SSESessionDelegate = SSESessionDelegate { [weak self] line in
-        Task { @MainActor [weak self] in
-            self?.handleSSELine(line)
-        }
-    }
-    private lazy var sseSession = URLSession(
-        configuration: .default,
-        delegate: sseDelegate,
-        delegateQueue: nil
-    )
+    private let sseTransport: SSESubscriptionTransport
     private let restBaseURL = "http://127.0.0.1:5005"
+    private var isRunning = false
+    private weak var observedWindow: NSWindow?
+    private var visibilityObservation: NSKeyValueObservation?
 
     // MARK: - Init
 
     override init(frame: NSRect) {
+        sseTransport = SSESubscriptionTransport()
         super.init(frame: frame)
         setupViews()
-        isHidden = true  // По умолчанию скрыт
+        isHidden = true
+    }
+
+    init(frame: NSRect, sessionFactory: @escaping ProbeSSESessionFactory) {
+        sseTransport = SSESubscriptionTransport(sessionFactory: sessionFactory)
+        super.init(frame: frame)
+        setupViews()
+        isHidden = true
     }
 
     required init?(coder: NSCoder) {
+        sseTransport = SSESubscriptionTransport()
         super.init(coder: coder)
         setupViews()
         isHidden = true
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+        // RunLoop удерживает Timer даже со слабым callback. Освобождаем на
+        // main, не захватывая owner; транспорт сам отменяет stream и retry.
+        let timer = heartbeatTimer
+        DispatchQueue.main.async { timer?.invalidate() }
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        stop()
+        NotificationCenter.default.removeObserver(self, name: nil, object: observedWindow)
+        visibilityObservation?.invalidate()
+        visibilityObservation = nil
+        observedWindow = window
+        guard let window else { return }
+        // orderOut/show у полностью occluded окна не меняет occlusion state.
+        // Наблюдаем само свойство видимости, без polling или второго stream.
+        visibilityObservation = window.observe(\.isVisible, options: [.new]) { [weak self] _, _ in
+            MainActor.assumeIsolated { self?.updateWindowSubscription() }
+        }
+        for name in [NSWindow.didChangeOcclusionStateNotification,
+                     NSWindow.didMiniaturizeNotification,
+                     NSWindow.didDeminiaturizeNotification,
+                     NSWindow.willCloseNotification] {
+            NotificationCenter.default.addObserver(self, selector: #selector(windowVisibilityChanged(_:)),
+                                                   name: name, object: window)
+        }
+        updateWindowSubscription()
+    }
+
+    @objc private func windowVisibilityChanged(_ notification: Notification) {
+        if notification.name == NSWindow.willCloseNotification {
+            stop()
+        } else {
+            updateWindowSubscription()
+        }
+    }
+
+    private func updateWindowSubscription() {
+        if let window, window.isVisible, !window.isMiniaturized { start() }
+        else { stop() }
     }
 
     private func setupViews() {
@@ -180,34 +226,29 @@ final class GlobalStatusBar: NSView {
 
     // MARK: - Public API
 
-    /// Подписаться на SSE и запустить heartbeat. Вызывать при viewDidAppear / показе панели.
+    /// Только декоративный статус: скрытая/свёрнутая панель не держит stream.
+    /// Повторные AppKit notifications не создают дополнительные соединения.
     func start() {
-        startSSE()
+        guard !isRunning, let window, window.isVisible, !window.isMiniaturized,
+              let url = URL(string: "\(restBaseURL)/v1/events?filter=app.status") else { return }
+        isRunning = true
+        var request = URLRequest(url: url, timeoutInterval: 600)
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        sseTransport.start(request: request, onConnectionReset: { [weak self] in
+            self?.isHidden = true
+            self?.stopPulseAnimation()
+        }, onLine: { [weak self] line in self?.handleSSELine(line) })
         startHeartbeat()
     }
 
-    /// Остановить SSE и heartbeat. Вызывать при viewWillDisappear / скрытии панели.
+    /// Отменяет также queued callbacks/retry; reopen начинает новую generation.
     func stop() {
-        stopSSE()
+        isRunning = false
+        sseTransport.stop()
         stopHeartbeat()
         stopPulseAnimation()
-        DispatchQueue.main.async { [weak self] in self?.isHidden = true }
-    }
-
-    // MARK: - SSE Lifecycle
-
-    private func startSSE() {
-        stopSSE()
-        guard let url = URL(string: "\(restBaseURL)/v1/events?filter=app.status") else { return }
-        var request = URLRequest(url: url, timeoutInterval: 600)
-        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        sseTask = sseSession.dataTask(with: request)
-        sseTask?.resume()
-    }
-
-    private func stopSSE() {
-        sseTask?.cancel()
-        sseTask = nil
+        lastEventAt = .distantPast
+        isHidden = true
     }
 
     // MARK: - Heartbeat

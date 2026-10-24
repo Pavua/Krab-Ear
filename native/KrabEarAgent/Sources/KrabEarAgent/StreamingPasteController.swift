@@ -52,30 +52,6 @@ extension StreamingPasteTarget {
         return await pasteService.revise(deleteCount: count, text: text, targetPID: target)
     }
 }
-private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let onLine: (String) -> Void
-    private var buffer = ""
-
-    init(onLine: @escaping (String) -> Void) {
-        self.onLine = onLine
-        super.init()
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        buffer += String(decoding: data, as: UTF8.self)
-        let lines = buffer.components(separatedBy: "\n")
-        buffer = lines.last ?? ""
-        for line in lines.dropLast() {
-            onLine(line)
-        }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        // Жизненный цикл закрытого SSE соединения принадлежит start/stop.
-    }
-}
-
-
 /// Сессия — отдельный reference owner: поздний G1 completion не меняет G2.
 @MainActor final class StreamingPasteController {
     var isEnabled = false
@@ -97,13 +73,14 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
     }
     private var session = Session()
     private let pasteService: any StreamingPasteTarget
-    private var sseDelegate: StreamingSSEDelegate?
-    private var sseSession: URLSession?
-    private var sseTask: URLSessionDataTask?
+    private let sseTransport: SSESubscriptionTransport
     private var eventType = ""
     private let logger = AgentLogger.shared
     private(set) var didStreamThisRecording = false
-    init(pasteService: any StreamingPasteTarget) { self.pasteService = pasteService }
+    init(pasteService: any StreamingPasteTarget, transport: SSESubscriptionTransport? = nil) {
+        self.pasteService = pasteService
+        self.sseTransport = transport ?? SSESubscriptionTransport()
+    }
     func recordingDidStart(restBaseURL: String = "http://127.0.0.1:5005") {
         guard isEnabled else { return }
         beginSession()
@@ -116,39 +93,45 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
         stopSSE()
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=realtime.partial_transcript,realtime.final_transcript") else { return }
         let owner = session
-        let delegate = StreamingSSEDelegate { [weak self, weak owner] line in
-            Task { @MainActor [weak self, weak owner] in
-                guard let self, let owner, self.session === owner else { return }
-                await self.handleSSELine(line)
-            }
-        }
-        let connection = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-        sseDelegate = delegate; sseSession = connection
-        sseTask = connection.dataTask(with: request); sseTask?.resume()
+        sseTransport.start(request: request, onConnectionReset: { [weak self] in
+            self?.eventType = ""
+        }, onLine: { [weak self, weak owner] line in
+            guard let self, let owner, self.session === owner else { return }
+            self.handleSSELine(line)
+        })
     }
     private func stopSSE() {
-        sseTask?.cancel(); sseSession?.invalidateAndCancel()
-        sseTask = nil; sseDelegate = nil; sseSession = nil; eventType = ""
+        sseTransport.stop()
+        eventType = ""
     }
-    private func handleSSELine(_ line: String) async {
+    private func handleSSELine(_ line: String) {
         if line.hasPrefix("event: ") { eventType = String(line.dropFirst(7)); return }
+        if line.isEmpty { eventType = ""; return }
         guard line.hasPrefix("data: ") else { return }
         let type = eventType; eventType = ""
         guard let data = String(line.dropFirst(6)).data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return }
         let payload = obj["data"] as? [String: Any] ?? obj
         guard let text = payload["text"] as? String, !text.isEmpty else { return }
-        if type == "realtime.partial_transcript" { await handlePartial(text) }
-        else if type == "realtime.final_transcript" { _ = await handleFinal(text) }
+        // Приём и reservation синхронны: порядок SSE не теряется до async input.
+        if type == "realtime.partial_transcript" { _ = enqueuePartial(text) }
+        else if type == "realtime.final_transcript" { _ = finalBarrier(text) }
     }
     func handlePartial(_ text: String) async {
+        guard let accepted = enqueuePartial(text) else { return }
+        await withTaskCancellationHandler(operation: { await accepted.task.value }, onCancel: {
+            accepted.task.cancel(); accepted.reservation?.cancelWaiting()
+        })
+    }
+
+    private func enqueuePartial(_ text: String) -> (task: Task<Void, Never>, reservation: PasteInputReservation?)? {
         let owner = session, target = pasteService.captureTarget()
-        guard !owner.finalizing else { return }
+        guard !owner.finalizing else { return nil }
         let reservation = pasteService.reserveInput(target: target, maximumDeleteCount: owner.maximumAcceptedLength)
         // Отказ admission не создаёт скрытую неограниченную цепь Task за owner.tail.
-        if let failure = reservation?.failure { owner.lastReason = failure.reason; return }
+        if let failure = reservation?.failure { owner.lastReason = failure.reason; return nil }
         owner.maximumAcceptedLength = max(owner.maximumAcceptedLength, text.count)
         let previous = owner.tail
         let task = Task { @MainActor in
@@ -166,9 +149,7 @@ private final class StreamingSSEDelegate: NSObject, URLSessionDataDelegate, @unc
             }
         }
         owner.tail = task
-        await withTaskCancellationHandler(operation: { await task.value }, onCancel: {
-            task.cancel(); reservation?.cancelWaiting()
-        })
+        return (task, reservation)
     }
     @discardableResult func handleFinal(_ text: String) async -> PasteAttemptResult {
         let final = finalBarrier(text)

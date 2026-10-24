@@ -47,6 +47,7 @@ final class FakeStreamingPasteTarget: StreamingPasteTarget {
     }
 
     private(set) var calls: [Call] = []
+    var onPaste: ((String) -> Void)?
 
     /// Тесты выставляют перед конкретным вызовом, чтобы симулировать провал paste/delete
     /// (Critical #2 review: PasteAttemptResult.ok == false не должен продвигать state).
@@ -56,6 +57,7 @@ final class FakeStreamingPasteTarget: StreamingPasteTarget {
 
     func pasteToFrontmostApp(_ text: String) -> PasteAttemptResult {
         calls.append(.paste(text))
+        onPaste?(text)
         return pasteShouldFail
             ? PasteAttemptResult(ok: false, reason: failureReason)
             : PasteAttemptResult(ok: true, reason: "ok")

@@ -1,15 +1,59 @@
 # NOW — что делать сейчас (Krab Ear)
 
-## 2026-10-21 — source: TTS activity, runtime не меняется
+## 2026-10-24 — #2108: разрешение конфликта с интеграционной базой
 
-Карточка `superpowers/plans/2026-10-21-tts-activity.md`, база `3f08c9dc` (#2107).
-Auth REST readiness получает отдельный process-wide TTS handler observer через
-существующий bounded ActivityReservations. Синтез/cleanup/конкурирующий отказ
-наблюдаются без probe-acquire семафора. Caller attribution, direct bytes API,
-SSE reconnect, global drain и memory stability не доказаны; coverage false.
-110 целевых тестов, Ruff/diff/audit-all и Astra whole-diff SOURCE PASS. Hosted CI
-pending; local Python3.12 проверен только stdlib smoke, parity venv отсутствует. Runtime0ff399bc
-не менялся, release/27B/ES остаются HOLD.
+TTS handler observer из #2108 сохранён без изменений production-кода.
+Конфликт только в этом журнале разрешён поверх актуальной базы #2118
+`c44db7d9`; существующие SSE/recovery и тестовые исправления базы сохранены.
+Историческая квалификация #2108: 110 локальных тестов, audit и независимое
+Astra source review PASS. Повторные зависимые проверки и exact-head CI после
+merge базы ещё не выполнены; очередь согласована с Main/Gateway.
+
+Далее: согласованная интеграция #2119 (IPC + REST translation replay), затем
+проверка совместного дерева с TTS observer. `coverage.complete` остаётся false:
+handler idle не доказывает завершение вложенных/background/direct вызовов.
+Рестартов до закрытия live producer/drain и Swift rollback гейтов нет.
+Модели, конфигурация и runtime этой карточкой не меняются.
+
+## 2026-10-23 — Task 2 partial/paste SSE: локальный source checkpoint
+
+Ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568` (#2109,
+exact-head27 SUCCESS). Partial preview и streaming paste используют общий
+transport: clean/error EOF восстанавливает подписку, event type сбрасывается,
+stop/hide/recording stop отменяет retry, late callbacks прежней записи отклоняются.
+Reconnect сохраняет recording owner/final barrier без дублирования final paste.
+Приём partial и reservation синхронны до async input; порядок FIFO сохранён.
+Render/text/revision/debounce и native paste leaf не менялись.
+
+Оба actual controller EOF: localhost RED1connect вместо2 → GREEN. Ограниченный
+harness **56 PASS**, включая прежние14 streaming regressions; actual extensions/
+controller/transport/parser/InputAutomationQueue/result/reservation definitions,
+UI и native PasteService leaf заменены stub (native calls fatalError, не используются).
+Независимое повторное whole-diff source review + audit-all PASS; review-замечание
+о маскирующем handleFinal тесте закрыто: прямой SSE→real reservation/FIFO→spy,
+mutation dropped-final-dispatch RED → восстановленный whole56 GREEN. Полный AppKit/hosted Task2 и RealtimeOverlayTailTests впереди:
+в оба явных Swift CI filters добавлены новые suites и tail regression.
+Task3 status/translation остаётся впереди. Runtime recovery NOT_TESTED;
+модели, процессы, микрофон, clipboard и чужие проекты не затронуты.
+Новая ветка пока локальная; следующий push только в согласованном окне.
+
+## 2026-10-22 — SSE recovery: Task 1, PR #2109 exact-head CI SUCCESS
+
+Изолированная ветка `codex/ear-sse-recovery-1022`, база `3f08c9dc` + reviewed
+plan `9a97009e`. ProbeSSEBox теперь использует общий Foundation transport owner:
+clean/error EOF освобождает соединение и планирует один retry с backoff до 30s;
+FIFO callbacks проверяют поколение/UUID, parser state сбрасывается при reconnect.
+Отмена синхронно закрывает admission ещё до MainActor cleanup — независимое
+ревью обнаружило этот race, новый actual-owner тест воспроизвёл RED → GREEN.
+
+Локальный ограниченный harness: **31 PASS**, включая настоящий localhost
+TCP/HTTP/URLSession EOF/reconnect; actual HealthMonitor/transport/parser,
+StatusIndicatorView заменён leaf stub. Полный AppKit build и выбранный suite: 330 PASS; exact-head
+`f0b9f568` hosted CI: 27 SUCCESS / 0 failures. Независимое повторное
+source review PASS. Это только Task 1 плана `2026-10-21-sse-recovery.md`;
+partial/paste/status/translation ещё не переведены. Runtime recovery не доказан,
+production lifecycle, модели, clipboard и микрофон не затронуты. Main разбирает
+новые Telegram ответы; полнота их исправления этим source gate не заявляется.
 
 ## 2026-10-21 — source: IPC stage timing, runtime-корреляция ожидает релиза
 
