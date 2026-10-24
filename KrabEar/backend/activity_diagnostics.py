@@ -5,6 +5,7 @@ import os
 import threading
 import uuid
 import weakref
+from functools import wraps
 from typing import Any, Callable
 
 
@@ -72,7 +73,7 @@ def ipc_activity_snapshot(recording: Any, meeting: Any) -> dict:
     }, ["recording", "finalizing", "meeting"])
 
 
-def rest_activity_snapshot(observer: Any) -> dict:
+def rest_activity_snapshot(observer: Any, tts: Any = None) -> dict:
     try:
         native = observer.snapshot()
         if (not isinstance(native, dict) or type(native.get("known")) is not bool
@@ -80,13 +81,17 @@ def rest_activity_snapshot(observer: Any) -> dict:
             raise ValueError("invalid activity metadata")
     except Exception:
         native = unknown_component()
-    result = owner_activity_snapshot("rest", {"native_stt": native}, ["native_stt_after_singleflight"])
-    result["coverage"]["untracked"].extend(["nested_adapter_futures", "ws_translation_emit"])
+    result = owner_activity_snapshot("rest", {
+        "native_stt": native, "tts": component_activity(tts),
+    }, ["native_stt_after_singleflight", "tts_handler"])
+    result["coverage"]["untracked"].extend([
+        "nested_adapter_futures", "ws_translation_emit", "tts_direct_synthesis",
+    ])
     return result
 
 
 class ActivityReservations:
-    """Bounded observer существующего native STT admission, не очередь/гейт.
+    """Bounded observer callable/admission, не очередь и не разрешение lifecycle.
 
     Token принадлежит внешнему transcriber callable, а не HTTP response/client.
     Вложенные adapter futures и WS translation/emit остаются вне coverage. Здесь нет
@@ -94,7 +99,13 @@ class ActivityReservations:
     только к этому tracked subset; overflow консервативно теряет coverage.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, generation_scope: str = "native_stt_after_singleflight",
+                 completion_scope: str = "transcriber_callable",
+                 busy_reason: str = "native_stt") -> None:
+        # Только статические component labels из owning source, не request data.
+        self._generation_scope = generation_scope
+        self._completion_scope = completion_scope
+        self._busy_reason = busy_reason
         self._reset_for_child()
         if hasattr(os, "register_at_fork"):
             reference = weakref.ref(self)
@@ -149,6 +160,15 @@ class ActivityReservations:
         finally:
             self.complete(token)
 
+    def tracked(self, channel: str) -> Callable:
+        """Синхронный handler целиком, включая validation/отказ и finally cleanup."""
+        def decorate(fn):
+            @wraps(fn)
+            def observed(*args, **kwargs):
+                return self.run(self.reserve(channel), fn, *args, **kwargs)
+            return observed
+        return decorate
+
     def follow_future(self, token: str, future: Any) -> None:
         def done(completed):
             try:
@@ -197,9 +217,9 @@ class ActivityReservations:
             return {"known": known, "state": "busy" if states else ("idle" if known else "unknown"),
                     "reservations": len(states), "queued": states.count("reserved"),
                     "inflight": states.count("running"), "unknown": unknown,
-                    "generation": self._generation, "generation_scope": "native_stt_after_singleflight",
-                    "completion_scope": "transcriber_callable",
+                    "generation": self._generation, "generation_scope": self._generation_scope,
+                    "completion_scope": self._completion_scope,
                     "coverage_lost": self._coverage_lost,
-                    "busy_reasons": ["native_stt"] if states else []}
+                    "busy_reasons": [self._busy_reason] if states else []}
 
         return nonblocking_snapshot((self._lock,), read)
