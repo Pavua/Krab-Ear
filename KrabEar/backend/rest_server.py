@@ -2115,6 +2115,12 @@ def transcribe_audio():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403
         if call_deadline is not None and time.monotonic() >= call_deadline:
             return jsonify({"error": "call STT timeout", "text": ""}), 504
+        # AudioEngine возвращает ошибку словарём, а не исключением. Не превращать
+        # её в успешный пустой STT/прогрев и не сохранять в history/metrics.
+        # Внутренний error может содержать пути/текст; наружу только stable code.
+        # Этот ответ не аттестует завершение вложенной native-работы.
+        if result.get("status") == "error" or result.get("error"):
+            return jsonify({"status": "error", "error": "stt_failed", "text": ""}), 503
         text = result.get("text", "")
 
         # F3: Respect privacy_mode_enabled — skip history persistence when active.
