@@ -2120,6 +2120,10 @@ def transcribe_audio():
         # Внутренний error может содержать пути/текст; наружу только stable code.
         # Этот ответ не аттестует завершение вложенной native-работы.
         if result.get("status") == "error" or result.get("error"):
+            # Обычный профиль не имеет post-call проверки в _privacy_gate.
+            # Новый retryable503 не должен разрешить cloud fallback при privacy.
+            if not call_profile and _privacy_mode_enabled():
+                return jsonify({"skipped": "privacy_mode", "text": ""}), 403
             return jsonify({"status": "error", "error": "stt_failed", "text": ""}), 503
         text = result.get("text", "")
 

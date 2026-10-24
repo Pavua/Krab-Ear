@@ -83,3 +83,23 @@ def test_call_privacy_still_wins_over_engine_error(rest):
     assert response.json["skipped"] == "privacy_mode"
     assert "PRIVATE_" not in response.get_data(as_text=True)
     deps.store.add_history_item.assert_not_called()
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_general_privacy_change_or_read_failure_wins_over_engine_error(rest, unreadable):
+    client, deps, _ = rest
+
+    def failure(*args, **kwargs):
+        if unreadable:
+            deps.store.load_settings.side_effect = OSError("settings unavailable")
+        else:
+            deps.store.load_settings.return_value = {"privacy_mode_enabled": True}
+        return {"status": "error", "error": "PRIVATE_ENGINE_DETAIL", "text": ""}
+
+    deps.transcriber.transcribe.side_effect = failure
+    response = post(client, False)
+    assert response.status_code == 403
+    assert response.json["skipped"] == "privacy_mode"
+    assert "PRIVATE_" not in response.get_data(as_text=True)
+    deps.store.add_history_item.assert_not_called()
+    deps.metrics.record.assert_not_called()
