@@ -185,6 +185,16 @@ def _write_pcm_wav(path: str, audio: Any) -> None:
         wf.writeframes(pcm.tobytes())
 
 
+def _child_rss_mb(pid: int) -> Optional[int]:
+    """RSS живого child в МБ; любой сбой — None (метрика не должна ронять снимок)."""
+    try:
+        import psutil
+
+        return int(psutil.Process(pid).memory_info().rss // (1024 * 1024))
+    except Exception:
+        return None
+
+
 class MLXWhisperSession:
     """Долгоживущий mlx_whisper worker: модель остаётся в RSS child."""
 
@@ -196,6 +206,12 @@ class MLXWhisperSession:
         self._stderr_drain_thread: Optional[threading.Thread] = None
         self._inflight = 0
         self._last_used_ts = time.monotonic()
+        # Метрики цены выгрузки (канарейка enforce_whisper): только счётчики/
+        # метки под коротким _state_lock, без I/O.
+        self._cold_start_count = 0
+        self._spawn_mono: Optional[float] = None
+        self._last_load_sec: Optional[float] = None
+        self._awaiting_first = False
 
     @property
     def inflight(self) -> int:
@@ -279,6 +295,10 @@ class MLXWhisperSession:
             )
         except (OSError, FileNotFoundError) as exc:
             raise RuntimeError(f"mlx_whisper worker spawn failed: {exc}") from exc
+        with self._state_lock:
+            self._cold_start_count += 1
+            self._spawn_mono = time.monotonic()
+            self._awaiting_first = True
         self._start_stderr_drain()
 
     def transcribe(
@@ -315,6 +335,12 @@ class MLXWhisperSession:
             result = response.get("result")
             if not isinstance(result, dict):
                 raise RuntimeError("mlx_whisper worker: missing result dict")
+            with self._state_lock:
+                if self._awaiting_first and self._spawn_mono is not None:
+                    # Первый успешный ответ после spawn = spawn + загрузка модели
+                    # + сам запрос: честная цена холодного старта для оператора.
+                    self._last_load_sec = time.monotonic() - self._spawn_mono
+                    self._awaiting_first = False
             return result
         finally:
             with self._state_lock:
@@ -334,7 +360,13 @@ class MLXWhisperSession:
                 proc = self._proc
                 alive = proc is not None and proc.poll() is None
                 result = empty_snapshot("busy" if self._inflight else "unknown" if alive else "unloaded", "worker")
-                result.update(pid=proc.pid if alive else None, inflight=self._inflight)
+                result.update(
+                    pid=proc.pid if alive else None,
+                    inflight=self._inflight,
+                    cold_start_count=self._cold_start_count,
+                    last_load_sec=self._last_load_sec,
+                    resident_mb=_child_rss_mb(proc.pid) if alive else None,
+                )
                 return result
             finally:
                 self._state_lock.release()
