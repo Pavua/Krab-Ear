@@ -900,6 +900,68 @@ def _find_function(tree: ast.Module, name: str) -> ast.FunctionDef | None:
     return None
 
 
+PURGE_STEP_PREFIX = "_purge_"
+
+
+def _purge_scope_function(tree: ast.Module) -> ast.FunctionDef | None:
+    """``handle_purge_all_data`` + тела шагов-методов, которые он зовёт.
+
+    Рефакторинг 2026-10-25 разрезал purge на методы ``self._purge_*()``.
+    Все проверки гейта (прямые unlink/rmtree, glob-семейства каталогов,
+    collaborator-вызовы, локальные импорты, доказательства уничтожения)
+    исторически смотрели ТОЛЬКО в тело purge — вынос шага в метод сделал бы его
+    невидимым и дал ложные «gaps» (или, хуже, ложное покрытие при обратной
+    правке). Поэтому гейт анализирует синтетическую функцию: тело purge, к
+    которому дописаны тела шагов того же класса, вызванных напрямую как
+    ``self._purge_*(...)`` (ровно один уровень, как у inmemory-гейта).
+    Имя и аргументы сохраняются — остальные проверки работают без изменений.
+    """
+    purge_fn = None
+    owner = None
+    for cls in ast.walk(tree):
+        if not isinstance(cls, ast.ClassDef):
+            continue
+        for node in cls.body:
+            if isinstance(node, ast.FunctionDef) and node.name == "handle_purge_all_data":
+                purge_fn, owner = node, cls
+                break
+        if purge_fn is not None:
+            break
+    if purge_fn is None:
+        return _find_function(tree, "handle_purge_all_data")
+    called = {
+        node.func.attr
+        for node in ast.walk(purge_fn)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr.startswith(PURGE_STEP_PREFIX)
+    }
+    steps = [
+        node for node in owner.body
+        if isinstance(node, ast.FunctionDef) and node.name in called
+    ]
+    if not steps:
+        return purge_fn
+    body = list(purge_fn.body)
+    for step in steps:
+        body.extend(step.body)
+    combined = ast.FunctionDef(
+        name=purge_fn.name,
+        args=purge_fn.args,
+        body=body,
+        decorator_list=[],
+        returns=None,
+        type_comment=None,
+    )
+    if "type_params" in ast.FunctionDef._fields:
+        combined.type_params = []
+    ast.copy_location(combined, purge_fn)
+    combined.end_lineno = max(s.end_lineno for s in steps + [purge_fn])
+    return combined
+
+
 def _module_attr_filenames(scope: ast.AST, consts: dict[str, str]) -> dict[str, str]:
     """Map ``self._x_path`` attribute names to the filename they are assigned,
     by scanning ``scope`` (a module tree).  Resolution walks one hop:
@@ -1689,7 +1751,7 @@ def extract_purge_coverage() -> set[str]:
     hs_tree = _parse(HISTORY_SERVICE)
     hs_consts = collect_string_constants(hs_tree)
     hs_attrs = _module_attr_filenames(hs_tree, hs_consts)
-    purge_fn = _find_function(hs_tree, "handle_purge_all_data")
+    purge_fn = _purge_scope_function(hs_tree)
     # A5.2c1 (N1′): доказательство может лежать в хелпере, вызываемом из purge,
     # поэтому функции нужна ссылка на модуль (см. `_reachable_helpers`).
     if purge_fn is not None:
