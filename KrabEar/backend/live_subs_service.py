@@ -21,6 +21,7 @@ import base64
 import logging
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, TYPE_CHECKING
 
 import numpy as np
@@ -79,6 +80,7 @@ class LiveSubsService:
         settings_get: Callable[[str, Any], Any] | None = None,
         stt_acquire: Callable[[float], bool] | None = None,
         stt_release: Callable[[], None] | None = None,
+        replay_sink: Any = None,
     ) -> None:
         self._transcriber = transcriber
         self._translator = translator
@@ -87,6 +89,7 @@ class LiveSubsService:
         # IPC BackendService эти колбэки не передаёт (другой процесс) — default None.
         self._stt_acquire = stt_acquire
         self._stt_release = stt_release
+        self._replay_sink = replay_sink
         self._lock = threading.RLock()
         self._buffer: list[np.ndarray] = []
         self._buffer_samples: int = 0
@@ -550,6 +553,11 @@ class LiveSubsService:
         if self._settings_get("privacy_mode_enabled", False):
             return {"text": "", "translation": None}
 
+        # Epoch открыт REST-обработчиком до первого PCM. RPC только в worker.
+        replay_window = self._replay_sink.begin_window() if self._replay_sink is not None else None
+        if replay_window is not None and replay_window.get("status") not in {"ready", "unavailable"}:
+            return self._replay_suppressed(replay_window)
+
         # Defense-in-depth (W1771 HIGH): не доверяем несанитизированному
         # sample_rate даже здесь — window["sample_rate"] уже клампнут
         # ingest()/stop(), но повторный клампинг идемпотентен и защищает
@@ -729,7 +737,37 @@ class LiveSubsService:
             end_ts=end_ts,
             language_detected=language_detected,
         )
-        event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
+        # Повторная privacy-проверка после STT/translate закрывает direct WS и SSE.
+        try:
+            private = bool(self._settings_get("privacy_mode_enabled", False))
+        except Exception:
+            private = True
+        if private:
+            return {"text": "", "translation": None, "replay_status": "privacy"}
+        replay_meta = {}
+        if replay_window is not None:
+            data = event_payload.model_dump()
+            if replay_window.get("status") == "unavailable":
+                replay_meta = {"replay_status": "unavailable"}
+                event_bus.emit_envelope({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                         "type": "live_subs.result", "data": {**data, **replay_meta}})
+            else:
+                outcome = self._replay_sink.commit_window(replay_window, data)
+                if outcome.get("status") not in {"accepted", "duplicate"}:
+                    return self._replay_suppressed(outcome)
+                try:
+                    private = bool(self._settings_get("privacy_mode_enabled", False))
+                except Exception:
+                    private = True
+                if private:
+                    return {"text": "", "translation": None, "replay_status": "privacy"}
+                replay_meta = {"replay_status": outcome["status"], "event_id": replay_window["ticket"]}
+                # Фраза уже в canonical journal. Только hint, без повторного emit/echo.
+                event_bus.emit_envelope({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                         "type": "live_subs.result", "origin": "ipc",
+                                         "data": {**data, **replay_meta}})
+        else:
+            event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
         # W1770 MED: НИКОГДА не логируем сам текст транскрипта/перевода (PII).
         # Только метаданные — гарантия metadata-only логирования.
         logger.info(
@@ -747,7 +785,22 @@ class LiveSubsService:
             "start_ts": start_ts,
             "end_ts": end_ts,
             "language_detected": language_detected,
+            **replay_meta,
         }
+
+    @staticmethod
+    def _replay_suppressed(outcome: dict) -> dict:
+        status = outcome.get("status", "unknown")
+        result = {"text": "", "translation": None, "replay_status": status}
+        if outcome.get("reconnect_required") or status == "stale":
+            result["reconnect_required"] = True
+        if status in {"unknown", "stale", "busy", "rejected", "invalid", "conflict", "error"}:
+            hint = {"replay_status": status}
+            if result.get("reconnect_required"):
+                hint["reconnect_required"] = True
+            event_bus.emit_envelope({"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                                     "type": "live_subs.result", "data": hint})
+        return result
 
     def _reset(self) -> None:
         """Сбрасывает буфер и метки времени."""

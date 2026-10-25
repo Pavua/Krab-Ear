@@ -3155,14 +3155,45 @@ Returns: `{ok, trigger, removed}`
 | Метод | Описание |
 |---|---|
 | `get_event_log` | Лог событий с фильтрацией |
+| `translation_replay_begin` | Авторизованный epoch/ticket для REST-перевода |
+| `translation_replay_commit` | Одноразовый commit REST-фразы в общий журнал |
 | `get_event_stats` | Статистика событий |
 | `replay_events` | Воспроизведение событий |
 
 ### `get_event_log`
 *(event_replay.py)*  
-Лог событий для отладки (фильтрация по типу/времени).  
-Params: `{event_type?, from_ts?, to_ts?, limit?}`  
-Returns: `{events: [{type, ts, data}]}`
+Лог событий с фильтрацией по типу/времени.
+Params: `{event_type?, since?, limit?}`
+Returns: `{events: [{type, ts, data, seq}], count}`
+
+Для догрузки панели перевода: `{cursor_mode: true, event_type: "live_subs.result",
+limit: 1..200, cursor?: "<epoch>:<seq>"}`. Ответ: `{events, count, cursor,
+has_more, gap, privacy_mode, reset_reason}`. Первый запрос возвращает последние `limit` доступных событий;
+следующие — страницы строго после курсора. `has_more` требует следующего запроса
+с возвращённым курсором. Номера пропускаются при фильтрации по типу — это нормально.
+`gap` равен `null`, `retention` (кольцо вытеснило старые события) или `reset`
+(новый процесс/очистка журнала). `reset_reason` — `restart` или `clear` только
+при `gap=reset`. Новый epoch или `privacy_mode=true` очищает показанные фразы:
+backend мог обработать purge между чтениями панели. При обычном SSE reconnect
+в том же epoch показанные фразы сохраняются и пропущенные догружаются.
+Данные сброшенного backend-журнала восстановить нельзя; клиент показывает разрыв.
+Privacy редактирует payload и при чтении; purge,
+совпавший с чтением, отклоняет снимок. Невалидный/будущий курсор возвращает
+`{ok: false, error}` без payload; клиент сохраняет прежний курсор и строки.
+Для `live_subs.result` cursor-read использует отдельный light-бюджет (120/мин);
+обычный debug-read и cursor-read остальных типов сохраняют medium-бюджет (30/мин).
+Старый режим без `cursor_mode: true` сохраняет прежний контракт.
+
+SSE `live_subs.result` добавляет серверное поле `_replay_source`: `ipc` для
+записанных в IPC-журнал или bridged событий, `rest` для локального REST WS.
+Caller payload не может подменить эту метку. Подтверждённые IPC и REST-native
+фразы панель читает из общего курсорного replay. REST producer регистрирует
+окна через translation_replay_begin/commit (контракт ниже), после ACK даёт
+origin=ipc hint без повторной записи. Только сеанс с изначально недоступным
+IPC сохраняет прямую REST live-доставку, включая легитимные повторы, и явный
+replay_status=unavailable. Неизвестный commit и отказ журнала публикуют только
+статус разрыва без текста; privacy не публикует и его.
+
 
 ### `get_event_stats`
 *(event_replay.py)*  
@@ -4027,3 +4058,46 @@ Returns: `{context_words: [...], recent_topics: [...], size}`
 Memory Conductor (2026-08-19). Params: `{}` → `{ok, ledger: {v, entries: {"<owner>/<resident>": {owner, resident, size_mb, state, idle_since_ts?, reload_cost, pid, updated_ts}}}, conductor: {enabled, thread_alive, last_tick_ts, shadow_since, pressure_streak, would_skip_brain_reload, residents, decisions}}`.
 Леджер читается nowait (health-probe урок): под контеншеном возвращается пустой документ, не ожидание.
 Additive activity/lease_observation: см. основной раздел `get_memory_ledger` выше.
+
+
+## REST translation replay ingress
+
+### `translation_replay_begin`
+
+`translation_replay_begin` требует `translation_token` из private owner file
+`translation_replay_token` в каноническом IPC data_dir (0600, без symlink).
+Без `epoch` возвращает только текущий epoch; этот вызов REST выполняет до первого
+PCM в WS. С `epoch` выдаёт случайный одноразовый `ticket` (TTL300s, cap256).
+Epoch закреплён на весь WS-сеанс: `stale` требует нового подключения.
+
+### `translation_replay_commit`
+
+Тот же token, `ticket`, фиксированный `payload`
+с ключами `text`, `translation`, `start_ts`, `end_ts`, `language_detected`.
+Строки/числа проверяются строго, суммарный JSON payload не больше16384 UTF8 bytes.
+Текст непустой; времена конечные, 0≤start≤end≤1e12; язык optional string≤32.
+Результат `accepted`/`duplicate` содержит seq. Повтор с другим payload — `conflict`.
+Privacy/ошибка settings запрещает запись; purge инвалидирует все tickets.
+ACK подтверждает RAM journal, а не сохранность при crash/ошибке диска.
+
+REST `GET /v1/translation/replay?cursor=...&limit=1..200` использует тот же
+`get_event_log(cursor_mode=true,event_type=live_subs.result)` с auth/origin/privacy
+правилами REST. Сохраняйте cursor после успешной страницы, читайте `has_more`,
+показывайте `gap`. Initial page содержит последние до200 общих IPC+REST фраз;
+байтовый предел480KiB может сократить tail. Слишком большой legacy IPC payload
+заменяется redacted marker с `replay_size_limit`; cursor продолжает двигаться.
+Журнал не переживает restart и имеет конечный retention; gap нельзя скрывать.
+
+Native REST WS возвращает `event_id` и `replay_status`; event_id совпадает с ID
+в replay payload. После unknown ACK raw text не выдаётся: клиент восстанавливает
+его через cursor (операция могла уже завершиться). Retry commit ограничен двумя
+попытками в общем бюджете1s, с неизменными ticket/payload. При первоначальной
+недоступности IPC весь WS остаётся legacy-live с `replay_status=unavailable`;
+догрузка для такого сеанса невозможна, требуется новое WS-подключение.
+
+Для backend с нестандартным `--data-dir` REST должен получить
+`KRAB_EAR_IPC_DATA_DIR=<этот каталог>`; здесь находится purpose-bound token.
+`KRAB_EAR_SOCKET` независимо переопределяет путь сокета (например при
+`--socket-path`). Без него берётся `krabear.sock` из выбранного IPC-профиля.
+Без обеих переменных сохраняется стандартный профиль macOS. REST DATA_DIR
+не подменяет IPC-профиль; секреты не передаются в query string или CLI args.

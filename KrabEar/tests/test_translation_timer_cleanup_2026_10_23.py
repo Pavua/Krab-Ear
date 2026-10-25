@@ -26,9 +26,7 @@ class TranslationTimerCleanupTest(unittest.TestCase):
             r"""import Foundation
 import Dispatch
 
-final class TaskLeaf { var cancelled = false; func cancel() { cancelled = true } }
 final class Owner {
-    var sseStreamTask: TaskLeaf?
     var captureTimer: Timer?
     var glossaryRefreshTimer: Timer?
 """
@@ -39,18 +37,16 @@ final class ReleaseBox: @unchecked Sendable { var owner: Owner? }
 DispatchQueue.main.async {
     let box = ReleaseBox()
     box.owner = Owner()
-    let task = TaskLeaf()
     let capture = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in }
     let glossary = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { _ in }
-    box.owner!.sseStreamTask = task
     box.owner!.captureTimer = capture
     box.owner!.glossaryRefreshTimer = glossary
     weak var released = box.owner
     let release = {
         box.owner = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            guard released == nil, task.cancelled else {
-                fputs("OWNER_OR_SSE_NOT_RELEASED\n", stderr); exit(2)
+            guard released == nil else {
+                fputs("OWNER_NOT_RELEASED\n", stderr); exit(2)
             }
             guard !capture.isValid, !glossary.isValid else {
                 capture.invalidate(); glossary.invalidate()

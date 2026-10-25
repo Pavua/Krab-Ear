@@ -2343,6 +2343,45 @@ def list_models():
     }), 200
 
 
+def _translation_replay_client():
+    from pathlib import Path
+    from backend.service import default_data_dir, default_socket_path
+    from backend.translation_replay_client import TranslationReplayClient
+    profile_override = os.getenv("KRAB_EAR_IPC_DATA_DIR", "").strip()
+    data_dir = Path(profile_override).expanduser() if profile_override else default_data_dir()
+    override = os.getenv("KRAB_EAR_SOCKET", "").strip()
+    path = Path(override).expanduser() if override else default_socket_path(data_dir)
+    return TranslationReplayClient(path, data_dir, signing_enabled=settings.IPC_SIGNING_ENABLED,
+                                   signing_secret=settings.IPC_SIGNING_SECRET)
+
+
+@v1_blp.route("/translation/replay", methods=["GET"])
+@require_api_key
+@_block_cross_origin_reads
+def translation_replay():
+    """Фиксированный cursor repair общего журнала для REST-потребителей."""
+    if _privacy_mode_enabled():
+        return jsonify({"error": "privacy mode", "events": []}), 403
+    cursor = request.args.get("cursor")
+    try:
+        limit = int(request.args.get("limit", "200"))
+        if not 1 <= limit <= 200 or (cursor is not None and len(cursor) > 64):
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "invalid replay parameters"}), 400
+    try:
+        result = _translation_replay_client().replay(cursor, limit=limit)
+    except Exception:
+        return jsonify({"error": "replay unavailable", "events": []}), 503
+    if _privacy_mode_enabled() or result.get("privacy_mode"):
+        return jsonify({"error": "privacy mode", "events": []}), 403
+    if result.get("ok") is False:
+        return jsonify({"error": "invalid replay cursor"}), 400
+    if "cursor" not in result or "events" not in result:
+        return jsonify({"error": "replay unavailable", "events": []}), 503
+    return jsonify(result)
+
+
 @v1_blp.route("/events", methods=["GET"])
 @require_api_key
 @_block_cross_origin_reads
@@ -2683,12 +2722,21 @@ def _ws_stream_handler(ws):
     observed_acquire, observed_release = _REST_ACTIVITY.slot_callbacks(
         try_acquire_stt_singleflight, release_stt_singleflight, "native_ws",
     )
+    replay_client = None
+    if backend != "cloud":
+        if _privacy_mode_enabled():
+            ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "text": ""}))
+            ws.close(message=b"privacy_mode_active")
+            return
+        replay_client = _translation_replay_client()
+        replay_client.open()  # Неизменяемый epoch до первого принятого PCM.
     live_subs = LiveSubsService(
         transcriber=deps.transcriber,
         translator=deps.translator,
         settings_get=lambda k, d=None: deps.store.load_settings().get(k, d),
         stt_acquire=observed_acquire,
         stt_release=observed_release,
+        replay_sink=replay_client,
     )
 
     cloud_audio_buffer = bytearray()
@@ -2741,7 +2789,7 @@ def _ws_stream_handler(ws):
                                     ws.send(json.dumps(resp))
                 else:
                     result = live_subs.ingest(audio_bytes=b"", sample_rate=16000, target_lang=target_lang, is_final=True)
-                    if result and result.get("text"):
+                    if result and (result.get("text") or result.get("replay_status")):
                         resp = {
                             "type": "final",
                             "text": result.get("text", ""),
@@ -2750,6 +2798,11 @@ def _ws_stream_handler(ws):
                         }
                         if mode == "translate" and result.get("translation"):
                             resp["translation"] = result["translation"]
+                        for key in ("replay_status", "event_id", "reconnect_required"):
+                            if key in result:
+                                resp[key] = result[key]
+                        if _privacy_mode_enabled():
+                            resp = {"type": "error", "code": "privacy_mode_active", "text": ""}
                         ws.send(json.dumps(resp))
                 break
 
@@ -2806,7 +2859,7 @@ def _ws_stream_handler(ws):
                         is_final=is_final
                     )
 
-                    if result and result.get("text"):
+                    if result and (result.get("text") or result.get("replay_status")):
                         resp = {
                             "type": "final",
                             "text": result.get("text", ""),
@@ -2815,6 +2868,11 @@ def _ws_stream_handler(ws):
                         }
                         if mode == "translate" and result.get("translation"):
                             resp["translation"] = result["translation"]
+                        for key in ("replay_status", "event_id", "reconnect_required"):
+                            if key in result:
+                                resp[key] = result[key]
+                        if _privacy_mode_enabled():
+                            resp = {"type": "error", "code": "privacy_mode_active", "text": ""}
                         ws.send(json.dumps(resp))
 
                     if is_final:
