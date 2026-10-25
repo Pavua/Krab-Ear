@@ -2554,6 +2554,199 @@ class HistoryService:
 
         secondary_errors: list[str] = []
 
+        # Шаги вынесены в методы ``_purge_*`` (рефакторинг 2026-10-25) БЕЗ смены
+        # порядка и семантики: каждый шаг сам ловит свои ошибки и пишет имя шага
+        # в ``secondary_errors``. Порядок вызовов ниже — это и есть порядок purge.
+        # Гейты audit_purge_coverage / audit_inmemory_purge_coverage анализируют
+        # тела этих шагов (прямые вызовы ``self._purge_*``, один уровень).
+        refusal, history_deleted = self._purge_tombstone_history(secondary_errors)
+        if refusal is not None:
+            return refusal
+        transcripts_deleted, rescue_deleted = self._purge_early_disk_artifacts(
+            secondary_errors
+        )
+        collab = self._purge_collaborator_stores(secondary_errors)
+        chains_deleted = collab["chains_deleted"]
+        semantic_purged = collab["semantic_purged"]
+        archive_deleted = collab["archive_deleted"]
+        bookmarks_deleted = collab["bookmarks_deleted"]
+        call_sessions_deleted = collab["call_sessions_deleted"]
+        obsidian_deleted = collab["obsidian_deleted"]
+        backups_deleted = self._purge_data_dir_copies(secondary_errors)
+
+        # ==================================================================
+        # W1770: закрытие оставшихся privacy-purge пробелов (audit_purge_coverage).
+        # Каждый шаг защищён собственным try/except → secondary_errors.append(...).
+        # Прямой rmtree/unlink для файловых/директорных хранилищ; вызов метода
+        # коллаборатора только там, где надо также очистить in-memory состояние.
+        # ==================================================================
+        # Резолв data_dir защищён: повреждённый store.data_dir (напр. не-строка)
+        # не должен ронять весь purge — прямые файловые шаги пропускаются, но
+        # collaborator-методы (знают свои пути сами) всё равно отрабатывают ниже.
+        _data_dir: Path | None
+        try:
+            _data_dir = Path(self.store.data_dir)
+        except Exception:
+            logger.warning("purge_all_data: некорректный data_dir — прямые файловые шаги пропущены", exc_info=True)
+            secondary_errors.append("data_dir")
+            _data_dir = None
+
+        self._purge_data_dir_stores(secondary_errors, _data_dir)
+        self._purge_in_memory_state(secondary_errors)
+        stale_copies_removed = self._purge_stale_copies(secondary_errors, _data_dir)
+        (
+            deletion_ledger_purged,
+            deletion_ledger_ids_preserved,
+            encryption_key_shredded,
+        ) = self._purge_final_barrier(secondary_errors, _data_dir)
+        self._purge_temp_uploads(secondary_errors, _data_dir)
+
+        # --- A5.2c1: пост-фактум флага шифрования (НЕ переключаем его) ---
+        # Purge уничтожает данные, но политику не меняет: решение владельца
+        # остаётся его. Значение читается ПОСЛЕ всех шагов, чтобы ответ был
+        # честным («профиль остался на ON, но данных в нём нет»), а не обещанием.
+        #
+        # Сбой чтения НЕ пополняет `errors`: это не провал зачистки (ничего не
+        # осталось на диске из-за неудачного чтения флага), а невозможность
+        # сообщить состояние. ВНИМАНИЕ: в этом случае поле `false`, то есть
+        # «определить не удалось» здесь НЕ отличается от «выключено» — в ответе
+        # purge нет третьего состояния. Компенсирующий признак: тот же сбой
+        # делает битый settings.json, который виден в errors шага 15; а сам
+        # флаг при битом settings читается фейл-closed в True на всех путях
+        # записи (read_history_encryption_flag), то есть профиль не уйдёт
+        # молча в plaintext.
+        history_encryption_enabled_after = False
+        try:
+            history_encryption_enabled_after = bool(
+                self.store.load_settings().get("history_encryption_enabled", False)
+            )
+        except Exception:
+            logger.warning(
+                "purge_all_data: не удалось прочитать флаг history_encryption_enabled",
+                exc_info=True,
+            )
+
+        # --- C. W1734: Audit log entry ---
+        try:
+            from backend.privacy_audit import get_privacy_audit_logger
+            audit = get_privacy_audit_logger()
+            audit.log_event(
+                category="privacy",
+                action="purge_all_data",
+                details={
+                    "history_deleted": history_deleted,
+                    "chains_deleted": chains_deleted,
+                    "archive_deleted": archive_deleted,
+                    "bookmarks_deleted": bookmarks_deleted,
+                    "call_sessions_deleted": call_sessions_deleted,
+                    "transcripts_deleted": transcripts_deleted,
+                    "rescue_deleted": rescue_deleted,
+                    "obsidian_deleted": obsidian_deleted,
+                    # A5.2c1: только счётчики и флаги состояния — ни ключа,
+                    # ни содержимого .bak-копий в комплайнс-трейл не пишется.
+                    "backups_deleted": backups_deleted,
+                    "deletion_ledger_purged": deletion_ledger_purged,
+                    "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
+                    "stale_copies_removed": stale_copies_removed,
+                    "encryption_key_shredded": encryption_key_shredded,
+                    "history_encryption_enabled_after": history_encryption_enabled_after,
+                    "secondary_errors": secondary_errors,
+                },
+            )
+        except Exception:
+            logger.warning("purge_all_data: privacy audit log failed", exc_info=True)
+
+        add_breadcrumb(
+            category="history",
+            message="purge_all_data",
+            level="info",
+            data={
+                "history_deleted": history_deleted,
+                "chains_deleted": chains_deleted,
+                "archive_deleted": archive_deleted,
+                "bookmarks_deleted": bookmarks_deleted,
+                "call_sessions_deleted": call_sessions_deleted,
+                "transcripts_deleted": transcripts_deleted,
+                "rescue_deleted": rescue_deleted,
+                "obsidian_deleted": obsidian_deleted,
+                "semantic_purged": semantic_purged,
+                # A5.2c1: результат зачистки виден в crash-report, а не только в
+                # ответе IPC (ответ не переживает рестарт процесса).
+                "backups_deleted": backups_deleted,
+                "deletion_ledger_purged": deletion_ledger_purged,
+                "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
+                "stale_copies_removed": stale_copies_removed,
+                "encryption_key_shredded": encryption_key_shredded,
+            },
+        )
+        # --- W1749 CRITICAL-1: loud error when purge is only partial ---
+        if secondary_errors:
+            self._push_error(
+                code="history.purge_incomplete",
+                message_debug=f"purge_all_data partial failure: {secondary_errors}",
+                context={
+                    "failed_steps": secondary_errors,
+                    "data_dir": str(self.store.data_dir),
+                },
+            )
+
+        logger.info(
+            "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
+            "obsidian=%d semantic_purged=%s backups=%d stale_copies=%d ledger_purged=%s "
+            "ledger_ids=%d key_shredded=%s encryption_after=%s errors=%s",
+            history_deleted,
+            transcripts_deleted,
+            chains_deleted,
+            archive_deleted,
+            bookmarks_deleted,
+            call_sessions_deleted,
+            obsidian_deleted,
+            semantic_purged,
+            backups_deleted,
+            stale_copies_removed,
+            deletion_ledger_purged,
+            deletion_ledger_ids_preserved,
+            encryption_key_shredded,
+            history_encryption_enabled_after,
+            secondary_errors,
+        )
+        return {
+            "ok": True,
+            "history_deleted": history_deleted,
+            "chains_deleted": chains_deleted,
+            "archive_deleted": archive_deleted,
+            "bookmarks_deleted": bookmarks_deleted,
+            "call_sessions_deleted": call_sessions_deleted,
+            "transcripts_deleted": transcripts_deleted,
+            "rescue_deleted": rescue_deleted,
+            "obsidian_deleted": obsidian_deleted,
+            "semantic_purged": semantic_purged,
+            # A5.2c1: машинно-читаемый результат зачистки. Владелец должен
+            # видеть по ОТВЕТУ, что именно уничтожено, а не восстанавливать это
+            # по косвенным признакам (отсутствующий файл мог и не быть).
+            "backups_deleted": backups_deleted,
+            "deletion_ledger_purged": deletion_ledger_purged,
+            # B1: ledger сохранён ОТКРЫТЫМ (в нём только ID, без PII) — его
+            # содержимое держит защиту от resurrection для ID, удалённых
+            # после снимка. Ноль означает «реестр потерян», и это громко
+            # отражается в complete/errors.
+            "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
+            "stale_copies_removed": stale_copies_removed,
+            "encryption_key_shredded": encryption_key_shredded,
+            # Флаг политики purge НЕ меняет — сообщаем состояние пост-фактум.
+            "history_encryption_enabled_after": history_encryption_enabled_after,
+            "complete": len(secondary_errors) == 0,
+            "errors": secondary_errors,
+        }
+
+    def _purge_tombstone_history(
+        self, secondary_errors: list[str]
+    ) -> tuple[dict[str, Any] | None, int]:
+        """Шаг 1 purge: pre-flight пути ledger'а и томбестоны под store-lock.
+
+        Возвращает ``(refusal, history_deleted)``: ``refusal`` — готовый ответ
+        отказа (purge прерван ДО любых удалений), иначе ``None``.
+        """
         # --- 1. Удалить все записи истории (primary — must succeed) ---
         with self.store._lock():
             # --- 1-pre. A5.2c1 (M1′/LOW1) pre-flight пути deletion ledger'а.
@@ -2699,18 +2892,21 @@ class HistoryService:
                                     "purge_all_data: privacy audit log failed (preflight)",
                                     exc_info=True,
                                 )
-                            return {
-                                "ok": False,
-                                "error": "preflight_failed",
-                                "message": (
-                                    "Путь permanent deletion ledger'а занят нерегулярной "
-                                    "записью, и освободить его не удалось. Purge "
-                                    "прерван ДО любых удалений, чтобы не читать этот "
-                                    "путь. Освободите путь вручную и повторите."
-                                ),
-                                "errors": list(secondary_errors),
-                                "complete": False,
-                            }
+                            return (
+                                {
+                                    "ok": False,
+                                    "error": "preflight_failed",
+                                    "message": (
+                                        "Путь permanent deletion ledger'а занят нерегулярной "
+                                        "записью, и освободить его не удалось. Purge "
+                                        "прерван ДО любых удалений, чтобы не читать этот "
+                                        "путь. Освободите путь вручную и повторите."
+                                    ),
+                                    "errors": list(secondary_errors),
+                                    "complete": False,
+                                },
+                                0,
+                            )
 
             try:
                 active = self.store._load_active_items_unlocked()
@@ -2734,7 +2930,10 @@ class HistoryService:
                     json.dumps({"id": item.id}, ensure_ascii=False),
                 )
             history_deleted = len(active)
+        return None, history_deleted
 
+    def _purge_early_disk_artifacts(self, secondary_errors: list[str]) -> tuple[int, int]:
+        """Шаги 1b-1g: compact, transcripts/, rescue/, forensics/, alive-маркер, restore staging."""
         # --- 1b. W1749 CRITICAL-2: compact history.ndjson to physically erase transcript text.
         # Tombstoning alone only logically hides items; the cleartext remains in the NDJSON
         # file on disk.  compact_with_stats() rewrites history.ndjson dropping all tombstoned
@@ -2870,7 +3069,10 @@ class HistoryService:
                 "purge_all_data: A5.2b2 restore staging purge failed", exc_info=True
             )
             secondary_errors.append("restore_staging")
+        return transcripts_deleted, rescue_deleted
 
+    def _purge_collaborator_stores(self, secondary_errors: list[str]) -> dict[str, Any]:
+        """Шаги 2-11: хранилища коллабораторов (версии, цепочки, индекс, архив, ...)."""
         # --- 2. W1771 GAP-3: БЕЗУСЛОВНАЯ очистка версий транскрипций (true wipe).
         # Раньше здесь был cleanup_for_ids(current_active_ids) — он стирал версии
         # только тех записей, что попали в текущий снимок active. Версии уже
@@ -2991,7 +3193,17 @@ class HistoryService:
                     "purge_all_data: obsidian_sync.purge_all_synced_files failed", exc_info=True
                 )
                 secondary_errors.append("obsidian")
+        return {
+            "chains_deleted": chains_deleted,
+            "semantic_purged": semantic_purged,
+            "archive_deleted": archive_deleted,
+            "bookmarks_deleted": bookmarks_deleted,
+            "call_sessions_deleted": call_sessions_deleted,
+            "obsidian_deleted": obsidian_deleted,
+        }
 
+    def _purge_data_dir_copies(self, secondary_errors: list[str]) -> int:
+        """Шаги 12-17: backups/, shares/, tmp_meeting/, переводы, глоссарий, словарь, settings_backups/."""
         # --- 12. W1767 #2 (HIGH): удалить migration backups (<data_dir>/backups/) ---
         # DataMigrator._create_backup() копирует history.ndjson и settings.json в
         # <data_dir>/backups/migration_backup_<ts>/.  Полные снапшоты истории
@@ -3113,24 +3325,16 @@ class HistoryService:
             except Exception:
                 logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
                 secondary_errors.append("settings_backups")
+        return backups_deleted
 
-        # ==================================================================
-        # W1770: закрытие оставшихся privacy-purge пробелов (audit_purge_coverage).
-        # Каждый шаг защищён собственным try/except → secondary_errors.append(...).
-        # Прямой rmtree/unlink для файловых/директорных хранилищ; вызов метода
-        # коллаборатора только там, где надо также очистить in-memory состояние.
-        # ==================================================================
-        # Резолв data_dir защищён: повреждённый store.data_dir (напр. не-строка)
-        # не должен ронять весь purge — прямые файловые шаги пропускаются, но
-        # collaborator-методы (знают свои пути сами) всё равно отрабатывают ниже.
-        _data_dir: Path | None
-        try:
-            _data_dir = Path(self.store.data_dir)
-        except Exception:
-            logger.warning("purge_all_data: некорректный data_dir — прямые файловые шаги пропущены", exc_info=True)
-            secondary_errors.append("data_dir")
-            _data_dir = None
+    def _purge_data_dir_stores(
+        self, secondary_errors: list[str], _data_dir: Path | None
+    ) -> None:
+        """Шаги 18-31 (W1770/W1771): файловые хранилища под data_dir.
 
+        ``_data_dir is None`` сохраняет прежнюю семантику: шаги без явного
+        guard'а падают в свой except и пишут имя шага в ``secondary_errors``.
+        """
         # --- 18. W1770: удалить сырое аудио (audio/) ---
         # AudioRecorder/конвейер сохраняют сырые WAV/PCM записей под <data_dir>/audio/.
         # Сырое аудио — это голос пользователя (биометрия) и должно исчезать при wipe.
@@ -3385,6 +3589,8 @@ class HistoryService:
                 logger.warning("purge_all_data: удаление templates.json не удалось", exc_info=True)
                 secondary_errors.append("templates")
 
+    def _purge_in_memory_state(self, secondary_errors: list[str]) -> None:
+        """Шаги 32-37: RAM-копии PII (live-субтитры, поисковые кэши, контекст, буфер, задачи)."""
         # --- 32. W1771 GAP-3: сбросить in-memory буфер live-субтитров (raw voice) ---
         # LiveSubsService накапливает base64 PCM 16 kHz system-audio в RAM до flush.
         # Это сырой голос (биометрия); файлового артефакта нет, поэтому только in-memory
@@ -3473,12 +3679,10 @@ class HistoryService:
                 )
                 secondary_errors.append("terminal_cache")
 
-        # Ledger обрабатывается вместе с финальным wipe и shred под общим
-        # store-lock (38-1). Между rematerialize и shred compact не должен
-        # успеть снова записать ENC1 в permanent ledger.
-        deletion_ledger_purged = False
-        deletion_ledger_ids_preserved = 0
-
+    def _purge_stale_copies(
+        self, secondary_errors: list[str], _data_dir: Path | None
+    ) -> int:
+        """Шаг 37b: производные копии ``*.bak*`` / ``*.tmp`` / ``*_tmp`` под store-lock."""
         # --- 37b. A5.2c1 / P1: зачистить ПРОИЗВОДНЫЕ копии (`.bak*` и `*.tmp`).
         # В data_dir лежат `history.ndjson.bak*` (в прод-профиле владельца —
         # 23.4 МБ ОТКРЫТОЙ истории) и `settings.json.bak*` (шесть копий с
@@ -3577,6 +3781,21 @@ class HistoryService:
                 except Exception:
                     logger.warning("purge_all_data: зачистка .bak-копий не удалась", exc_info=True)
                     _flag_step_error(secondary_errors, "stale_copies")
+        return stale_copies_removed
+
+    def _purge_final_barrier(
+        self, secondary_errors: list[str], _data_dir: Path | None
+    ) -> tuple[bool, int, bool]:
+        """Шаг 38: ledger -> wipe журналов -> fsync -> проверка -> shred ключа.
+
+        Возвращает ``(deletion_ledger_purged, deletion_ledger_ids_preserved,
+        encryption_key_shredded)``.
+        """
+        # Ledger обрабатывается вместе с финальным wipe и shred под общим
+        # store-lock (38-1). Между rematerialize и shred compact не должен
+        # успеть снова записать ENC1 в permanent ledger.
+        deletion_ledger_purged = False
+        deletion_ledger_ids_preserved = 0
 
         # --- 38. Crypto-audit (2026-06-20): удалить ключ шифрования истории из Keychain.
         # Без этого выживший AES-256 ключ расшифровывает pre-purge бэкап history.ndjson
@@ -3666,7 +3885,12 @@ class HistoryService:
                     # следующий writer заново получает ключ из keystore.
                     self.store._history_crypto_initialized = False
                     self.store._history_crypto_instance = None
+        return deletion_ledger_purged, deletion_ledger_ids_preserved, encryption_key_shredded
 
+    def _purge_temp_uploads(
+        self, secondary_errors: list[str], _data_dir: Path | None
+    ) -> int:
+        """Шаг 39: содержимое temp_uploads/ (сам каталог остаётся)."""
         # --- 39. S3/M-B: удалить сырые REST-загрузки (temp_uploads/) ---
         # TEMP_DIR = settings.DATA_DIR / "temp_uploads" (rest_server.py) хранит сырое
         # пользовательское аудио из POST /v1/stt/transcribe до его транскрибации и
@@ -3702,144 +3926,7 @@ class HistoryService:
         except Exception:
             logger.warning("purge_all_data: удаление содержимого temp_uploads/ не удалось", exc_info=True)
             secondary_errors.append("temp_uploads")
-
-        # --- A5.2c1: пост-фактум флага шифрования (НЕ переключаем его) ---
-        # Purge уничтожает данные, но политику не меняет: решение владельца
-        # остаётся его. Значение читается ПОСЛЕ всех шагов, чтобы ответ был
-        # честным («профиль остался на ON, но данных в нём нет»), а не обещанием.
-        #
-        # Сбой чтения НЕ пополняет `errors`: это не провал зачистки (ничего не
-        # осталось на диске из-за неудачного чтения флага), а невозможность
-        # сообщить состояние. ВНИМАНИЕ: в этом случае поле `false`, то есть
-        # «определить не удалось» здесь НЕ отличается от «выключено» — в ответе
-        # purge нет третьего состояния. Компенсирующий признак: тот же сбой
-        # делает битый settings.json, который виден в errors шага 15; а сам
-        # флаг при битом settings читается фейл-closed в True на всех путях
-        # записи (read_history_encryption_flag), то есть профиль не уйдёт
-        # молча в plaintext.
-        history_encryption_enabled_after = False
-        try:
-            history_encryption_enabled_after = bool(
-                self.store.load_settings().get("history_encryption_enabled", False)
-            )
-        except Exception:
-            logger.warning(
-                "purge_all_data: не удалось прочитать флаг history_encryption_enabled",
-                exc_info=True,
-            )
-
-        # --- C. W1734: Audit log entry ---
-        try:
-            from backend.privacy_audit import get_privacy_audit_logger
-            audit = get_privacy_audit_logger()
-            audit.log_event(
-                category="privacy",
-                action="purge_all_data",
-                details={
-                    "history_deleted": history_deleted,
-                    "chains_deleted": chains_deleted,
-                    "archive_deleted": archive_deleted,
-                    "bookmarks_deleted": bookmarks_deleted,
-                    "call_sessions_deleted": call_sessions_deleted,
-                    "transcripts_deleted": transcripts_deleted,
-                    "rescue_deleted": rescue_deleted,
-                    "obsidian_deleted": obsidian_deleted,
-                    # A5.2c1: только счётчики и флаги состояния — ни ключа,
-                    # ни содержимого .bak-копий в комплайнс-трейл не пишется.
-                    "backups_deleted": backups_deleted,
-                    "deletion_ledger_purged": deletion_ledger_purged,
-                    "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
-                    "stale_copies_removed": stale_copies_removed,
-                    "encryption_key_shredded": encryption_key_shredded,
-                    "history_encryption_enabled_after": history_encryption_enabled_after,
-                    "secondary_errors": secondary_errors,
-                },
-            )
-        except Exception:
-            logger.warning("purge_all_data: privacy audit log failed", exc_info=True)
-
-        add_breadcrumb(
-            category="history",
-            message="purge_all_data",
-            level="info",
-            data={
-                "history_deleted": history_deleted,
-                "chains_deleted": chains_deleted,
-                "archive_deleted": archive_deleted,
-                "bookmarks_deleted": bookmarks_deleted,
-                "call_sessions_deleted": call_sessions_deleted,
-                "transcripts_deleted": transcripts_deleted,
-                "rescue_deleted": rescue_deleted,
-                "obsidian_deleted": obsidian_deleted,
-                "semantic_purged": semantic_purged,
-                # A5.2c1: результат зачистки виден в crash-report, а не только в
-                # ответе IPC (ответ не переживает рестарт процесса).
-                "backups_deleted": backups_deleted,
-                "deletion_ledger_purged": deletion_ledger_purged,
-                "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
-                "stale_copies_removed": stale_copies_removed,
-                "encryption_key_shredded": encryption_key_shredded,
-            },
-        )
-        # --- W1749 CRITICAL-1: loud error when purge is only partial ---
-        if secondary_errors:
-            self._push_error(
-                code="history.purge_incomplete",
-                message_debug=f"purge_all_data partial failure: {secondary_errors}",
-                context={
-                    "failed_steps": secondary_errors,
-                    "data_dir": str(self.store.data_dir),
-                },
-            )
-
-        logger.info(
-            "purge_all_data: history=%d transcripts=%d chains=%d archive=%d bookmarks=%d calls=%d "
-            "obsidian=%d semantic_purged=%s backups=%d stale_copies=%d ledger_purged=%s "
-            "ledger_ids=%d key_shredded=%s encryption_after=%s errors=%s",
-            history_deleted,
-            transcripts_deleted,
-            chains_deleted,
-            archive_deleted,
-            bookmarks_deleted,
-            call_sessions_deleted,
-            obsidian_deleted,
-            semantic_purged,
-            backups_deleted,
-            stale_copies_removed,
-            deletion_ledger_purged,
-            deletion_ledger_ids_preserved,
-            encryption_key_shredded,
-            history_encryption_enabled_after,
-            secondary_errors,
-        )
-        return {
-            "ok": True,
-            "history_deleted": history_deleted,
-            "chains_deleted": chains_deleted,
-            "archive_deleted": archive_deleted,
-            "bookmarks_deleted": bookmarks_deleted,
-            "call_sessions_deleted": call_sessions_deleted,
-            "transcripts_deleted": transcripts_deleted,
-            "rescue_deleted": rescue_deleted,
-            "obsidian_deleted": obsidian_deleted,
-            "semantic_purged": semantic_purged,
-            # A5.2c1: машинно-читаемый результат зачистки. Владелец должен
-            # видеть по ОТВЕТУ, что именно уничтожено, а не восстанавливать это
-            # по косвенным признакам (отсутствующий файл мог и не быть).
-            "backups_deleted": backups_deleted,
-            "deletion_ledger_purged": deletion_ledger_purged,
-            # B1: ledger сохранён ОТКРЫТЫМ (в нём только ID, без PII) — его
-            # содержимое держит защиту от resurrection для ID, удалённых
-            # после снимка. Ноль означает «реестр потерян», и это громко
-            # отражается в complete/errors.
-            "deletion_ledger_ids_preserved": deletion_ledger_ids_preserved,
-            "stale_copies_removed": stale_copies_removed,
-            "encryption_key_shredded": encryption_key_shredded,
-            # Флаг политики purge НЕ меняет — сообщаем состояние пост-фактум.
-            "history_encryption_enabled_after": history_encryption_enabled_after,
-            "complete": len(secondary_errors) == 0,
-            "errors": secondary_errors,
-        }
+        return temp_uploads_deleted
 
     def handle_get_storage_info(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает информацию о размере файлов данных Krab Ear.

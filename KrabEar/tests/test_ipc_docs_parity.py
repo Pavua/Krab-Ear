@@ -348,9 +348,24 @@ def _purge_error_codes() -> set[str]:
     (N1′), а не в `handle_purge_all_data`. Сканирование только тела хендлера дало
     бы ложное «код не эмитится» — ровно та ложная тревога, из-за которой потом
     добавили бы имя в исключение.
+
+    Рефакторинг 2026-10-25 разрезал тело purge на методы `self._purge_*()` —
+    см. `_purge_error_codes_from_tree`.
     """
     path = BACKEND / "history_service.py"
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return _purge_error_codes_from_tree(ast.parse(path.read_text(encoding="utf-8")))
+
+
+def _purge_error_codes_from_tree(tree: ast.Module) -> set[str]:
+    """Замыкание кодов ошибок purge по дереву модуля.
+
+    Обход: (1) прежнее — вызовы модульных функций (`ast.Name`), транзитивно;
+    (2) новое — РОВНО ОДИН уровень прямых вызовов `self._purge_<шаг>()` из тела
+    самого purge-хендлера в методы КЛАССА, которому принадлежит хендлер. Чужой
+    объект (`other._purge_x()`), метод без префикса `_purge_` и второй
+    self-уровень (шаг, вызывающий другой `self._purge_*`) НЕ обходятся: гейт не
+    должен случайно «найти» код там, где purge его не эмитит.
+    """
     purges = _functions_named(tree, "purge_all_data")
     if not purges:
         return set()
@@ -368,21 +383,38 @@ def _purge_error_codes() -> set[str]:
     scope: dict[str, ast.AST] = dict(modules)
     if owner:
         scope.update(classes[owner])
+    # Класс, которому ПРИНАДЛЕЖИТ сам хендлер (не путать с `owner` выше — тот
+    # выводится из имён в теле и сохранён как был).
+    handler_class: dict[str, ast.AST] = {}
+    for members in classes.values():
+        if any(m is fn for fn in purges for m in members.values()):
+            handler_class = members
+            break
 
     closure: dict[str, ast.AST] = {}
-    stack = list(purges)
+    stack: list[tuple[ast.AST, bool]] = [(fn, True) for fn in purges]
     while stack:
-        fn = stack.pop()
+        fn, is_handler = stack.pop()
         key = f"{owner}.{fn.name}" if owner and fn.name in classes.get(owner, {}) else fn.name
         if key in closure:
             continue
         closure[key] = fn
         for node in ast.walk(fn):
-            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            if not isinstance(node, ast.Call):
                 continue
-            callee = node.func.id
-            if callee in scope and callee not in closure:
-                stack.append(scope[callee])
+            func = node.func
+            if isinstance(func, ast.Name):
+                callee = func.id
+                if callee in scope and callee not in closure:
+                    stack.append((scope[callee], False))
+            elif (is_handler and isinstance(func, ast.Attribute)
+                    and isinstance(func.value, ast.Name) and func.value.id == "self"
+                    and func.attr.startswith("_purge_")
+                    and func.attr in handler_class):
+                step_key = f"step.{func.attr}"
+                if step_key not in closure:
+                    closure[step_key] = handler_class[func.attr]
+                    stack.append((handler_class[func.attr], False))
 
     codes: set[str] = set()
     for fn in closure.values():
@@ -403,6 +435,82 @@ def _is_error_code(name: str, method: str, returns: dict[str, set[str]]) -> bool
     if method not in ("purge_all_data", "?"):
         return False
     return name in _purge_error_codes()
+
+
+class PurgeErrorCodeClosureTests(unittest.TestCase):
+    """Фиксируют границы обхода `_purge_error_codes_from_tree` (синтетические деревья)."""
+
+    HEAD = (
+        "def _flag_step_error(errs, code):\n    errs.append(code)\n"
+        "class HistoryService:\n"
+        "    def handle_purge_all_data(self, params):\n"
+        "        secondary_errors = []\n"
+    )
+
+    def _codes(self, body: str, methods: str = "") -> set[str]:
+        src = self.HEAD + body + methods
+        return _purge_error_codes_from_tree(ast.parse(src))
+
+    def test_direct_self_purge_step_is_visible(self):
+        codes = self._codes(
+            "        self._purge_a(secondary_errors)\n",
+            "    def _purge_a(self, secondary_errors):\n"
+            "        _flag_step_error(secondary_errors, 'step_a')\n"
+            "        secondary_errors.append('step_a2')\n",
+        )
+        self.assertEqual(codes, {"step_a", "step_a2"})
+
+    def test_foreign_object_and_non_purge_method_are_not_followed(self):
+        codes = self._codes(
+            "        other._purge_a(secondary_errors)\n"
+            "        self._helper(secondary_errors)\n",
+            "    def _purge_a(self, secondary_errors):\n"
+            "        _flag_step_error(secondary_errors, 'foreign')\n"
+            "    def _helper(self, secondary_errors):\n"
+            "        _flag_step_error(secondary_errors, 'not_a_step')\n",
+        )
+        self.assertEqual(codes, set())
+
+    def test_second_self_level_is_not_followed(self):
+        codes = self._codes(
+            "        self._purge_a(secondary_errors)\n",
+            "    def _purge_a(self, secondary_errors):\n"
+            "        _flag_step_error(secondary_errors, 'level1')\n"
+            "        self._purge_b(secondary_errors)\n"
+            "    def _purge_b(self, secondary_errors):\n"
+            "        _flag_step_error(secondary_errors, 'level2')\n",
+        )
+        self.assertEqual(codes, {"level1"})
+
+    def test_module_helper_called_from_step_is_still_followed(self):
+        src = (
+            "def _flag_step_error(errs, code):\n    errs.append(code)\n"
+            "def _wipe(errs):\n    _flag_step_error(errs, 'helper_code')\n"
+            "class HistoryService:\n"
+            "    def handle_purge_all_data(self, params):\n"
+            "        secondary_errors = []\n"
+            "        self._purge_a(secondary_errors)\n"
+            "    def _purge_a(self, secondary_errors):\n"
+            "        _wipe(secondary_errors)\n"
+        )
+        self.assertEqual(_purge_error_codes_from_tree(ast.parse(src)), {"helper_code"})
+
+    def test_removed_step_call_loses_its_code(self):
+        methods = (
+            "    def _purge_a(self, secondary_errors):\n"
+            "        _flag_step_error(secondary_errors, 'step_a')\n"
+        )
+        self.assertEqual(self._codes("        self._purge_a(secondary_errors)\n", methods), {"step_a"})
+        self.assertEqual(self._codes("        pass\n", methods), set())
+
+    def test_removed_code_inside_step_is_lost(self):
+        self.assertEqual(
+            self._codes(
+                "        self._purge_a(secondary_errors)\n",
+                "    def _purge_a(self, secondary_errors):\n        pass\n",
+            ),
+            set(),
+        )
 
 
 if __name__ == "__main__":
