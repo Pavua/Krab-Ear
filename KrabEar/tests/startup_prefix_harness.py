@@ -13,7 +13,6 @@ import json
 import logging
 import math
 import threading
-import time
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -81,9 +80,24 @@ class DiskSettings:
         raise AssertionError("unrelated policy reader must stay inert")
 
 
+class ManualClock:
+    """Только namespace извлечённого кода; глобальные часы не меняются."""
+
+    def __init__(self):
+        self.now = 100.0
+
+    def monotonic(self):
+        return self.now
+
+    def advance(self, seconds):
+        assert seconds >= 0
+        self.now += seconds
+
+
 def build_harness(directory, settings, *, source=None):
     """Подставляет только явные inert boundaries; реальный Thread не стартует."""
     defaults = literal("core/config.py", "DEFAULT_SETTINGS")
+    clock = ManualClock()
     # Validator целиком, но ровно два core imports заменены exact literal data.
     validator_ns = {
         "__name__": __name__,
@@ -100,7 +114,7 @@ def build_harness(directory, settings, *, source=None):
         "__name__": __name__, "DEFAULT_SETTINGS": defaults,
         "SettingsValidator": validator_ns["SettingsValidator"],
         "SettingsBackup": lambda: object(), "threading": threading,
-        "time": time, "math": math, "json": json,
+        "time": clock, "math": math, "json": json,
         "logger": logging.getLogger(__name__), "_log": logging.getLogger(__name__),
         "StateStoreLockTimeout": TimeoutError,
     }
@@ -167,5 +181,5 @@ def build_harness(directory, settings, *, source=None):
     cls = namespace["BackendService"]
     cls._init_llm_rewriter = init_rewriter
     service = cls(store=store, recorder=object(), transcriber=object(), translator=object())
-    return SimpleNamespace(service=service, store=store, rewriter=rewriter, events=events,
+    return SimpleNamespace(service=service, store=store, rewriter=rewriter, events=events, clock=clock,
                            warmup=holder.get("warmup"), early_settings=holder["early_settings"])

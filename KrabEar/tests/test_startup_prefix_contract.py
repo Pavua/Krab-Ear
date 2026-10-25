@@ -45,13 +45,26 @@ def test_continuation_rereads_persisted_settings_after_invalidation(tmp_path, ke
     continuation = probe.warmup["should_continue"]
     assert continuation() is True
     probe.store.persist({**SAVED, key: value})
-    # Документируем настоящий TTL: диск сам по себе ещё не инвалидирует кэш.
+    # Часы harness заморожены: wallclock/scheduling не могут состарить кэш.
     assert continuation() is True
     probe.service._invalidate_settings_cache()
     assert continuation() is False
     probe.store.persist(SAVED)
     probe.service._invalidate_settings_cache()
     assert continuation() is True
+
+
+def test_continuation_rereads_disk_when_real_cache_ttl_expires(tmp_path):
+    probe = harness.build_harness(tmp_path / "data", SAVED)
+    continuation = probe.warmup["should_continue"]
+    ttl = probe.service._settings_svc._cache_ttl
+    assert ttl > 0
+    probe.store.persist({**SAVED, "privacy_mode_enabled": True})
+    probe.clock.advance(ttl / 2)
+    assert continuation() is True
+    # В настоящем алгоритме на точной границе TTL кэш уже протух.
+    probe.clock.advance(ttl / 2)
+    assert continuation() is False
 
 
 @pytest.mark.parametrize("overrides", [
