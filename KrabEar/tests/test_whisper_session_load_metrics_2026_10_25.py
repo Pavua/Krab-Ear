@@ -68,14 +68,13 @@ def test_failed_first_transcribe_does_not_record_load_sec():
 def test_resident_mb_reads_child_rss_without_raising():
     s = _session()
     s._proc = _fake_proc(pid=777)
-    rss = MagicMock()
-    rss.memory_info.return_value.rss = 1536 * 1024 * 1024
-    with patch("psutil.Process", return_value=rss):
+    with patch.object(mws.subprocess, "check_output", return_value=" 1572864\n") as co:
         assert s.residency_snapshot()["resident_mb"] == 1536
+        assert co.call_args[0][0][-1] == "777"
 
 
 def test_resident_mb_none_when_psutil_fails():
     s = _session()
     s._proc = _fake_proc(pid=777)
-    with patch("psutil.Process", side_effect=OSError("gone")):
+    with patch.object(mws.subprocess, "check_output", side_effect=OSError("gone")):
         assert s.residency_snapshot()["resident_mb"] is None

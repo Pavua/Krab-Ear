@@ -186,11 +186,13 @@ def _write_pcm_wav(path: str, audio: Any) -> None:
 
 
 def _child_rss_mb(pid: int) -> Optional[int]:
-    """RSS живого child в МБ; любой сбой — None (метрика не должна ронять снимок)."""
+    """RSS живого child в МБ через ps (psutil не в requirements); сбой — None."""
     try:
-        import psutil
-
-        return int(psutil.Process(pid).memory_info().rss // (1024 * 1024))
+        out = subprocess.check_output(
+            ["ps", "-o", "rss=", "-p", str(int(pid))],
+            text=True, timeout=1.0, stderr=subprocess.DEVNULL,
+        )
+        return int(out.strip()) // 1024
     except Exception:
         return None
 
