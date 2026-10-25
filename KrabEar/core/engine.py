@@ -1211,6 +1211,76 @@ class AudioEngine:
             logger.warning("[STT] denoising error, skipping: %s", exc)
         return audio
 
+    def _build_dynamic_prompt(
+        self,
+        audio_data: Any,
+        *,
+        is_preview: bool,
+        context_free: bool,
+        domain: str,
+        extra_vocabulary: Any,
+        history_context: Any,
+        stt_hotwords: Any,
+        resolved_lang: str,
+        diarize: bool | None,
+    ) -> str:
+        """Динамический initial_prompt для STT (вынесено из transcribe без смены поведения)."""
+        # Preview path идёт с пустым prompt'ом: короткие аудиобуферы (<3s)
+        # провоцируют whisper на "leakage" initial_prompt'а в output как
+        # артефакта. Финальный stop_recording по-прежнему использует полный
+        # TRANSCRIBE_PROMPT для пунктуации/брендов/имён. Defense-in-depth:
+        # _postprocess_preview_text в service.py срезает известные фрагменты
+        # промпта как safety net.
+        # context_free (2026-08-12, живой инцидент — «Сохраняй смысл 0 тяги» в
+        # live-субтитрах чужого YouTube-видео): live subs флашит каждые ~3s,
+        # то есть та же «короткие буферы» ситуация, что и у preview, ПЛЮС
+        # инструкция и история/hotwords владельца вредны для чужого системного
+        # звука (смещают распознавание в лексику диктовок владельца). Не
+        # переиспользуем is_preview: тот дополнительно гейтит диаризацию/
+        # loop-детектор/LLM-passes, которые live subs использует как обычно —
+        # навесить на is_preview значило бы получить три незапрошенных
+        # изменения поведения.
+        if is_preview or context_free:
+            dynamic_prompt = ""
+        else:
+            domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
+            dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
+            if extra_vocabulary:
+                dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
+            # Обогащаем prompt контекстом недавней истории и пользовательскими hotwords.
+            # build_initial_prompt возвращает пустую строку если нет ни контекста, ни hotwords.
+            # Языковой словарь подключается только для своего языка: испанские
+            # медицинские термины бесполезны в русской диктовке, а место в
+            # промпте выкупают у контекста истории (бюджет 224 токена уже
+            # режется — см. лог «initial_prompt truncated»).
+            _lang_hotwords = {
+                "ru": list(getattr(settings, "STT_HOTWORDS_RU", []) or []),
+                "es": list(getattr(settings, "STT_HOTWORDS_ES", []) or []),
+                "en": list(getattr(settings, "STT_HOTWORDS_EN", []) or []),
+            }
+            context_suffix = build_initial_prompt(
+                history_items=history_context or [],
+                hotwords=merge_language_hotwords(
+                    stt_hotwords or [], resolved_lang, _lang_hotwords
+                ),
+            )
+            if context_suffix:
+                dynamic_prompt = f"{context_suffix} {dynamic_prompt}"
+
+            # Добавляем speaker-aware dialogue hint если включено и спикеров ≥ threshold.
+            _diarize_for_prompt = diarize if diarize is not None else settings.DIARIZATION_ENABLED
+            if settings.STT_SPEAKER_AWARE_PROMPT_ENABLED and _diarize_for_prompt:
+                try:
+                    _speaker_cache: dict[str, Any] = {}
+                    num_spk = self._estimate_num_speakers(audio_data, cache=_speaker_cache)
+                    if num_spk is not None and num_spk >= settings.STT_DIALOGUE_HINT_THRESHOLD:
+                        spk_hint = self._build_speaker_context_prompt(num_spk, resolved_lang)
+                        if spk_hint:
+                            dynamic_prompt = f"{dynamic_prompt}\n{spk_hint}"
+                except Exception as _spk_exc:
+                    logger.debug("Speaker-aware prompt: оценка не удалась, пропускаем: %s", _spk_exc)
+        return dynamic_prompt
+
     def transcribe(
         self,
         audio_data: Any,
@@ -1354,61 +1424,18 @@ class AudioEngine:
         except Exception:
             pass  # telemetry must never break transcription
 
-        # 1. Формирование динамического промпта.
-        # Preview path идёт с пустым prompt'ом: короткие аудиобуферы (<3s)
-        # провоцируют whisper на "leakage" initial_prompt'а в output как
-        # артефакта. Финальный stop_recording по-прежнему использует полный
-        # TRANSCRIBE_PROMPT для пунктуации/брендов/имён. Defense-in-depth:
-        # _postprocess_preview_text в service.py срезает известные фрагменты
-        # промпта как safety net.
-        # context_free (2026-08-12, живой инцидент — «Сохраняй смысл 0 тяги» в
-        # live-субтитрах чужого YouTube-видео): live subs флашит каждые ~3s,
-        # то есть та же «короткие буферы» ситуация, что и у preview, ПЛЮС
-        # инструкция и история/hotwords владельца вредны для чужого системного
-        # звука (смещают распознавание в лексику диктовок владельца). Не
-        # переиспользуем is_preview: тот дополнительно гейтит диаризацию/
-        # loop-детектор/LLM-passes, которые live subs использует как обычно —
-        # навесить на is_preview значило бы получить три незапрошенных
-        # изменения поведения.
-        if is_preview or context_free:
-            dynamic_prompt = ""
-        else:
-            domain_desc = self.DOMAIN_PROMPTS.get(domain, self.DOMAIN_PROMPTS["casual"])
-            dynamic_prompt = f"{settings.TRANSCRIBE_PROMPT} Тематика: {domain_desc}"
-            if extra_vocabulary:
-                dynamic_prompt += f" Ключевые слова: {', '.join(extra_vocabulary)}"
-            # Обогащаем prompt контекстом недавней истории и пользовательскими hotwords.
-            # build_initial_prompt возвращает пустую строку если нет ни контекста, ни hotwords.
-            # Языковой словарь подключается только для своего языка: испанские
-            # медицинские термины бесполезны в русской диктовке, а место в
-            # промпте выкупают у контекста истории (бюджет 224 токена уже
-            # режется — см. лог «initial_prompt truncated»).
-            _lang_hotwords = {
-                "ru": list(getattr(settings, "STT_HOTWORDS_RU", []) or []),
-                "es": list(getattr(settings, "STT_HOTWORDS_ES", []) or []),
-                "en": list(getattr(settings, "STT_HOTWORDS_EN", []) or []),
-            }
-            context_suffix = build_initial_prompt(
-                history_items=history_context or [],
-                hotwords=merge_language_hotwords(
-                    stt_hotwords or [], resolved_lang, _lang_hotwords
-                ),
-            )
-            if context_suffix:
-                dynamic_prompt = f"{context_suffix} {dynamic_prompt}"
-
-            # Добавляем speaker-aware dialogue hint если включено и спикеров ≥ threshold.
-            _diarize_for_prompt = diarize if diarize is not None else settings.DIARIZATION_ENABLED
-            if settings.STT_SPEAKER_AWARE_PROMPT_ENABLED and _diarize_for_prompt:
-                try:
-                    _speaker_cache: dict[str, Any] = {}
-                    num_spk = self._estimate_num_speakers(audio_data, cache=_speaker_cache)
-                    if num_spk is not None and num_spk >= settings.STT_DIALOGUE_HINT_THRESHOLD:
-                        spk_hint = self._build_speaker_context_prompt(num_spk, resolved_lang)
-                        if spk_hint:
-                            dynamic_prompt = f"{dynamic_prompt}\n{spk_hint}"
-                except Exception as _spk_exc:
-                    logger.debug("Speaker-aware prompt: оценка не удалась, пропускаем: %s", _spk_exc)
+        # 1. Формирование динамического промпта (см. _build_dynamic_prompt).
+        dynamic_prompt = self._build_dynamic_prompt(
+            audio_data,
+            is_preview=is_preview,
+            context_free=context_free,
+            domain=domain,
+            extra_vocabulary=extra_vocabulary,
+            history_context=history_context,
+            stt_hotwords=stt_hotwords,
+            resolved_lang=resolved_lang,
+            diarize=diarize,
+        )
 
         # 1.9 Диаризованный конвейер (W-C, opt-in): ТОЛЬКО файловые входы —
         # живые диктовки (ndarray/bytes) не попадают сюда никогда. Ранний
