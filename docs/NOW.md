@@ -1,5 +1,33 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-26 — первый срез конструктора: source/offline checkpoint
+
+Ветка `codex/ear-startup-characterization-1025`, база `66e44c53`.
+Production checkpoint `d4ec1f5b`: прежние три присваивания local text stores
+вынесены в `_init_local_text_stores`, единственный вызов — сразу после plaintext
+IPC. Порядок Vocabulary → Snippet → Phonetic, три отдельных чтения `data_dir`,
+немедленные присваивания и распространение исключений сохранены.
+
+Локальная характеристика конструктора: **40 PASS на Python 3.14 и 40 PASS на
+Python 3.12**, семь исходных reader assertions исполнены в AST-обёртке;
+это не полные исходные integration suites. Обратный inline даёт прежний module
+AST; 16 статических audit-команд прошли. Отдельный ограниченный стенд:
+**34 синтетические проверки PASS**, затем **92 исходных storage tests PASS**
+(35 vocabulary / 27 snippets / 30 phonetic) на Python 3.14.8. В последнем
+запуске загружены 11 канонических модулей, count и имена методов сверены,
+ошибок, skips, запрещённых обращений и оставшихся потоков нет; дочерний процесс
+завершён, его группа пуста, хеши исходников сохранены.
+
+Стенд запуска и его квитанции остаются внешними проверочными артефактами;
+они не добавляют приложению механизм runtime-защиты. Полный BackendService,
+startup/IPC/E2E, полноценное Ubuntu parity-окружение и hosted CI этим checkpoint
+не подтверждены. Следующий шаг — финальное whole-diff review и draft PR с
+отдельным CI точного SHA. Runtime, модели, клон и OrbStack не менялись.
+
+Владелец 26.10 разрешил лёгкие ограниченные offline-проверки параллельно между
+сессиями с сообщениями START/FINISH. Общие тяжёлые CI/build/model/lifecycle
+операции по-прежнему требуют согласования фактической нагрузки.
+
 ## 2026-10-23 — Task 2 partial/paste SSE: локальный source checkpoint
 
 Ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568` (#2109,
