@@ -53,7 +53,13 @@ extension AgentAppDelegate {
             return
         }
         let badge = activePresetBadge()
-        if isRecording {
+        if isProcessing {
+            // Диктовка держит isRecording=true до терминального ответа stop
+            // (токен нужен recovery), но захват уже остановлен: красная точка
+            // всю финализацию (до 5 мин) показывала бы запись, которой нет.
+            button.image = nil
+            button.title = "KE … [\(badge)]"
+        } else if isRecording {
             // Wave 67 (AGENT-J): `●` U+25CF → SF Symbol to avoid TFPFont::CopyGlyphPath hang.
             let symConfig = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
                 .applying(NSImage.SymbolConfiguration(paletteColors: [NSColor.systemRed]))
@@ -63,9 +69,6 @@ extension AgentAppDelegate {
                 button.imagePosition = .imageLeft
             }
             button.title = "KE [\(badge)]"
-        } else if isProcessing {
-            button.image = nil
-            button.title = "KE … [\(badge)]"
         } else {
             button.image = nil
             button.title = "KE [\(badge)]"

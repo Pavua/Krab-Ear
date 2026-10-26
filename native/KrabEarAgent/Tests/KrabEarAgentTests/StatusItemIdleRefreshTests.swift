@@ -70,6 +70,23 @@ final class StatusItemIdleRefreshWiringTests: XCTestCase {
         }
     }
 
+    /// Реальный stop диктовки держит isRecording=true до терминального ответа
+    /// (токен нужен recovery) и одновременно ставит isProcessing=true.
+    func test_dictation_finalization_shows_processing_not_recording() {
+        withDelegate { delegate, button in
+            delegate.isRecording = true
+            delegate.isProcessing = true
+            delegate.refreshStatusItemTitle()
+            XCTAssertTrue(button.title.contains("…"), "Финализация должна читаться как обработка")
+            XCTAssertNil(button.image, "Красная точка записи не должна гореть во время финализации")
+
+            delegate.isProcessing = false
+            delegate.refreshStatusItemTitle()
+            XCTAssertFalse(button.title.contains("…"))
+            XCTAssertNotNil(button.image, "Recovery без активного IPC остаётся записью с красной точкой")
+        }
+    }
+
     func test_external_temporary_title_is_restored_on_next_tick() {
         withDelegate { delegate, button in
             delegate.applyHealthStateToStatusItem(.healthy)
