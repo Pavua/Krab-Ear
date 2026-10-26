@@ -1,5 +1,56 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-26 — очередь интегрирована; релиз подготовлен, выкат удерживается
+
+**Source / merge / exact post-merge CI: PASS. Runtime cutover: HOLD.**
+На 26.10 23:50 Madrid удалённая целевая ветка подтверждена на
+`22a3c0e3193999bcb434d9fdb823e2b4eb967877`. Итоговое tree
+`c98feed74a507394be33b25111a45e84ca95ac52` совпадает с независимо
+проверенной композицией; Swift, scripts и core/config.py не менялись.
+
+| PR | Merge SHA | Terminal post-merge CI / backend |
+| --- | --- | --- |
+| #2125: helper трёх хранилищ | `0fe59fecdd405d1445daaa2d8a6c873508f0a781` | 40338133375 / 40338133317 SUCCESS |
+| #2126: отмена поздней доставки, удержание LiveSubs worker | `0b93461549df220f8c9a20f9682739f895f7702a` | 40348134838 / 40348134995 SUCCESS |
+| #2127: владение принятой async batch-задачей | `22a3c0e3193999bcb434d9fdb823e2b4eb967877` | 40353515577 / 40353515682 SUCCESS |
+
+Все три backend raw receipts: 16 chunks, aggregate rc0, без fallback и
+isolated failed files; число файлов соответственно 1128 / 1129 / 1130.
+Это числа файлов отдельных запусков, не сумма тестовых методов.
+Повторные/отменённые запуски в этой интеграции не создавались;
+все три наблюдателя завершены, дочерние группы пусты.
+
+Владелец 26.10 прямо разрешил merge/deploy готового Ear. Подготовлен чистый
+locked detached release `ear-release-22a3c0e3`; старый `ear-release-66e44c53`
+сохранён для отката. `prepare_release_cutover.py` проверил private bundle
+двух before/two after plist и manifest: меняются только Python entrypoint и
+PYTHONPATH. Действующие LaunchAgents, Swift app и процессы не изменялись.
+Приватные plist/env не публиковать и не включать в Git.
+
+Независимое release review: **PREPARATION GO / CUTOVER HOLD до первой
+остановки**. Старый `66e44` не учитывает все batch/background/nested/TTS
+задачи; полного terminal drain доступные metadata не подтверждают.
+Нулевые recording/meeting/native счётчики и health200 не закрывают это
+UNKNOWN. Удерживаемое окно без новых запросов (включая VG periodic STT)
+и passive/reconnect текущего Swift процесса тоже отдельно не подтверждены.
+Новый код не исправляет уже работающую старую generation задним числом.
+
+Следующий шаг: отдельное решение владельца о legacy-risk maintenance либо
+сохранение текущего запуска. При maintenance сначала согласовать фактическое
+окно и producer fence; не трактовать elapsed time/ответ соседнего чата как
+разрешение stop. Использовать reviewed safe-release-cutover и stage-specific
+откат обоих plist. Не делать автоматический kill/rollback занятого или
+неизвестного нового процесса. Модели, клон и OrbStack остаются защищены.
+
+Артефакты текущего чата: `ear-integration-release-20261026/` —
+`ci_owner/INTEGRATION_FINAL.json`, `RELEASE_SOURCE_GATE_REVIEW_RU.md`,
+`RELEASE_STAGED_RECEIPT.json`; приватный bundle хранится отдельно.
+Итоговая память содержит абсолютные пути. Source/CI этого блока 100%;
+выкат не начат, live E2E и сохранность фраз при реальном cutover не заявляются.
+
+Предыдущие датированные разделы ниже — исторические checkpoints;
+их «следующий шаг» не заменяет текущий статус.
+
 ## 2026-10-26 — первый срез конструктора: source/offline checkpoint
 
 Ветка `codex/ear-startup-characterization-1025`, база `66e44c53`.
