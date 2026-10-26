@@ -464,6 +464,11 @@ def live_backend_services() -> list["BackendService"]:
 class BackendService:
     """Бизнес-логика сервиса: запись, транскрибация, история и настройки."""
 
+    def _init_local_text_stores(self, store: StateStore) -> None:
+        self.vocabulary = VocabularyStore(data_dir=store.data_dir)
+        self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
+        self._phonetic_vocab_svc = PhoneticVocabService(data_dir=store.data_dir)
+
     def __init__(
         self,
         store: StateStore,
@@ -490,9 +495,7 @@ class BackendService:
             profile_identity=str(self.store.data_dir),
         )
         self._plaintext_export_ipc = PlaintextExportIPC(self._plaintext_export_authorizer)
-        self.vocabulary = VocabularyStore(data_dir=store.data_dir)
-        self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
-        self._phonetic_vocab_svc = PhoneticVocabService(data_dir=store.data_dir)
+        self._init_local_text_stores(store)
 
         def _emit_audio_level(rms: float) -> None:
             """Callback для VU meter: эмитит событие recording.audio_level ~30 Hz."""
