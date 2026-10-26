@@ -1,5 +1,20 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-24 — #2108: разрешение конфликта с интеграционной базой
+
+TTS handler observer из #2108 сохранён без изменений production-кода.
+Конфликт только в этом журнале разрешён поверх актуальной базы #2118
+`c44db7d9`; существующие SSE/recovery и тестовые исправления базы сохранены.
+Историческая квалификация #2108: 110 локальных тестов, audit и независимое
+Astra source review PASS. Повторные зависимые проверки и exact-head CI после
+merge базы ещё не выполнены; очередь согласована с Main/Gateway.
+
+Далее: согласованная интеграция #2119 (IPC + REST translation replay), затем
+проверка совместного дерева с TTS observer. `coverage.complete` остаётся false:
+handler idle не доказывает завершение вложенных/background/direct вызовов.
+Рестартов до закрытия live producer/drain и Swift rollback гейтов нет.
+Модели, конфигурация и runtime этой карточкой не меняются.
+
 ## 2026-10-23 — Task 2 partial/paste SSE: локальный source checkpoint
 
 Ветка `codex/ear-partial-sse-1022`, stacked на Task 1 `f0b9f568` (#2109,

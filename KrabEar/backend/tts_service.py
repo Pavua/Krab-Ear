@@ -35,6 +35,7 @@ import wave
 from typing import Any
 
 from core.config import settings
+from backend.activity_diagnostics import ActivityReservations
 
 logger = logging.getLogger("KrabEar.Backend.TTS")
 
@@ -42,6 +43,8 @@ logger = logging.getLogger("KrabEar.Backend.TTS")
 # Rate limit ограничивает частоту, но не число одновременно живущих say/ML-вызовов.
 # Direct bytes API — внутренний; production входит через handle_synthesize_speech.
 _SYNTHESIS_GATE = threading.BoundedSemaphore(1)
+_TTS_ACTIVITY = ActivityReservations(generation_scope="tts_handler",
+                                     completion_scope="synthesis_handler", busy_reason="tts")
 
 # Порог кириллицы для определения RU
 _CYRILLIC_THRESHOLD = 0.30  # >30% символов кириллица -> Russian
@@ -321,6 +324,10 @@ class TTSService:
         self._silero_attempted = False
         self._kokoro_attempted = False
 
+    def activity_snapshot(self) -> dict:
+        """Process-wide handler metadata без модели/текста/захвата admission gate."""
+        return _TTS_ACTIVITY.snapshot()
+
     # Lazy accessors
 
     def _get_silero(self) -> Any | None:
@@ -523,6 +530,7 @@ class TTSService:
 
         return b""
 
+    @_TTS_ACTIVITY.tracked("tts_handler")
     def handle_synthesize_speech(self, params: dict) -> dict:
         """IPC handler для метода synthesize_speech.
 

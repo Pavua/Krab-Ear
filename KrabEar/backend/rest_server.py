@@ -1580,7 +1580,11 @@ def readiness():
         logger.warning("readiness: stt_residency snapshot недоступен", exc_info=True)
         report["stt_residency"] = {"owner": "rest", "state": "unavailable"}
     from backend.brain_lease import observe_brain_lease
-    report["activity"] = rest_activity_snapshot(_REST_ACTIVITY)
+    try:
+        tts_owner = _deps().tts_service
+    except Exception:
+        tts_owner = None
+    report["activity"] = rest_activity_snapshot(_REST_ACTIVITY, tts_owner)
     report["lease_observation"] = observe_brain_lease()
     status_code = 200 if report["overall_ready"] else 503
     return jsonify(report), status_code
