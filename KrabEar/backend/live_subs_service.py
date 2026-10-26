@@ -99,6 +99,13 @@ class LiveSubsService:
         # locking, тот же паттерн, что и lazy-load STT-адаптеров).
         self._worker_start_lock = threading.Lock()
         self._worker_cond = threading.Condition()
+        # Отдельный reentrant gate линеаризует reset с доставкой. Buffer/worker
+        # locks никогда не удерживаются во время внешнего event callback.
+        self._delivery_lock = threading.RLock()
+        self._generation = 0
+        self._invalidated_seq = 0
+        self._processing = False
+        self._closed = False
         self._worker_thread: threading.Thread | None = None
         # Экземпляр Event, захваченный ТЕКУЩИМ потоком воркера — см. _worker_loop
         # про то, почему это не общий на сервис флаг.
@@ -156,6 +163,9 @@ class LiveSubsService:
         # ни здесь, ни где-либо ещё (F3): он живёт исключительно в фоновом
         # воркере, вне self._lock и вне IPC-тредов.
         with self._lock:
+            if self._closed:
+                raise RuntimeError("LiveSubsService is closed")
+            generation = self._generation
             self._buffer.append(audio_array)
             self._buffer_samples += len(audio_array)
             buffer_sec = self._buffer_samples / max(sample_rate, 1)
@@ -207,6 +217,7 @@ class LiveSubsService:
             target_lang=target_lang,
             start_ts=start_ts,
             end_ts=end_ts,
+            generation=generation,
         )
         if not is_final:
             # Немедленный возврат — обычный путь. Результат (если/когда воркер
@@ -222,7 +233,7 @@ class LiveSubsService:
         return result
 
     def stop(self) -> dict[str, Any]:
-        """Flush оставшегося буфера, останавливает фоновый воркер и сбрасывает состояние.
+        """Flush оставшегося буфера и сброс сессии с reusable worker.
 
         Если privacy_mode_enabled=True — буфер сбрасывается БЕЗ транскрипции
         и эмиссии событий (аудио, накопленное до переключения режима, не утекает).
@@ -233,6 +244,7 @@ class LiveSubsService:
         а не виснем на неопределённое время.
         """
         with self._lock:
+            generation = self._generation
             privacy_active = self._settings_get("privacy_mode_enabled", False)
             if privacy_active:
                 self._reset()
@@ -258,21 +270,22 @@ class LiveSubsService:
             # Privacy fail-safe: сессия завершена под privacy_mode — не даём
             # уже засабмиченному ДО переключения режима окну (если такое есть)
             # доехать до STT/emit. Та же логика, что и в _process_window/reset().
-            self._discard_pending_window()
-            self._stop_worker()
+            self._discard_pending_window(expected_generation=generation)
             return {"status": "stopped", "flushed": False, "skipped": True,
                     "reason": "privacy_mode_active"}
 
         if not has_data:
-            self._stop_worker()
+            self._discard_pending_window(expected_generation=generation)
             return {"status": "stopped", "flushed": False}
 
         seq = self._submit_window(
             audio=audio, sample_rate=16000, target_lang="off",
             start_ts=start_ts, end_ts=end_ts,
+            generation=generation,
         )
         result = self._await_completion(seq, timeout=_FINAL_FLUSH_TIMEOUT_SEC)
-        self._stop_worker()
+        if result is None:
+            self._discard_pending_window(expected_generation=generation)
         if result is None:
             logger.warning(
                 "LiveSubsService: финальный flush в stop() не успел за %.1fс",
@@ -296,7 +309,7 @@ class LiveSubsService:
         """
         deadline = time.monotonic() + timeout
         with self._worker_cond:
-            while not (self._pending_window is None and self._completed_seq >= self._pending_seq):
+            while not (not self._processing and self._pending_window is None and self._completed_seq >= self._pending_seq):
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
@@ -310,18 +323,24 @@ class LiveSubsService:
         чтобы накопленное system-audio было стёрто немедленно, не пройдя через
         STT/EventBus. Отличается от stop(): никакого flush, никаких событий.
 
-        F3: также выкидывает необработанное окно из слота воркера и
-        останавливает воркер — иначе аудио, засабмиченное ДО purge, всё равно
-        транскрибировалось бы и утекло через EventBus уже ПОСЛЕ того, как
-        reset() отчитался о полной очистке.
+        Инвалидирует старое поколение, включая уже выполняемый STT/перевод.
+        Один idle daemon остаётся reusable до close(); обработанное окно и
+        его текст не удерживаются в стеке. Это не подтверждение STT-drain:
+        уже выполняемый нативный вызов отменить синхронно невозможно.
         """
-        with self._lock:
-            self._reset()
-        self._discard_pending_window()
-        self._stop_worker()
+        with self._delivery_lock:
+            with self._lock:
+                self._reset()
+                self._discard_pending_window()
+        # Занятый worker остаётся единственным владельцем STT и после
+        # возврата старого вызова сможет обработать окно новой сессии.
+        # Не останавливаем reusable worker: exit между ensure и enqueue
+        # иначе мог бы оставить новое принятое окно без потребителя.
 
-    def close(self) -> None:
-        """Graceful shutdown: останавливает фоновый flush-воркер без обработки хвоста.
+    def close(self) -> bool:
+        """Терминально закрывает приём, отменяет хвост и bounded-join worker.
+
+        False означает живой retained worker, True — подтверждённое завершение.
 
         Идемпотентен — безопасно вызывать несколько раз. Тот же паттерн, что и
         другие daemon-треды сервиса (DiskSpaceMonitor/RecapScheduler/
@@ -329,8 +348,12 @@ class LiveSubsService:
         бы залогировать уже после начала teardown интерпретатора в CI
         (feedback_backendservice_teardown_ci.md).
         """
-        self._discard_pending_window()
-        self._stop_worker()
+        with self._delivery_lock:
+            with self._lock:
+                self._closed = True
+                self._reset()
+                self._discard_pending_window()
+        return self._stop_worker()
 
     # ── IPC handlers ──────────────────────────────────────────────────────────
 
@@ -393,6 +416,9 @@ class LiveSubsService:
         if self._worker_thread is not None and self._worker_thread.is_alive():
             return
         with self._worker_start_lock:
+            with self._lock:
+                if self._closed:
+                    return
             if self._worker_thread is not None and self._worker_thread.is_alive():
                 return
             stop_event = threading.Event()
@@ -422,6 +448,7 @@ class LiveSubsService:
                     self._worker_cond.wait(timeout=_WORKER_POLL_SEC)
                 window = self._pending_window
                 self._pending_window = None
+                self._processing = window is not None
             if window is None:
                 continue
             try:
@@ -433,11 +460,15 @@ class LiveSubsService:
                 logger.exception("LiveSubsService: фоновый flush упал с исключением")
                 result = {"text": "", "translation": None}
             with self._worker_cond:
-                self._completed_seq = window["seq"]
-                self._completed_result = result
+                self._processing = False
+                if window.get("generation", self._generation) == self._generation:
+                    self._completed_seq = window["seq"]
+                    self._completed_result = result
                 self._worker_cond.notify_all()
+            # После purge отменённое аудио/текст не остаются в стеке idle worker.
+            del window, result
 
-    def _stop_worker(self) -> None:
+    def _stop_worker(self) -> bool:
         """Останавливает текущий воркер (если запущен) и джойнит с таймаутом.
 
         daemon=True не блокирует завершение процесса сам по себе, но не
@@ -451,19 +482,26 @@ class LiveSubsService:
             thread = self._worker_thread
             stop_event = self._worker_stop_event
             if thread is None or stop_event is None:
-                return
-            stop_event.set()
+                return True
             with self._worker_cond:
+                stop_event.set()
                 self._worker_cond.notify_all()
-            thread.join(timeout=_WORKER_JOIN_TIMEOUT_SEC)
+        # Не держим start lock во время join: callback может вызвать reset.
+        if thread is threading.current_thread():
+            return False
+        thread.join(timeout=_WORKER_JOIN_TIMEOUT_SEC)
+        with self._worker_start_lock:
             if thread.is_alive():
                 logger.warning(
                     "LiveSubsService: воркер не завершился за %.1fс при остановке — "
                     "оставлен daemon-потоком",
                     _WORKER_JOIN_TIMEOUT_SEC,
                 )
-            self._worker_thread = None
-            self._worker_stop_event = None
+                return False
+            if self._worker_thread is thread:
+                self._worker_thread = None
+                self._worker_stop_event = None
+            return True
 
     def _submit_window(
         self,
@@ -472,6 +510,7 @@ class LiveSubsService:
         target_lang: str,
         start_ts: float,
         end_ts: float,
+        generation: int | None = None,
     ) -> int:
         """Кладёт снапшот в слот воркера (размер 1, последний выигрывает).
 
@@ -481,8 +520,13 @@ class LiveSubsService:
         один раз на эпизод (серию подряд идущих дропов), а не на каждый —
         иначе лог-шторм воспроизвёл бы тот же паттерн, что и живой инцидент.
         """
+        with self._worker_cond:
+            if generation is not None and generation != self._generation:
+                return self._invalidated_seq
         self._ensure_worker_started()
         with self._worker_cond:
+            if generation is not None and generation != self._generation:
+                return self._invalidated_seq
             self._pending_seq += 1
             seq = self._pending_seq
             if self._pending_window is not None:
@@ -497,6 +541,7 @@ class LiveSubsService:
                 self._drop_episode_logged = False
             self._pending_window = {
                 "seq": seq,
+                "generation": self._generation,
                 "audio": audio,
                 "sample_rate": sample_rate,
                 "target_lang": target_lang,
@@ -515,22 +560,36 @@ class LiveSubsService:
         deadline = time.monotonic() + timeout
         with self._worker_cond:
             while self._completed_seq < seq:
+                if seq <= self._invalidated_seq:
+                    return None
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
                 self._worker_cond.wait(timeout=remaining)
-            return self._completed_result
+            return None if seq <= self._invalidated_seq else self._completed_result
 
-    def _discard_pending_window(self) -> None:
+    def _discard_pending_window(self, expected_generation: int | None = None) -> None:
         """Выкидывает окно из слота БЕЗ обработки.
 
         Используется reset()/stop()-под-privacy/close() — окно, засабмиченное
         до явного сброса состояния, не должно доехать до STT/emit.
         """
+        with self._delivery_lock:
+            with self._lock:
+                with self._worker_cond:
+                    if expected_generation is not None and expected_generation != self._generation:
+                        return
+                    self._generation += 1
+                    self._invalidated_seq = self._pending_seq
+                    self._completed_seq = self._pending_seq
+                    self._completed_result = None
+                    self._pending_window = None
+                    self._worker_cond.notify_all()
+
+    def _window_is_current(self, window: dict[str, Any]) -> bool:
         with self._worker_cond:
-            if self._pending_window is not None:
-                self._pending_window = None
-                self._worker_cond.notify_all()
+            current = window.get("generation", self._generation) == self._generation
+        return current and not self._settings_get("privacy_mode_enabled", False)
 
     # ── internals: flush pipeline ─────────────────────────────────────────────
 
@@ -547,7 +606,7 @@ class LiveSubsService:
         # переключения режима. Окно теперь может ждать своей очереди в
         # воркере ДОЛЬШЕ, чем раньше висел один синхронный STT-вызов — тем
         # более веская причина перепроверять здесь, а не только на входе.
-        if self._settings_get("privacy_mode_enabled", False):
+        if not self._window_is_current(window):
             return {"text": "", "translation": None}
 
         # Defense-in-depth (W1771 HIGH): не доверяем несанитизированному
@@ -655,6 +714,8 @@ class LiveSubsService:
                     self._stt_release()
                 except Exception:
                     logger.exception("LiveSubsService: stt_release упал")
+        if not self._window_is_current(window):
+            return {"text": "", "translation": None}
         text = stt_result.get("text", "").strip()
         language_detected = stt_result.get("language")
 
@@ -729,7 +790,10 @@ class LiveSubsService:
             end_ts=end_ts,
             language_detected=language_detected,
         )
-        event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
+        with self._delivery_lock:
+            if not self._window_is_current(window):
+                return {"text": "", "translation": None}
+            event_bus.emit_typed(EventType.LIVE_SUBS_RESULT, event_payload)
         # W1770 MED: НИКОГДА не логируем сам текст транскрипта/перевода (PII).
         # Только метаданные — гарантия metadata-only логирования.
         logger.info(

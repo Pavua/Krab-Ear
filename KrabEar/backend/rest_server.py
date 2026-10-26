@@ -2825,7 +2825,8 @@ def _ws_stream_handler(ws):
     except Exception as e:
         logger.error("WS /v1/stream loop error: %s", e)
     finally:
-        live_subs.reset()
+        # Экземпляр принадлежит соединению: reusable reset оставил бы daemon.
+        live_subs.close()
         try:
             ws.close()
         except Exception:
