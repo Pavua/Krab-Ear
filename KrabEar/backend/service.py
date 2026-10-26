@@ -2598,8 +2598,11 @@ class BackendService:
         live_subs = getattr(self, "_live_subs", None)
         if live_subs is not None:
             try:
-                live_subs.close()
+                if live_subs.close() is False:
+                    all_workers_stopped = False
+                    logger.error("LiveSubsService сохранил живой worker при close()")
             except Exception:
+                all_workers_stopped = False
                 logger.exception("LiveSubsService.close() raised during close()")
 
         # Stop PurgeScheduler daemon thread — mirrors the RecapScheduler stop above.
@@ -2697,7 +2700,7 @@ class BackendService:
         # no-op, не AttributeError-шум в логе.
         transcriber = getattr(self, "transcriber", None)
         close_transcriber = getattr(transcriber, "close", None) if transcriber is not None else None
-        if close_transcriber is not None and call_stt_stopped:
+        if close_transcriber is not None and all_workers_stopped and call_stt_stopped:
             try:
                 if close_transcriber() is False:
                     all_workers_stopped = False

@@ -239,19 +239,25 @@ class TestWorkerLazyLifecycle(unittest.TestCase):
         self.assertTrue(svc._worker_thread.daemon, "воркер обязан быть daemon-потоком")
         svc.close()
 
-    def test_worker_stopped_by_stop(self) -> None:
+    def test_worker_reused_by_stop_and_reaped_by_close(self) -> None:
         svc = _make_service()
         svc.ingest(_pcm_bytes(3.0), 16000, "off", False)
         self.assertIsNotNone(svc._worker_thread)
         svc.stop()
-        self.assertIsNone(svc._worker_thread, "stop() должен остановить воркер")
+        self.assertIsNotNone(svc._worker_thread)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0))
+        self.assertTrue(svc.close())
+        self.assertIsNone(svc._worker_thread)
 
-    def test_worker_stopped_by_reset(self) -> None:
+    def test_worker_reused_by_reset_and_reaped_by_close(self) -> None:
         svc = _make_service()
         svc.ingest(_pcm_bytes(3.0), 16000, "off", False)
         svc.wait_until_idle(timeout=2.0)
         svc.reset()
-        self.assertIsNone(svc._worker_thread, "reset() должен остановить воркер")
+        self.assertIsNotNone(svc._worker_thread)
+        self.assertTrue(svc.wait_until_idle(timeout=2.0))
+        self.assertTrue(svc.close())
+        self.assertIsNone(svc._worker_thread)
 
     def test_worker_stopped_by_close(self) -> None:
         svc = _make_service()
@@ -272,15 +278,17 @@ class TestWorkerLazyLifecycle(unittest.TestCase):
         svc.close()  # воркер никогда не стартовал — не должен бросить
 
     def test_worker_restarts_lazily_after_stop(self) -> None:
-        """Новая сессия после stop() снова лениво стартует воркер (self-heal)."""
+        """Новая сессия после stop() переиспользует единственный worker."""
         svc = _make_service()
         svc.ingest(_pcm_bytes(1.0), 16000, "off", False)
         svc.stop()
-        self.assertIsNone(svc._worker_thread)
+        worker = svc._worker_thread
+        self.assertIsNotNone(worker)
 
         svc.ingest(_pcm_bytes(3.0), 16000, "off", False)
         self.assertIsNotNone(svc._worker_thread)
         self.assertTrue(svc._worker_thread.is_alive())
+        self.assertIs(svc._worker_thread, worker)
         svc.close()
 
     def test_wait_until_idle_true_when_nothing_submitted(self) -> None:
