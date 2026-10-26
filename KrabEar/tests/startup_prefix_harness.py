@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import copy
+import importlib.util
 import json
 import logging
 import math
@@ -58,6 +59,16 @@ def early_init_nodes(tree):
     assert any(isinstance(n.func, ast.Attribute) and n.func.attr == "start" for n in calls)
     assert any(isinstance(n.func, ast.Attribute) and n.func.attr == "Thread" for n in calls)
     return init, prefix
+
+
+def local_text_store_helpers(tree):
+    """Exact allowlist одного helper; unknown/extra calls не обходятся рекурсивно."""
+    path = Path(__file__).with_name("local_text_stores_harness.py")
+    spec = importlib.util.spec_from_file_location("ear_startup_local_store_contract", path)
+    contract = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(contract)
+    _, helpers = contract.slice_contract(tree)
+    return helpers
 
 
 class DiskSettings:
@@ -135,7 +146,8 @@ def build_harness(directory, settings, *, source=None):
     service_class = copy.deepcopy(definition(tree, "BackendService"))
     service_class.bases = []
     service_class.decorator_list = []
-    service_class.body = [init, *[copy.deepcopy(definition(service_class, name)) for name in (
+    service_class.body = [init, *copy.deepcopy(local_text_store_helpers(tree)),
+                          *[copy.deepcopy(definition(service_class, name)) for name in (
         "_cached_settings", "_get_runtime_setting", "_invalidate_settings_cache")]]
     events = []
     rewriter = SimpleNamespace()

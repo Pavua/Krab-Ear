@@ -1,4 +1,4 @@
-"""Tests-only срез: порядок, identity и fail-closed подготовка helper extraction."""
+"""Контракт extracted slice: порядок, identity и fail-closed AST границы."""
 
 import ast
 import copy
@@ -25,18 +25,30 @@ def source():
     return ast.parse((Path(__file__).parents[1] / "backend/service.py").read_text(encoding="utf-8"))
 
 
-def helper_candidate():
-    """Только AST fixture будущего review-патча, production source не записывается."""
+def candidate_source(shape):
+    """Inline/extracted AST fixtures; production source не записывается."""
     tree = source()
     cls = harness.definition(tree, "BackendService")
     init = harness.definition(cls, "__init__")
-    nodes, _ = harness.slice_contract(tree)
+    nodes, helpers = harness.slice_contract(tree)
     first = init.body.index(nodes[0])
+    if shape == "inline":
+        if helpers:
+            init.body[first:first + 1] = copy.deepcopy(helpers[0].body)
+            cls.body.remove(helpers[0])
+        return tree
+    assert shape == "helper"
+    if helpers:
+        return tree
     helper = ast.parse(f"def {harness.HELPER}(self, store: StateStore) -> None:\n    pass").body[0]
     helper.body = copy.deepcopy(nodes)
     init.body[first:first + len(nodes)] = ast.parse(f"self.{harness.HELPER}(store)").body
     cls.body.insert(0, helper)
     return tree
+
+
+def helper_candidate():
+    return candidate_source("helper")
 
 
 def assert_success_contract(tree):
@@ -93,7 +105,7 @@ def test_actual_engine_and_ipc_bindings_keep_created_instances():
 ])
 @pytest.mark.parametrize("shape", ["inline", "future_helper"])
 def test_failure_preserves_prior_assignments_and_same_exception(factory, assigned, called, shape):
-    tree = source() if shape == "inline" else helper_candidate()
+    tree = candidate_source("inline") if shape == "inline" else helper_candidate()
     probe = harness.build_probe(tree, fail_at=factory)
     assert probe.caught is probe.error, "same exception must propagate, no fallback/wrapping"
     assert tuple(attr for attr in harness.ATTRS if hasattr(probe.service, attr)) == assigned
@@ -105,12 +117,18 @@ def test_failure_preserves_prior_assignments_and_same_exception(factory, assigne
             assert getattr(probe.service, attr) is probe.instances[constructor]
 
 
-def test_actual_inline_scope_is_exact_and_not_yet_extracted():
+def test_actual_helper_scope_is_exact_and_called_at_original_boundary():
     tree = source()
     cls = harness.definition(tree, "BackendService")
     assert not cls.bases, "new inheritance requires reviewing slice assignment semantics"
     assert not any(getattr(node, "name", None) == "__setattr__" for node in cls.body)
-    harness.assert_inline_contract(tree)
+    nodes, helpers = harness.slice_contract(tree)
+    assert len(helpers) == 1, "reviewed helper extraction is required"
+    assert len(nodes) == 1
+
+
+def test_inline_baseline_fixture_retains_exact_three_assignments():
+    harness.assert_inline_contract(candidate_source("inline"))
 
 
 def test_future_exact_helper_is_executable_and_has_same_consumers():
@@ -156,14 +174,16 @@ def test_future_helper_gate_rejects_unsafe_ast_before_execution(change):
         harness.slice_contract(tree)
 
 
-def test_existing_startup_harness_does_not_silently_skip_unknown_helper(tmp_path):
-    # Старый harness не подключает helper сам: до будущей явной адаптации fail closed.
-    with pytest.raises(AttributeError, match="_init_local_text_stores"):
-        startup.build_harness(tmp_path / "settings", {}, source=helper_candidate())
+def test_startup_harness_does_not_silently_skip_unknown_helper(tmp_path):
+    tree = helper_candidate()
+    cls = harness.definition(tree, "BackendService")
+    cls.body.remove(harness.definition(cls, harness.HELPER))
+    with pytest.raises(AssertionError, match="unknown helper"):
+        startup.build_harness(tmp_path / "settings", {}, source=tree)
 
 
 def test_sensitivity_to_tuple_assignment_delaying_partial_state():
-    tree = source()
+    tree = candidate_source("inline")
     cls = harness.definition(tree, "BackendService")
     init = harness.definition(cls, "__init__")
     nodes, _ = harness.slice_contract(tree)
