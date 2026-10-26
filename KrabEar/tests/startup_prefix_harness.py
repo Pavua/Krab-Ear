@@ -146,9 +146,10 @@ def build_harness(directory, settings, *, source=None):
     service_class = copy.deepcopy(definition(tree, "BackendService"))
     service_class.bases = []
     service_class.decorator_list = []
-    service_class.body = [init, *copy.deepcopy(local_text_store_helpers(tree)),
-                          *[copy.deepcopy(definition(service_class, name)) for name in (
-        "_cached_settings", "_get_runtime_setting", "_invalidate_settings_cache")]]
+    service_class.body = [
+        init, *copy.deepcopy(local_text_store_helpers(tree)),
+        *[copy.deepcopy(definition(service_class, name)) for name in (
+            "_cached_settings", "_get_runtime_setting", "_invalidate_settings_cache")]]
     events = []
     rewriter = SimpleNamespace()
     holder = {}

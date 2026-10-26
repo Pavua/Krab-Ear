@@ -129,8 +129,10 @@ def build_probe(tree, *, fail_at=None):
     init.body = copy.deepcopy(nodes)
     cls = ast.ClassDef(name="SliceProbe", bases=[], keywords=[],
                        body=[init, *copy.deepcopy(helpers)], decorator_list=[])
-    module = ast.Module(body=[ast.ImportFrom(module="__future__", level=0,
-                                            names=[ast.alias(name="annotations")]), cls], type_ignores=[])
+    module = ast.Module(
+        body=[ast.ImportFrom(module="__future__", level=0,
+                             names=[ast.alias(name="annotations")]), cls],
+        type_ignores=[])
     exec(compile(ast.fix_missing_locations(module), "<ear-text-stores-source>", "exec"), namespace)
     probe_cls = namespace["SliceProbe"]
     state.service = probe_cls.__new__(probe_cls)
