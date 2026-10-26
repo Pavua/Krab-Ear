@@ -90,6 +90,7 @@ _SHUTDOWN_RECORDER_TIMEOUT_SEC = 3.0
 # Этот бюджет ограничивает только ожидание незавершённого start/setup.
 # Остальные worker-ы сохраняют собственные независимые stop-таймауты ниже.
 _SHUTDOWN_LIFECYCLE_LOCK_TIMEOUT_SEC = 1.5
+_SHUTDOWN_BATCH_TIMEOUT_SEC = 1.5
 # R2 Task 3: живые finalizing-хвосты не вытесняются. Восьмой может завершиться,
 # а девятый fresh start временно получает уже известный recorder_stopping.
 _MAX_FINALIZING_GENERATIONS = 8
@@ -288,6 +289,9 @@ class RecordingCoreService:
 
         # Async transcription jobs
         self._job_tracker = JobTracker()
+        # Lifecycle lock защищает admission и registry. Worker не удаляет себя:
+        # только owner может подтвердить фактический выход thread через is_alive.
+        self._batch_workers: dict[str, threading.Thread] = {}
 
         # Allow test monkey-patching of audio input enumeration
         self._list_audio_inputs = RecordingCoreService._list_audio_inputs_static
@@ -1828,6 +1832,9 @@ class RecordingCoreService:
 
     def handle_transcribe_paths_async(self, params: dict[str, Any]) -> dict[str, Any]:
         """Асинхронный вариант `transcribe_paths`: возвращает job_id сразу."""
+        lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
+        if closed_event.is_set():
+            raise RuntimeError("Backend закрывается: batch-транскрибация недоступна")
         raw_paths = params.get("paths", [])
         if not isinstance(raw_paths, list):
             raise RuntimeError("Параметр paths должен быть массивом")
@@ -1854,15 +1861,7 @@ class RecordingCoreService:
             audio_paths = []
         total_files = len(audio_paths)
 
-        job_id = self._job_tracker.create_job(total_files=total_files)
-        # Сразу фиксируем отклонённые пути в errors задачи — видны через get_transcribe_progress.
-        if rejected_errors:
-            self._job_tracker.update(job_id, errors=list(rejected_errors))
         job_params = dict(params)
-        # W1342: получаем Event сразу после создания задачи — пока он точно существует.
-        # Если впоследствии задача будет вытеснена prune(), get_cancel_event() вернёт None
-        # и _cancel_check упадёт обратно на dict-полинг.
-        cancel_event = self._job_tracker.get_cancel_event(job_id)
 
         def _emit_status(
             op: str,
@@ -1938,6 +1937,8 @@ class RecordingCoreService:
             )
 
         def _cancel_check() -> bool:
+            if closed_event.is_set():
+                return True
             # W1342: используем threading.Event для мгновенной проверки без lock.
             # Если Event недоступен (задача вытеснена prune) — fallback на dict-полинг.
             if cancel_event is not None:
@@ -1948,19 +1949,20 @@ class RecordingCoreService:
         def _worker() -> None:
             try:
                 self._job_tracker.update(job_id, status="running")
-                _emit_status("transcribe_job", stage="started", progress=0.0)
-                result = self._transcribe_paths_core(
-                    job_params,
-                    progress_callback=_progress_callback,
-                    cancel_check=_cancel_check,
-                    on_file_start=_on_file_start,
-                    on_file_done=_on_file_done,
-                )
-                state = self._job_tracker.get(job_id) or {}
+                result: dict[str, Any] = {"items": [], "errors": []}
+                if not _cancel_check():
+                    _emit_status("transcribe_job", stage="started", progress=0.0)
+                    result = self._transcribe_paths_core(
+                        job_params,
+                        progress_callback=_progress_callback,
+                        cancel_check=_cancel_check,
+                        on_file_start=_on_file_start,
+                        on_file_done=_on_file_done,
+                    )
                 # Объединяем ошибки из ядра с ранее зафиксированными rejected_errors.
                 core_errors = list(result.get("errors") or [])
                 all_errors = rejected_errors + core_errors
-                if state.get("cancel_requested"):
+                if _cancel_check():
                     _emit_status("idle", stage="", progress=1.0)
                     self._job_tracker.update(
                         job_id,
@@ -1983,13 +1985,50 @@ class RecordingCoreService:
                 _emit_status("idle", stage="", progress=1.0)
                 self._job_tracker.mark_failed(job_id, str(exc))
 
-        thread = threading.Thread(
-            target=_worker,
-            name=f"transcribe-{job_id}",
-            daemon=True,
-        )
-        thread.start()
+        # Подготовка путей выше может ждать filesystem. Проверяем latch повторно
+        # и публикуем handle ДО start под тем же lock, что берёт shutdown.
+        with lifecycle_lock:
+            if closed_event.is_set():
+                raise RuntimeError("Backend закрывается: batch-транскрибация недоступна")
+            workers = self._batch_reap_workers_locked()
+            job_id = self._job_tracker.create_job(total_files=total_files)
+            if rejected_errors:
+                self._job_tracker.update(job_id, errors=list(rejected_errors))
+            # Сохраняем Event до возможного prune/clear в JobTracker.
+            cancel_event = self._job_tracker.get_cancel_event(job_id)
+            thread = None
+            try:
+                thread = threading.Thread(
+                    target=_worker,
+                    name=f"transcribe-{job_id}",
+                    daemon=True,
+                )
+                workers[job_id] = thread
+                thread.start()
+            except BaseException:
+                self._job_tracker.cancel(job_id)
+                self._job_tracker.mark_failed(job_id, "Не удалось запустить batch worker")
+                # start может прерваться после native spawn, до _started.
+                # Ни тип исключения, ни ident/is_alive не доказывают отсутствие
+                # потока. Опубликованный handle сохраняем до join-подтверждения.
+                self._batch_reap_workers_locked()
+                raise
         return {"job_id": job_id}
+
+    def _batch_reap_workers_locked(self) -> dict[str, threading.Thread]:
+        """Убрать только подтверждённо завершённые handles; lifecycle lock held."""
+        workers = getattr(self, "_batch_workers", None)
+        if workers is None:  # Совместимость с legacy __new__-дублями.
+            workers = self._batch_workers = {}
+        for job_id, worker in list(workers.items()):
+            try:
+                worker.join(timeout=0)
+            except RuntimeError:
+                # Ещё не started либо текущий thread: выход не подтверждён.
+                continue
+            if not worker.is_alive():
+                del workers[job_id]
+        return workers
 
     def handle_get_transcribe_progress(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает текущее состояние async-job'а."""
@@ -2250,8 +2289,9 @@ class RecordingCoreService:
         lifecycle_lock_timeout_sec: float = (
             _SHUTDOWN_LIFECYCLE_LOCK_TIMEOUT_SEC
         ),
+        batch_timeout_sec: float = _SHUTDOWN_BATCH_TIMEOUT_SEC,
     ) -> bool:
-        """Закрыть все recording-worker-ы без финальной транскрибации аудио.
+        """Закрыть recording/batch workers без финальной транскрибации аудио.
 
         Порядок важен: потребители аудиобуфера завершаются до рекордера. Каждый
         этап изолирован от ошибок, а повторный вызов безопасен. False означает,
@@ -2274,9 +2314,27 @@ class RecordingCoreService:
             return False
 
         try:
-            return self._abort_recording_workers_locked()
+            batch_workers = list(self._batch_reap_workers_locked().items())
+            for job_id, _worker in batch_workers:
+                self._job_tracker.cancel(job_id)
+            recording_stopped = self._abort_recording_workers_locked()
         finally:
             lifecycle_lock.release()
+
+        # Один общий budget; join вне lock, чтобы worker callbacks могли выйти.
+        # Уже начатый native вызов не прерываем. Его owner остаётся retained.
+        deadline = time.monotonic() + max(0.0, float(batch_timeout_sec))
+        current = threading.current_thread()
+        for _job_id, worker in batch_workers:
+            if worker is not current and worker.is_alive():
+                worker.join(timeout=max(0.0, deadline - time.monotonic()))
+        if not lifecycle_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return False
+        try:
+            batch_stopped = not self._batch_reap_workers_locked()
+        finally:
+            lifecycle_lock.release()
+        return recording_stopped and batch_stopped
 
     def _abort_recording_workers_locked(self) -> bool:
         """Остановить consumers+recorder; caller уже держит lifecycle-lock."""
@@ -3768,6 +3826,10 @@ class RecordingCoreService:
                 except Exception:
                     pass
 
+                # metadata/read может задержаться уже после проверки в начале
+                # итерации. Не входить в native STT после замеченной отмены.
+                if cancel_check is not None and cancel_check():
+                    break
                 import_lang_hint = lang_hint if lang_hint else "auto"
                 # MED-3: batch-импорт реально гоняет транскрайбер (+ rewriter
                 # внутри engine.transcribe) — раньше эта активность вообще не

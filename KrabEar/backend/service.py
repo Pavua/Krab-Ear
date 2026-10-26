@@ -2694,7 +2694,7 @@ class BackendService:
         # no-op, не AttributeError-шум в логе.
         transcriber = getattr(self, "transcriber", None)
         close_transcriber = getattr(transcriber, "close", None) if transcriber is not None else None
-        if close_transcriber is not None and call_stt_stopped:
+        if close_transcriber is not None and call_stt_stopped and all_workers_stopped:
             try:
                 if close_transcriber() is False:
                     all_workers_stopped = False
