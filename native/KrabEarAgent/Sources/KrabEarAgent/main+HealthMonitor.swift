@@ -265,6 +265,15 @@ extension AgentAppDelegate {
         applyHealthStateToStatusItem(lastHealthState)
     }
 
+    /// Один badge на батч ErrorBus: побеждает наивысшая severity, а не
+    /// последняя, иначе [critical, warn] маскировал бы critical.
+    func applyErrorBadge(forBatch payloads: [KrabErrorPayload]) {
+        guard let severity = StatusIndicatorImage.highestSeverity(payloads.map(\.severity)) else {
+            return
+        }
+        applyErrorSeverityBadge(severity)
+    }
+
     /// Останавливает lifecycle visible badge при завершении ErrorBus/app.
     func clearErrorSeverityBadge() {
         statusErrorBadgeSeverity = nil

@@ -102,10 +102,10 @@ extension AgentAppDelegate {
                 // новых ошибок сразу.
                 Task { @MainActor in
                     guard let self, let handler = self.errorActionHandler else { return }
+                    // В отличие от старого StatusIndicatorView, это обновляет
+                    // реальный NSStatusItem.button.image через AppDelegate.
+                    self.applyErrorBadge(forBatch: payloads)
                     for payload in payloads {
-                        // В отличие от старого StatusIndicatorView, это обновляет
-                        // реальный NSStatusItem.button.image через AppDelegate.
-                        self.applyErrorSeverityBadge(payload.severity)
                         await handler.handleErrorEvent(payload)
                     }
                 }

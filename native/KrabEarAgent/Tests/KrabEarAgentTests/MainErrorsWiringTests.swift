@@ -317,13 +317,8 @@ final class MainErrorsWiringTests: XCTestCase {
     /// батч ErrorBus обязан обновить state AgentAppDelegate, а реальный menu-bar
     /// image обязан получить это state при следующем render.
     func test_error_bus_severity_reaches_visible_menu_bar_image() throws {
-        let errorsSource = try String(contentsOf: Self.agentSourcesURL.appendingPathComponent("main+Errors.swift"), encoding: .utf8)
         let healthSource = try String(contentsOf: Self.agentSourcesURL.appendingPathComponent("main+HealthMonitor.swift"), encoding: .utf8)
 
-        XCTAssertTrue(
-            errorsSource.contains("applyErrorSeverityBadge(payload.severity)"),
-            "ErrorBus callback обязан передать severity payload в AgentAppDelegate, а не только показать toast."
-        )
         XCTAssertTrue(
             healthSource.contains("errorSeverity: self.statusErrorBadgeSeverity"),
             "Видимый NSStatusItem.image обязан рендериться с сохранённым severity badge."
@@ -333,6 +328,22 @@ final class MainErrorsWiringTests: XCTestCase {
                 && healthSource.contains("badgeOpacity: self.statusBadgeBlinkOpacity"),
             "Critical badge обязан мигать в том же видимом menu-bar image, а не в скрытом view."
         )
+    }
+
+    /// Wiring-pin (поведение самих методов покрыто в StatusItemIdleRefreshTests):
+    /// батч ErrorBus идёт через выбор наивысшей severity, а открытие меню снимает
+    /// значок. menuWillOpen не вызываем: он ходит в живой IPC через refresh-методы.
+    func test_error_badge_batch_and_menu_open_are_wired() throws {
+        let errors = try String(contentsOf: Self.agentSourcesURL.appendingPathComponent("main+Errors.swift"), encoding: .utf8)
+        XCTAssertTrue(errors.contains("applyErrorBadge(forBatch: payloads)"))
+        XCTAssertFalse(errors.contains("applyErrorSeverityBadge(payload.severity)"),
+                       "Покадровый вызов вернул бы «побеждает последняя severity»")
+
+        let recap = try String(contentsOf: Self.agentSourcesURL.appendingPathComponent("main+MenuBarRecap.swift"), encoding: .utf8)
+        let start = try XCTUnwrap(recap.range(of: "func menuWillOpen(_ menu: NSMenu) {"))
+        let body = recap[start.upperBound...].prefix(400)
+        XCTAssertTrue(body.contains("clearErrorSeverityBadge()"),
+                      "Открытие меню обязано снимать значок ошибки")
     }
 
     /// Resolves native/KrabEarAgent/Sources/KrabEarAgent/main.swift from the test bundle,

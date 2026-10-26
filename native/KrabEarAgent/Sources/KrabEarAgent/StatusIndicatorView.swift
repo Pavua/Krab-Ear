@@ -340,6 +340,25 @@ enum StatusIndicatorImage {
         badgeColor(for: severity) == nil ? nil : severity
     }
 
+    /// Наивысшая severity батча (critical > error > warn > остальное).
+    /// При равенстве побеждает последняя, поэтому батч из одних `info`
+    /// по-прежнему даёт clear-сигнал. Пустой батч — `nil`.
+    static func highestSeverity(_ severities: [String]) -> String? {
+        func rank(_ severity: String) -> Int {
+            switch severity {
+            case "critical": return 3
+            case "error":    return 2
+            case "warn":     return 1
+            default:         return 0
+            }
+        }
+        var best: String?
+        for severity in severities where best.map({ rank(severity) >= rank($0) }) ?? true {
+            best = severity
+        }
+        return best
+    }
+
     static func image(
         for state: HealthState,
         privacyMode: Bool = false,
