@@ -117,8 +117,25 @@ class ErrorToastPresenter: NSObject, ToastPresenting {
     /// Enqueue an error for display. Thread-safe call — always routes to Main thread.
     func present(error: KrabErrorPayload) {
         // Already on MainActor, but called from possibly non-async code.
+        // Тот же код с тем же текстом уже ждёт показа — второй раз не нужен.
+        if queue.contains(where: {
+            $0.code == error.code && $0.message_user == error.message_user
+        }) { return }
         queue.append(error)
+        trimQueue()
         drainQueue()
+    }
+
+    /// Очередь ограничена: пока висит critical (закрывается только вручную),
+    /// ошибки копились бы без предела и показывались потом устаревшими.
+    /// Выбрасывается самый старый не-critical; critical уходит последним.
+    static let maxQueued = 8
+
+    private func trimQueue() {
+        while queue.count > Self.maxQueued {
+            let index = queue.firstIndex { $0.severity != "critical" } ?? 0
+            queue.remove(at: index)
+        }
     }
 
     // MARK: - Queue drain
