@@ -1281,6 +1281,105 @@ class AudioEngine:
                     logger.debug("Speaker-aware prompt: оценка не удалась, пропускаем: %s", _spk_exc)
         return dynamic_prompt
 
+    def _postprocess_text_deterministic(
+        self,
+        raw_text: str,
+        *,
+        cleanup_profile: str,
+        resolved_lang: Optional[str],
+        report: Callable[[str], None],
+    ) -> tuple[str, str]:
+        """Детерминированная пост-обработка текста STT (шаги 4–4.4a transcribe).
+
+        Вынесено из `transcribe` без смены поведения. Возвращает
+        `(cleaned_text, text)`: `cleaned_text` — результат cleanup (на него позже
+        опирается LLM rewrite), `text` — после голосовых команд, сниппетов,
+        фонетического словаря и нормализации чисел/дат. `report` — stage-callback.
+        """
+        # 4. Очистка результата через утилиты (D.7 normalization)
+        report("cleanup")
+        cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
+        text = cleaned_text
+
+        # 4.3 Голосовые команды диктовки (opt-in, перед punctuation pass)
+        # «запятая» → «,», «новый абзац» → «\n\n», «удалить последнее слово» и т.д.
+        from core.voice_commands import VoiceCommandProcessor  # lazy — avoid circular
+        _vc_processor = VoiceCommandProcessor(settings_get=self._settings_get)
+        _vc_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
+        _vc_result = _vc_processor.process(text, language=_vc_lang)
+        if _vc_result != text:
+            report("voice_commands")
+            logger.info(
+                "VoiceCommands: %d chars → %d chars (lang=%s)",
+                len(text), len(_vc_result), _vc_lang,
+            )
+            text = _vc_result
+
+        # 4.3a Голосовые текстовые сниппеты (opt-in, после voice_commands)
+        # trigger-фразы → user-defined expansions, напр. "вставь подпись" → "С уважением,\nПавел"
+        _snippets_provider = getattr(self, "_snippets_provider", None)
+        if _snippets_provider is not None:
+            from core.text_snippet_expander import TextSnippetExpander  # lazy — avoid circular
+            _snip_expander = TextSnippetExpander(
+                settings_get=self._settings_get,
+                snippets_provider=_snippets_provider,
+            )
+            _snip_result = _snip_expander.expand(text)
+            if _snip_result != text:
+                report("text_snippets")
+                logger.info(
+                    "TextSnippets: %d chars → %d chars",
+                    len(text), len(_snip_result),
+                )
+                text = _snip_result
+
+        # 4.3b Фонетический словарь пользователя (opt-in, после text_snippets)
+        # Варианты → канонические написания, напр. "пашел"/"павэл" → "Павел"
+        _phonetic_provider = getattr(self, "_phonetic_provider", None)
+        if _phonetic_provider is not None:
+            from core.phonetic_vocabulary import PhoneticVocabulary  # lazy — avoid circular
+            _phonetic_vocab = PhoneticVocabulary(
+                settings_get=self._settings_get,
+                entries_provider=_phonetic_provider,
+            )
+            _phonetic_result = _phonetic_vocab.correct(text)
+            if _phonetic_result != text:
+                report("phonetic_vocab")
+                logger.info(
+                    "PhoneticVocab: %d chars → %d chars",
+                    len(text), len(_phonetic_result),
+                )
+                text = _phonetic_result
+
+        # 4.4a Нормализация числительных и дат/времени (post-STT, pre-LLM)
+        # «сто двадцать три» → «123», «третье ноября» → «03.11» и т.д.
+        _norm_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
+        if settings.NUMBER_NORMALIZATION_ENABLED or self._settings_get(
+            "number_normalization_enabled", settings.NUMBER_NORMALIZATION_ENABLED
+        ):
+            from core.number_normalizer import NumberNormalizer  # lazy
+            _nn_result = NumberNormalizer().normalize(text, language=_norm_lang)
+            if _nn_result != text:
+                report("number_normalization")
+                logger.info(
+                    "NumberNormalizer: %d chars → %d chars (lang=%s)",
+                    len(text), len(_nn_result), _norm_lang,
+                )
+                text = _nn_result
+        if settings.DATETIME_NORMALIZATION_ENABLED or self._settings_get(
+            "datetime_normalization_enabled", settings.DATETIME_NORMALIZATION_ENABLED
+        ):
+            from core.datetime_normalizer import DateTimeNormalizer  # lazy
+            _dt_result = DateTimeNormalizer().normalize(text, language=_norm_lang)
+            if _dt_result != text:
+                report("datetime_normalization")
+                logger.info(
+                    "DateTimeNormalizer: %d chars → %d chars (lang=%s)",
+                    len(text), len(_dt_result), _norm_lang,
+                )
+                text = _dt_result
+        return cleaned_text, text
+
     def transcribe(
         self,
         audio_data: Any,
@@ -1709,88 +1808,13 @@ class AudioEngine:
             except (ImportError, AttributeError):
                 pass  # MLX не установлен или старая версия без clear_cache
 
-            # 4. Очистка результата через утилиты (D.7 normalization)
-            _report("cleanup")
-            cleaned_text = TextUtils.cleanup_transcript(raw_text, profile=cleanup_profile)
-            text = cleaned_text
-
-            # 4.3 Голосовые команды диктовки (opt-in, перед punctuation pass)
-            # «запятая» → «,», «новый абзац» → «\n\n», «удалить последнее слово» и т.д.
-            from core.voice_commands import VoiceCommandProcessor  # lazy — avoid circular
-            _vc_processor = VoiceCommandProcessor(settings_get=self._settings_get)
-            _vc_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
-            _vc_result = _vc_processor.process(text, language=_vc_lang)
-            if _vc_result != text:
-                _report("voice_commands")
-                logger.info(
-                    "VoiceCommands: %d chars → %d chars (lang=%s)",
-                    len(text), len(_vc_result), _vc_lang,
-                )
-                text = _vc_result
-
-            # 4.3a Голосовые текстовые сниппеты (opt-in, после voice_commands)
-            # trigger-фразы → user-defined expansions, напр. "вставь подпись" → "С уважением,\nПавел"
-            _snippets_provider = getattr(self, "_snippets_provider", None)
-            if _snippets_provider is not None:
-                from core.text_snippet_expander import TextSnippetExpander  # lazy — avoid circular
-                _snip_expander = TextSnippetExpander(
-                    settings_get=self._settings_get,
-                    snippets_provider=_snippets_provider,
-                )
-                _snip_result = _snip_expander.expand(text)
-                if _snip_result != text:
-                    _report("text_snippets")
-                    logger.info(
-                        "TextSnippets: %d chars → %d chars",
-                        len(text), len(_snip_result),
-                    )
-                    text = _snip_result
-
-            # 4.3b Фонетический словарь пользователя (opt-in, после text_snippets)
-            # Варианты → канонические написания, напр. "пашел"/"павэл" → "Павел"
-            _phonetic_provider = getattr(self, "_phonetic_provider", None)
-            if _phonetic_provider is not None:
-                from core.phonetic_vocabulary import PhoneticVocabulary  # lazy — avoid circular
-                _phonetic_vocab = PhoneticVocabulary(
-                    settings_get=self._settings_get,
-                    entries_provider=_phonetic_provider,
-                )
-                _phonetic_result = _phonetic_vocab.correct(text)
-                if _phonetic_result != text:
-                    _report("phonetic_vocab")
-                    logger.info(
-                        "PhoneticVocab: %d chars → %d chars",
-                        len(text), len(_phonetic_result),
-                    )
-                    text = _phonetic_result
-
-            # 4.4a Нормализация числительных и дат/времени (post-STT, pre-LLM)
-            # «сто двадцать три» → «123», «третье ноября» → «03.11» и т.д.
-            _norm_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
-            if settings.NUMBER_NORMALIZATION_ENABLED or self._settings_get(
-                "number_normalization_enabled", settings.NUMBER_NORMALIZATION_ENABLED
-            ):
-                from core.number_normalizer import NumberNormalizer  # lazy
-                _nn_result = NumberNormalizer().normalize(text, language=_norm_lang)
-                if _nn_result != text:
-                    _report("number_normalization")
-                    logger.info(
-                        "NumberNormalizer: %d chars → %d chars (lang=%s)",
-                        len(text), len(_nn_result), _norm_lang,
-                    )
-                    text = _nn_result
-            if settings.DATETIME_NORMALIZATION_ENABLED or self._settings_get(
-                "datetime_normalization_enabled", settings.DATETIME_NORMALIZATION_ENABLED
-            ):
-                from core.datetime_normalizer import DateTimeNormalizer  # lazy
-                _dt_result = DateTimeNormalizer().normalize(text, language=_norm_lang)
-                if _dt_result != text:
-                    _report("datetime_normalization")
-                    logger.info(
-                        "DateTimeNormalizer: %d chars → %d chars (lang=%s)",
-                        len(text), len(_dt_result), _norm_lang,
-                    )
-                    text = _dt_result
+            # 4–4.4a. Детерминированная пост-обработка (см. _postprocess_text_deterministic).
+            cleaned_text, text = self._postprocess_text_deterministic(
+                raw_text,
+                cleanup_profile=cleanup_profile,
+                resolved_lang=resolved_lang,
+                report=_report,
+            )
 
             # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
             # Модели с нативной пунктуацией (gigaam-mlx) помечают результат
