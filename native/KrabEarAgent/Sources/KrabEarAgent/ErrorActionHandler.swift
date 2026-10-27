@@ -175,7 +175,21 @@ final class ErrorActionHandler {
             logger.error(
                 "action \(actionId, privacy: .public) failed: \(error.localizedDescription, privacy: .public)"
             )
+            // Пользователь нажал кнопку и должен увидеть, что действие не сработало.
+            toastPresenter.present(error: Self.actionFailurePayload(error))
         }
+    }
+
+    static func actionFailurePayload(_ error: Error) -> KrabErrorPayload {
+        let reason = String(error.localizedDescription.prefix(140))
+        return KrabErrorPayload(
+            severity: "warn",
+            component: "ui",
+            code: "ui.error_action_failed",
+            message_user: "Не удалось выполнить действие: \(reason)",
+            message_debug: error.localizedDescription,
+            timestamp: ISO8601DateFormatter().string(from: Date())
+        )
     }
 
     // MARK: - Side effect dispatch

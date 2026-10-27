@@ -413,6 +413,35 @@ final class ErrorToastViewTests: XCTestCase {
         XCTAssertEqual(panel.orderOutCallCount, 1, "orderOut must be called exactly once on dismiss")
     }
 
+    // MARK: 11a. очередь ограничена; critical переживает вытеснение
+
+    func test_queue_is_capped_and_drops_oldest_non_critical() {
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: SpyActionInvoker(), factory: factory)
+
+        // Активный critical не закрывается сам и держит очередь.
+        presenter.present(error: makePayload(severity: "critical", code: "active", message: "active"))
+        presenter.present(error: makePayload(severity: "critical", code: "queued_critical", message: "qc"))
+        for i in 0..<12 {
+            presenter.present(error: makePayload(severity: "warn", code: "w\(i)", message: "w\(i)"))
+        }
+
+        XCTAssertEqual(presenter.queue.count, ErrorToastPresenter.maxQueued)
+        XCTAssertTrue(presenter.queue.contains { $0.code == "queued_critical" },
+                      "critical в очереди вытесняется последним")
+        XCTAssertFalse(presenter.queue.contains { $0.code == "w0" }, "старые warn вытеснены")
+        XCTAssertTrue(presenter.queue.contains { $0.code == "w11" }, "свежие warn сохранены")
+    }
+
+    func test_duplicate_of_queued_toast_is_dropped() {
+        let factory = MockToastPanelFactory()
+        let presenter = TestableErrorToastPresenter(spy: SpyActionInvoker(), factory: factory)
+        presenter.present(error: makePayload(severity: "error", code: "first", message: "x"))
+        presenter.present(error: makePayload(severity: "error", code: "dup", message: "same"))
+        presenter.present(error: makePayload(severity: "error", code: "dup", message: "same"))
+        XCTAssertEqual(presenter.queue.count, 1)
+    }
+
     // MARK: 11. queue_multiple_toasts_serial drains in order
 
     func test_queue_multiple_toasts_serial_ordering() {

@@ -447,8 +447,12 @@ final class ErrorActionHandlerTests: XCTestCase {
 
         // Should complete without throwing (errors are logged, not rethrown)
         await handler.handleActionTap(actionId: "open_lm_studio")
-        // If we reach here without crashing or hanging, the test passes
-        XCTAssertEqual(presenter.presentedErrors.count, 0)
+        // Провал действия виден пользователю одним предупреждением
+        XCTAssertEqual(presenter.presentedErrors.count, 1)
+        let shown = presenter.presentedErrors.first
+        XCTAssertEqual(shown?.code, "ui.error_action_failed")
+        XCTAssertEqual(shown?.severity, "warn")
+        XCTAssertTrue(shown?.message_user.hasPrefix("Не удалось выполнить действие") ?? false)
     }
 
     // MARK: 13. concurrent handleErrorEvent — thread safe (main actor serial)
