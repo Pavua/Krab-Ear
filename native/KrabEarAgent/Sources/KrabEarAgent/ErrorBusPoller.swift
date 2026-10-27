@@ -31,9 +31,12 @@ import Foundation
 /// Решает какие элементы ответа list_recent_errors показывать как toast.
 /// Backend уже фильтрует по since_seq, трекер лишь подстраховывается от
 /// рассинхрона: если backend перезапустился, его seq-счётчик обнулился и
-/// latestSeq может внезапно оказаться МЕНЬШЕ уже виденного — это re-arm
-/// (не показывать backlog новой сессии backend'а), не показ старой ошибки
-/// как новой.
+/// latestSeq может внезапно оказаться МЕНЬШЕ уже виденного. Кольцо новой
+/// сессии содержит только ошибки после рестарта (например
+/// `audio.recording_rescued` при старте), и пользователь их не видел, поэтому
+/// курсор сбрасывается в 0: следующий опрос заберёт всё кольцо. Ответ на
+/// опрос со старым курсором ничего показывать не должен — backend уже
+/// отфильтровал его по устаревшему since_seq.
 final class ErrorBusTracker {
     private var initialized = false
     private(set) var lastSeenSeq: Int = 0
@@ -42,14 +45,16 @@ final class ErrorBusTracker {
     /// Возвращает элементы, которые стоит показать как toast (может быть
     /// пустым списком).
     func newItemsToShow(_ items: [KrabErrorPayload], latestSeq: Int) -> [KrabErrorPayload] {
-        defer { lastSeenSeq = latestSeq }
         if !initialized {
             initialized = true
+            lastSeenSeq = latestSeq
             return []
         }
         if latestSeq < lastSeenSeq {
+            lastSeenSeq = 0
             return []
         }
+        lastSeenSeq = latestSeq
         return items
     }
 

@@ -304,6 +304,9 @@ final class MenuBarRecapView: NSView {
 /// AGENT-3: refresh() сам запускает IPC off-main; здесь только триггер.
 extension AgentAppDelegate: NSMenuDelegate {
     func menuWillOpen(_ menu: NSMenu) {
+        // Пользователь открыл меню — значок ошибки выполнил свою задачу.
+        // Без этого badge висел до выхода агента, а critical мигал вечно.
+        clearErrorSeverityBadge()
         menuBarRecapView?.refresh(ipcClient: ipcClient)
         // C3a Task 2: подменю «Быстрые заметки» — тот же паттерн, свой IPC off-main.
         refreshQuickNotesSubmenu()

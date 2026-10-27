@@ -70,6 +70,60 @@ final class StatusItemIdleRefreshWiringTests: XCTestCase {
         }
     }
 
+    /// Реальный stop диктовки держит isRecording=true до терминального ответа
+    /// (токен нужен recovery) и одновременно ставит isProcessing=true.
+    func test_dictation_finalization_shows_processing_not_recording() {
+        withDelegate { delegate, button in
+            delegate.isRecording = true
+            delegate.isProcessing = true
+            delegate.refreshStatusItemTitle()
+            XCTAssertTrue(button.title.contains("…"), "Финализация должна читаться как обработка")
+            XCTAssertNil(button.image, "Красная точка записи не должна гореть во время финализации")
+
+            delegate.isProcessing = false
+            delegate.refreshStatusItemTitle()
+            XCTAssertFalse(button.title.contains("…"))
+            XCTAssertNotNil(button.image, "Recovery без активного IPC остаётся записью с красной точкой")
+        }
+    }
+
+    private func errorPayload(_ severity: String) -> KrabErrorPayload {
+        KrabErrorPayload(
+            severity: severity, component: "audio", code: "test.\(severity)",
+            message_user: "m", message_debug: "d", timestamp: "t"
+        )
+    }
+
+    func test_error_batch_badge_uses_highest_severity_not_last() {
+        withDelegate { delegate, _ in
+            delegate.applyErrorBadge(forBatch: [errorPayload("critical"), errorPayload("warn")])
+            XCTAssertEqual(delegate.statusErrorBadgeSeverity, "critical")
+            delegate.clearErrorSeverityBadge()
+
+            delegate.applyErrorBadge(forBatch: [errorPayload("warn"), errorPayload("error"), errorPayload("info")])
+            XCTAssertEqual(delegate.statusErrorBadgeSeverity, "error")
+            delegate.clearErrorSeverityBadge()
+        }
+    }
+
+    func test_error_batch_of_info_clears_and_empty_batch_keeps_badge() {
+        withDelegate { delegate, _ in
+            delegate.applyErrorBadge(forBatch: [errorPayload("warn")])
+            XCTAssertEqual(delegate.statusErrorBadgeSeverity, "warn")
+            delegate.applyErrorBadge(forBatch: [])
+            XCTAssertEqual(delegate.statusErrorBadgeSeverity, "warn")
+            delegate.applyErrorBadge(forBatch: [errorPayload("info")])
+            XCTAssertNil(delegate.statusErrorBadgeSeverity)
+        }
+    }
+
+    func test_highest_severity_ranking() {
+        XCTAssertNil(StatusIndicatorImage.highestSeverity([]))
+        XCTAssertEqual(StatusIndicatorImage.highestSeverity(["warn", "critical", "error"]), "critical")
+        XCTAssertEqual(StatusIndicatorImage.highestSeverity(["info", "unknown"]), "unknown")
+        XCTAssertEqual(StatusIndicatorImage.highestSeverity(["info", "warn"]), "warn")
+    }
+
     func test_external_temporary_title_is_restored_on_next_tick() {
         withDelegate { delegate, button in
             delegate.applyHealthStateToStatusItem(.healthy)

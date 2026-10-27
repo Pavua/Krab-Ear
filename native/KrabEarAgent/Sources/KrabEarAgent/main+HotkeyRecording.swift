@@ -937,9 +937,12 @@ extension AgentAppDelegate {
                 let errorText = outcome.error?.localizedDescription
                     ?? "backend не вернул терминальный ответ"
                 logger.error("stop_recording не подтверждён: \(errorText)")
+                let message = outcome.backendRefusalMessage.map {
+                    "Backend отклонил остановку: \($0). Токен сохранён — нажмите остановку ещё раз."
+                } ?? "Ответ остановки не получен. Токен сохранён — нажмите остановку ещё раз."
                 retainDictationStopRecovery(
                     result: outcome.result,
-                    message: "Ответ остановки не получен. Токен сохранён — нажмите остановку ещё раз."
+                    message: message
                 )
                 return
             }

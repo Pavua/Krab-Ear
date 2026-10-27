@@ -51,6 +51,15 @@ struct RecordingStopOutcome: @unchecked Sendable {
     var hasTerminalResponse: Bool {
         decision == .surfaceAsIs && response != nil && result != nil
     }
+
+    /// Текст явного отказа backend (`ok:false`). Ответ при этом ПОЛУЧЕН, поэтому
+    /// сообщение «ответ не получен» для него неверно; `nil` — отказа не было.
+    var backendRefusalMessage: String? {
+        guard let ipcError = error as? IPCError,
+              case .backendError(let message) = ipcError else { return nil }
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : String(trimmed.prefix(140))
+    }
 }
 
 enum RecordingStopCoordinator {

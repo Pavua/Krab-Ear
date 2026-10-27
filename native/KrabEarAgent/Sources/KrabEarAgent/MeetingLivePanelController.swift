@@ -410,7 +410,9 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
             setUIState(.idle)
         case .surfaceAsIs:
             enterMeetingStopRecovery(
-                "Ответ остановки не получен — повторите действие"
+                outcome.backendRefusalMessage.map {
+                    "Backend отклонил остановку: \($0) — повторите действие"
+                } ?? "Ответ остановки не получен — повторите действие"
             )
         case .retry, .retryRecorderStop, .pollAgain:
             enterMeetingStopRecovery(

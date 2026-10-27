@@ -232,6 +232,51 @@ final class RecordingStopCoordinatorTests: XCTestCase {
         XCTAssertNil(outcome.response)
     }
 
+    func test_executor_backend_refusal_is_reported_as_refusal_not_lost_reply() async {
+        let request = RecordingStopRequest(
+            method: "stop_recording",
+            params: ["source": "dictation", "generation_token": "g1"],
+            timeoutSec: 120
+        )
+        var calls = 0
+
+        let outcome = await RecordingStopCoordinator.execute(
+            request: request,
+            operation: { _ in
+                calls += 1
+                throw IPCError.backendError("  внутренняя ошибка остановки  ")
+            },
+            sleep: { _ in
+                XCTFail("Отказ backend не повторяется")
+            }
+        )
+
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(outcome.decision, .surfaceAsIs)
+        XCTAssertFalse(outcome.hasTerminalResponse)
+        XCTAssertEqual(outcome.backendRefusalMessage, "внутренняя ошибка остановки")
+    }
+
+    func test_backend_refusal_message_is_absent_for_other_outcomes() {
+        let errors: [Error?] = [nil, IPCError.timeout, IPCError.invalidResponse, IPCError.readFailed]
+        for error in errors {
+            let outcome = RecordingStopOutcome(
+                decision: .surfaceAsIs, response: nil, result: nil, error: error
+            )
+            XCTAssertNil(outcome.backendRefusalMessage)
+        }
+        let blank = RecordingStopOutcome(
+            decision: .surfaceAsIs, response: nil, result: nil,
+            error: IPCError.backendError("   ")
+        )
+        XCTAssertNil(blank.backendRefusalMessage)
+        let long = RecordingStopOutcome(
+            decision: .surfaceAsIs, response: nil, result: nil,
+            error: IPCError.backendError(String(repeating: "я", count: 400))
+        )
+        XCTAssertEqual(long.backendRefusalMessage?.count, 140)
+    }
+
     func test_executor_poll_budget_is_absolute_and_nonblocking() async {
         let request = RecordingStopRequest(
             method: "stop_recording",

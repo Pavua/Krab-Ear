@@ -349,7 +349,9 @@ extension AgentAppDelegate {
         case .surfaceAsIs:
             retainQuickCaptureStopRecovery(
                 result: outcome.result,
-                message: "Ответ остановки не получен — нажмите остановку ещё раз"
+                message: outcome.backendRefusalMessage.map {
+                    "Backend отклонил остановку: \($0) — нажмите остановку ещё раз"
+                } ?? "Ответ остановки не получен — нажмите остановку ещё раз"
             )
         case .retry, .retryRecorderStop, .pollAgain:
             logger.error(
