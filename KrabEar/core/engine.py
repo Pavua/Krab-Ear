@@ -1380,6 +1380,100 @@ class AudioEngine:
                 text = _dt_result
         return cleaned_text, text
 
+    def _apply_llm_rewrite_chain(
+        self,
+        text: str,
+        cleaned_text: str,
+        *,
+        native_punctuation: bool,
+        is_loop: bool,
+        resolved_lang: Optional[str],
+        report: Callable[[str], None],
+    ) -> tuple[str, Any, Any]:
+        """LLM-цепочка пост-обработки (шаги 4.5a–4.5 transcribe), поведение прежнее.
+
+        Punctuation-only pass → полный LLM rewrite → cloud-fallback (только если
+        Studio недостижим). Возвращает `(text, llm_result, llm_diff)`; `llm_result`
+        и `llm_diff` позже попадают в метрики ответа transcribe. Побочный эффект
+        `self._last_llm_diff` сохранён.
+        """
+        # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
+        # Модели с нативной пунктуацией (gigaam-mlx) помечают результат
+        # native_punctuation=True — дорогой LLM-проход для них холостой.
+        if self._punctuation_pass_allowed() and not is_loop and not native_punctuation:
+            report("punctuation_pass")
+            punct_result = self._llm_rewriter.fix_punctuation_only(
+                text, language=resolved_lang or settings.TRANSCRIBE_LANGUAGE
+            )
+            if punct_result is not None:
+                logger.info(
+                    "Punctuation pass: %d chars -> %d chars",
+                    len(text), len(punct_result),
+                )
+                text = punct_result
+            else:
+                logger.debug("Punctuation pass: rejected or unavailable, keeping original")
+
+        # 4.5 D.10a: LLM rewrite hook (только если admin+runtime toggle=true)
+        llm_result = None
+        llm_diff = None
+        if self._llm_rewrite_allowed() and not is_loop:
+            report("llm_rewrite")
+            llm_result = self._llm_rewriter.rewrite(cleaned_text)
+            if llm_result.ok:
+                logger.info(
+                    "LLM rewrite: %d chars -> %d chars, %d ms",
+                    len(cleaned_text), len(llm_result.text), llm_result.latency_ms,
+                )
+                llm_diff = TextDiffAnalyzer().compute_diff(cleaned_text, llm_result.text)
+                self._last_llm_diff = llm_diff
+                text = llm_result.text
+            else:
+                logger.debug(
+                    "LLM rewrite fallback: %s (latency=%s ms)",
+                    llm_result.fallback_reason,
+                    llm_result.latency_ms,
+                )
+                # 4.5a Cloud rewriter fallback: ТОЛЬКО если Studio недостижим
+                # (timeout/connection), не если каталог пуст (C1 extractive).
+                # PRIVACY CONTRACT: cloud_rewriter_enabled=True И не privacy.
+                from backend.llm_rewriter import is_studio_unavailable as _studio_down  # noqa: PLC0415
+                if self._cloud_rewrite_allowed() and _studio_down(
+                    llm_result.fallback_reason,
+                    last_error=getattr(self._llm_rewriter, "_last_error", None),
+                ):
+                    try:
+                        from backend.cloud_rewriter import cloud_rewrite as _cloud_rewrite  # noqa: PLC0415
+                        _cr_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
+                        cloud_text = _cloud_rewrite(cleaned_text, _cr_lang)
+                        if cloud_text:
+                            logger.info(
+                                "Cloud rewrite fallback applied: %d->%d chars lang=%s",
+                                len(cleaned_text), len(cloud_text), _cr_lang,
+                            )
+                            llm_diff = TextDiffAnalyzer().compute_diff(cleaned_text, cloud_text)
+                            self._last_llm_diff = llm_diff
+                            text = cloud_text
+                            # Privacy audit trail: данные покинули устройство.
+                            try:
+                                from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
+                                _cr_provider = self._settings_get("cloud_rewriter_provider", "openai")
+                                get_privacy_audit_logger().log_event(
+                                    category="cloud_rewrite",
+                                    action="cloud_rewrite_used",
+                                    details={
+                                        "provider": _cr_provider,
+                                        "input_chars": len(cleaned_text),
+                                        "output_chars": len(cloud_text),
+                                        "language": _cr_lang,
+                                    },
+                                )
+                            except Exception:
+                                pass  # audit trail must never break transcription
+                    except Exception as _cr_exc:
+                        logger.warning("Cloud rewrite error (ignored): %s", _cr_exc)
+        return text, llm_result, llm_diff
+
     def transcribe(
         self,
         audio_data: Any,
@@ -1816,84 +1910,18 @@ class AudioEngine:
                 report=_report,
             )
 
-            # 4.5a Punctuation-only LLM pass (opt-in, перед полным rewrite)
-            # Модели с нативной пунктуацией (gigaam-mlx) помечают результат
-            # native_punctuation=True — дорогой LLM-проход для них холостой.
+            # 4.5a–4.5. LLM-цепочка (см. _apply_llm_rewrite_chain).
             _native_punct = isinstance(result, dict) and bool(
                 result.get("native_punctuation")
             )
-            if self._punctuation_pass_allowed() and not _is_loop and not _native_punct:
-                _report("punctuation_pass")
-                punct_result = self._llm_rewriter.fix_punctuation_only(
-                    text, language=resolved_lang or settings.TRANSCRIBE_LANGUAGE
-                )
-                if punct_result is not None:
-                    logger.info(
-                        "Punctuation pass: %d chars -> %d chars",
-                        len(text), len(punct_result),
-                    )
-                    text = punct_result
-                else:
-                    logger.debug("Punctuation pass: rejected or unavailable, keeping original")
-
-            # 4.5 D.10a: LLM rewrite hook (только если admin+runtime toggle=true)
-            llm_result = None
-            llm_diff = None
-            if self._llm_rewrite_allowed() and not _is_loop:
-                _report("llm_rewrite")
-                llm_result = self._llm_rewriter.rewrite(cleaned_text)
-                if llm_result.ok:
-                    logger.info(
-                        "LLM rewrite: %d chars -> %d chars, %d ms",
-                        len(cleaned_text), len(llm_result.text), llm_result.latency_ms,
-                    )
-                    llm_diff = TextDiffAnalyzer().compute_diff(cleaned_text, llm_result.text)
-                    self._last_llm_diff = llm_diff
-                    text = llm_result.text
-                else:
-                    logger.debug(
-                        "LLM rewrite fallback: %s (latency=%s ms)",
-                        llm_result.fallback_reason,
-                        llm_result.latency_ms,
-                    )
-                    # 4.5a Cloud rewriter fallback: ТОЛЬКО если Studio недостижим
-                    # (timeout/connection), не если каталог пуст (C1 extractive).
-                    # PRIVACY CONTRACT: cloud_rewriter_enabled=True И не privacy.
-                    from backend.llm_rewriter import is_studio_unavailable as _studio_down  # noqa: PLC0415
-                    if self._cloud_rewrite_allowed() and _studio_down(
-                        llm_result.fallback_reason,
-                        last_error=getattr(self._llm_rewriter, "_last_error", None),
-                    ):
-                        try:
-                            from backend.cloud_rewriter import cloud_rewrite as _cloud_rewrite  # noqa: PLC0415
-                            _cr_lang = resolved_lang or settings.TRANSCRIBE_LANGUAGE
-                            cloud_text = _cloud_rewrite(cleaned_text, _cr_lang)
-                            if cloud_text:
-                                logger.info(
-                                    "Cloud rewrite fallback applied: %d->%d chars lang=%s",
-                                    len(cleaned_text), len(cloud_text), _cr_lang,
-                                )
-                                llm_diff = TextDiffAnalyzer().compute_diff(cleaned_text, cloud_text)
-                                self._last_llm_diff = llm_diff
-                                text = cloud_text
-                                # Privacy audit trail: данные покинули устройство.
-                                try:
-                                    from backend.privacy_audit import get_privacy_audit_logger  # noqa: PLC0415
-                                    _cr_provider = self._settings_get("cloud_rewriter_provider", "openai")
-                                    get_privacy_audit_logger().log_event(
-                                        category="cloud_rewrite",
-                                        action="cloud_rewrite_used",
-                                        details={
-                                            "provider": _cr_provider,
-                                            "input_chars": len(cleaned_text),
-                                            "output_chars": len(cloud_text),
-                                            "language": _cr_lang,
-                                        },
-                                    )
-                                except Exception:
-                                    pass  # audit trail must never break transcription
-                        except Exception as _cr_exc:
-                            logger.warning("Cloud rewrite error (ignored): %s", _cr_exc)
+            text, llm_result, llm_diff = self._apply_llm_rewrite_chain(
+                text,
+                cleaned_text,
+                native_punctuation=_native_punct,
+                is_loop=_is_loop,
+                resolved_lang=resolved_lang,
+                report=_report,
+            )
 
             # 5. Расчет метрик уверенности (единый источник — helper: результаты
             # без segments, но с явным confidence (GigaAM) не зануляются)
