@@ -4300,10 +4300,11 @@ class AudioEngine:
                 # Pipeline получаем уже ВНУТРИ lock: hot reload HF-токена берёт
                 # locks в том же порядке run → load и не оставляет нам старый
                 # объект между invalidation и реальным вызовом.
+                pipeline_input = self._diarization_pipeline_input(prepared_path)
                 with self._diarization_run_lock:
                     pipeline = self._load_diarization_pipeline()
                     try:
-                        annotation = pipeline(prepared_path)
+                        annotation = pipeline(pipeline_input)
                     finally:
                         gc.collect()
                         if (
@@ -4486,10 +4487,11 @@ class AudioEngine:
         import gc
         prepared_audio_path, should_cleanup = self._prepare_audio_for_diarization(audio_path)
         try:
+            pipeline_input = self._diarization_pipeline_input(prepared_audio_path)
             with self._diarization_run_lock:
                 pipeline = self._load_diarization_pipeline()
                 try:
-                    diarization = pipeline(prepared_audio_path)
+                    diarization = pipeline(pipeline_input)
                 finally:
                     # Очистка MPS остаётся частью той же critical section:
                     # следующий pyannote-вызов не должен стартовать посреди
@@ -4535,10 +4537,11 @@ class AudioEngine:
         {label: list[float]}} — времена относительны начала окна.
         """
         import gc
+        pipeline_input = self._diarization_pipeline_input(audio_path)
         with self._diarization_run_lock:
             pipeline = self._load_diarization_pipeline()
             try:
-                out = pipeline(audio_path)
+                out = pipeline(pipeline_input)
             finally:
                 # Паттерн утечки MPS — как в _run_diarization_impl.
                 gc.collect()
@@ -4568,6 +4571,32 @@ class AudioEngine:
                 "speaker": str(speaker),
             })
         return {"segments": segments, "speaker_embeddings": embeddings}
+
+    @staticmethod
+    def _diarization_pipeline_input(audio_path: str) -> Any:
+        """Вход pyannote: заранее загруженный waveform вместо пути к файлу.
+
+        pyannote 4 декодирует путь через torchcodec, а тот грузит
+        libtorchcodec_core{N} только под FFmpeg major 4–8. После обновления
+        brew-FFmpeg до 9 каждый прогон падал `NameError: AudioDecoder`, и
+        диаризация молча отключалась. Словарь с waveform обходит torchcodec.
+        При любом сбое чтения возвращается прежний путь (старое поведение).
+        """
+        if torch is None:
+            return audio_path
+        try:
+            import soundfile as _sf
+
+            data, sample_rate = _sf.read(str(audio_path), dtype="float32", always_2d=True)
+            mono = np.ascontiguousarray(data.mean(axis=1, dtype=np.float32))
+            return {
+                "waveform": torch.from_numpy(mono)[None, :],
+                "sample_rate": int(sample_rate),
+                "uri": Path(audio_path).stem,
+            }
+        except Exception as exc:
+            logger.debug("diarization: waveform не загружен, передаю путь: %s", exc)
+            return audio_path
 
     def _prepare_audio_for_diarization(self, audio_path: str) -> tuple[str, bool]:
         """Подготавливает совместимый WAV для pyannote.
