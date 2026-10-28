@@ -243,8 +243,10 @@ final class StatusIndicatorView: NSView {
         if currentBadgeSeverity == severity { return }
         currentBadgeSeverity = severity
 
-        // Убираем предыдущий badge перед созданием нового
+        // Убираем предыдущий badge перед созданием нового. Таймер мигания от
+        // прежнего critical глушим, иначе он мигал бы уже статичным error/warn.
         _removeBadgeLayerOnly()
+        if !shouldBlink { _stopBlinking() }
 
         // Убеждаемся что у вью есть CA layer
         wantsLayer = true
