@@ -42,11 +42,27 @@ final class HealthMonitorTests: XCTestCase {
         monitor.setPingProvider { return false }
 
         await monitor.start()
-        try? await Task.sleep(nanoseconds: 300_000_000)
-        let state = await monitor.currentState()
+        // Ждём условие, а не фиксированные 300 мс: на загруженном CI-раннере два
+        // тика цикла не укладывались в окно, и тест падал (healthy вместо hung).
+        let state = await waitForState(monitor, .hung)
         await monitor.stop()
 
         XCTAssertEqual(state, .hung)
+    }
+
+    /// Опрашивает состояние до ожидаемого или до дедлайна; возвращает последнее.
+    private func waitForState(
+        _ monitor: HealthMonitor,
+        _ expected: HealthState,
+        timeout: TimeInterval = 5.0
+    ) async -> HealthState {
+        let deadline = Date().addingTimeInterval(timeout)
+        var state = await monitor.currentState()
+        while state != expected, Date() < deadline {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            state = await monitor.currentState()
+        }
+        return state
     }
 
     /// Один fail + один success → .healthy (счётчик сбрасывается).
