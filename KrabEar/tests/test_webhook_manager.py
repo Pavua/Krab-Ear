@@ -178,7 +178,9 @@ class WebhookManagerFilterTestCase(unittest.TestCase):
         self.assertEqual(len(delivered), 0)
 
     # 15 — два webhook-а с разными фильтрами: каждый получает только своё
-    def test_two_webhooks_independent_filters(self) -> None:
+    @patch("backend.webhook_manager._resolve_and_check_host", return_value=(True, None))
+    def test_two_webhooks_independent_filters(self, _dns) -> None:
+        # DNS замокан: тест не должен зависеть от публичной резолюции one.com/two.com.
         _wid1 = self._mgr.register_webhook("https://one.com/hook", events=["stt.final"])  # noqa: F841
         _wid2 = self._mgr.register_webhook("https://two.com/hook", events=["stt.failed"])  # noqa: F841
         calls_log: list[str] = []
