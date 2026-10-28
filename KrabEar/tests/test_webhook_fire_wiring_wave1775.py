@@ -111,7 +111,9 @@ class WebhookFireWiringTestCase(unittest.TestCase):
         self.assertEqual(len(captured), 0, "webhook на translation.completed не должен ловить stt.final")
 
     # 3b — два webhook-а с разными фильтрами: каждый ловит только своё
-    def test_two_webhooks_independent_filters(self) -> None:
+    @patch("backend.webhook_manager._resolve_and_check_host", return_value=(True, None))
+    def test_two_webhooks_independent_filters(self, _dns) -> None:
+        # DNS замокан: тест не должен зависеть от публичной резолюции one.com/two.com.
         self._mgr.register_webhook("https://one.com/hook", events=["stt.final"])
         self._mgr.register_webhook("https://two.com/hook", events=["translation.completed"])
         urls: list[str] = []
