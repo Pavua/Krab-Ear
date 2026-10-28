@@ -133,6 +133,21 @@ final class StatusIndicatorViewTests: XCTestCase {
         )
     }
 
+    /// critical → error/warn: таймер мигания обязан остановиться, иначе он
+    /// продолжает мигать уже статичным badge и утекает.
+    func test_critical_then_lower_severity_stops_blink_timer() {
+        for lower in ["error", "warn"] {
+            let view = makeView()
+            view.applyErrorBadge(severity: "critical")
+            drainMainQueue()
+            XCTAssertNotNil(view.blinkTimerForTesting)
+
+            view.applyErrorBadge(severity: lower)
+            drainMainQueue()
+            XCTAssertNil(view.blinkTimerForTesting, "после critical→\(lower) blinkTimer должен быть nil")
+        }
+    }
+
     /// T3: info → badge скрыт (не добавлено sublayer).
     func test_applyErrorBadge_info_hides_badge() {
         let view = makeView()
