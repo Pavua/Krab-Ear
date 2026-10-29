@@ -2558,6 +2558,11 @@ class BackendService:
         es_thread = getattr(self, "_export_scheduler_thread", None)
         if es_thread is not None and es_thread.is_alive():
             es_thread.join(timeout=2.0)
+            # Истёкший join не подтверждает завершение экспорта. Сохраняем
+            # owner для повторного close и не закрываем transcriber раньше.
+            if es_thread.is_alive():
+                all_workers_stopped = False
+                logger.error("ExportScheduler сохранил живой worker при close()")
 
         probe = getattr(self, "_llm_probe", None)
         if probe is not None:

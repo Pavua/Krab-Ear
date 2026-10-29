@@ -1,5 +1,27 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-29 — полный constructor / export close verdict: локально принято
+
+Изолированный `ear-full-lifecycle-1029`, база `91a9b714`; remote target
+повторно подтверждён на `16552643`. Настоящие import/full constructor/dispatch/
+idle-close проверены в scratch-профиле без сети, моделей и запуска scheduler loops.
+
+Причинный RED показал: export handle жив после join2, но `close()` возвращает
+True и закрывает transcriber. Пять строк исправления сохраняют owner, возвращают
+False и удерживают transcriber; после завершения handle повторный close успешен.
+GREEN: **2 PASS / 2.768s**, children reaped/PGIDempty, violations0.
+Независимый Astra Ultra whole-diff SOURCE_GO; `audit-all`: 16 commands PASS,
+48.884s, 1808 source hashes стабильны; flake8 трёх файлов PASS.
+
+Оговорённый локальный блок **100%**, Ear RUN0. Push/PR/hosted CI/merge/runtime
+не выполнялись; модели, клон, OrbStack не затронуты. Контрольный export handle
+не доказывает реальный worker drain. `_shutdown_backend` при False по-прежнему
+hard-exit до metadata, без retry: сохранность active export и безопасный выкат
+не квалифицированы. Listener/replay retention и MemoryConductor owner-chain —
+следующие отдельные source-гейты после согласования, без нового запуска сейчас.
+Подробности и receipts: [full lifecycle](superpowers/plans/2026-10-29-ear-full-lifecycle-feasibility.md).
+Для следующего анализа ownership/races рекомендован Sol 6.1 High; модель не менялась.
+
 ## 2026-10-29 — aggregate offline checkpoint
 
 Managed WT `ear-aggregate-offline-1029`, база локальный `b34e238b` поверх
