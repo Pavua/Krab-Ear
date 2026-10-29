@@ -14,8 +14,11 @@ from unittest.mock import patch
 
 
 class PersistedTranslationIntegration(unittest.TestCase):
+    probe_name = "translation_components_probe.py"
+    expected_tests = 9
+
     def test_real_components_in_disposable_process(self):
-        probe = Path(__file__).with_name("translation_components_probe.py")
+        probe = Path(__file__).with_name(self.probe_name)
         with tempfile.TemporaryDirectory(prefix="ear-translation-components-") as directory:
             scratch = Path(directory).resolve()
             (scratch / "home").mkdir()
@@ -54,7 +57,7 @@ class PersistedTranslationIntegration(unittest.TestCase):
             self.assertEqual(process.returncode, 0, output)
             marker = next(line for line in output.splitlines() if line.startswith("COMPONENT_RECEIPT="))
             receipt = json.loads(marker.partition("=")[2])
-            self.assertEqual(receipt["tests"], 9, output)
+            self.assertEqual(receipt["tests"], self.expected_tests, output)
             self.assertEqual(receipt["skipped"], 0, output)
             self.assertEqual(receipt["violations"], [], output)
             self.assertFalse(receipt["backend_service_imported"], output)

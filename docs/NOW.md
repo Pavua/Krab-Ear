@@ -1,5 +1,30 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-29 — aggregate offline checkpoint
+
+Managed WT `ear-aggregate-offline-1029`, база локальный `b34e238b` поверх
+актуального remote `16552643`; канонический dirty `9bc7edfc` не изменён.
+Новых production правок нет: квалифицированы накопленные helper/cache изменения.
+
+В трёх новых окнах Main: **70 cache + 5 wiring + 9 component PASS**, отдельно
+2 cleanup checks PASS. Все шесть прошлых исключений включены: 41 настоящий
+cache test thread запущен и joined, alive0; fsync/locks/throttle настоящие.
+Все receipts: violations0/skips0; child reaped/PGIDempty/no timeout.
+Независимый Astra Ultra whole-diff SOURCE GO; flake8/diff-check PASS.
+
+Wiring исполняет 21 непрерывный исходный statement constructor-prefix и
+actual assignments TranslationService/LiveSubs; реальные stores/settings/
+handlers/cache, persisted glossary/privacy/reopen, LiveSubs privacy early
+return + idle close. Сохранение настроек и config hot-reload смотрят в один
+scratch HOME path. STT/recorder/transcriber/model transport — явные doubles.
+
+Доступный локальный этап **100%**. Это не полный service startup/close,
+worker cancellation/drain/replay, IPC/REST/native/audio/model E2E. Python3.12.7
+на macOS проверен, Ubuntu/full pre-merge/hosted CI не запускались. Публикация,
+runtime, модели, клон, OrbStack не затронуты; Ear RUN0. Следующий app/startup
+gate требует точного нового плана изоляции и свежего Main START.
+Карточка/артефакты: [aggregate](superpowers/plans/2026-10-29-ear-aggregate-offline.md).
+
 ## 2026-10-29 — реальные компоненты перевода: исправление повреждённого кэша
 
 Поверх локального `c0dcf9f6` проверены реальные Translator/TranslationCache/
