@@ -1,5 +1,20 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-29 — открытые PR: карта композиции, без runtime
+
+GitHub повторно подтвердил OPEN2120/2108/2119; remote16552643. Text-only карта
+на owned002583:2120 clean,2108 NOW conflict,2119 LiveSubs/NOW/HealthMonitorTests
+conflicts. Нужна совместная защита replay/privacy и merged2126 cancellation.
+Минимальный existing2120fix перенесён: actual AST suffix RED7 ожидаемых
+subFAIL→GREEN3methods/14subcasesPASS; independent Astra whole SOURCE_GO.
+Процессы reaped/PGIDempty, Main окна закрыты, EarRUN0. FullFlask/parity/audit/
+hostedCI/merge не выполнялись; source/offline срез100%, release не квалифицирован.
+Gateway согласовал exact503 schema и подтвердил отсутствие STT pause ACK.
+Согласие на legacy maintenance не заменяет actual producer fence/окно.
+Без выката, рестартов, моделей, клона, OrbStack; новый release не квалифицирован.
+Подробности: [composition card](superpowers/plans/2026-10-29-ear-pr-composition.md).
+
+
 ## 2026-10-29 — полный constructor / export close verdict: локально принято
 
 Изолированный `ear-full-lifecycle-1029`, база `91a9b714`; remote target

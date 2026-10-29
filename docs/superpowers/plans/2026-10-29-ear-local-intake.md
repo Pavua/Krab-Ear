@@ -8,7 +8,10 @@ Scope: только source/docs после диагностического comm
 
 В docs/superpowers/plans найдено109 Markdown-файлов. Девять датированы Oct26–29:
 это текущая выборка intake, не полный прочитанный исторический backlog.
-Остальные100 файлов ещё не квалифицированы как active/done/superseded.
+Frozen100 historical files теперь имеют hash/metadata/source-reference registry:
+scan100/100, metadata review100/100, полное чтение17/100; behavior verification0.
+Остальные83 не прочитаны полностью; active/done/superseded не присваивается
+автоматически по checklist или существованию пути.
 NOW содержит исторические checkpoints рядом с текущими — unchecked box старой
 карточки сам по себе не означает новый незавершённый implementation task.
 
@@ -55,8 +58,12 @@ GitHub CI lookup в этой карточке нет. Local SHAs проверя�
    Main START для Swift; нельзя заменять root-cause анализ увеличенным sleep.
 4. Remaining100historicalplans: следующий intake — только индекс/статусы/
    supersession, без автоматического исполнения старых карточек/моделей.
-5. Sentry first-page17backend/0agent — peer metadata only; даты/env/pages/events
-   ещё UNKNOWN. Не объявлять полный Sentry охват или текущую severity.
+5. Sentry central peerreceipt обновлён: unresolved17backend/0agent полностью
+   paginated; latest17/17 metadata прочитаны координатором. Environment daily-use,
+   releasekrab-ear@2.4.0 без gitSHA; latestOct27, MLX chainOct24. Это peer metadata,
+   не точная runtime revision/causality и не17 независимых новых багов.
+6. OPEN PR2120/2108/2119 не интегрированы; текущая карта конфликтов и первый
+   causal REST gate: [composition](2026-10-29-ear-pr-composition.md).
 
 Текущий scoped intake свежих девяти карточек/source-map завершён. Общий аудит
 Ear остаётся неполным; процент по всему проекту не вычислялся.
