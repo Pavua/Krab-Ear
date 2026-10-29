@@ -1,5 +1,28 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-29 — реальные компоненты перевода: исправление повреждённого кэша
+
+Поверх локального `c0dcf9f6` проверены реальные Translator/TranslationCache/
+SettingsService/StateStore в disposable scratch HOME/TMP/cwd. Только четыре
+owner methods извлечены из actual service AST: полный backend не импортируется.
+Подменён transport, модели/сеть/threads/production state запрещены до импортов.
+
+Обнаружен и воспроизведён баг: валидный JSON с нестроковым cache value
+ронял Translator на `.split()`. `_load` теперь отбрасывает такие значения
+до count-limit, сохраняя корректные строки, их порядок и byte-eviction.
+RED 8 PASS / 1 ERROR → GREEN 9 component PASS. Независимое Astra Ultra
+review приняло fix и обнаружило P2 в cleanup самого стенда; causal RED2
+→ GREEN2 подтверждает очистку при timeout/KeyboardInterrupt. Общий parent
+запуск: 3 PASS (2 lifecycle + 1 wrapper), child9, violations0/skips0,
+один Python thread; child reaped, группа пуста. Compatibility gate: 64 PASS
+из 70 исходных cache cases, 6 явно исключены (3 threads + 3 IPC throttle).
+Source/flake8/diff-check PASS. Локальный компонентный блок завершён на 100%;
+Python 3.12/Ubuntu parity и hosted CI не запускались.
+
+Карточка: [component gate](superpowers/plans/2026-10-29-translation-components-integration.md).
+Это локальная приёмка компонентов, не полного startup/IPC/native/live E2E.
+Без push/PR/merge/hosted CI/runtime/restart/models/clone/OrbStack.
+
 ## 2026-10-29 — translation constructor slice: локальный checkpoint
 
 От базы `165526430d6c4d378b69da5abfa71eb6076982c9` четыре присваивания

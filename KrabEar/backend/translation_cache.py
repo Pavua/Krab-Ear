@@ -231,15 +231,17 @@ class TranslationCache:
             with open(self._path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             if isinstance(data, dict):
-                # Восстанавливаем порядок; обрезаем до лимита
-                items = list(data.items())[-self._max_entries:]
+                # JSON может быть валидным, но содержать чужие типы значений.
+                # Отбрасываем их ДО count-limit: они не должны вытеснять
+                # корректные строки или попадать в Translator как cache hit.
+                items = [(k, v) for k, v in data.items() if isinstance(v, str)][-self._max_entries:]
                 self._cache = OrderedDict(items)
                 # Восстанавливаем учёт байтов и применяем byte-eviction —
                 # защита от заранее раздутого/отравленного файла на диске.
                 self._sizes = {}
                 self._total_bytes = 0
                 for k, v in self._cache.items():
-                    size = self._value_bytes(v) if isinstance(v, str) else 0
+                    size = self._value_bytes(v)
                     self._sizes[k] = size
                     self._total_bytes += size
                 self._evict_locked()
