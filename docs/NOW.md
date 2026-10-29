@@ -1,5 +1,19 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-29 — REST full import/auth/privacy prerequisite: локальный PASS
+
+Owned ear-rest-contract-integration-1029 поверхc9e62600. Actual REST globals,
+Flask factory/test_client/StateStore/RestAuth/privacy/auth декораторы сохранены.
+Attempt1 guard запретил limits MemoryStorage Timer доHTTP; сохранён как FAIL.
+Через существующий scratchenv RATE_LIMIT_ENABLED=false и новый review/START
+attempt2: fullimport+3HTTP401/401/403 PASS, violations0/workerstarts0, child17660
+exit0/reaped/PGIDempty/2.244s/hash15stable. EarRUN0/окно возвращено Main.
+Parent finalformat AST-identical tested e10; flake8двухfiles/diffcheckPASS.
+StageA100%; STT503/upload/executor/provider/rate-limits/TCP/live/audio/drain ещё
+не проверены этим fixture. Productiondiff0; без push/CI/merge/runtime/models/
+clone/OrbStack. [Карточка](superpowers/plans/2026-10-29-rest-flask-isolation.md).
+
+
 ## 2026-10-29 — открытые PR: карта композиции, без runtime
 
 GitHub повторно подтвердил OPEN2120/2108/2119; remote16552643. Text-only карта
