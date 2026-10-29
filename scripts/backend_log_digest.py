@@ -17,6 +17,7 @@
 Exit code:
   0 — healthy (no alerts)
   1 — ≥1 ALERT triggered
+  2 — UNKNOWN (log file not found)
 """
 
 from __future__ import annotations
@@ -377,8 +378,8 @@ def main() -> int:
 
     # Read log
     if not os.path.exists(args.log):
-        print("healthy (log file not found)")
-        return 0
+        print("UNKNOWN (log file not found)")
+        return 2
 
     with open(args.log, encoding="utf-8", errors="replace") as fh:
         raw_lines = fh.readlines()
