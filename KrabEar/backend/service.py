@@ -469,6 +469,14 @@ class BackendService:
         self._text_snippet_svc = TextSnippetService(data_dir=store.data_dir)
         self._phonetic_vocab_svc = PhoneticVocabService(data_dir=store.data_dir)
 
+    def _init_translation_client(self, store: StateStore, translator: Translator | None) -> None:
+        self.translator = translator or Translator()
+        # W1429 — wire persistent translation cache (late-injection pattern)
+        self._translation_cache = TranslationCache(data_dir=str(store.data_dir))
+        self.translator._translation_cache = self._translation_cache
+        # W1500 — wire runtime settings getter for privacy-mode detection
+        self.translator._settings_getter = self._get_runtime_setting
+
     def __init__(
         self,
         store: StateStore,
@@ -567,12 +575,7 @@ class BackendService:
         if hasattr(self.transcriber, "engine"):
             self.transcriber.engine._phonetic_provider = self._phonetic_vocab_svc.get_entries
 
-        self.translator = translator or Translator()
-        # W1429 — wire persistent translation cache (late-injection pattern)
-        self._translation_cache = TranslationCache(data_dir=str(store.data_dir))
-        self.translator._translation_cache = self._translation_cache
-        # W1500 — wire runtime settings getter for privacy-mode detection
-        self.translator._settings_getter = self._get_runtime_setting
+        self._init_translation_client(store, translator)
         self._start_time: float = time.monotonic()
         # S3/Задача 2: cloud_stt/cloud_rewriter раньше строили СОБСТВЕННЫЙ
         # StateStore(settings.DATA_DIR) — после выравнивания каталога данных

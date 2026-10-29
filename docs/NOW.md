@@ -1,5 +1,25 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 2026-10-29 — translation constructor slice: локальный checkpoint
+
+От базы `165526430d6c4d378b69da5abfa71eb6076982c9` четыре присваивания
+translator/cache/runtime-getter вынесены в `_init_translation_client`, один
+синхронный вызов на прежнем месте. Сохранены falsey injection, порядок,
+частичная инициализация при ошибках, identity кэша и bound getter.
+
+Baseline 8 PASS → shape RED (8 PASS / 1 ожидаемый missing-helper FAIL) →
+GREEN 9 PASS. Отдельно прежний constructor pack 40 PASS, audit-all PASS,
+полный module AST после обратного inline совпал с базой; flake8/diff-check PASS.
+Независимое Astra whole-diff source review GO. Все owned test-процессы
+завершены, группы пусты. Это локальная source/offline приёмка, не hosted CI.
+
+Карточка и границы: [translation extraction](superpowers/plans/2026-10-29-constructor-translation-extraction.md).
+Текущий scope: без push/PR/merge/hosted CI/runtime/restart/models/clone/OrbStack.
+Историческое maintenance-согласие ниже не возобновляет выкат; фактического
+STT pause ACK нет. Полный startup, реальная privacy/cache wiring и live E2E
+остаются отдельными гейтами. Перед следующими тестами согласовать новое окно
+с Main/Gateway; локальный блок завершён на 100%, не весь проект.
+
 ## 2026-10-26 — очередь интегрирована; релиз подготовлен, выкат удерживается
 
 **Source / merge / exact post-merge CI: PASS. Runtime cutover: HOLD.**
