@@ -1,0 +1,100 @@
+{
+  "historical_inventory_ref": "fbb6b55ab6e80f3a678b502970cfdfb1d5555b88",
+  "qualified_design_ref": "173eec5a635986e4019a824e3d1e3b733f84283d",
+  "runtime_reference_only": "8b40; not inspected or live qualified",
+  "symbols": [
+    {
+      "file": "app/main.py",
+      "symbol": "_notify_screening_started",
+      "old_sha256": "a752ca1e79f3ae8933fa7c0c82420f258b211c56ebeb39aca20f538c96c4aac7",
+      "fresh_sha256": "a752ca1e79f3ae8933fa7c0c82420f258b211c56ebeb39aca20f538c96c4aac7",
+      "equal": true
+    },
+    {
+      "file": "app/main.py",
+      "symbol": "receive_mic_audio",
+      "old_sha256": "c0916fb5262a246b4d4074066d41d4b79ef128fde91b52db5c84f077b8b36451",
+      "fresh_sha256": "c0916fb5262a246b4d4074066d41d4b79ef128fde91b52db5c84f077b8b36451",
+      "equal": true
+    },
+    {
+      "file": "app/main.py",
+      "symbol": "_process_mic_audio",
+      "old_sha256": "079e2b17b2a3bb63e4847a1f3bf1f6e2b748fb3891150f668d8d9ff7b6e9c447",
+      "fresh_sha256": "bc07dd158762227c2db36a03477d164e6c55d4e6c23d7cc135be476579c1b39e",
+      "equal": false
+    },
+    {
+      "file": "app/main.py",
+      "symbol": "monitor_audio_ws",
+      "old_sha256": "f8fc881a2d4960157dc2e6a5bb9f931f14304aebb935bc0788cd895b4cda93fb",
+      "fresh_sha256": "f8fc881a2d4960157dc2e6a5bb9f931f14304aebb935bc0788cd895b4cda93fb",
+      "equal": true
+    },
+    {
+      "file": "app/main.py",
+      "symbol": "_quiesce_agent_audio_for_mode_change",
+      "old_sha256": "a7471764ce17350ea2bcd836a6b85ba9bb34b796eb864cb1d11c709d8268cb41",
+      "fresh_sha256": "3a5695fabf97c1e50a623acf412e0f71a969060bc83209efa6fd85952b7923ea",
+      "equal": false
+    },
+    {
+      "file": "app/main.py",
+      "symbol": "_agent_ownership_matches",
+      "old_sha256": "512bf32532dfd1dd84804c9b01205d8bcba1452115bc2f4bc8e0ef8e0115572b",
+      "fresh_sha256": "512bf32532dfd1dd84804c9b01205d8bcba1452115bc2f4bc8e0ef8e0115572b",
+      "equal": true
+    },
+    {
+      "file": "app/main.py",
+      "symbol": "_deliver_translation_voice",
+      "old_sha256": "d8ea162dc8083076fd3835dd7204eedd3e7d930fcbc34ad479b8503920413cb8",
+      "fresh_sha256": "d8ea162dc8083076fd3835dd7204eedd3e7d930fcbc34ad479b8503920413cb8",
+      "equal": true
+    },
+    {
+      "file": "app/routers/prompt_call.py",
+      "symbol": "agent_takeover",
+      "old_sha256": "e82a13011328cbe7ecce30abe1be6d75f8f53069708431d3fe57e823c0decb3d",
+      "fresh_sha256": "e82a13011328cbe7ecce30abe1be6d75f8f53069708431d3fe57e823c0decb3d",
+      "equal": true
+    },
+    {
+      "file": "app/routers/prompt_call.py",
+      "symbol": "_report_takeover_reverse_leg_unavailable_once",
+      "old_sha256": "aad5b814fe3406ba510a8a93d91341cc1088f1311d8a3d645e5de0d72efdced0",
+      "fresh_sha256": "aad5b814fe3406ba510a8a93d91341cc1088f1311d8a3d645e5de0d72efdced0",
+      "equal": true
+    },
+    {
+      "file": "app/telephony/sip.py",
+      "symbol": "create_call",
+      "old_sha256": "5fff86fc682a7358db66e41da2f06ecd6657a0d5f23cbfddf11a4c7363c22088",
+      "fresh_sha256": "5fff86fc682a7358db66e41da2f06ecd6657a0d5f23cbfddf11a4c7363c22088",
+      "equal": true
+    }
+  ],
+  "whole_files": [
+    {
+      "file": "ios/KrabVoiceiOS/ContentView.swift",
+      "equal": true,
+      "sha256": "b196be0f5d81fdcdbb7492b28356e72c482780b71e1aa2327fbfe90960935b76"
+    },
+    {
+      "file": "ios/KrabVoiceiOS/IncomingScreeningLifecycleModel.swift",
+      "equal": true,
+      "sha256": "5ac019f12703be8fd496c3fdfdd174f5dafd4c117226791b4ea5bd7105db6461"
+    },
+    {
+      "file": "ios/KrabVoiceiOS/GatewayClient.swift",
+      "equal": true,
+      "sha256": "5ddc9f8defbc97f4bc24344b5c544358c3ace02a2a817b545d01af4445e2d241"
+    },
+    {
+      "file": "app/telephony/sip.py",
+      "equal": true,
+      "sha256": "ad0aed644eb0f400bea85847715f43dd40707d6f010b78be0823aa077e796081"
+    }
+  ],
+  "changed_symbols_review": "_process_mic_audio: utterance metadata/history and callee TTS provenance only; raw-branch and translation route preserved. _quiesce_agent_audio_for_mode_change: successful clear also removes quiet/speech byte counters. No resolution of documented incoming answer/takeover gap."
+}

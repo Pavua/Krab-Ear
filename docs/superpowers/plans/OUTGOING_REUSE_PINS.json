@@ -1,0 +1,61 @@
+{
+  "scope": "source-only immutable blobs; no imports/tests/runtime/network",
+  "files": [
+    {
+      "root": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway",
+      "commit": "173eec5a635986e4019a824e3d1e3b733f84283d",
+      "path": "app/routers/prompt_call.py",
+      "sha256": "2b4f064702b566501fa3489cfad227980ab19f802812abe7d5efb406e5e1eac1",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    },
+    {
+      "root": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway",
+      "commit": "173eec5a635986e4019a824e3d1e3b733f84283d",
+      "path": "app/models.py",
+      "sha256": "8133555a41d1e4470f68f0c2f8ab2b6a182a0ecc8479838e627fd8d20063f039",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    },
+    {
+      "root": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway",
+      "commit": "173eec5a635986e4019a824e3d1e3b733f84283d",
+      "path": "ios/KrabVoiceiOS/GatewayClient.swift",
+      "sha256": "5ddc9f8defbc97f4bc24344b5c544358c3ace02a2a817b545d01af4445e2d241",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    },
+    {
+      "root": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway",
+      "commit": "173eec5a635986e4019a824e3d1e3b733f84283d",
+      "path": "ios/KrabVoiceiOS/ContentView.swift",
+      "sha256": "b196be0f5d81fdcdbb7492b28356e72c482780b71e1aa2327fbfe90960935b76",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    },
+    {
+      "root": "/Users/pablito/Antigravity_AGENTS/Krab Ear",
+      "commit": "139d228f6f3f0609b740deb801ecef129233d2fc",
+      "path": "KrabEar/backend/gateway_call_provider.py",
+      "sha256": "57c0bf9fa5d40f997c76d42e2cbaa6545348b498d5e5bba3e6d65c24ae9411fc",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    },
+    {
+      "root": "/Users/pablito/Antigravity_AGENTS/Krab Ear",
+      "commit": "139d228f6f3f0609b740deb801ecef129233d2fc",
+      "path": "KrabEar/backend/call_session_service.py",
+      "sha256": "83ee56ece5220a20faa8c90808c51fe3c5012dd1e686591076cbfc3751dd2947",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    },
+    {
+      "root": "/Users/pablito/.codex/worktrees/main-health-residency-1030",
+      "commit": "1921de3836a737423071c2590891b11bf955da06",
+      "path": "src/core/follow_ups.py",
+      "sha256": "bcbc3c7b50d50b4e57ee7d3143b7055b8ff7f6b14ab483fefeb4226abd893ba3",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    },
+    {
+      "root": "/Users/pablito/.codex/worktrees/main-health-residency-1030",
+      "commit": "1921de3836a737423071c2590891b11bf955da06",
+      "path": "src/userbot/callback_handler.py",
+      "sha256": "913a9c4a1488323cd05383a7dd336dc7e1919157eac038c3739b54921cc2fb36",
+      "input": "immutable Git blob; not runtime or current dirty file"
+    }
+  ]
+}
