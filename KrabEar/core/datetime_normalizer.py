@@ -526,9 +526,9 @@ class DateTimeNormalizer:
         text = re.sub(full_pat, _repl_date, text, flags=re.IGNORECASE)
 
         # Цифровой день + месяц словом
-        # NumberNormalizer выдаёт «3-е»/«3-го» для порядкового дня.
+        # NumberNormalizer выдаёт «3-е»/«3-го»/«3-му» для порядкового дня.
         digit_day_pat = (
-            rf"(?<![\w-])(\d{{1,2}})(?:-(?:е|го))?"
+            rf"(?<![\w-])(\d{{1,2}})(?:-(?:е|го|му))?"
             rf"\s+({months_pat})(?!\w)"
             rf"(?:\s+(\d{{4}})\s+года?)?"
         )
