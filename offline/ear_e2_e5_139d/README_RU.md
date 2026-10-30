@@ -1,25 +1,66 @@
-# E2/E5: подготовленный causal profile, НЕ ЗАПУЩЕН
+# E2/E5: локальный source/offline checkpoint
 
-База строго Ear139d228f6f3f0609b740deb801ecef129233d2fc. Отдельный test-only commit и freeze. Профиль не относится к c77/fae. Изменений production нет.
+База: `139d228f6f3f0609b740deb801ecef129233d2fc`. Проверенный кандидат:
+`e9327cea8b5a3a02e99ace197e90ade535bdae33`. Последующее изменение этого README
+не меняет проверенные исходники и тесты. Результаты относятся к точному E932,
+не к текущей удалённой ветке и не к production.
 
-Три последовательных unittest. E2 — ожидаемый RED на safety-утверждении «после running timeout второй обработчик не допускается до worker drain». Настоящий первый worker держится Event, Future.result после подтверждения старта вызывает настоящий Future.result(timeout=0); это ускоритель ожидания, не подделка running/done/cancel. Ответ504 намеренно не закрыт, поэтому exit callback ещё не вызван; второе обращение должно отвергаться. После проверки Event отпускается, все реальные pools shutdown(wait=True), futures done. Первый worker имеет защитный wait2s, supervisor30s TERM3/KILL3. Нельзя по этому результату заявлять parallel MLX/GPU/OOM или поведение конкретного WSGI сервера.
+## Выбранный контракт
 
-E5 — characterization, ожидается PASS: ordinary admission получает10s, затем Future.result ещё10s. Логические часы admission+6 и worker+5 дают11s при успехе. Lock/worker реальны, call_in_scope целиком настоящий и работает в worker ContextVar; его часы остаются настоящими. Это фиксация границы двух часов и фаз, НЕ измерение физической latency и НЕ whole-request deadline violation. Docstring endpoint прямо называет Future.result бюджет; изменение внешнего контракта требует отдельного решения. Третий контроль фиксирует настоящий MIN5/clamp10 и invalid values.
+После таймаута действительно работающей direct-engine STT-задачи
+`_STT_POISONED` закрывает новые admissions до перезапуска процесса. Проверки
+до и после захвата singleflight не пропускают ожидавший запрос после poison.
+Callback завершения Future освобождает primitive lock, но не снимает poison.
+Старый response.close/exit70 сохраняется. Обычные success, completed error и
+cancelled pending Future не устанавливают poison.
 
-Из rest_server AST извлекаются полные тела6 функций; убираются только декораторы регистрации/auth/privacy. Privacy/auth реализации не тестируются и не ослабляются в production. Полные чисто stdlib stt_budget/activity_diagnostics/operation_ownership исполняются под offline-именами, без server/model import. Request/Response/upload/deps — узкие synthetic seams. Файл — только synthetic RIFF header, не audio processing. normalize stub; soundfile отсутствует в isolated -S и его необязательная ветка обрабатывается штатно. Метрики stub, persist_history=false. Никаких private transcript/audio.
+Callback-only кандидат был отозван: освобождение admission после первого drain
+позволяло начать новую работу, которую затем мог оборвать поздний close старого
+ответа. Поэтому прежнее обещание «после drain снова 200» здесь неприменимо.
 
-Runner заимствует проверенный30s supervisor: isolated Python3.12 -I-S-B, sandbox network deny, audit deny provider/model/app imports, processes/DB/network, writes только scratch; ровно3 допустимых owned ThreadPool workers, остальные запрещены. Freeze проверяется до child, source stable после, clean exactHEAD, exit/reap/groupempty/remainingthreads/appmodules/guards в receipt. Отсутствие body receipt — ошибка стенда, не RED. E2 ожидаемый assertion failure должен быть отдельно классифицирован, не скрыт expectedFailure.
+## Причинное воспроизведение и пять контролей
 
-Запуск только после независимого SOURCE_PROFILE review и согласованного окна; сейчас NONE. Никаких setup/install/build/restart/publication. Рекомендуется одно bounded execution, не полный suite.
+Исходный test-only RUN1: три метода, один причинный assertion failure E2 и два
+PASS. Наблюдались first504, second200 при ещё работающей первой Future и
+незакрытом первом ответе. Ошибок стенда и оставшихся потоков не было. Это
+доказательство admission gap, не параллельного MLX/GPU/OOM.
 
-## Candidate GREEN profile, ещё не запущен
+ONE GREEN1 точного E932: **5 PASS**, wall 0,196 секунды, exit0, дочерний процесс
+собран, группа пуста, четыре owned worker завершены, хеши сохранены. Ошибок,
+skips, нарушений guard и оставшихся потоков нет. Проверяются:
 
-Минимальный source diff переносит release singleflight на callback завершения Future только при nonblocking shutdown. Exit/close функция не меняется. E2 перед второй попыткой использует actual lock acquire(0) как дополнительный ускоритель admission: исходный handler по-прежнему передаёт10, это утверждается отдельно. После causal503 worker отпускается/drain, слот снова берётся, обычный запрос200 и исходный close callback вызывает stub exit70. Исходный RUN1 неизменён и хранит реальный причинный200 при работающем worker.
+- E2: first504/second503 при работающей первой Future; после drain также503,
+  второй worker не входит; old close70 сохранён.
+- E5: характеристика двух отдельных бюджетов admission и Future.result.
+  Логические admission+6/work+5 не доказывают нарушение whole-request deadline.
+- Минимум/clamp10 и некорректные значения бюджета.
+- Освобождение admission после обычного success/completed error.
+- Отмена настоящей pending Future через минимальный executor seam; реальный
+  scheduling pending pool этой проверкой не доказан.
 
-Теперь5tests: исходные3 с усилением E2 + обычныйsuccess/completederror release + cancelledpendingFuture release. Последняя ветка использует настоящий pendingFuture и явный minimal executor seam безworker; это не доказательство executor scheduling. Нельзя выдавать её за настоящий pendingpoolrun. Не более5owned realworkers суммарно; новый профиль требует независимого review. До запуска source/AST только. Отдельные существующие11owned-subtree и2HTTP profiles ещё предстоит привязать к новому кандидату, здесь их приёмка не заявляется.
+Полные тела шести функций rest_server извлекаются AST; registration/auth/privacy
+декораторы сняты только в offline-профиле. Реализации auth/privacy не проверены.
+Future, Lock, ThreadPool и ContextVar настоящие; request/response/upload/metrics
+синтетические. Ускорители Future.result(0) и lock.acquire(0) явно отличаются
+от исходного RUN1; узкая эквивалентность свободного lock не означает одинаковое
+расписание всего теста. Supervisor: Python3.12 -I-S-B, максимум5 workers,
+30 секунд плюс TERM3/KILL3, запрет сети, моделей и application imports.
 
-## Lifetime qualification: HOLD заменяет прежний callback-only кандидат
+## Отдельные HTTP-контроли
 
-Исходныйcallback-only fix не закрывал поздний close после первого drain. Итоговая предлагаемая политика: running timeout устанавливает STT_POISONED до ответа; этот latch не сбрасывается в живом процессе. Admission проверяет latch до и после acquire, освобождая полученный lock при отзыве во время ожидания. Futurecallback продолжает отпускать primitive lock после завершения, но не снимает poison. Новый STT послеdrain получает503 до recycle. Exitcallback70 не отменяется и не меняется. Это выбранная политика кандидата, требует независимого review; ещё не выкачено и не GREEN.
+ONE HTTP2 на точном E932: **2 PASS**, wall1,948 секунды, exit0, process reaped,
+группа пуста, все19 pins стабильны, два owned worker завершены. Настоящий Flask
+POST200 с синтетическим transcriber учитывает root и вложенную задачу: внешний
+обработчик уже завершён, а child ещё running; после release subtree completed.
+Engine dispatch binding проверен только AST. Стенд использует scratch settings,
+не открывает настоящий listener и не обращается к моделям/сети.
 
-E2 расширен: после первого drain подготовлен отдельный удерживаемый второй worker. Если admission ошибочно допускает его, Future.result hook ждётегоstart, вызывает first.close во времяработы, фиксируетexit70приrunningFuture, затем выпускаетworker для cleanup. При исправлении второйworker вообще не запускается, response503, oldclose70 остаётся. Общий5case count прежний; фактически исправленный E2 использует1worker, лимит5 остаётся верхней границей. Все lifetime-exit вызовы stub, никакого настоящегоprocess exit. Новаяseam отличаетсястаромуRUN1; ADMISSION_SEAM_EQUIVALENCE_RU.md описываетузкуюэквивалентностьпервогоno-contentionпути, не целогоновоготеста.
+Это не HTTP504 poison lifecycle test и не проверка реального ASR, auth/privacy,
+ранней RU IPC ветки, native UI, полного server/subprocess drain или heard/audio E2E.
+Существующие operation_ownership и11 unit-тестов побайтно не менялись от139d;
+новый запуск11 не выполнялся и не суммируется с этими результатами.
+
+Сырые RUN1/GREEN1 и HTTP receipts, immutable freezes и независимые отчёты
+хранятся во внешнем артефакте ear-e2-e5-causal-139d-1030 текущего Ear-чата.
+Все запуски согласованы отдельно; автоматических повторов нет. Hosted CI,
+merge, deployment и runtime acceptance этим checkpoint не заявляются.
