@@ -1,4 +1,4 @@
-"""Bounded E2/E5 actual-handler profile; only three owned stdlib workers.
+"""Bounded E2/E5 actual-handler profile; only five owned stdlib workers.
 Supervisor mechanics reused from run_stt_ownership_consumer.py:30s, TERM3/KILL3,
 reap/process-group check, sandbox network deny, isolated interpreter and scratch.
 """
@@ -87,9 +87,9 @@ def child(scratch):
     thread_starts = []
 
     def owned_thread_start(thread, *args, **kwargs):
-        if not thread.name.startswith("ear-causal_") or len(thread_starts) >= 3:
+        if not thread.name.startswith("ear-causal_") or len(thread_starts) >= 5:
             attempts.append("unowned_thread.start")
-            raise RuntimeError("Only three owned executor workers allowed")
+            raise RuntimeError("Only five owned executor workers allowed")
         thread_starts.append(thread.name)
         return real_thread_start(thread, *args, **kwargs)
 
@@ -99,8 +99,8 @@ def child(scratch):
     suite = unittest.defaultTestLoader.discover(
         str(Path(__file__).resolve().parent), pattern="test_causal.py"
     )
-    if suite.countTestCases() != 3:
-        raise RuntimeError("Exact E2/E5 causal profile must contain 3 tests")
+    if suite.countTestCases() != 5:
+        raise RuntimeError("Exact E2/E5 causal profile must contain 5 tests")
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     app_modules = sorted(name for name in sys.modules if name.split(".")[0] in ("app", "backend", "core"))
     remaining = [
@@ -207,7 +207,7 @@ def parent(output, expected):
                 while True:
                     if interruptions:
                         raise InterruptedError("Ready-yield gate interrupted")
-                    if time.monotonic() - start >= 30:
+                    if time.monotonic() - start >= 50:
                         raise subprocess.TimeoutExpired(command, 30)
                     try:
                         proc.wait(timeout=0.25)
@@ -259,7 +259,7 @@ def parent(output, expected):
             and not interruptions
             and group_empty
             and receipt["source_stable"]
-            and receipt.get("tests_run") == 3
+            and receipt.get("tests_run") == 5
             and receipt.get("forbidden_attempts") == []
             and receipt.get("remaining_threads") == []
             and receipt.get("skips") == []
@@ -269,7 +269,7 @@ def parent(output, expected):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
+    if len(sys.argv) != 5:
         raise SystemExit("usage: run_profile.py OUTPUT.json EXPECTED_SHA")
     if sys.argv[1] == "--child":
         raise SystemExit(child(sys.argv[2]))

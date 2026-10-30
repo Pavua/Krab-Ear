@@ -212,6 +212,16 @@ class CausalProfile(unittest.TestCase):
         self.assertFalse(h.futures[0].done())
         self.assertEqual(h.exit_codes, [])  # Response deliberately not closed yet.
         self.assertEqual(len(first.callbacks), 1)
+        # Probe actual lock state without spending another physical 10s. The
+        # ordinary handler still supplies its real clamped admission budget.
+        original_acquire = h.ns["try_acquire_stt_singleflight"]
+        admission_budgets = []
+
+        def probe_acquire(timeout):
+            admission_budgets.append(timeout)
+            return original_acquire(0.0)
+
+        h.ns["try_acquire_stt_singleflight"] = probe_acquire
         second = h.invoke()
         print(json.dumps({"witness": "E2", "first_status": first.status_code,
                           "second_status": second.status_code,
@@ -221,7 +231,17 @@ class CausalProfile(unittest.TestCase):
                           "exit_invocations": len(h.exit_codes)}), flush=True)
         self.assertEqual(second.status_code, 503,
                          "second handler admitted while first timed-out worker remains running")
+        self.assertEqual(admission_budgets, [10.0])
         self.assertFalse(h.worker_alive_on_second_entry)
+        self.assertFalse(h.futures[0].done())
+        h.cleanup()
+        self.assertTrue(h.ns["try_acquire_stt_singleflight"](0.0))
+        h.ns["release_stt_singleflight"]()
+        recovered = h.invoke()
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual(h.exit_codes, [])
+        first.close()  # Actual arm_timeout_exit callback is retained unchanged.
+        self.assertEqual(h.exit_codes, [70])
 
     def test_e5_characterize_ordinary_two_phase_budget_without_new_contract(self):
         h = self.harness(logical_clock=True)
@@ -252,6 +272,51 @@ class CausalProfile(unittest.TestCase):
         self.assertEqual(resolve(None), (None, None))
         for raw in ["nan", "inf", "0", "-1", "121"]:
             self.assertIsNotNone(resolve(raw)[1])
+
+    def test_success_and_completed_error_release_slot_without_exit(self):
+        h = self.harness()
+        self.assertEqual(h.invoke().status_code, 200)
+        self.assertTrue(h.ns["try_acquire_stt_singleflight"](0.0))
+        h.ns["release_stt_singleflight"]()
+
+        def fail(*args, **kwargs):
+            raise ValueError("synthetic completed error")
+
+        h.ns["_deps"]().transcriber.transcribe = fail
+        self.assertEqual(h.invoke().status_code, 500)
+        self.assertTrue(h.ns["try_acquire_stt_singleflight"](0.0))
+        h.ns["release_stt_singleflight"]()
+        self.assertTrue(all(f.done() for f in h.futures))
+        self.assertEqual(h.exit_codes, [])
+
+    def test_cancelled_pending_future_releases_slot_without_exit(self):
+        h = self.harness()
+        pending = concurrent.futures.Future()
+
+        class PendingPool:
+            def submit(self, *args, **kwargs):
+                h.futures.append(pending)
+                return self
+
+            def __getattr__(self, name):
+                return getattr(pending, name)
+
+            def result(self, timeout=None):
+                h.wait_budgets.append(timeout)
+                return pending.result(timeout=0.0)
+
+            def shutdown(self, wait=True, **kwargs):
+                pending.cancel()
+
+        h.ns["concurrent"].futures.ThreadPoolExecutor = lambda **kw: PendingPool()
+        response = h.invoke()
+        self.assertEqual(response.status_code, 504)
+        self.assertTrue(pending.cancelled())
+        self.assertEqual(h.calls, 0)
+        self.assertTrue(h.ns["try_acquire_stt_singleflight"](0.0))
+        h.ns["release_stt_singleflight"]()
+        self.assertEqual(response.callbacks, [])
+        self.assertEqual(h.exit_codes, [])
 
 
 if __name__ == "__main__":

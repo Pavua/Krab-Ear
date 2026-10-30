@@ -2107,7 +2107,13 @@ def transcribe_audio():
                     return timeout_response
         finally:
             try:
-                release_stt_singleflight()
+                if _pool_shutdown_nonblocking and _future is not None:
+                    # 504 ещё не означает завершения worker. До close/exit
+                    # WSGI может принять следующий запрос: держим слот до
+                    # фактического завершения Future, не метаданных observer.
+                    _future.add_done_callback(lambda _done: release_stt_singleflight())
+                else:
+                    release_stt_singleflight()
             except RuntimeError:
                 # release без acquire не должен маскировать таймаут/ошибку STT.
                 pass

@@ -11,3 +11,9 @@ E5 — characterization, ожидается PASS: ordinary admission получ�
 Runner заимствует проверенный30s supervisor: isolated Python3.12 -I-S-B, sandbox network deny, audit deny provider/model/app imports, processes/DB/network, writes только scratch; ровно3 допустимых owned ThreadPool workers, остальные запрещены. Freeze проверяется до child, source stable после, clean exactHEAD, exit/reap/groupempty/remainingthreads/appmodules/guards в receipt. Отсутствие body receipt — ошибка стенда, не RED. E2 ожидаемый assertion failure должен быть отдельно классифицирован, не скрыт expectedFailure.
 
 Запуск только после независимого SOURCE_PROFILE review и согласованного окна; сейчас NONE. Никаких setup/install/build/restart/publication. Рекомендуется одно bounded execution, не полный suite.
+
+## Candidate GREEN profile, ещё не запущен
+
+Минимальный source diff переносит release singleflight на callback завершения Future только при nonblocking shutdown. Exit/close функция не меняется. E2 перед второй попыткой использует actual lock acquire(0) как дополнительный ускоритель admission: исходный handler по-прежнему передаёт10, это утверждается отдельно. После causal503 worker отпускается/drain, слот снова берётся, обычный запрос200 и исходный close callback вызывает stub exit70. Исходный RUN1 неизменён и хранит реальный причинный200 при работающем worker.
+
+Теперь5tests: исходные3 с усилением E2 + обычныйsuccess/completederror release + cancelledpendingFuture release. Последняя ветка использует настоящий pendingFuture и явный minimal executor seam безworker; это не доказательство executor scheduling. Нельзя выдавать её за настоящий pendingpoolrun. Не более5owned realworkers суммарно; новый профиль требует независимого review. До запуска source/AST только. Отдельные существующие11owned-subtree и2HTTP profiles ещё предстоит привязать к новому кандидату, здесь их приёмка не заявляется.
