@@ -102,9 +102,9 @@ def run(output):
                     isinstance(child_receipt, dict)
                     and child_receipt.get("full_rest_import") is True
                     and type(child_receipt.get("http_cases")) is int
-                    and child_receipt["http_cases"] == 8
+                    and child_receipt["http_cases"] == 20
                     and type(child_receipt.get("worker_starts")) is int
-                    and child_receipt["worker_starts"] == 8
+                    and child_receipt["worker_starts"] == 18
                     and child_receipt.get("violations") == []
                     and child_receipt.get("failures") == []
                     and child_receipt.get("scope") ==

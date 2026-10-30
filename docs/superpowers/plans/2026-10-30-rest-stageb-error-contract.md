@@ -27,3 +27,16 @@ GREEN: шесть503/stable stt_failed/redacted text, два legitimate200; hist
 не менялась и отдельной новой timeout acceptance пока нет. Старый Stage A401/403 не
 выдаётся за новую Stage B проверку. Ошибка начальной fixture из-за mimetypes system read
 не считается causal RED; устранена явным audio/wav MIME без расширения read allowlist.
+
+## Расширение отрицательных контрактов после c8a0e565
+
+20 реальных HTTP запросов /18 реальных executor workers: прежние8 плюс
+4privacy(toggle/unreadable ×general/call),4empty_audio/null-error-success controls,
+2deterministic call-deadline/privacy precedence,2invalid-upload pre-worker400.
+Errors/privacy/deadline/invalid сохраняют scratchhistory/metrics; нормальный общий
+результат действительно добавляется в scratchhistory, callprofile не сохраняется.
+Пустой результат StateStore не добавляет как новую запись — первая assertion на+1
+была ошибкой fixture и исправлена, production не менялась. Deadline движется
+syntheticclock внутри worker; реального ожидания/hard-exit timer не создаётся.
+EXPANDED2 PASS, violations0,20cases/18workers joined, parent reaped/groupempty,
+hashstable. Исходный10-line gate неизменён; новое sourceповедение не добавлялось.
