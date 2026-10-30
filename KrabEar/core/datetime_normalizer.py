@@ -429,7 +429,25 @@ class DateTimeNormalizer:
                 return m.group(0)
             return f"{hour:02d}:{minute:02d}"
 
-        return re.sub(full_pat, _repl_time, text, flags=re.IGNORECASE)
+        text = re.sub(full_pat, _repl_time, text, flags=re.IGNORECASE)
+
+        # NumberNormalizer сокращает единицы. Принимаем их как время суток
+        # только с «в» или маркером; обычная длительность «2 ч» сохраняется.
+        abbreviated_pat = (
+            rf"(?<![\w:])(?:в\s+)?(\d{{1,2}})\s+ч(?!\w)"
+            rf"(?:\s+(\d{{1,2}})(?!\d)\s+мин(?!\w))?"
+            rf"(\s+(?:{time_markers_pat})(?!\w))?"
+            # Не принимать один час перед некорректным минутным токеном,
+            # включая длинные числа и продолжения единицы вроде «минус».
+            rf"(?!\s+\d+\s+мин)"
+        )
+
+        def _repl_abbreviated_time(m: re.Match) -> str:
+            if not re.match(r"в\s+", m.group(0), flags=re.IGNORECASE) and not m.group(3):
+                return m.group(0)
+            return _repl_time(m)
+
+        return re.sub(abbreviated_pat, _repl_abbreviated_time, text, flags=re.IGNORECASE)
 
     # ------------------------------------------------------------------
     # Русский: ДАТА
@@ -508,13 +526,25 @@ class DateTimeNormalizer:
         text = re.sub(full_pat, _repl_date, text, flags=re.IGNORECASE)
 
         # Цифровой день + месяц словом
+        # NumberNormalizer выдаёт «3-е»/«3-го» для порядкового дня.
         digit_day_pat = (
-            rf"(?<!\d)(\d{{1,2}})"
+            rf"(?<![\w-])(\d{{1,2}})(?:-(?:е|го))?"
             rf"\s+({months_pat})(?!\w)"
             rf"(?:\s+(\d{{4}})\s+года?)?"
         )
 
         def _repl_digit_date(m: re.Match) -> str:
+            # Новые цифровые порядковые формы не должны нормализовать лишь
+            # хвост составного дня или дату с неразобранным продолжением года.
+            if m.group(0).startswith(m.group(1) + "-"):
+                before = text[:m.start()]
+                after = text[m.end():]
+                if re.search(r"(?<!\S)\d+\s+$", before):
+                    return m.group(0)
+                if not m.group(3) and re.match(r"\s+\d", after):
+                    return m.group(0)
+                if m.group(3) and re.match(r"\w", after):
+                    return m.group(0)
             day = int(m.group(1))
             month_str = m.group(2).lower()
             year_str = m.group(3) or ""
@@ -623,8 +653,10 @@ class DateTimeNormalizer:
         )
 
         # Pattern 2: "a las N" (requires «a las» prefix) → digit hour
+        # Не съедать префикс HH:MM или длинного цифрового токена;
+        # запрет цифры также блокирует откат с двух цифр часа на одну.
         alas_pat = (
-            rf"(?<!\d)(?:a\s+las?\s+)(\d{{1,2}})"
+            rf"(?<!\d)(?:a\s+las?\s+)(\d{{1,2}})(?![\d:])"
             rf"(?:\s+y\s+(\w+))?"
             rf"(?:\s+({markers_pat}))?"
         )
@@ -710,9 +742,9 @@ class DateTimeNormalizer:
 
         # «el tres de noviembre de dos mil veintiséis»
         full_pat = (
-            rf"(?:el\s+)?(\d{{1,2}}|{day_ordinals_pat})"
-            rf"\s+de\s+({months_pat})"
-            rf"(?:\s+de\s+(\d{{4}}))?"
+            rf"(?<!\w)(?:el\s+)?(\d{{1,2}}(?:\.º)?|{day_ordinals_pat})"
+            rf"\s+de\s+({months_pat})(?!\w)"
+            rf"(?:\s+de\s+(\d\w*))?"
         )
 
         def _repl_date(m: re.Match) -> str:
@@ -720,10 +752,16 @@ class DateTimeNormalizer:
             month_str = m.group(2).strip().lower()
             year_str = m.group(3) or ""
 
+            # Захватываем числовой токен целиком: иначе необязательный год
+            # позволяет частично нормализовать дату с некорректным суффиксом.
+            if year_str and re.fullmatch(r"\d{4}", year_str) is None:
+                return m.group(0)
+
             day = _ES_DAY_ORDINALS.get(day_str)
             if day is None:
                 try:
-                    day = int(day_str)
+                    # Цифровая форма порядкового дня от NumberNormalizer.
+                    day = int(day_str.removesuffix(".º"))
                 except ValueError:
                     return m.group(0)
             month = _ES_MONTHS.get(month_str)
