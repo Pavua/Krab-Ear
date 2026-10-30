@@ -192,11 +192,18 @@ def run():
                    403, expired=True, privacy='enabled')
         for call in (False, True):
             extra_case('invalid_upload', call, {}, 400, invalid=True)
+        expected_cases = ([(number, call) for call in (False, True) for number in range(4)]
+                          + [(label, call) for call in (False, True) for label in
+                             ('privacy_enabled', 'privacy_unreadable', 'empty_audio', 'null_error_success')]
+                          + [('expired_engine_error', True), ('expired_privacy_error', True)]
+                          + [('invalid_upload', False), ('invalid_upload', True)])
+        assert len(cases) == 20
+        assert [(case['case'], case['call']) for case in cases] == expected_cases
         assert len(leaf_threads) == 18
         assert all(t != threading.get_ident() for t in leaf_threads)
         assert all(not t.is_alive() for t in boundary.workers)
         assert not boundary.violations, boundary.violations
-        receipt = {'full_rest_import': True, 'http_cases': 20, 'worker_starts': len(boundary.workers),
+        receipt = {'full_rest_import': True, 'http_cases': len(cases), 'worker_starts': len(boundary.workers),
                    'violations': boundary.violations, 'cases': cases, 'failures': failures,
                    'scope': 'real Flask upload/executor/error mapping; synthetic transcriber leaf; no ASR/runtime proof'}
         print('REST_STAGEB_RECEIPT=' + json.dumps(receipt), flush=True)
