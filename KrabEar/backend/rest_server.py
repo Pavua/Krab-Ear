@@ -628,6 +628,9 @@ def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | Non
 # P0 2026-08-16: один native STT в REST-процессе. Каждый POST раньше поднимал
 # свой ThreadPoolExecutor — два /v1/stt/transcribe грузили MLX параллельно.
 _STT_SINGLEFLIGHT = threading.Lock()
+# Running timeout уже вооружил завершение процесса при close старого ответа.
+# Даже завершившаяся позже Future не делает новый STT безопасным до recycle.
+_STT_POISONED = threading.Event()
 _REST_ACTIVITY = ActivityReservations()
 # Внутреннее subtree metadata; не endpoint, admission fence или full drain ACK.
 _REST_OPERATIONS = OwnedOperations()
@@ -635,7 +638,14 @@ _REST_OPERATIONS = OwnedOperations()
 
 def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
     """Захватить STT-слот. False → 503 stt_busy, transcribe не стартует."""
-    return _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec)))
+    if _STT_POISONED.is_set():
+        return False
+    acquired = _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec)))
+    if acquired and _STT_POISONED.is_set():
+        # Poison мог появиться, пока этот запрос ждал предыдущего владельца.
+        _STT_SINGLEFLIGHT.release()
+        return False
+    return acquired
 
 
 def release_stt_singleflight() -> None:
@@ -2076,6 +2086,7 @@ def transcribe_audio():
                     # cancel(). Забираем результат гонки без ложного hard-exit.
                     result = _future.result()
                 elif _future.running():
+                    _STT_POISONED.set()
                     _pool_shutdown_nonblocking = True
                     # Уже работающую задачу Future.cancel() не прерывает.
                     # Не ждём non-daemon worker: ожидание снова превратило бы

@@ -82,6 +82,9 @@ class FutureView:
 
     def result(self, timeout=None):
         self.harness.wait_budgets.append(timeout)
+        hook = getattr(self.harness, "before_result", None)
+        if hook is not None:
+            hook(self.future)
         if self.harness.force_running_timeout and len(self.harness.futures) == 1:
             if not self.harness.started.wait(1):
                 raise AssertionError("worker did not start")
@@ -120,6 +123,7 @@ class Harness:
                        _TRANSCRIBE_TIMEOUT_SEC=600, _DEADLINE_SEC_MIN=budget.MIN_USEFUL_ATTEMPT_SEC * 2,
                        _DEADLINE_SEC_MAX=120.0, _MAX_AUDIO_DURATION_SEC=3600,
                        _STT_SINGLEFLIGHT=threading.Lock(), _TRANSCRIBE_TIMEOUT_EXIT_CODE=70,
+                       _STT_POISONED=threading.Event(),
                        _REST_ACTIVITY=activity.ActivityReservations(),
                        _REST_OPERATIONS=ownership.OwnedOperations(),
                        TEMP_DIR=Path(scratch), ALLOWED_EXTENSIONS={".wav"},
@@ -185,6 +189,8 @@ class Harness:
 
     def cleanup(self):
         self.release_worker.set()
+        for event in getattr(self, "extra_release_events", []):
+            event.set()
         for pool in self.pools:
             pool.shutdown(wait=True, cancel_futures=True)
         assert all(f.done() for f in self.futures)
@@ -235,13 +241,41 @@ class CausalProfile(unittest.TestCase):
         self.assertFalse(h.worker_alive_on_second_entry)
         self.assertFalse(h.futures[0].done())
         h.cleanup()
-        self.assertTrue(h.ns["try_acquire_stt_singleflight"](0.0))
-        h.ns["release_stt_singleflight"]()
+        self.assertFalse(h.ns["_STT_SINGLEFLIGHT"].locked())
+        # A second long STT must not enter after first Future drains while its
+        # old response still carries a live process-exit callback.
+        entered_after_drain = threading.Event()
+        release_after_drain = threading.Event()
+        h.extra_release_events = [release_after_drain]
+        late_exit_with_second_running = []
+
+        def forbidden_long_stt(*args, **kwargs):
+            entered_after_drain.set()
+            if not release_after_drain.wait(2):
+                raise AssertionError("test failed to release second held worker")
+            return {"text": "synthetic"}
+
+        def late_close_if_wrongly_admitted(future):
+            self.assertTrue(entered_after_drain.wait(1))
+            first.close()
+            late_exit_with_second_running.append(future.running() and h.exit_codes == [70])
+            release_after_drain.set()
+
+        h.before_result = late_close_if_wrongly_admitted
+        h.ns["_deps"]().transcriber.transcribe = forbidden_long_stt
         recovered = h.invoke()
-        self.assertEqual(recovered.status_code, 200)
+        print(json.dumps({"witness": "E2_LATE_CLOSE", "after_drain_status": recovered.status_code,
+                          "second_worker_entered": entered_after_drain.is_set(),
+                          "exit_while_second_running": any(late_exit_with_second_running)}), flush=True)
+        self.assertEqual(recovered.status_code, 503)
+        self.assertFalse(entered_after_drain.is_set())
+        self.assertEqual(len(h.futures), 1)
         self.assertEqual(h.exit_codes, [])
         first.close()  # Actual arm_timeout_exit callback is retained unchanged.
         self.assertEqual(h.exit_codes, [70])
+        self.assertFalse(entered_after_drain.is_set())
+        self.assertTrue(h.ns["_STT_POISONED"].is_set())
+        self.assertFalse(h.ns["try_acquire_stt_singleflight"](0.0))
 
     def test_e5_characterize_ordinary_two_phase_budget_without_new_contract(self):
         h = self.harness(logical_clock=True)
