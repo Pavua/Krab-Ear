@@ -712,15 +712,20 @@ class DateTimeNormalizer:
 
         # «el tres de noviembre de dos mil veintiséis»
         full_pat = (
-            rf"(?:el\s+)?(\d{{1,2}}|{day_ordinals_pat})"
-            rf"\s+de\s+({months_pat})"
-            rf"(?:\s+de\s+(\d{{4}}))?"
+            rf"(?<!\w)(?:el\s+)?(\d{{1,2}}|{day_ordinals_pat})"
+            rf"\s+de\s+({months_pat})(?!\w)"
+            rf"(?:\s+de\s+(\d\w*))?"
         )
 
         def _repl_date(m: re.Match) -> str:
             day_str = m.group(1).strip().lower()
             month_str = m.group(2).strip().lower()
             year_str = m.group(3) or ""
+
+            # Захватываем числовой токен целиком: иначе необязательный год
+            # позволяет частично нормализовать дату с некорректным суффиксом.
+            if year_str and re.fullmatch(r"\d{4}", year_str) is None:
+                return m.group(0)
 
             day = _ES_DAY_ORDINALS.get(day_str)
             if day is None:
