@@ -1,0 +1,116 @@
+{
+  "utc": "2026-10-30T13:04:54.279916+00:00",
+  "scope": "source-only bounded inventory; no tests/imports/network/runtime/settings/credentials/calls",
+  "repositories": [
+    {
+      "root": "/Users/pablito/.codex/worktrees/ear-rest-owned-compose-1030/Krab Ear",
+      "head": "139d228f6f3f0609b740deb801ecef129233d2fc",
+      "files": [
+        {
+          "path": "KrabEar/backend/call_provider_factory.py",
+          "sha256": "68a9d0c7c5a74a96ab05db027b108a0ed3110ac6fc2243f99a17dc28049b3916",
+          "matches_head": true
+        },
+        {
+          "path": "KrabEar/backend/gateway_call_provider.py",
+          "sha256": "57c0bf9fa5d40f997c76d42e2cbaa6545348b498d5e5bba3e6d65c24ae9411fc",
+          "matches_head": true
+        },
+        {
+          "path": "KrabEar/backend/call_session_service.py",
+          "sha256": "83ee56ece5220a20faa8c90808c51fe3c5012dd1e686591076cbfc3751dd2947",
+          "matches_head": true
+        },
+        {
+          "path": "native/KrabEarAgent/Sources/KrabEarAgent/CallAutomationController.swift",
+          "sha256": "bb69b48fcc5125145a083dfbb66ada7eb89a0890d4fc3cc62d3aa94c7eba8bce",
+          "matches_head": true
+        },
+        {
+          "path": "native/KrabEarAgent/Sources/KrabEarAgent/CallObserverCoordinator.swift",
+          "sha256": "042a573a0b1f9b55664c430ddefb31dc9986d9f8a6f35592556030d21c5d2f18",
+          "matches_head": true
+        },
+        {
+          "path": "native/KrabEarAgent/Sources/KrabEarAgent/CallAudioPlayer.swift",
+          "sha256": "333b0503880e860fc3d96380055166e5d67a1eba5b94b5c7c9113c370c17b418",
+          "matches_head": true
+        },
+        {
+          "path": "native/KrabEarAgent/Sources/KrabEarAgent/ConversationViewController+Audio.swift",
+          "sha256": "9de042153bf8907078a961d19bc4ed453b52ef0f33b01cd6377181cfa4e0f63d",
+          "matches_head": true
+        },
+        {
+          "path": "native/KrabEarAgent/Sources/KrabEarAgent/ConversationViewController+WebSocket.swift",
+          "sha256": "2bd78e2ef81e8dbf6038da8611ea3d401d41dc082dc744ea848d8e16db8f0158",
+          "matches_head": true
+        },
+        {
+          "path": "native/KrabEarAgent/Sources/KrabEarAgent/main.swift",
+          "sha256": "3c6f2831243bb5123d6bae518c519b30739ca85729aadc81864c27936fb8f399",
+          "matches_head": true
+        }
+      ]
+    },
+    {
+      "root": "/Users/pablito/Antigravity_AGENTS/Krab Voice Gateway",
+      "head": "fbb6b55ab6e80f3a678b502970cfdfb1d5555b88",
+      "files": [
+        {
+          "path": "app/main.py",
+          "sha256": "5f3e40e8c361b3a0b24453d79e9484c6a107e3bbdb091a56fb8b7e36282b6bc5",
+          "matches_head": true
+        },
+        {
+          "path": "app/routers/prompt_call.py",
+          "sha256": "0e040c72eab28421118e824589c5b6cdc16187133265e3dfab9f66f38cafb63a",
+          "matches_head": true
+        },
+        {
+          "path": "app/telephony/sip.py",
+          "sha256": "ad0aed644eb0f400bea85847715f43dd40707d6f010b78be0823aa077e796081",
+          "matches_head": true
+        },
+        {
+          "path": "app/push_sender.py",
+          "sha256": "0f3e257c036f89417ea7b4ca6b929edadade944181c44ac6c31ba74a55e75315",
+          "matches_head": true
+        },
+        {
+          "path": "ios/KrabVoiceiOS/ContentView.swift",
+          "sha256": "b196be0f5d81fdcdbb7492b28356e72c482780b71e1aa2327fbfe90960935b76",
+          "matches_head": true
+        },
+        {
+          "path": "ios/KrabVoiceiOS/GatewayClient.swift",
+          "sha256": "5ddc9f8defbc97f4bc24344b5c544358c3ace02a2a817b545d01af4445e2d241",
+          "matches_head": true
+        },
+        {
+          "path": "ios/KrabVoiceiOS/IncomingScreeningLifecycleModel.swift",
+          "sha256": "5ac019f12703be8fd496c3fdfdd174f5dafd4c117226791b4ea5bd7105db6461",
+          "matches_head": true
+        },
+        {
+          "path": "ios/KrabVoiceiOS/LiveScreeningView.swift",
+          "sha256": "fbbd0358dfea2a80cabac373769e884b990c2b9bb0da03b14cbaa23025361ac0",
+          "matches_head": true
+        }
+      ]
+    }
+  ],
+  "report_sha256": "1b9407556968ded4d9c3d92deffe0e1d47e2d36c5f576f0bfb3df46ed9ac97d0",
+  "owner_constraint": {
+    "paid_apple_developer_membership": false,
+    "background_invitation_usable": "UNKNOWN; code pieces only",
+    "credentials_provisioning_install": "UNKNOWN; not inspected",
+    "research": "separate coordinator worker; no duplicated web research"
+  },
+  "design_report_sha256": "d81e73a98bfca9828e0137d176f3496af3d077d479af2006b81afd3494bd4c9f",
+  "design_addendum": "universal authenticated same-session join; one owner/device handoff/expiry/replay; 33 future offline scenarios total; not implemented/not executed",
+  "outgoing_inventory_sha256": "0738b71a1f28d65d6a2d5825981e8a49f2189c1e621c4c9122da3bb9a45ff01a",
+  "future_offline_cases": 43,
+  "executed_cases_this_design_scope": 0,
+  "active_design_invariant": "JOIN OBSERVE micmuted BOTcontinues; WHISPER privateAI; explicitHUMAN/TRANSLATED takeoveronly cancelsAI; oneTXlease distinctobserver"
+}
