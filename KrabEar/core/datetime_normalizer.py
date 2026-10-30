@@ -429,7 +429,25 @@ class DateTimeNormalizer:
                 return m.group(0)
             return f"{hour:02d}:{minute:02d}"
 
-        return re.sub(full_pat, _repl_time, text, flags=re.IGNORECASE)
+        text = re.sub(full_pat, _repl_time, text, flags=re.IGNORECASE)
+
+        # NumberNormalizer сокращает единицы. Принимаем их как время суток
+        # только с «в» или маркером; обычная длительность «2 ч» сохраняется.
+        abbreviated_pat = (
+            rf"(?<![\w:])(?:в\s+)?(\d{{1,2}})\s+ч(?!\w)"
+            rf"(?:\s+(\d{{1,2}})(?!\d)\s+мин(?!\w))?"
+            rf"(\s+(?:{time_markers_pat})(?!\w))?"
+            # Не принимать один час перед некорректным минутным токеном,
+            # включая длинные числа и продолжения единицы вроде «минус».
+            rf"(?!\s+\d+\s+мин)"
+        )
+
+        def _repl_abbreviated_time(m: re.Match) -> str:
+            if not re.match(r"в\s+", m.group(0), flags=re.IGNORECASE) and not m.group(3):
+                return m.group(0)
+            return _repl_time(m)
+
+        return re.sub(abbreviated_pat, _repl_abbreviated_time, text, flags=re.IGNORECASE)
 
     # ------------------------------------------------------------------
     # Русский: ДАТА
