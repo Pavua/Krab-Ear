@@ -126,13 +126,16 @@ Ear-only 27B. Ear `llm_brain_model` = `qwen/qwen3.6-27b` — lease/unload/OOM-UI
   машине, `history_encryption_enabled`.
 - История деплоев сентября (6561a030 → 5cab7988 → 35b32bab → e004ba3d, W4/F1, R1-табло/F5/F2
   с флагами OFF) — в `ROADMAP-2026H2.md`, здесь не актуальна.
-- **Брошенные WIP разобраны 30.10, оба SUPERSEDED (НЕ восстанавливать):**
+- **Брошенные WIP разобраны 30.10, все три SUPERSEDED (НЕ восстанавливать):**
   `codex/ear-paste-async-20261016` (async paste CI2099 — колея реализовала шире:
   весь `PasteService` `@MainActor`-async + seam `modifierKeysDown` + оба теста,
-  `598087333`) и `feat/a53-card-a-authorizer` (A5.3 slice 3 — все поверхности
+  `598087333`), `feat/a53-card-a-authorizer` (A5.3 slice 3 — все поверхности
   покрыты CAS-коммитом; «уникальный» auto-repair settings.json колея осознанно
   отвергла no-write-дизайном, тест `test_integrity_repair_does_not_reset_unknown_to_defaults`
-  ожидает `fixed==0`). Worktrees и ветки — кандидаты на удаление после архива diff-патчем.
+  ожидает `fixed==0`) и `codex/ear-a5-lifecycle` (ahead-коммит `9db5162e` — два docs-файла,
+  байт-в-байт уже в колее через A5.2a #2052; весь план пройден дальше: A5.2 задеплоена
+  `84deb513`, A5.3 закрыт, A5.4 в проде 10.10 — уникального кода ноль). Worktrees и ветки
+  удалены; a53-diff заархивирован в `docs/audit/2026-10-30-superseded-wip-a53-card-a-authorizer.patch`.
 
 ## Не делать
 
