@@ -47,6 +47,7 @@ from backend.live_subs_service import LiveSubsService
 from backend.cloud_stt import get_cloud_stt_provider, MAX_CLOUD_AUDIO_BYTES
 from backend.tts_service import TTSService
 from backend.activity_diagnostics import ActivityReservations, rest_activity_snapshot
+from core.operation_ownership import OwnedOperations
 
 # Настройка логирования
 # W10: единая настройка — время в строке + глушение дублирующего access-лога
@@ -628,6 +629,8 @@ def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | Non
 # свой ThreadPoolExecutor — два /v1/stt/transcribe грузили MLX параллельно.
 _STT_SINGLEFLIGHT = threading.Lock()
 _REST_ACTIVITY = ActivityReservations()
+# Внутреннее subtree metadata; не endpoint, admission fence или full drain ACK.
+_REST_OPERATIONS = OwnedOperations()
 
 
 def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
@@ -2025,17 +2028,25 @@ def transcribe_audio():
                 _transcribe_timeout_sec = call_deadline - time.monotonic()
                 if _transcribe_timeout_sec <= 0:
                     return jsonify({"error": "call STT timeout"}), 504
-            _future = _pool.submit(
-                _REST_ACTIVITY.run,
-                _activity_token,
-                stt_budget.call_in_scope,
-                deps.transcriber.transcribe,
-                _transcribe_path,
-                profile=stt_budget.INTERACTIVE,
-                deadline_sec=_transcribe_timeout_sec,
-                settings_snapshot=_budget_settings_snapshot,
-                **_transcribe_kwargs,
-            )
+            _owned_operation = _REST_OPERATIONS.admit_root()
+            try:
+                _future = _pool.submit(
+                    _REST_OPERATIONS.run,
+                    _owned_operation,
+                    _REST_ACTIVITY.run,
+                    _activity_token,
+                    stt_budget.call_in_scope,
+                    deps.transcriber.transcribe,
+                    _transcribe_path,
+                    profile=stt_budget.INTERACTIVE,
+                    deadline_sec=_transcribe_timeout_sec,
+                    settings_snapshot=_budget_settings_snapshot,
+                    **_transcribe_kwargs,
+                )
+            except BaseException:
+                _REST_OPERATIONS.mark_unknown(_owned_operation)
+                raise
+            _REST_OPERATIONS.follow_future(_owned_operation, _future)
             _REST_ACTIVITY.follow_future(_activity_token, _future)
             try:
                 result = _future.result(timeout=(
