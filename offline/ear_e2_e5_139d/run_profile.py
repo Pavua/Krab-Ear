@@ -207,7 +207,7 @@ def parent(output, expected):
                 while True:
                     if interruptions:
                         raise InterruptedError("Ready-yield gate interrupted")
-                    if time.monotonic() - start >= 50:
+                    if time.monotonic() - start >= 30:
                         raise subprocess.TimeoutExpired(command, 30)
                     try:
                         proc.wait(timeout=0.25)
@@ -269,7 +269,7 @@ def parent(output, expected):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 5:
+    if len(sys.argv) != 3:
         raise SystemExit("usage: run_profile.py OUTPUT.json EXPECTED_SHA")
     if sys.argv[1] == "--child":
         raise SystemExit(child(sys.argv[2]))
