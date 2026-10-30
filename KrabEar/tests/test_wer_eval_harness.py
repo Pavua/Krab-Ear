@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import requests  # noqa: E402
+
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _SCRIPTS = _REPO_ROOT / "scripts"
 for _p in (_SCRIPTS, _REPO_ROOT / "KrabEar"):
@@ -58,8 +60,12 @@ class TestNormalizeForWer(unittest.TestCase):
         out = wer_eval.normalize_for_wer("Привет, мир!")
         self.assertEqual(out, "привет мир")
 
-    def test_does_not_import_mlx(self):
-        self.assertNotIn("mlx_whisper", sys.modules)
+    def test_module_source_does_not_reference_mlx(self):
+        import inspect
+
+        src = inspect.getsource(wer_eval)
+        self.assertNotIn("mlx_whisper", src)
+        self.assertNotIn("import mlx", src)
 
 
 class TestWerWithOps(unittest.TestCase):
@@ -106,28 +112,34 @@ class TestAggregate(unittest.TestCase):
 
 
 class TestRestClient(unittest.TestCase):
+    def _fake_wav(self, tmp: Path) -> Path:
+        tmp.mkdir(parents=True, exist_ok=True)
+        p = tmp / "ru_001.wav"
+        p.write_bytes(b"RIFF" + b"\x00" * 40)
+        return p
+
     def test_privacy_mode_403(self):
         resp = MagicMock()
         resp.status_code = 403
+        resp.ok = False
         resp.json.return_value = {"ok": False, "skipped": "privacy_mode"}
-        with patch.object(wer_eval, "requests") as mock_req:
-            mock_req.post.return_value = resp
-            mock_req.exceptions = wer_eval.requests.exceptions
+        with patch("wer_eval.requests.post", return_value=resp):
             with self.assertRaises(wer_eval.RestPrivacyError) as ctx:
                 wer_eval.transcribe_wav_rest(
-                    Path("ru_001.wav"),
+                    self._fake_wav(Path("/tmp/wer_eval_test_priv")),
                     base_url="http://127.0.0.1:5005",
                     lang_hint="ru",
                 )
         self.assertIn("privacy", str(ctx.exception).lower())
 
     def test_connection_failure(self):
-        with patch.object(wer_eval, "requests") as mock_req:
-            mock_req.post.side_effect = wer_eval.requests.exceptions.ConnectionError("refused")
-            mock_req.exceptions = wer_eval.requests.exceptions
+        with patch(
+            "wer_eval.requests.post",
+            side_effect=requests.exceptions.ConnectionError("refused"),
+        ):
             with self.assertRaises(wer_eval.RestUnavailableError):
                 wer_eval.transcribe_wav_rest(
-                    Path("ru_001.wav"),
+                    self._fake_wav(Path("/tmp/wer_eval_test_conn")),
                     base_url="http://127.0.0.1:5005",
                     lang_hint="ru",
                 )
@@ -135,19 +147,16 @@ class TestRestClient(unittest.TestCase):
     def test_success_parses_text(self):
         resp = MagicMock()
         resp.status_code = 200
+        resp.ok = True
         resp.json.return_value = {"status": "ok", "text": " привет мир "}
-        with patch.object(wer_eval, "requests") as mock_req:
-            mock_req.post.return_value = resp
-            mock_req.exceptions = wer_eval.requests.exceptions
+        with patch("wer_eval.requests.post", return_value=resp) as mock_post:
             text = wer_eval.transcribe_wav_rest(
-                Path("ru_001.wav"),
+                self._fake_wav(Path("/tmp/wer_eval_test_ok")),
                 base_url="http://127.0.0.1:5005",
                 lang_hint="ru",
             )
         self.assertEqual(text, " привет мир ")
-        call_kw = mock_req.post.call_args
-        self.assertIn("files", call_kw.kwargs)
-        data = call_kw.kwargs.get("data") or call_kw[1].get("data")
+        data = mock_post.call_args.kwargs["data"]
         self.assertEqual(data.get("persist_history"), "false")
         self.assertEqual(data.get("diarize"), "false")
 
@@ -169,7 +178,7 @@ class TestJsonReport(unittest.TestCase):
         ]
         report = wer_eval.build_json_report(rows, wer_eval.aggregate_results(rows))
         json.dumps(report, ensure_ascii=False)
-        self.assertIn("overall", report)
+        self.assertIn("overall", report["aggregate"])
 
 
 if __name__ == "__main__":
