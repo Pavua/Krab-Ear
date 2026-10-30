@@ -2748,3 +2748,16 @@ bake-off гвард починен в том же SHA).
   `cloud_rewriter_enabled=False`, `semantic_search_enabled=False`.
 - Постдеплой: ping ok, diagnostics 13/13, health 200, e2e 44/44+21/21,
   privacy-gates hold, Sentry — 0 инцидентов Ear; F1-лексика цела (11/31, 43).
+
+## 2026-10-30 — фронт-синхронизация NOW.md + superseded-WIP
+
+- PR [#2138](https://github.com/Pavua/Krab-Ear/pull/2138) (`codex/ear-docs-now-sync-1030`)
+  слит: merge **`558f63a7`**; колея `codex/krab-ear-v2` → **`558f63a7`**. Runtime
+  **`5a09e630`** без изменений; деплой по-прежнему 0% (три блокера из NOW).
+- **`docs/NOW.md`** догнан до журналов `.remember/` (отставание ~5–6 недель); на
+  `chore/agent-parity-0928` — коммиты `445da3ee`, `08fc8ce5`, `783ff75e`. Зафиксирован
+  код-долг **`A5_2B_CALLER_SUCCESS_LOG_DEBT`**.
+- Backup-push 12 веток `ear-*-1029/1030` в origin; WIP `ear-paste-async-20261016` и
+  `feat/a53-card-a-authorizer` — **SUPERSEDED**, worktrees/ветки сняты; архив diff:
+  `docs/audit/2026-10-30-superseded-wip-a53-card-a-authorizer.patch`.
+- Handoff для агентов: `.remember/today-2026-10-30-cursor-handoff.md`.
