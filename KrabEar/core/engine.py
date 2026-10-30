@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
+from core.operation_ownership import submit_owned
 
 if TYPE_CHECKING:
     from backend.llm_rewriter import LLMRewriter
@@ -2970,7 +2971,7 @@ class AudioEngine:
                                     "attempt_timeout_sec": _adapter_timeout,
                                     "attempt_deadline_monotonic": _mlx_attempt_deadline(_adapter_timeout),
                                 }
-                            _fut = _pool.submit(adapter_fn, **_adapter_kwargs)
+                            _fut = submit_owned(_pool, adapter_fn, **_adapter_kwargs)
                             try:
                                 adapter_result = _fut.result(timeout=_adapter_timeout)
                             except (MLXLockTimeoutError, MLXInterLockTimeout):
