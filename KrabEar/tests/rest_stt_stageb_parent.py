@@ -16,6 +16,32 @@ FLAGS = ("RATE_LIMIT_ENABLED", "LLM_ENABLED", "STT_GIGAAM_ENABLED", "REST_IN_PRO
          "STT_AUTO_SEED_HOTWORDS", "SEMANTIC_SEARCH_ENABLED", "WAKE_WORD_ENABLED")
 
 
+
+def valid_cases(cases):
+    """Не принимать self-report count без полной матрицы, включая zero-worker cases."""
+    expected = ([(number, call) for call in (False, True) for number in range(4)]
+                + [(label, call) for call in (False, True) for label in
+                   ('privacy_enabled', 'privacy_unreadable', 'empty_audio', 'null_error_success')]
+                + [('expired_engine_error', True), ('expired_privacy_error', True)]
+                + [('invalid_upload', False), ('invalid_upload', True)])
+    if not isinstance(cases, list) or len(cases) != 20:
+        return False
+    for case, (label, call) in zip(cases, expected):
+        if (not isinstance(case, dict) or set(case) != {'case', 'call', 'status'}
+                or type(case['case']) is not type(label) or case['case'] != label
+                or type(case['call']) is not bool or case['call'] is not call
+                or type(case['status']) is not int):
+            return False
+        status = (503 if label < 3 else 200) if type(label) is int else {
+            'privacy_enabled': 403, 'privacy_unreadable': 403,
+            'empty_audio': 200, 'null_error_success': 200,
+            'expired_engine_error': 504, 'expired_privacy_error': 403, 'invalid_upload': 400,
+        }[label]
+        if case['status'] != status:
+            return False
+    return True
+
+
 def run(output):
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
@@ -103,6 +129,7 @@ def run(output):
                     and child_receipt.get("full_rest_import") is True
                     and type(child_receipt.get("http_cases")) is int
                     and child_receipt["http_cases"] == 20
+                    and valid_cases(child_receipt.get("cases"))
                     and type(child_receipt.get("worker_starts")) is int
                     and child_receipt["worker_starts"] == 18
                     and child_receipt.get("violations") == []
