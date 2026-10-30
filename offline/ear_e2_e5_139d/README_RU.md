@@ -1,0 +1,13 @@
+# E2/E5: подготовленный causal profile, НЕ ЗАПУЩЕН
+
+База строго Ear139d228f6f3f0609b740deb801ecef129233d2fc. Отдельный test-only commit и freeze. Профиль не относится к c77/fae. Изменений production нет.
+
+Три последовательных unittest. E2 — ожидаемый RED на safety-утверждении «после running timeout второй обработчик не допускается до worker drain». Настоящий первый worker держится Event, Future.result после подтверждения старта вызывает настоящий Future.result(timeout=0); это ускоритель ожидания, не подделка running/done/cancel. Ответ504 намеренно не закрыт, поэтому exit callback ещё не вызван; второе обращение должно отвергаться. После проверки Event отпускается, все реальные pools shutdown(wait=True), futures done. Первый worker имеет защитный wait2s, supervisor30s TERM3/KILL3. Нельзя по этому результату заявлять parallel MLX/GPU/OOM или поведение конкретного WSGI сервера.
+
+E5 — characterization, ожидается PASS: ordinary admission получает10s, затем Future.result ещё10s. Логические часы admission+6 и worker+5 дают11s при успехе. Lock/worker реальны, call_in_scope целиком настоящий и работает в worker ContextVar; его часы остаются настоящими. Это фиксация границы двух часов и фаз, НЕ измерение физической latency и НЕ whole-request deadline violation. Docstring endpoint прямо называет Future.result бюджет; изменение внешнего контракта требует отдельного решения. Третий контроль фиксирует настоящий MIN5/clamp10 и invalid values.
+
+Из rest_server AST извлекаются полные тела6 функций; убираются только декораторы регистрации/auth/privacy. Privacy/auth реализации не тестируются и не ослабляются в production. Полные чисто stdlib stt_budget/activity_diagnostics/operation_ownership исполняются под offline-именами, без server/model import. Request/Response/upload/deps — узкие synthetic seams. Файл — только synthetic RIFF header, не audio processing. normalize stub; soundfile отсутствует в isolated -S и его необязательная ветка обрабатывается штатно. Метрики stub, persist_history=false. Никаких private transcript/audio.
+
+Runner заимствует проверенный30s supervisor: isolated Python3.12 -I-S-B, sandbox network deny, audit deny provider/model/app imports, processes/DB/network, writes только scratch; ровно3 допустимых owned ThreadPool workers, остальные запрещены. Freeze проверяется до child, source stable после, clean exactHEAD, exit/reap/groupempty/remainingthreads/appmodules/guards в receipt. Отсутствие body receipt — ошибка стенда, не RED. E2 ожидаемый assertion failure должен быть отдельно классифицирован, не скрыт expectedFailure.
+
+Запуск только после независимого SOURCE_PROFILE review и согласованного окна; сейчас NONE. Никаких setup/install/build/restart/publication. Рекомендуется одно bounded execution, не полный suite.
