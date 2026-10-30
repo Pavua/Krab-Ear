@@ -508,8 +508,9 @@ class DateTimeNormalizer:
         text = re.sub(full_pat, _repl_date, text, flags=re.IGNORECASE)
 
         # Цифровой день + месяц словом
+        # NumberNormalizer выдаёт «3-е»/«3-го» для порядкового дня.
         digit_day_pat = (
-            rf"(?<!\d)(\d{{1,2}})"
+            rf"(?<![\w-])(\d{{1,2}})(?:-(?:е|го))?"
             rf"\s+({months_pat})(?!\w)"
             rf"(?:\s+(\d{{4}})\s+года?)?"
         )
@@ -712,7 +713,7 @@ class DateTimeNormalizer:
 
         # «el tres de noviembre de dos mil veintiséis»
         full_pat = (
-            rf"(?<!\w)(?:el\s+)?(\d{{1,2}}|{day_ordinals_pat})"
+            rf"(?<!\w)(?:el\s+)?(\d{{1,2}}(?:\.º)?|{day_ordinals_pat})"
             rf"\s+de\s+({months_pat})(?!\w)"
             rf"(?:\s+de\s+(\d\w*))?"
         )
@@ -730,7 +731,8 @@ class DateTimeNormalizer:
             day = _ES_DAY_ORDINALS.get(day_str)
             if day is None:
                 try:
-                    day = int(day_str)
+                    # Цифровая форма порядкового дня от NumberNormalizer.
+                    day = int(day_str.removesuffix(".º"))
                 except ValueError:
                     return m.group(0)
             month = _ES_MONTHS.get(month_str)
