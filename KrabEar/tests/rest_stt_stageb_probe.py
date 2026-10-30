@@ -27,8 +27,8 @@ class RestBoundary(Boundary):
 
     def start(self, thread):
         import concurrent.futures.thread as executor
-        if thread._target is not executor._worker or len(self.workers) >= 8:
-            self.deny('only eight stdlib executor workers allowed')
+        if thread._target is not executor._worker or len(self.workers) >= 18:
+            self.deny('only eighteen stdlib executor workers allowed')
         self.workers.append(thread)
         threading._start_new_thread = REAL_START_NEW
         try:
@@ -111,11 +111,92 @@ def run():
                 assert response.headers.get('X-Request-ID')
                 response.close()
                 assert not list(rs.TEMP_DIR.iterdir())
-        assert len(leaf_threads) == 8
+        def extra_case(label, call, result, expected, *, privacy=None, expired=False, invalid=False):
+            original_load = rs.store.load_settings
+            original_call_privacy = rs.store.call_privacy_mode
+            original_monotonic = rs.time.monotonic
+            clock = [100.0]
+            before_history = rs.store.get_history_stats()
+            before_metrics = rs.metrics.total_requests
+            before_workers = len(boundary.workers)
+
+            def unavailable(*args, **kwargs):
+                raise OSError('synthetic unreadable privacy')
+
+            def transcribe(*args, **kwargs):
+                leaf_threads.append(threading.get_ident())
+                if privacy == 'enabled':
+                    rs.store.save_settings({'privacy_mode_enabled': True})
+                elif privacy == 'unreadable':
+                    if call:
+                        rs.store.call_privacy_mode = unavailable
+                    else:
+                        rs.store.load_settings = unavailable
+                if expired:
+                    clock[0] = 109.0
+                return result
+
+            rs.transcriber.transcribe = transcribe
+            if expired:
+                rs.time.monotonic = lambda: clock[0]
+            data = {'file': (io.BytesIO(b'not audio' if invalid else output.getvalue()),
+                             'synthetic.wav', 'audio/wav'), 'persist_history': 'true'}
+            if call:
+                data.update(request_profile='voice_gateway_call', language='auto', deadline_sec='8')
+            try:
+                response = client.post('/v1/stt/transcribe', data=data)
+            finally:
+                rs.store.load_settings = original_load
+                rs.store.call_privacy_mode = original_call_privacy
+                rs.time.monotonic = original_monotonic
+                rs.store.save_settings({'privacy_mode_enabled': False})
+            case = {'case': label, 'call': call, 'status': response.status_code}
+            cases.append(case)
+            assert response.status_code == expected, case
+            if privacy:
+                assert response.json.get('skipped') == 'privacy_mode', case
+                assert not response.json.get('text'), case
+            elif expired:
+                assert not response.json.get('text'), case
+            elif not invalid:
+                assert response.json['text'] == result['text'], case
+                if result.get('reason'):
+                    assert response.json.get('reason') == result['reason'], case
+            if expected != 200 or call:
+                assert rs.store.get_history_stats() == before_history, case
+            else:
+                assert rs.store.get_history_stats()['active_count'] == before_history['active_count'] + bool(result.get('text')), case
+            assert rs.metrics.total_requests == before_metrics + (expected == 200), case
+            assert len(boundary.workers) - before_workers == (not invalid), case
+            assert response.headers.get('X-Request-ID'), case
+            assert 'SYNTHETIC_DETAIL' not in response.get_data(as_text=True), case
+            response.close()
+            assert not list(rs.TEMP_DIR.iterdir()), case
+
+        # Privacy changed inside the actual worker: both ON and unreadable must
+        # forbid retryable503/cloud fallback, without success metrics/history.
+        for call in (False, True):
+            for privacy in ('enabled', 'unreadable'):
+                extra_case('privacy_' + privacy, call,
+                           {'status': 'error', 'error': 'SYNTHETIC_DETAIL', 'text': 'SYNTHETIC_TEXT'},
+                           403, privacy=privacy)
+            extra_case('empty_audio', call, {'text': '', 'reason': 'empty_audio'}, 200)
+            extra_case('null_error_success', call,
+                       {'status': 'ok', 'error': None, 'text': 'synthetic retained'}, 200)
+        # An already completed Future cannot bypass call deadline; privacy wins
+        # even when error and expired deadline are observed together.
+        extra_case('expired_engine_error', True,
+                   {'status': 'error', 'error': 'SYNTHETIC_DETAIL', 'text': ''}, 504, expired=True)
+        extra_case('expired_privacy_error', True,
+                   {'status': 'error', 'error': 'SYNTHETIC_DETAIL', 'text': ''},
+                   403, expired=True, privacy='enabled')
+        for call in (False, True):
+            extra_case('invalid_upload', call, {}, 400, invalid=True)
+        assert len(leaf_threads) == 18
         assert all(t != threading.get_ident() for t in leaf_threads)
         assert all(not t.is_alive() for t in boundary.workers)
         assert not boundary.violations, boundary.violations
-        receipt = {'full_rest_import': True, 'http_cases': 8, 'worker_starts': len(boundary.workers),
+        receipt = {'full_rest_import': True, 'http_cases': 20, 'worker_starts': len(boundary.workers),
                    'violations': boundary.violations, 'cases': cases, 'failures': failures,
                    'scope': 'real Flask upload/executor/error mapping; synthetic transcriber leaf; no ASR/runtime proof'}
         print('REST_STAGEB_RECEIPT=' + json.dumps(receipt), flush=True)
