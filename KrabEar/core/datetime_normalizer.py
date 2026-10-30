@@ -623,8 +623,10 @@ class DateTimeNormalizer:
         )
 
         # Pattern 2: "a las N" (requires «a las» prefix) → digit hour
+        # Не съедать префикс HH:MM или длинного цифрового токена;
+        # запрет цифры также блокирует откат с двух цифр часа на одну.
         alas_pat = (
-            rf"(?<!\d)(?:a\s+las?\s+)(\d{{1,2}})"
+            rf"(?<!\d)(?:a\s+las?\s+)(\d{{1,2}})(?![\d:])"
             rf"(?:\s+y\s+(\w+))?"
             rf"(?:\s+({markers_pat}))?"
         )
