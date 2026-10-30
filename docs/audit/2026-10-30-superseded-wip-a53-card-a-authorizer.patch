@@ -1,0 +1,831 @@
+diff --git a/KrabEar/backend/history_service.py b/KrabEar/backend/history_service.py
+index 0d1096f30..86416035b 100644
+--- a/KrabEar/backend/history_service.py
++++ b/KrabEar/backend/history_service.py
+@@ -5453,7 +5453,50 @@ class HistoryService:
+             if restore_settings:
+                 settings_backup = backup_dir / "settings.json"
+                 if settings_backup.exists():
+-                    shutil.copy2(settings_backup, self.store.settings_path)
++                    # A5.3 slice 3 (п.10–11): settings-часть — validated commit
++                    # под ТЕМ ЖЕ StateStore lock, НЕ copy2.
++                    #
++                    # Lock-обоснование (проверено чтением state_store._lock):
++                    # внешний ``with self.store._lock():`` выше — EXCLUSIVE
++                    # (default shared=False). Вложенный ``save_settings`` был бы
++                    # EX-под-EX — реентерабельно (no-op, без upgrade-ошибки), но
++                    # ``save_settings`` несёт merge с DEFAULT_SETTINGS (отмыл бы
++                    # неполный backup в KNOWN_OFF) и A5 write-guards (отказали бы
++                    # на нечитаемом текущем файле — именно его чинит restore).
++                    # Поэтому прямой ``_commit_settings_explicit_unlocked``:
++                    # guards нет (явный recovery, validated_repair-семантика),
++                    # merge нет (явный контент как есть + новая ревизия),
++                    # своего lock НЕ берёт (требует удерживаемый — он удерживается),
++                    # новый FD/history_flock НЕ вкладывается (п.11, state_store:253).
++                    #
++                    # Fail-closed: полный backup → KNOWN_* (флаги exact-bool +
++                    # новая ревизия); неполный → MISSING_KEY UNKNOWN (ревизия всё
++                    # равно новая — старые grants мертвы, п.5/16). Входная ревизия
++                    # из backup отбрасывается commit'ом (п.9). Не-объект/битый
++                    # JSON backup'а — громкий отказ БЕЗ перезаписи (не портим живые
++                    # настройки corrupt-бэкапом).
++                    try:
++                        _raw_backup = settings_backup.read_bytes()
++                    except OSError as exc:
++                        raise RuntimeError(
++                            f"restore_history: settings backup unreadable: "
++                            f"{type(exc).__name__}"
++                        ) from exc
++                    try:
++                        _backup_obj = json.loads(_raw_backup)
++                    except (ValueError, TypeError) as exc:
++                        raise RuntimeError(
++                            "restore_history: settings backup is not valid JSON"
++                        ) from exc
++                    if not isinstance(_backup_obj, dict):
++                        raise RuntimeError(
++                            "restore_history: settings backup must be an object"
++                        )
++                    self.store._commit_settings_explicit_unlocked(_backup_obj)
++                    logger.info(
++                        "handle_restore_history: settings restored via validated "
++                        "commit (revision rotated)"
++                    )
+ 
+         restored_entries = self.store.count_active_items()
+         logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)
+diff --git a/KrabEar/backend/integrity_checker.py b/KrabEar/backend/integrity_checker.py
+index 4f4d62c18..d6a5cc3da 100644
+--- a/KrabEar/backend/integrity_checker.py
++++ b/KrabEar/backend/integrity_checker.py
+@@ -224,7 +224,9 @@ class IntegrityChecker:
+             invalid_json_lines=invalid_json_lines,
+         )
+ 
+-    def repair(self, data_dir: Path, report: IntegrityReport) -> RepairResult:
++    def repair(
++        self, data_dir: Path, report: IntegrityReport, store: Any | None = None
++    ) -> RepairResult:
+         """Автоматически исправляет то, что помечено auto_fixable=True.
+ 
+         Гарантии безопасности данных (Wave 1743):
+@@ -233,6 +235,11 @@ class IntegrityChecker:
+         - Отклонённые строки пишутся в ``<file>.quarantine-<ts>.ndjson``.
+         - Вся операция read-modify-write выполняется под тем же flock
+           (history.lock), что и StateStore, исключая TOCTOU-гонку.
++
++        A5.3 slice 3: store — живой StateStore профиля (service.py его
++        передаёт). Если не передан (старые тесты), строится временный
++        StateStore(data_dir) только для settings-repair — всё равно через
++        центральный commit, а не через собственный tmp+replace.
+         """
+         result = RepairResult()
+         fixable = [c for c in report.checks if c.auto_fixable and c.status != "ok"]
+@@ -267,6 +274,7 @@ class IntegrityChecker:
+                 backup = self._repair_settings(
+                     data_dir / "settings.json",
+                     data_dir / "history.lock",
++                    store=store,
+                 )
+                 result.fixed += 1
+                 if backup:
+@@ -466,10 +474,32 @@ class IntegrityChecker:
+         # BUGFIX: The old logic deleted valid tombstones. This check is disabled.
+         return 0, "", ""
+ 
+-    def _repair_settings(self, settings_path: Path, lock_path: Path) -> str:
+-        """Сбрасывает повреждённый settings.json до пустого объекта.
+-
+-        Сохраняет бэкап оригинала. Выполняется под flock(lock_path).
++    def _repair_settings(
++        self, settings_path: Path, lock_path: Path, store: Any | None = None
++    ) -> str:
++        """Сбрасывает повреждённый settings.json до пустого объекта через commit.
++
++        Сохраняет бэкап оригинала. Выполняется под StateStore lock
++        (тот же history.lock, что и save_settings) — см. lock-обоснование ниже.
++
++        A5.3 slice 3 (п.10, 17): bypass ``with_suffix(".json.tmp")+replace``
++        заменён центральным commit ``_commit_settings_explicit_unlocked({})``:
++        та же ревизия-семантика (входная отброшена, новая uuid4().hex ВСЕГДА —
++        старые grants мертвы, п.5/16), тот же atomic replace
++        (atomic_write_text: уникальный temp + fsync, без shared-tmp гонки),
++        но БЕЗ merge с DEFAULT_SETTINGS (иначе {} стал бы KNOWN_OFF и отмыл бы
++        corrupt в известное). Результат — {} + ревизия = MISSING_KEY UNKNOWN
++        fail-closed читателем (не KNOWN_OFF).
++
++        Lock-обоснование: прежний ``_acquire_lock`` (блокирующий flock на новом
++        FD) и ``store._lock`` — один файл, но разные FD: вкладывать их друг в
++        друга нельзя (второй flock заблокируется; п.11, state_store:253).
++        Поэтому здесь РОВНО ОДИН lock — ``store._lock()`` (EX, с 30с timeout и
++        диагностикой вместо вечного hang). Отдельный write-lock не нужен:
++        store._lock уже сериализует repair против save_settings/commit.
++        Guards нет (явный recovery, validated_repair-семантика): текущий файл
++        нечитаем/не-объект — именно это чиним; безопасность даёт UNKNOWN/deny,
++        а не отказ записи.
+ 
+         Returns:
+             Путь к бэкапу в виде строки (пустая строка, если файл не существовал).
+@@ -480,21 +510,20 @@ class IntegrityChecker:
+         ts = self._iso_ts()
+         backup_path = settings_path.parent / f"settings.json.corrupt-backup-{ts}"
+ 
+-        lock_fd = self._acquire_lock(lock_path)
+-        try:
++        if store is None:
++            from backend.state_store import StateStore as _StateStore
++
++            store = _StateStore(settings_path.parent)
++        with store._lock():
+             raw_bytes = settings_path.read_bytes()
+             backup_path.write_bytes(raw_bytes)
+             logger.info(
+                 "integrity_checker: бэкап settings.json сохранён",
+                 extra={"backup": str(backup_path)},
+             )
+-            tmp = settings_path.with_suffix(".json.tmp")
+-            tmp.write_text("{}", encoding="utf-8")
+-            with tmp.open("r+", encoding="utf-8") as fh:
+-                fh.flush()
+-                os.fsync(fh.fileno())
+-            tmp.replace(settings_path)
++            store._commit_settings_explicit_unlocked({})
++            logger.info(
++                "integrity_checker: settings.json сброшен через validated commit "
++                "(revision rotated, UNKNOWN fail-closed)"
++            )
+             return str(backup_path)
+-        finally:
+-            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+-            lock_fd.close()
+diff --git a/KrabEar/backend/settings_service.py b/KrabEar/backend/settings_service.py
+index 76934ea3f..65f415bda 100644
+--- a/KrabEar/backend/settings_service.py
++++ b/KrabEar/backend/settings_service.py
+@@ -30,6 +30,32 @@ from backend.state_store import StateStoreLockTimeout
+ 
+ _log = logging.getLogger(__name__)
+ 
++# A5.3 карточка A, slice 3: имена policy-флагов для validated_repair-решения.
++# Проверяются через ``type(v) is bool`` (exact-bool, не truthiness): 1/0/"true"
++# полным объектом НЕ считаются и repair-права не дают (контракт п.8, BLOCKER-1).
++_POLICY_ENCRYPTION_KEY = "history_encryption_enabled"
++_POLICY_PRIVACY_KEY = "privacy_mode_enabled"
++
++
++def _request_carries_full_policy(payload: dict[str, Any]) -> bool:
++    """Явно ли запрос несёт ОБА policy-флага как exact-bool.
++
++    Только такой запрос — «полный валидированный объект» для обычного save-пути
++    и вправе идти как validated repair (``validated_repair=True``). Всё остальное
++    (частичные обновления, truthy-не-bool, один флаг) — default ``False``:
++    решает guard по состоянию на диске (KNOWN — пишем как раньше, UNKNOWN —
++    громкий отказ без laundering через merge ``DEFAULT_SETTINGS``).
++    """
++    try:
++        return (
++            _POLICY_ENCRYPTION_KEY in payload
++            and _POLICY_PRIVACY_KEY in payload
++            and type(payload[_POLICY_ENCRYPTION_KEY]) is bool
++            and type(payload[_POLICY_PRIVACY_KEY]) is bool
++        )
++    except Exception:  # noqa: BLE001 — fail-closed: сомнение = не полный объект
++        return False
++
+ # ---------------------------------------------------------------------------
+ # Path-traversal allowlist for settings export / import (W1736)
+ # ---------------------------------------------------------------------------
+@@ -629,7 +655,12 @@ class SettingsService:
+                 _log.warning("settings save: %s", w)
+         settings = vr.fixed
+ 
+-        result = self.store.save_settings(settings)
++        # A5.3 slice 3 (п.8, BLOCKER-1): validated_repair ТОЛЬКО если входящий
++        # запрос ЯВНО несёт ОБА policy-флага exact-bool. Иначе default False —
++        # решает guard по диску: KNOWN пишет как раньше, UNKNOWN громко
++        # отказывает (закрывает laundering через merge DEFAULT_SETTINGS).
++        validated_repair = _request_carries_full_policy(params)
++        result = self.store.save_settings(settings, validated_repair=validated_repair)
+         self.invalidate_cache()
+         add_breadcrumb(
+             category="settings",
+@@ -663,6 +694,9 @@ class SettingsService:
+             settings = dict(old_settings)
+             settings.update(preset)
+             settings["active_preset"] = profile
++            # A5.3 slice 3: preset — частичное обновление без policy-флагов
++            # (пресеты их никогда не несут) — default False: решает guard по диску
++            # (KNOWN пишет как раньше, UNKNOWN громко отказывает).
+             result = self.store.save_settings(settings)
+             self.invalidate_cache()
+             add_breadcrumb(
+@@ -804,7 +838,9 @@ class SettingsService:
+                     "restart_required": restart_required,
+                 }
+ 
+-            # dry_run=False — реально применяем
++            # dry_run=False — реально применяем.
++            # A5.3 slice 3: recommended-ключи policy-флагов никогда не содержат —
++            # default False (guard по диску), как preset.
+             snapshot_id = self._backup.create_backup(old_settings, reason="before_recommended_setup")
+             merged = dict(old_settings)
+             for item in applied:
+@@ -925,6 +961,8 @@ class SettingsService:
+                     max_value=1.0,
+                 )
+ 
++            # A5.3 slice 3: notification-поля policy-флагов никогда не содержат —
++            # default False (guard по диску), как preset/recommended.
+             result = self.store.save_settings(settings)
+             self.invalidate_cache()
+             # W1308/W1341/W1436: reload pydantic settings and fire hooks
+@@ -1036,7 +1074,12 @@ class SettingsService:
+             merged = vr.fixed
+ 
+             imported = len(incoming) - skipped
+-            self.store.save_settings(merged)
++            # A5.3 slice 3 (п.8, 10): import предъявляет ПОЛНЫЙ валидированный
++            # объект — это и есть явный repair-путь (validated_repair=True).
++            # Валидатор выше уже проверил (как раньше); если объект неполный и
++            # валидатор его отверг — мы сюда не дошли (raise выше), запись не
++            # произошла и профиль остался UNKNOWN fail-closed.
++            self.store.save_settings(merged, validated_repair=True)
+             self.invalidate_cache()
+             add_breadcrumb(
+                 category="settings",
+@@ -1141,9 +1184,13 @@ class SettingsService:
+             if not vr.valid:
+                 _log.warning("handle_restore_settings_backup: corrupt backup %s rejected: %s",
+                              backup_id, vr.errors)
+-                # W1178: rollback to pre-restore state
++                # W1178: rollback to pre-restore state.
++                # A5.3 slice 3: rollback — тоже явный repair-путь
++                # (validated_repair=True): восстанавливаем pre-restore состояние
++                # через центральный commit с новой ревизией (старые grants мертвы,
++                # п.5/16 — callback не единственный revoke-механизм).
+                 try:
+-                    self.store.save_settings(old_settings)
++                    self.store.save_settings(old_settings, validated_repair=True)
+                     self.invalidate_cache()
+                 except Exception as rollback_exc:  # noqa: BLE001
+                     _log.error(
+@@ -1155,7 +1202,9 @@ class SettingsService:
+                 )
+             restored = vr.fixed
+ 
+-            self.store.save_settings(restored)
++            # A5.3 slice 3 (п.8, 10): restore предъявляет ПОЛНЫЙ валидированный
++            # объект — явный repair-путь (validated_repair=True), как import.
++            self.store.save_settings(restored, validated_repair=True)
+             self.invalidate_cache()
+ 
+             _log.info("handle_restore_settings_backup: restored from %s", backup_id)
+diff --git a/KrabEar/backend/state_store.py b/KrabEar/backend/state_store.py
+index 6bf4523c2..9901a3b4f 100644
+--- a/KrabEar/backend/state_store.py
++++ b/KrabEar/backend/state_store.py
+@@ -1156,15 +1156,56 @@ class StateStore:
+             f"settings policy UNKNOWN ({reason}); validated repair required"
+         )
+ 
++    def _commit_settings_explicit_unlocked(self, content: dict[str, Any]) -> dict[str, Any]:
++        """Явный commit БЕЗ merge с ``DEFAULT_SETTINGS``. ТОЛЬКО под ``self._lock()``.
++
++        A5.3 карточка A, slice 3 (контракт п.10–11, 17): wholesale-замены
++        (history-restore settings, integrity-repair) обязаны идти через тот же
++        центральный commit — та же ревизия-семантика (входная отбрасывается,
++        новая ``uuid4().hex`` минтится ВСЕГДА) и тот же atomic replace
++        (``core.atomic_io.atomic_write_text``, уникальный temp + fsync), но БЕЗ
++        merge с дефолтами.
++
++        Почему без merge: ``_save_settings_unlocked`` делает
++        ``dict(DEFAULT_SETTINGS) + update(new)`` — любой неполный backup/``{}``
++        стал бы полным ``KNOWN_OFF`` (оба флага из дефолтов) и отмыл бы
++        ``UNKNOWN`` в известное без действия владельца. Явный контент пишется
++        как есть + новая ревизия: полного backup хватает до ``KNOWN_*``,
++        неполного/пустого — нет (``MISSING_KEY`` → ``UNKNOWN`` fail-closed
++        читателем). Ревизия при этом всё равно новая — старые grants мертвы
++        (п.5/16), callback не единственный revoke-механизм.
++
++        Guards здесь НЕТ (ни ``_guard_supported_write_unlocked``, ни A5
++        ENC1/write-guards из ``save_settings``): вызывающий — явный recovery
++        (restore/repair, ``validated_repair=True``-семантика), у которого текущий
++        файл может быть нечитаем/не-объектом — именно это он и чинит.
++        Безопасность даёт fail-closed читатель (неполное → ``UNKNOWN``/deny),
++        а не отказ записи. Внешние ON-гейты (policy_blocks до lock) остаются
++        на вызывающем (history-restore их уже делает до и под lock).
++        """
++        from core.atomic_io import atomic_write_text
++
++        settings = dict(content)
++        # Входной/backup revision никогда не сохраняется (п.9).
++        settings.pop(POLICY_REVISION_KEY, None)
++        # Новая ревизия на КАЖДОЙ поддержанной записи, даже при тех же флагах.
++        settings[POLICY_REVISION_KEY] = uuid.uuid4().hex
++        atomic_write_text(
++            self.settings_path,
++            json.dumps(settings, ensure_ascii=False, indent=2),
++        )
++        return settings
++
+     def _save_settings_unlocked(self, new_settings: dict[str, Any]) -> dict[str, Any]:
+         """Тело центрального settings commit (§7.3). ТОЛЬКО под ``self._lock()``.
+ 
+         Порядок обязателен: сначала merge с ``DEFAULT_SETTINGS`` (не менять),
+-        затем отбрасывание ВХОДНОГО значения ревизии и только ПОСЛЕ этого —
+-        генерация новой ``uuid4().hex``. Ревизия приходит от authorizer-контракта
+-        как durable-версия против ON→OFF→ON между процессами: входное или
+-        backup-значение сохранять нельзя никогда, а генерировать надо на КАЖДОЙ
+-        поддержанной записи — даже если значения флагов не изменились.
++        затем явный commit (отбрасывание ВХОДНОГО значения ревизии и генерация
++        новой ``uuid4().hex`` — см. ``_commit_settings_explicit_unlocked``).
++        Ревизия приходит от authorizer-контракта как durable-версия против
++        ON→OFF→ON между процессами: входное или backup-значение сохранять нельзя
++        никогда, а генерировать надо на КАЖДОЙ поддержанной записи — даже если
++        значения флагов не изменились.
+ 
+         Запись атомарная: ``core.atomic_io.atomic_write_text`` (уникальный temp
+         + fsync + ``os.replace``) вместо прежнего ``with_suffix(".json.tmp")``,
+@@ -1174,19 +1215,9 @@ class StateStore:
+         появляется только в записанном файле, поэтому exact-dict схема
+         настроек (tests, глоссарий) не меняется.
+         """
+-        from core.atomic_io import atomic_write_text
+-
+         settings = dict(DEFAULT_SETTINGS)
+         settings.update(new_settings)
+-        # Входной/backup revision никогда не сохраняется.
+-        settings.pop(POLICY_REVISION_KEY, None)
+-        # Новая ревизия на КАЖДОЙ поддержанной записи, даже при тех же флагах.
+-        settings[POLICY_REVISION_KEY] = uuid.uuid4().hex
+-        atomic_write_text(
+-            self.settings_path,
+-            json.dumps(settings, ensure_ascii=False, indent=2),
+-        )
+-        return settings
++        return self._commit_settings_explicit_unlocked(settings)
+ 
+     def initialize_startup_plaintext_policy(self, *, new_profile: bool) -> str:
+         """Startup-инициализация policy snapshot (спека §7.2 / контракт п.7–8).
+
+=== UNTRACKED NEW FILES ===
+--- NEW FILE: KrabEar/tests/test_plaintext_settings_commit_paths.py ---
+"""A5.3 карточка A, slice 3 — все поддержанные записи через центральный commit.
+
+Контракт: ``A53_STRONG_MODEL_HANDOFF.md`` п.5, 8, 10, 11, 17 + спека §7.2–7.3.
+
+Почему отдельный файл (а не продолжение ``test_plaintext_export_authorization.py``):
+slice 1–2 проверяют snapshot/reader/authorizer-ядро; этот файл проверяет ТОЛЬКО
+маршрутизацию записей (какой путь с каким ``validated_repair`` и под каким lock).
+Раздельные файлы — раздельные py312-гейты и понятный RED/GREEN по slice.
+
+Все проверки поведенческие (файлы на диске, revision, snapshot, authorizer-ответы):
+без AST/source-inspection, без BackendService (тяжёлые потоки), без реальной
+истории/ENC1/Keychain. StateStore + SettingsService + HistoryService + лёгкий
+IntegrityChecker — всё с реальными дисками во временных каталогах.
+
+Карта путей (реально существующие на HEAD slice 3):
+  set ......... SettingsService.handle_set_settings
+  preset ...... SettingsService.handle_apply_profile_preset
+  recommended . SettingsService.handle_apply_recommended_setup (dry_run=False)
+  notify ...... SettingsService.handle_set_notification_preferences
+  import ...... SettingsService.handle_import_settings
+  restore ..... SettingsService.handle_restore_settings_backup (+ rollback)
+  direct ...... StateStore.save_settings напрямую
+  hist-restore  HistoryService.handle_restore_history (restore_settings=True)
+  repair ...... IntegrityChecker.repair (settings_json)
+Reset-хендлера настроек в коде нет (поиск ``handle_*reset`` пуст) — пункт п.5
+«reset» покрывается direct save + restore путями; отсутствие зафиксировано здесь,
+а не выдумано.
+"""
+
+from __future__ import annotations
+
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+from backend.plaintext_export_authorization import (
+    POLICY_REVISION_KEY,
+    REASON_PLAINTEXT_SESSION_EXPIRED,
+    PlaintextExportAuthorizer,
+    PolicyState,
+)
+from backend.state_store import (
+    StateStore,
+    StateStoreSettingsCorruptError,
+)
+
+ENCRYPTION_KEY = "history_encryption_enabled"
+PRIVACY_KEY = "privacy_mode_enabled"
+
+VALID_REVISION = "0123456789abcdef0123456789abcdef"
+HOSTILE_REVISION = "0" * 32
+
+
+def _profile(encryption: bool = False, privacy: bool = False) -> dict:
+    return {
+        ENCRYPTION_KEY: encryption,
+        PRIVACY_KEY: privacy,
+        POLICY_REVISION_KEY: VALID_REVISION,
+    }
+
+
+def _seed_known(data_dir: Path, *, encryption: bool = False, privacy: bool = False) -> None:
+    (data_dir / "settings.json").write_text(
+        json.dumps(_profile(encryption, privacy)), encoding="utf-8"
+    )
+
+
+def _real_settings_service(store: StateStore):
+    from backend.settings_backup import SettingsBackup
+    from backend.settings_service import SettingsService
+
+    return SettingsService(store=store, backup=SettingsBackup(store.data_dir / "backups"))
+
+
+def _real_history_service(store: StateStore):
+    from backend.history_service import HistoryService
+
+    return HistoryService(store=store)
+
+
+class _CommitPathsFixture(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory(prefix="a53-commit-paths-")
+        # Каталог data создаём ДО StateStore — _created_data_dir=False,
+        # запись на отсутствующий/неполный settings.json не «новый профиль».
+        self.data_dir = Path(self._tmp.name) / "data"
+        self.data_dir.mkdir(parents=True)
+        self.store = StateStore(self.data_dir)
+
+    def tearDown(self) -> None:
+        self.store = None
+        self._tmp.cleanup()
+
+    def on_disk(self) -> dict:
+        return json.loads((self.data_dir / "settings.json").read_text(encoding="utf-8"))
+
+    def revision_on_disk(self) -> str:
+        return self.on_disk()[POLICY_REVISION_KEY]
+
+    def snapshot(self):
+        return self.store.read_plaintext_policy_snapshot()
+
+
+class TestPartialSetGuardedByDisk(_CommitPathsFixture):
+    """П.8 + BLOCKER-1: частичная запись без обоих exact-bool — решает guard по диску."""
+
+    def test_partial_wake_word_on_incomplete_profile_is_loud_reject(self):
+        """Эмуляция Swift-зеркала {wake_word_enabled: True} на неполном профиле."""
+        (self.data_dir / "settings.json").write_text(
+            json.dumps({ENCRYPTION_KEY: False}), encoding="utf-8"
+        )
+        before = (self.data_dir / "settings.json").read_bytes()
+        svc = _real_settings_service(self.store)
+        with self.assertRaises(StateStoreSettingsCorruptError):
+            svc.handle_set_settings({"wake_word_enabled": True})
+        self.assertEqual((self.data_dir / "settings.json").read_bytes(), before)
+        self.assertIs(self.snapshot().state, PolicyState.UNKNOWN)
+
+    def test_partial_wake_word_on_known_profile_rotates_revision(self):
+        _seed_known(self.data_dir)
+        before_rev = self.revision_on_disk()
+        svc = _real_settings_service(self.store)
+        svc.handle_set_settings({"wake_word_enabled": True})
+        after_rev = self.revision_on_disk()
+        self.assertNotEqual(after_rev, before_rev)
+        self.assertNotEqual(after_rev, VALID_REVISION)
+        self.assertIs(self.snapshot().state, PolicyState.KNOWN_OFF)
+
+    def test_partial_preset_recommended_notify_do_not_repair_unknown(self):
+        """Preset/recommended/notify никогда не несут policy-флаги — всегда guard по диску."""
+        for seed_payload in (
+            {ENCRYPTION_KEY: False},
+            {ENCRYPTION_KEY: False, PRIVACY_KEY: "yes"},
+        ):
+            with self.subTest(seed=seed_payload):
+                (self.data_dir / "settings.json").write_text(
+                    json.dumps(seed_payload), encoding="utf-8"
+                )
+                svc = _real_settings_service(self.store)
+                with self.assertRaises(StateStoreSettingsCorruptError):
+                    svc.handle_apply_profile_preset({"profile": "meeting"})
+                with self.assertRaises(StateStoreSettingsCorruptError):
+                    svc.handle_set_notification_preferences({"notifications_enabled": False})
+                # recommended dry_run=False — тоже частичная запись без policy-флагов.
+                with self.assertRaises(StateStoreSettingsCorruptError):
+                    svc.handle_apply_recommended_setup(
+                        {"dry_run": False},
+                        probe_llm_fn=lambda: {"reachable": False},
+                        sensevoice_cached_fn=lambda: False,
+                    )
+                self.assertIs(self.snapshot().state, PolicyState.UNKNOWN)
+
+
+class TestFullExplicitSetIsValidatedRepair(_CommitPathsFixture):
+    """Полный explicit set (оба флага exact-bool) на неполном — успех, KNOWN."""
+
+    def test_full_set_with_both_exact_bools_repairs_unknown(self):
+        (self.data_dir / "settings.json").write_text(
+            json.dumps({ENCRYPTION_KEY: False}), encoding="utf-8"
+        )
+        svc = _real_settings_service(self.store)
+        svc.handle_set_settings(
+            {ENCRYPTION_KEY: True, PRIVACY_KEY: False, "wake_word_enabled": True}
+        )
+        snap = self.snapshot()
+        self.assertIs(snap.state, PolicyState.KNOWN_ON)
+        self.assertIsNone(snap.reason)
+        self.assertNotEqual(snap.internal_revision, VALID_REVISION)
+
+    def test_set_with_truthy_non_bool_flags_does_not_repair(self):
+        """type(v) is bool, не truthiness: 1/'true' не считаются полным объектом."""
+        (self.data_dir / "settings.json").write_text(
+            json.dumps({ENCRYPTION_KEY: False}), encoding="utf-8"
+        )
+        svc = _real_settings_service(self.store)
+        with self.assertRaises(StateStoreSettingsCorruptError):
+            svc.handle_set_settings({ENCRYPTION_KEY: 1, PRIVACY_KEY: "true"})
+        self.assertIs(self.snapshot().state, PolicyState.UNKNOWN)
+
+    def test_set_with_only_one_flag_does_not_repair(self):
+        (self.data_dir / "settings.json").write_text(
+            json.dumps({ENCRYPTION_KEY: False}), encoding="utf-8"
+        )
+        svc = _real_settings_service(self.store)
+        with self.assertRaises(StateStoreSettingsCorruptError):
+            svc.handle_set_settings({ENCRYPTION_KEY: True})
+        self.assertIs(self.snapshot().state, PolicyState.UNKNOWN)
+
+
+class TestImportRestoreAreExplicitRepair(_CommitPathsFixture):
+    """П.8/10: import/restore/rollback — явный repair-путь (validated_repair=True)."""
+
+    def test_import_full_object_rotates_revision_and_ignores_input_revision(self):
+        _seed_known(self.data_dir)
+        incoming = dict(_profile(False, False))
+        incoming[POLICY_REVISION_KEY] = HOSTILE_REVISION
+        incoming["wake_word_enabled"] = True
+        src = Path(self._tmp.name) / "payload.json"
+        src.write_text(json.dumps(incoming), encoding="utf-8")
+        svc = _real_settings_service(self.store)
+        svc.handle_import_settings({"file": str(src)})
+        on_disk = self.on_disk()
+        self.assertNotEqual(on_disk[POLICY_REVISION_KEY], HOSTILE_REVISION)
+        self.assertNotEqual(on_disk[POLICY_REVISION_KEY], VALID_REVISION)
+        self.assertIs(self.snapshot().state, PolicyState.KNOWN_OFF)
+
+    def test_restore_backup_full_object_rotates_revision(self):
+        _seed_known(self.data_dir)
+        svc = _real_settings_service(self.store)
+        snap_id = svc.handle_create_manual_settings_backup({"reason": "t"})["backup_id"]
+        # Испортить backup ревизией злоумышленника напрямую в файле бэкапа.
+        backups = svc.handle_list_settings_backups({})["backups"]
+        entry = next(b for b in backups if b["backup_id"] == snap_id)
+        # Найти файл бэкапа: SettingsBackup хранит в data_dir/backups.
+        backup_files = list((self.data_dir / "backups").glob("*.json"))
+        self.assertTrue(backup_files, "нет файлов бэкапов")
+        for bf in backup_files:
+            try:
+                payload = json.loads(bf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict) and ENCRYPTION_KEY in payload:
+                payload[POLICY_REVISION_KEY] = HOSTILE_REVISION
+                bf.write_text(json.dumps(payload), encoding="utf-8")
+        svc.handle_restore_settings_backup({"backup_id": snap_id})
+        self.assertNotEqual(self.revision_on_disk(), HOSTILE_REVISION)
+        self.assertNotEqual(self.revision_on_disk(), VALID_REVISION)
+        self.assertIs(self.snapshot().state, PolicyState.KNOWN_OFF)
+        self.assertEqual(entry["backup_id"], snap_id)
+
+    def test_failed_restore_rollback_does_not_leave_hostile_revision(self):
+        """Невалидный backup отклоняется; hostile revision никогда не сохраняется."""
+        _seed_known(self.data_dir)
+        svc = _real_settings_service(self.store)
+        snap_id = svc.handle_create_manual_settings_backup({"reason": "t"})["backup_id"]
+        backup_files = list((self.data_dir / "backups").glob("*.json"))
+        target = None
+        for bf in backup_files:
+            try:
+                payload = json.loads(bf.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict) and ENCRYPTION_KEY in payload:
+                target = bf
+                break
+        self.assertIsNotNone(target)
+        bad = {"voice_gateway_url": "http://evil.example.com/"}
+        bad[POLICY_REVISION_KEY] = HOSTILE_REVISION
+        target.write_text(json.dumps(bad), encoding="utf-8")
+        with self.assertRaises(ValueError):
+            svc.handle_restore_settings_backup({"backup_id": snap_id})
+        self.assertNotEqual(self.revision_on_disk(), HOSTILE_REVISION)
+
+
+class TestEverySupportedPathRotatesRevisionAndRevokes(_CommitPathsFixture):
+    """П.5: каждый supported путь меняет revision; старый grant — session_expired."""
+
+    def _authorizer(self) -> PlaintextExportAuthorizer:
+        return PlaintextExportAuthorizer(
+            read_snapshot=self.store.read_plaintext_policy_snapshot,
+            profile_identity=str(self.data_dir),
+        )
+
+    def _issue_on(self) -> tuple[PlaintextExportAuthorizer, str, int]:
+        _seed_known(self.data_dir, encryption=True, privacy=False)
+        auth = self._authorizer()
+        grant = auth.issue_grant("11111111-1111-4111-8111-111111111111")
+        self.assertTrue(grant.ok, grant)
+        self.assertIsNotNone(grant.capability)
+        return auth, grant.capability, grant.policy_generation
+
+    def _assert_old_grant_dead(self, auth, capability, generation):
+        res = auth.validate(
+            "11111111-1111-4111-8111-111111111111",
+            auth.epoch,
+            capability,
+            generation,
+            1,
+            "export_history",
+        )
+        self.assertFalse(res.ok)
+        self.assertEqual(res.reason, REASON_PLAINTEXT_SESSION_EXPIRED)
+
+    def test_direct_save_rotates_and_revokes(self):
+        auth, cap, gen = self._issue_on()
+        rev_before = self.revision_on_disk()
+        self.store.save_settings({ENCRYPTION_KEY: True, PRIVACY_KEY: False})
+        self.assertNotEqual(self.revision_on_disk(), rev_before)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+    def test_set_path_rotates_and_revokes(self):
+        auth, cap, gen = self._issue_on()
+        rev_before = self.revision_on_disk()
+        _real_settings_service(self.store).handle_set_settings({"wake_word_enabled": True})
+        self.assertNotEqual(self.revision_on_disk(), rev_before)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+    def test_preset_path_rotates_and_revokes(self):
+        auth, cap, gen = self._issue_on()
+        rev_before = self.revision_on_disk()
+        _real_settings_service(self.store).handle_apply_profile_preset({"profile": "meeting"})
+        self.assertNotEqual(self.revision_on_disk(), rev_before)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+    def test_notify_path_rotates_and_revokes(self):
+        auth, cap, gen = self._issue_on()
+        rev_before = self.revision_on_disk()
+        _real_settings_service(self.store).handle_set_notification_preferences(
+            {"notifications_enabled": False}
+        )
+        self.assertNotEqual(self.revision_on_disk(), rev_before)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+    def test_recommended_path_rotates_and_revokes(self):
+        auth, cap, gen = self._issue_on()
+        rev_before = self.revision_on_disk()
+        _real_settings_service(self.store).handle_apply_recommended_setup(
+            {"dry_run": False},
+            probe_llm_fn=lambda: {"reachable": False},
+            sensevoice_cached_fn=lambda: False,
+        )
+        self.assertNotEqual(self.revision_on_disk(), rev_before)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+    def test_import_path_rotates_and_revokes(self):
+        auth, cap, gen = self._issue_on()
+        rev_before = self.revision_on_disk()
+        src = Path(self._tmp.name) / "imp.json"
+        src.write_text(json.dumps({"wake_word_enabled": False}), encoding="utf-8")
+        _real_settings_service(self.store).handle_import_settings({"file": str(src)})
+        self.assertNotEqual(self.revision_on_disk(), rev_before)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+    def test_restore_backup_path_rotates_and_revokes(self):
+        auth, cap, gen = self._issue_on()
+        rev_before = self.revision_on_disk()
+        svc = _real_settings_service(self.store)
+        snap_id = svc.handle_create_manual_settings_backup({"reason": "t"})["backup_id"]
+        svc.handle_restore_settings_backup({"backup_id": snap_id})
+        self.assertNotEqual(self.revision_on_disk(), rev_before)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+    def test_on_off_on_without_export_revokes_old_grant(self):
+        """ON→OFF→ON без export между переходами: старый grant мёртв."""
+        auth, cap, gen = self._issue_on()
+        self.store.save_settings({ENCRYPTION_KEY: False, PRIVACY_KEY: False})
+        self.store.save_settings({ENCRYPTION_KEY: True, PRIVACY_KEY: False})
+        self.assertIs(self.snapshot().state, PolicyState.KNOWN_ON)
+        self._assert_old_grant_dead(auth, cap, gen)
+
+
+class TestHistoryRestoreSettingsViaCommit(_CommitPathsFixture):
+    """П.11: settings-часть handle_restore_history — validated commit, не copy2."""
+
+    def _make_legacy_backup(self, *, settings_payload: dict) -> Path:
+        backups_root = self.data_dir / "backups"
+        backup_dir = backups_root / "backup_TEST"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        (backup_dir / "history.ndjson").write_text("", encoding="utf-8")
+        (backup_dir / "backup_meta.json").write_text(
+            json.dumps({"backup_ts": "2026-01-01T00:00:00Z"}), encoding="utf-8"
+        )
+        (backup_dir / "settings.json").write_text(
+            json.dumps(settings_payload), encoding="utf-8"
+        )
+        return backup_dir
+
+    def test_restore_settings_goes_through_commit_not_copy2(self):
+        _seed_known(self.data_dir, encryption=False)
+        backup_settings = dict(_profile(True, False))
+        backup_settings[POLICY_REVISION_KEY] = HOSTILE_REVISION
+        backup_dir = self._make_legacy_backup(settings_payload=backup_settings)
+        svc = _real_history_service(self.store)
+        with mock.patch("shutil.copy2") as copy2:
+            # history.ndjson и aux-файлы идут через copy2 — это нормально;
+            # settings.json через copy2 идти НЕ должен (иначе hostile revision сохранится).
+            result = svc.handle_restore_history(
+                {"backup_path": str(backup_dir), "restore_settings": True}
+            )
+            for call in copy2.call_args_list:
+                args, _kwargs = call
+                self.assertNotIn("settings.json", str(args[0]),
+                                 f"settings copy2 bypass жив: {call}")
+                self.assertNotIn("settings.json", str(args[1]),
+                                 f"settings copy2 bypass жив: {call}")
+        self.assertGreater(result.get("restored_entries", 0), -1)
+        on_disk = self.on_disk()
+        self.assertNotEqual(on_disk[POLICY_REVISION_KEY], HOSTILE_REVISION)
+        self.assertTrue(on_disk[ENCRYPTION_KEY] is True)
+        self.assertIs(self.snapshot().state, PolicyState.KNOWN_ON)
+
+    def test_restore_settings_incomplete_backup_stays_unknown(self):
+        _seed_known(self.data_dir, encryption=False)
+        backup_dir = self._make_legacy_backup(
+            settings_payload={"wake_word_enabled": True}
+        )
+        svc = _real_history_service(self.store)
+        svc.handle_restore_history(
+            {"backup_path": str(backup_dir), "restore_settings": True}
+        )
+        # Явный restore с неполным backup: запись идёт (validated repair),
+        # но профиль по содержимому UNKNOWN fail-closed — не KNOWN_OFF.
+        # (Единый commit минтит ревизию, но флагов в backup нет.)
+        snap = self.snapshot()
+        self.assertIs(snap.state, PolicyState.UNKNOWN, snap)
+
+    def test_encrypted_snapshot_restore_settings_stays_refused(self):
+        """Запрет encrypted_snapshot.py:3034 цел: restore_settings=True отклонён."""
+        from backend.encrypted_snapshot import (
+            REASON_RESTORE_SETTINGS_UNSUPPORTED,
+            SnapshotOperationRefused,
+            restore_encrypted_snapshot,
+        )
+
+        with self.assertRaises(SnapshotOperationRefused) as ctx:
+            restore_encrypted_snapshot(
+                data_dir=self.data_dir,
+                backups_root=self.data_dir / "backups",
+                snapshot_dir=self.data_dir / "backups" / "nope",
+                crypto=object(),
+                restore_settings=True,
+            )
+        self.assertEqual(ctx.exception.reason, REASON_RESTORE_SETTINGS_UNSUPPORTED)
+
+
+class TestIntegrityRepairViaCommit(_CommitPathsFixture):
+    """П.10/17: repair settings — центральный commit, revision минтится, UNKNOWN."""
+
+    def test_repair_corrupt_settings_mints_revision_and_stays_unknown(self):
+        (self.data_dir / "settings.json").write_bytes(b"[1, 2, 3]")
+        from backend.integrity_checker import IntegrityChecker
+
+        checker = IntegrityChecker()
+        report = checker.check_integrity(self.data_dir)
+        result = checker.repair(self.data_dir, report)
+        self.assertGreaterEqual(result.fixed, 1)
+        on_disk = self.on_disk()
+        self.assertIn(POLICY_REVISION_KEY, on_disk)
+        self.assertNotEqual(on_disk[POLICY_REVISION_KEY], HOSTILE_REVISION)
+        snap = self.snapshot()
+        # Главное: НЕ KNOWN_OFF. Пустой explicit-контент + ревизия = MISSING_KEY UNKNOWN.
+        self.assertIs(snap.state, PolicyState.UNKNOWN, snap)
+
+    def test_repair_does_not_use_shared_tmp_name(self):
+        (self.data_dir / "settings.json").write_bytes(b"not json {{{")
+        from backend.integrity_checker import IntegrityChecker
+
+        checker = IntegrityChecker()
+        report = checker.check_integrity(self.data_dir)
+        checker.repair(self.data_dir, report)
+        leftovers = [p.name for p in self.data_dir.iterdir() if p.name.endswith(".tmp")]
+        self.assertEqual(leftovers, [], leftovers)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
