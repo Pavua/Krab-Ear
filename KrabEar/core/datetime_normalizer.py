@@ -534,6 +534,17 @@ class DateTimeNormalizer:
         )
 
         def _repl_digit_date(m: re.Match) -> str:
+            # Новые цифровые порядковые формы не должны нормализовать лишь
+            # хвост составного дня или дату с неразобранным продолжением года.
+            if m.group(0).startswith(m.group(1) + "-"):
+                before = text[:m.start()]
+                after = text[m.end():]
+                if re.search(r"(?<!\S)\d+\s+$", before):
+                    return m.group(0)
+                if not m.group(3) and re.match(r"\s+\d", after):
+                    return m.group(0)
+                if m.group(3) and re.match(r"\w", after):
+                    return m.group(0)
             day = int(m.group(1))
             month_str = m.group(2).lower()
             year_str = m.group(3) or ""
