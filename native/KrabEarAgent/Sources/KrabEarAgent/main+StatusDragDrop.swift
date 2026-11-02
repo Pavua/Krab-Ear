@@ -66,6 +66,9 @@ final class StatusBarDropView: NSView {
     private func setupDragRegistration() {
         // Регистрируем только fileURL — игнорируем текст, изображения и прочее.
         registerForDraggedTypes([.fileURL])
+        // Overlay sits on NSStatusBarButton; an inherited toolTip would track
+        // the pointer on Tahoe if mouseExited never reaches the button.
+        toolTip = nil
     }
 
     // MARK: - NSDraggingDestination
