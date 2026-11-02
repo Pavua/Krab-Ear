@@ -111,6 +111,19 @@ class TestAggregate(unittest.TestCase):
         self.assertAlmostEqual(agg["overall"]["mean_wer"], (0.1 + 0.3 + 0.0) / 3)
         self.assertEqual(agg["overall"]["count"], 3)
 
+    def test_errors_are_counted_not_hidden(self):
+        rows = [
+            {"stem": "ru_001", "lang": "ru", "wer": 0.0, "substitutions": 0, "deletions": 0, "insertions": 0, "ref_words": 5},
+            {"stem": "ru_002", "lang": "ru", "error": "REST STT failed (stt_failed)"},
+        ]
+        agg = wer_eval.aggregate_results(rows)
+        self.assertEqual(agg["by_lang"]["ru"]["count"], 1)
+        self.assertEqual(agg["by_lang"]["ru"]["errors"], 1)
+        self.assertEqual(agg["by_lang"]["ru"]["total"], 2)
+        self.assertEqual(agg["overall"]["count"], 1)
+        self.assertEqual(agg["overall"]["errors"], 1)
+        self.assertEqual(agg["overall"]["total"], 2)
+
 
 class TestRestClient(unittest.TestCase):
     def _fake_wav(self, tmp: Path) -> Path:
@@ -246,6 +259,45 @@ class TestBackendIpcRouting(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(recorded[0]["lang_hint"], "ru")
         self.assertNotIn("error", rows[0])
+
+    def test_http200_error_payload_is_not_success(self):
+        # До PR #2120 REST превращает ошибку engine в HTTP 200 с пустым
+        # текстом; харнесс обязан считать это ошибкой замера, а не гипотезой "".
+        for payload in (
+            {"status": "error", "error": "stt_failed", "text": ""},
+            {"status": "error", "text": ""},
+            {"error": "stt_failed", "text": ""},
+        ):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.ok = True
+            resp.json.return_value = dict(payload)
+            with patch("wer_eval.requests.post", return_value=resp):
+                with self.assertRaises(
+                    wer_eval.RestUnavailableError, msg=f"payload={payload}"
+                ):
+                    wer_eval.transcribe_wav_rest(
+                        self._fake_wav(Path("/tmp/wer_eval_test_err200"), "ru_001"),
+                        base_url="http://127.0.0.1:5005",
+                        lang_hint="ru",
+                    )
+
+    def test_legitimate_empty_and_ok_with_null_error_stay_success(self):
+        for payload, expected in (
+            ({"text": "", "reason": "vad_skip"}, ""),
+            ({"status": "ok", "error": None, "text": "ok"}, "ok"),
+        ):
+            resp = MagicMock()
+            resp.status_code = 200
+            resp.ok = True
+            resp.json.return_value = dict(payload)
+            with patch("wer_eval.requests.post", return_value=resp):
+                text = wer_eval.transcribe_wav_rest(
+                    self._fake_wav(Path("/tmp/wer_eval_test_legit"), "ru_001"),
+                    base_url="http://127.0.0.1:5005",
+                    lang_hint="ru",
+                )
+            self.assertEqual(text, expected)
 
 
 class TestJsonReport(unittest.TestCase):
