@@ -20,6 +20,7 @@ docs/golden/r2-scenario.md. Аудио остаётся ЛОКАЛЬНО, в git
 from __future__ import annotations
 
 import argparse
+import array
 import os
 import re
 import shutil
@@ -27,6 +28,7 @@ import signal
 import subprocess
 import sys
 import time
+import wave
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +38,7 @@ SCENARIO_PATH = REPO_ROOT / "docs" / "golden" / "r2-scenario.md"
 DEFAULT_OUT = Path.home() / "Library" / "Application Support" / "KrabEar" / "golden"
 LANG_CODES = {"RU": "ru", "ES": "es", "EN": "en"}
 MIN_WAV_BYTES = 16000  # ~0.5 c при 16 kHz mono PCM16 (32 КБ/с)
+MIN_PEAK_ABS = 16  # int16; цифровые нули / молчащий loopback не проходят
 _VIRTUAL_MARKERS = (
     "blackhole",
     "loopback",
@@ -205,8 +208,31 @@ def resolve_record_device(
     )
 
 
+def _wav_peak_abs(path: Path) -> int:
+    """Пик |PCM16| по файлу. Битый/не-wav → 0 (fail-closed: не resume)."""
+    try:
+        with wave.open(str(path), "rb") as wf:
+            nframes = wf.getnframes()
+            sampwidth = wf.getsampwidth()
+            raw = wf.readframes(nframes)
+    except (OSError, wave.Error, EOFError):
+        return 0
+    if sampwidth != 2 or len(raw) < 2:
+        return 0
+    samples = array.array("h")
+    try:
+        samples.frombytes(raw[: len(raw) - (len(raw) % 2)])
+    except (ValueError, OverflowError):
+        return 0
+    if sys.byteorder != "little":
+        samples.byteswap()
+    return max((abs(int(s)) for s in samples), default=0)
+
+
 def _is_recorded(path: Path) -> bool:
-    return path.exists() and path.stat().st_size >= MIN_WAV_BYTES
+    if not path.exists() or path.stat().st_size < MIN_WAV_BYTES:
+        return False
+    return _wav_peak_abs(path) >= MIN_PEAK_ABS
 
 
 def _record_one(device: str, out_path: Path) -> bool:
@@ -249,7 +275,13 @@ def _record_one(device: str, out_path: Path) -> bool:
         part_path.unlink(missing_ok=True)
         raise
     if not stopped_cleanly or not _is_recorded(part_path):
-        print("    Файл пустой или слишком короткий — попробуем ещё раз.")
+        size_ok = part_path.exists() and part_path.stat().st_size >= MIN_WAV_BYTES
+        if size_ok:
+            print("    Устройство молчит (peak≈0) — запись отброшена.")
+            print('    Список устройств: ffmpeg -f avfoundation -list_devices true -i ""')
+            print("    Повтори с --device :N, где N — микрофон из списка.")
+        else:
+            print("    Файл пустой или слишком короткий — попробуем ещё раз.")
         part_path.unlink(missing_ok=True)
         return False
     os.replace(part_path, out_path)
