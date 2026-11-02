@@ -372,9 +372,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Wave 656: log bootstrap stage — app_launched.
-        AgentRecoveryLogger.shared.logStage("app_launched")
-
         // Phase C C.6: POSIX flock — единственная общая single-instance гарантия.
         // Новый экземпляр завершается сам; startup больше не ищет и не убивает
         // процессы только по имени `KrabEarAgent`.
@@ -384,6 +381,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             NSApp.terminate(nil)
             return
         }
+
+        // Wave 656: bootstrap stage — только владелец flock (duplicate-spawn не пишет шум).
+        AgentRecoveryLogger.shared.logStage("app_launched")
 
         // Только LaunchServices cleanup вынесен в фон, чтобы синхронный Process-вызов
         // не блокировал applicationDidFinishLaunching. PID-based cleanup запрещён.
