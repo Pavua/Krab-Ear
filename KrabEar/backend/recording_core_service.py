@@ -20,6 +20,7 @@ import time
 import uuid
 from collections import OrderedDict
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
@@ -3784,6 +3785,13 @@ class RecordingCoreService:
         quality_profile = str(params.get("quality_profile") or settings.get("quality_profile", "balanced"))
         cleanup_profile = str(params.get("cleanup_profile") or settings.get("cleanup_profile", "soft"))
         lang_hint: str | None = params.get("lang_hint") or None
+        persist_history = True
+        if "persist_history" in params:
+            persist_history = self._coerce_bool(params.get("persist_history"), default=True)
+        if "diarize" not in params:
+            diarize_override: bool | None = None
+        else:
+            diarize_override = self._coerce_bool(params.get("diarize"), default=False)
         translation_mode = str(params.get("translation_mode") or settings.get("translation_mode", "off"))
         translation_style = str(params.get("translation_style") or settings.get("translation_style", "neutral"))
         translation_glossary = settings.get("translation_glossary", {})
@@ -3852,6 +3860,7 @@ class RecordingCoreService:
                             domain="casual",
                             extra_vocabulary=user_vocabulary if user_vocabulary else None,
                             lang_hint=import_lang_hint,
+                            diarize=diarize_override,
                             progress_callback=progress_callback,
                         )
                     else:
@@ -3861,6 +3870,7 @@ class RecordingCoreService:
                             cleanup_profile=cleanup_profile,
                             lang_hint=import_lang_hint,
                             extra_vocabulary=user_vocabulary if user_vocabulary else None,
+                            diarize=diarize_override,
                         )
                 text = self._extract_transcribed_text(transcribe_payload)
                 elapsed = round(time.monotonic() - started_at, 3)
@@ -3893,70 +3903,73 @@ class RecordingCoreService:
                 # W1711: read runtime threshold — same fix as stop_recording path.
                 # wave-25 MED: sanitize (negative/NaN/out-of-range → safe default 0.9).
                 _dedup_threshold = _sanitize_dedup_threshold(settings.get("auto_dedup_threshold", 0.9))
-                with self._persist_lock:
-                    if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
-                        try:
-                            import time as _time_mod
-                            _ts_now = _time_mod.strftime("%Y-%m-%dT%H:%M:%S")
-                            _dedup_result = self._auto_deduplicator.check_duplicate(
-                                text=display_text or text,
-                                timestamp=_ts_now,
-                                store=self.store,
-                                threshold=_dedup_threshold,
-                            )
-                            if _dedup_result.is_duplicate:
-                                logger.info(
-                                    "transcribe_paths: запись пропущена как дубликат"
-                                    " original_id=%s similarity=%.3f threshold=%.3f path=%s",
-                                    _dedup_result.duplicate_of,
-                                    _dedup_result.similarity,
-                                    _dedup_threshold,
+                if not persist_history:
+                    history_item = SimpleNamespace(id="")
+                else:
+                    with self._persist_lock:
+                        if self._auto_deduplicator is not None and _dedup_enabled and not _privacy_mode:
+                            try:
+                                import time as _time_mod
+                                _ts_now = _time_mod.strftime("%Y-%m-%dT%H:%M:%S")
+                                _dedup_result = self._auto_deduplicator.check_duplicate(
+                                    text=display_text or text,
+                                    timestamp=_ts_now,
+                                    store=self.store,
+                                    threshold=_dedup_threshold,
+                                )
+                                if _dedup_result.is_duplicate:
+                                    logger.info(
+                                        "transcribe_paths: запись пропущена как дубликат"
+                                        " original_id=%s similarity=%.3f threshold=%.3f path=%s",
+                                        _dedup_result.duplicate_of,
+                                        _dedup_result.similarity,
+                                        _dedup_threshold,
+                                        audio_path,
+                                    )
+                                    self._safe_callback(on_file_done, file_index, None, "duplicate")
+                                    skipped_duplicates += 1
+                                    continue
+                            except Exception:
+                                logger.exception(
+                                    "transcribe_paths: dedup check завершился с исключением,"
+                                    " продолжаем запись path=%s",
                                     audio_path,
                                 )
-                                self._safe_callback(on_file_done, file_index, None, "duplicate")
-                                skipped_duplicates += 1
-                                continue
-                        except Exception:
-                            logger.exception(
-                                "transcribe_paths: dedup check завершился с исключением,"
-                                " продолжаем запись path=%s",
-                                audio_path,
-                            )
 
-                    history_item = self.store.add_history_item(
-                        text=display_text,
-                        paste_status="failed",
-                        # wave-1770: tag privacy_mode correctly for batch import — was
-                        # always False, breaking privacy-tagged filtering/purge logic.
-                        privacy_mode=_privacy_mode,
-                        source_text=text,
-                        translated_text=translated_text,
-                        translation_mode=translation.mode,
-                        source_lang=translation.source_lang,
-                        target_lang=translation.target_lang,
-                        translation_status=translation.status,
-                        translation_engine=translation.engine,
-                        diarization=diarization_data,
-                        audio_duration_sec=audio_duration_sec,
-                        emotion=(
-                            transcribe_payload.get("emotion")
-                            if isinstance(transcribe_payload, dict)
-                            and isinstance(transcribe_payload.get("emotion"), str)
-                            else None
-                        ),
-                        word_timestamps=(
-                            transcribe_payload.get("word_timestamps")
-                            if isinstance(transcribe_payload, dict)
-                            and isinstance(transcribe_payload.get("word_timestamps"), list)
-                            else None
-                        ),
-                        speaker_turns=(
-                            transcribe_payload.get("speaker_turns")
-                            if isinstance(transcribe_payload, dict)
-                            and isinstance(transcribe_payload.get("speaker_turns"), list)
-                            else None
-                        ),
-                    )
+                        history_item = self.store.add_history_item(
+                            text=display_text,
+                            paste_status="failed",
+                            # wave-1770: tag privacy_mode correctly for batch import — was
+                            # always False, breaking privacy-tagged filtering/purge logic.
+                            privacy_mode=_privacy_mode,
+                            source_text=text,
+                            translated_text=translated_text,
+                            translation_mode=translation.mode,
+                            source_lang=translation.source_lang,
+                            target_lang=translation.target_lang,
+                            translation_status=translation.status,
+                            translation_engine=translation.engine,
+                            diarization=diarization_data,
+                            audio_duration_sec=audio_duration_sec,
+                            emotion=(
+                                transcribe_payload.get("emotion")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("emotion"), str)
+                                else None
+                            ),
+                            word_timestamps=(
+                                transcribe_payload.get("word_timestamps")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("word_timestamps"), list)
+                                else None
+                            ),
+                            speaker_turns=(
+                                transcribe_payload.get("speaker_turns")
+                                if isinstance(transcribe_payload, dict)
+                                and isinstance(transcribe_payload.get("speaker_turns"), list)
+                                else None
+                            ),
+                        )
 
                 summary: str | None = None
                 if len(final_text) > 500:
@@ -3965,7 +3978,7 @@ class RecordingCoreService:
                 # wave-1770 HIGH + crypto-audit (2026-06-20): gate .md write behind data
                 # protection (privacy_mode ИЛИ history_encryption_enabled), consistent with
                 # the live path. require_auto_save=False — import пишет .md без этого флага.
-                if self._should_write_plaintext_md(settings, _privacy_mode, require_auto_save=False):
+                if persist_history and self._should_write_plaintext_md(settings, _privacy_mode, require_auto_save=False):
                     try:
                         transcripts_dir = Path(self.store.data_dir) / "transcripts"
                         transcripts_dir.mkdir(exist_ok=True)

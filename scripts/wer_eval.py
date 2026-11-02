@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""WER-оценка Golden Set: REST STT против эталонов из r2-scenario.md.
+"""WER-оценка Golden Set: живой backend STT против эталонов из r2-scenario.md.
+
+По умолчанию идёт в IPC ``transcribe_paths`` (тот же роутер, что диктовка:
+RU → GigaAM при ``stt_gigaam_enabled``, ES/EN → Whisper). REST :5005
+остаётся как ``--via rest`` (свой skip_gigaam Whisper, без истории).
 
 Пример:
     python3 scripts/wer_eval.py
     python3 scripts/wer_eval.py --lang ru --limit 5 --json-out /tmp/wer.json
+    python3 scripts/wer_eval.py --via rest
 
 Без jiwer; эталоны — parse_scenario из record_golden.py; WER — compute_wer
 из stt_engine_bench.py. Нормализация — TextUtils.normalize_phrase (без MLX).
@@ -12,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -30,7 +37,9 @@ from record_golden import DEFAULT_OUT, SCENARIO_PATH, Phrase, parse_scenario  # 
 from stt_engine_bench import compute_wer  # noqa: E402
 
 DEFAULT_BASE_URL = "http://127.0.0.1:5005"
+DEFAULT_SOCKET = Path.home() / "Library" / "Application Support" / "KrabEar" / "krabear.sock"
 REST_TIMEOUT_SEC = 120
+IPC_TIMEOUT_SEC = 180
 _LANG_PREFIX = {"ru": "ru_", "es": "es_", "en": "en_"}
 
 
@@ -48,6 +57,10 @@ class RestPrivacyError(WerEvalError):
 
 class RestUnavailableError(WerEvalError):
     """REST недоступен или неожиданный ответ."""
+
+
+class IpcUnavailableError(WerEvalError):
+    """Backend IPC недоступен или неожиданный ответ."""
 
 
 def normalize_for_wer(text: str) -> str:
@@ -166,12 +179,92 @@ def _parse_privacy_payload(resp: requests.Response) -> bool:
     return skipped == "privacy_mode"
 
 
+def ipc_transcribe_params(wav_path: Path, lang_hint: str) -> dict[str, Any]:
+    """Параметры живого IPC ``transcribe_paths`` для Golden Set (без истории)."""
+    return {
+        "paths": [str(wav_path)],
+        "lang_hint": lang_hint,
+        "persist_history": False,
+        "diarize": False,
+        "translation_mode": "off",
+    }
+
+
+def _ipc_call(
+    *,
+    socket_path: str,
+    method: str,
+    params: dict[str, Any],
+    timeout_sec: float = IPC_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    payload = json.dumps({"id": f"wer-{method}", "method": method, "params": params}) + "\n"
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sock.settimeout(timeout_sec)
+    try:
+        sock.connect(socket_path)
+        sock.sendall(payload.encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            buf += chunk
+    except OSError as exc:
+        raise IpcUnavailableError(
+            f"IPC недоступен ({socket_path}): {exc}. Живой backend на krabear.sock?"
+        ) from exc
+    finally:
+        sock.close()
+    if not buf:
+        raise IpcUnavailableError(f"IPC пустой ответ ({socket_path})")
+    try:
+        return json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
+    except ValueError as exc:
+        raise IpcUnavailableError("IPC вернул не-JSON") from exc
+
+
+def transcribe_wav_ipc(
+    wav_path: Path,
+    *,
+    lang_hint: str,
+    socket_path: str | Path | None = None,
+    timeout_sec: float = IPC_TIMEOUT_SEC,
+    base_url: str | None = None,
+    **_kwargs: Any,
+) -> str:
+    """Транскрибирует WAV через backend IPC — тот же роутер, что диктовка."""
+    del base_url  # run_eval прокидывает оба транспорта
+    sock = str(socket_path or os.environ.get("KRAB_EAR_SOCKET") or DEFAULT_SOCKET)
+    params = ipc_transcribe_params(wav_path, lang_hint)
+    resp = _ipc_call(
+        socket_path=sock,
+        method="transcribe_paths",
+        params=params,
+        timeout_sec=timeout_sec,
+    )
+    if not resp.get("ok"):
+        err = resp.get("error") or resp
+        raise IpcUnavailableError(f"IPC transcribe_paths отказ: {err}")
+    result = resp.get("result") or {}
+    if not isinstance(result, dict):
+        raise IpcUnavailableError("IPC transcribe_paths: неожиданный result")
+    errors = result.get("errors") or []
+    items = result.get("items") or []
+    if not items:
+        detail = errors[0] if errors else "пустой ответ"
+        raise IpcUnavailableError(f"IPC transcribe_paths: {detail}")
+    item = items[0] if isinstance(items[0], dict) else {}
+    # STT text, not display/translation — WER measures the router, not paste formatting.
+    return str(item.get("original_text") or item.get("text") or "")
+
+
 def transcribe_wav_rest(
     wav_path: Path,
     *,
     base_url: str = DEFAULT_BASE_URL,
     lang_hint: str,
     timeout_sec: float = REST_TIMEOUT_SEC,
+    **_kwargs: Any,
 ) -> str:
     url = base_url.rstrip("/") + "/v1/stt/transcribe"
     data = {
@@ -244,6 +337,9 @@ def format_table_row(stem: str, detail: dict[str, Any]) -> str:
     )
 
 
+DEFAULT_TRANSCRIBE_FN = transcribe_wav_ipc
+
+
 def run_eval(
     *,
     golden_dir: Path,
@@ -251,8 +347,11 @@ def run_eval(
     lang_filter: str,
     limit: int | None,
     scenario_path: Path,
-    transcribe_fn=transcribe_wav_rest,
+    transcribe_fn=None,
+    socket_path: str | Path | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if transcribe_fn is None:
+        transcribe_fn = DEFAULT_TRANSCRIBE_FN
     scenario_text = scenario_path.read_text(encoding="utf-8")
     ref_map = build_reference_map(parse_scenario(scenario_text))
     wavs = iter_golden_wavs(golden_dir, lang_filter)
@@ -266,7 +365,12 @@ def run_eval(
         try:
             reference_raw = reference_for_stem(stem, ref_map)
             lang_hint = lang_from_stem(stem)
-            hypothesis_raw = transcribe_fn(wav, base_url=base_url, lang_hint=lang_hint)
+            hypothesis_raw = transcribe_fn(
+                wav,
+                base_url=base_url,
+                lang_hint=lang_hint,
+                socket_path=socket_path,
+            )
             detail = evaluate_pair(reference_raw, hypothesis_raw)
             row.update(
                 {
@@ -286,7 +390,9 @@ def run_eval(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="WER Golden Set через REST STT")
+    parser = argparse.ArgumentParser(
+        description="WER Golden Set через backend IPC (RU→GigaAM) или REST Whisper"
+    )
     parser.add_argument(
         "--golden-dir",
         type=Path,
@@ -296,7 +402,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--base-url",
         default=DEFAULT_BASE_URL,
-        help="Базовый URL REST (без /v1/...)",
+        help="Базовый URL REST (без /v1/...), только --via rest",
+    )
+    parser.add_argument(
+        "--socket",
+        type=Path,
+        default=DEFAULT_SOCKET,
+        help="Unix-сокет backend IPC (по умолчанию прод krabear.sock)",
+    )
+    parser.add_argument(
+        "--via",
+        choices=("ipc", "rest"),
+        default="ipc",
+        help="ipc = живой роутер диктовки; rest = REST :5005 skip_gigaam Whisper",
     )
     parser.add_argument(
         "--lang",
@@ -313,6 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         help="Путь к r2-scenario.md (для тестов/override)",
     )
     args = parser.parse_args(argv)
+    transcribe_fn = transcribe_wav_rest if args.via == "rest" else transcribe_wav_ipc
 
     try:
         rows, aggregate = run_eval(
@@ -321,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
             lang_filter=args.lang,
             limit=args.limit,
             scenario_path=args.scenario,
+            transcribe_fn=transcribe_fn,
+            socket_path=args.socket,
         )
     except WerEvalError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)

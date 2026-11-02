@@ -98,6 +98,15 @@ class _FakeTranscriber:
         return {"text": "hello world", "confidence": 0.9, "engine": "fake"}
 
 
+class _CapturingKwargsTranscriber(_FakeTranscriber):
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def transcribe(self, audio, **kwargs):
+        self.calls.append(kwargs)
+        return super().transcribe(audio, **kwargs)
+
+
 class _FakeTranslator:
     def translate(self, text, **kwargs):
         from backend.translator import TranslationResult
@@ -435,6 +444,59 @@ class TestBumpSttActivitySymmetry(unittest.TestCase):
             rcs_module.last_stt_activity_ts(), 0.0,
             "batch-импорт реально гоняет транскрайбер, но не бампал активность",
         )
+
+
+class TestTranscribePathsPersistHistory(unittest.TestCase):
+    """WER/golden-set путь: persist_history=false не пишет историю, lang_hint живой."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_persist_history_false_skips_history_and_keeps_text(self):
+        transcriber = _CapturingKwargsTranscriber()
+        svc = _make_service(self._tmp, transcriber=transcriber)
+        original_add = svc.store.add_history_item
+        svc.store.add_history_item = MagicMock(side_effect=original_add)
+        audio_path = Path(self._tmp) / "ru_001.wav"
+        audio_path.write_bytes(b"\x00" * 64)
+
+        result = svc.handle_transcribe_paths({
+            "paths": [str(audio_path)],
+            "lang_hint": "ru",
+            "persist_history": False,
+            "diarize": False,
+        })
+
+        self.assertEqual(result.get("errors"), [])
+        self.assertEqual(result.get("processed"), 1)
+        self.assertEqual(result["items"][0]["text"], "hello world")
+        self.assertEqual(result["items"][0].get("history_id") or "", "")
+        svc.store.add_history_item.assert_not_called()
+        self.assertEqual(transcriber.calls[0]["lang_hint"], "ru")
+        self.assertIs(transcriber.calls[0]["diarize"], False)
+        transcripts = Path(self._tmp) / "transcripts"
+        if transcripts.exists():
+            self.assertEqual(list(transcripts.glob("*.md")), [])
+
+    def test_persist_history_default_still_saves(self):
+        svc = _make_service(self._tmp)
+        original_add = svc.store.add_history_item
+        svc.store.add_history_item = MagicMock(side_effect=original_add)
+        audio_path = Path(self._tmp) / "es_001.wav"
+        audio_path.write_bytes(b"\x00" * 64)
+
+        result = svc.handle_transcribe_paths({
+            "paths": [str(audio_path)],
+            "lang_hint": "es",
+        })
+
+        self.assertEqual(result.get("processed"), 1)
+        svc.store.add_history_item.assert_called_once()
+        self.assertTrue(result["items"][0]["history_id"])
 
 
 class TestCurrentRecordingOwner(unittest.TestCase):

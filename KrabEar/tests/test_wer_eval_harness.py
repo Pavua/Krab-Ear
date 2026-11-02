@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -159,6 +160,92 @@ class TestRestClient(unittest.TestCase):
         data = mock_post.call_args.kwargs["data"]
         self.assertEqual(data.get("persist_history"), "false")
         self.assertEqual(data.get("diarize"), "false")
+        self.assertNotIn("request_profile", data)
+
+
+class TestBackendIpcRouting(unittest.TestCase):
+    """Golden Set должен идти в живой backend-роутер, не в REST skip_gigaam Whisper."""
+
+    def _fake_wav(self, tmp: Path, stem: str) -> Path:
+        tmp.mkdir(parents=True, exist_ok=True)
+        p = tmp / f"{stem}.wav"
+        p.write_bytes(b"RIFF" + b"\x00" * 40)
+        return p
+
+    def test_default_transcribe_fn_is_backend_ipc(self):
+        self.assertIs(wer_eval.DEFAULT_TRANSCRIBE_FN, wer_eval.transcribe_wav_ipc)
+
+    def test_ipc_params_ru_hit_transcribe_paths_without_history(self):
+        wav = Path("/tmp/ru_001.wav")
+        params = wer_eval.ipc_transcribe_params(wav, "ru")
+        self.assertEqual(params["paths"], [str(wav)])
+        self.assertEqual(params["lang_hint"], "ru")
+        self.assertFalse(params["persist_history"])
+        self.assertFalse(params["diarize"])
+        self.assertEqual(params["translation_mode"], "off")
+        self.assertNotIn("request_profile", params)
+
+    def test_ipc_params_es_en_keep_whisper_lang_hints(self):
+        for lang in ("es", "en"):
+            with self.subTest(lang=lang):
+                params = wer_eval.ipc_transcribe_params(Path(f"/tmp/{lang}_001.wav"), lang)
+                self.assertEqual(params["lang_hint"], lang)
+                self.assertNotEqual(params["lang_hint"], "ru")
+                self.assertFalse(params["persist_history"])
+
+    def test_transcribe_wav_ipc_sends_lang_hint_and_persist_false(self):
+        wav = self._fake_wav(Path("/tmp/wer_eval_ipc_ok"), "ru_001")
+        fake_result = {
+            "ok": True,
+            "result": {
+                "items": [{
+                    "text": "translated display",
+                    "original_text": "привет мир",
+                    "history_id": "",
+                }],
+                "errors": [],
+            },
+        }
+        with patch("wer_eval._ipc_call", return_value=fake_result) as mock_call:
+            text = wer_eval.transcribe_wav_ipc(
+                wav, lang_hint="ru", socket_path="/tmp/fake.sock"
+            )
+        self.assertEqual(text, "привет мир")
+        method = mock_call.call_args.kwargs.get("method") or mock_call.call_args[0][1]
+        params = mock_call.call_args.kwargs.get("params")
+        if params is None:
+            params = mock_call.call_args[0][2]
+        self.assertEqual(method, "transcribe_paths")
+        self.assertEqual(params["lang_hint"], "ru")
+        self.assertFalse(params["persist_history"])
+        self.assertFalse(params["diarize"])
+        self.assertEqual(params["translation_mode"], "off")
+        self.assertNotEqual(params.get("request_profile"), "voice_gateway_call")
+
+    def test_run_eval_ru_stem_uses_lang_hint_ru_on_default_path(self):
+        recorded = []
+
+        def fake_ipc(wav, **kwargs):
+            recorded.append({"stem": wav.stem, "lang_hint": kwargs["lang_hint"]})
+            return "ok"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            scenario = tmp_path / "scenario.md"
+            scenario.write_text("## Фразы RU\n1. Привет, мир!\n", encoding="utf-8")
+            golden = tmp_path / "golden"
+            self._fake_wav(golden, "ru_001")
+            rows, _agg = wer_eval.run_eval(
+                golden_dir=golden,
+                base_url="http://127.0.0.1:5005",
+                lang_filter="ru",
+                limit=None,
+                scenario_path=scenario,
+                transcribe_fn=fake_ipc,
+            )
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(recorded[0]["lang_hint"], "ru")
+        self.assertNotIn("error", rows[0])
 
 
 class TestJsonReport(unittest.TestCase):
