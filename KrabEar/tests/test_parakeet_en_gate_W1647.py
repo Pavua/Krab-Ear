@@ -297,6 +297,25 @@ class TestGigaAmRuGateUnchanged(unittest.TestCase):
             "GIGAAM_MARKER НЕ должен входить в chain для 'en' — GigaAM RU-only gate должен быть нетронутым",
         )
 
+    def test_gigaam_excluded_for_es(self) -> None:
+        """GigaAM НЕ должен входить в chain для языка 'es' — RU-only модель."""
+        engine = _make_engine()
+        engine._skip_gigaam = False
+
+        mock_router = MagicMock()
+        mock_gigaam_adapter = MagicMock()
+        mock_router.get_gigaam_adapter.return_value = mock_gigaam_adapter
+        engine._router = mock_router
+
+        settings = _make_settings(gigaam_enabled=True, parakeet_enabled=False, language="es")
+
+        result = _gigaam_in_chain(engine, settings, language="es")
+
+        self.assertFalse(
+            result,
+            "GIGAAM_MARKER НЕ должен входить в chain для 'es' — GigaAM RU-only gate должен быть нетронутым",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
