@@ -8,7 +8,7 @@ docs/golden/r2-scenario.md. Аудио остаётся ЛОКАЛЬНО, в git
 Использование (или двойной клик по «Record Golden Set.command»):
     python3 scripts/record_golden.py --list       # показать фразы
     python3 scripts/record_golden.py --dry-run    # проверка без записи
-    python3 scripts/record_golden.py              # живая запись (Enter: старт/стоп)
+    python3 scripts/record_golden.py              # живая запись (Enter — стоп)
     python3 scripts/record_golden.py --device :2  # явный вход; не перетирается
     python3 scripts/record_golden.py --force      # перезаписать всё
 
@@ -39,6 +39,12 @@ DEFAULT_OUT = Path.home() / "Library" / "Application Support" / "KrabEar" / "gol
 LANG_CODES = {"RU": "ru", "ES": "es", "EN": "en"}
 MIN_WAV_BYTES = 16000  # ~0.5 c при 16 kHz mono PCM16 (32 КБ/с)
 MIN_PEAK_ABS = 16  # int16; цифровые нули / молчащий loopback не проходят
+PREROLL_SEC = 0.4
+CAPTURE_READY_TIMEOUT_SEC = 5.0
+WAV_HEADER_BYTES = 44
+# 50 мс PCM16 16 kHz mono поверх заголовка — «захват живой», не пустой header.
+MIN_CAPTURE_BYTES = WAV_HEADER_BYTES + 1600
+CAPTURE_POLL_SEC = 0.05
 _VIRTUAL_MARKERS = (
     "blackhole",
     "loopback",
@@ -235,12 +241,55 @@ def _is_recorded(path: Path) -> bool:
     return _wav_peak_abs(path) >= MIN_PEAK_ABS
 
 
+def capture_has_audio(path: Path, min_bytes: int = MIN_CAPTURE_BYTES) -> bool:
+    """True, когда part-файл уже содержит PCM, а не только WAV-заголовок."""
+    try:
+        return path.is_file() and path.stat().st_size >= min_bytes
+    except OSError:
+        return False
+
+
+def wait_until_capture_ready(
+    path: Path,
+    is_alive,
+    timeout_sec: float = CAPTURE_READY_TIMEOUT_SEC,
+    min_bytes: int = MIN_CAPTURE_BYTES,
+) -> bool:
+    """Ждёт живые сэмплы. Blind sleep не считается готовностью."""
+    deadline = time.monotonic() + timeout_sec
+    while True:
+        if not is_alive():
+            return False
+        if capture_has_audio(path, min_bytes=min_bytes):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(CAPTURE_POLL_SEC)
+
+
+def _stop_ffmpeg(proc, timeout: float) -> bool:
+    try:
+        proc.send_signal(signal.SIGINT)
+        proc.wait(timeout=timeout)
+        return True
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        return False
+    except (ProcessLookupError, OSError):
+        return False
+
+
 def _record_one(device: str, out_path: Path) -> bool:
-    """Пишет одну фразу: Enter — старт, Enter — стоп (SIGINT, корректный WAV).
+    """Пишет одну фразу: захват живой + preroll, затем Enter — стоп.
 
     Пишем в `<id>.wav.part` и переименовываем ТОЛЬКО после чистого стопа:
     обрыв (Ctrl+C/EOF) не оставит половинку фразы, которую resume примет за
     готовую (обрывок → завышенный WER на эталоне).
+
+    «Говори» — только после первых сэмплов и короткого preroll. Иначе
+    avfoundation init съедает начало (живой ru_013: речь с t=0, без ведущей
+    тишины, у всех моделей пропало первое слово).
     """
     part_path = out_path.with_name(out_path.name + ".part")
     cmd = [
@@ -248,30 +297,30 @@ def _record_one(device: str, out_path: Path) -> bool:
         "-f", "avfoundation", "-i", device,
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", "-f", "wav", "-y", str(part_path),
     ]
+    print("    Включаю микрофон…")
+    part_path.unlink(missing_ok=True)
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL)
     stopped_cleanly = False
     try:
-        time.sleep(0.4)
+        ready = wait_until_capture_ready(part_path, lambda: proc.poll() is None)
+        if not ready:
+            if proc.poll() is not None:
+                print("    ffmpeg завершился сразу — похоже, нет доступа к микрофону.")
+            else:
+                print("    Захват не начался вовремя — сэмплы так и не пошли.")
+                _stop_ffmpeg(proc, timeout=5)
+            part_path.unlink(missing_ok=True)
+            return False
+        time.sleep(PREROLL_SEC)
         if proc.poll() is not None:
             print("    ffmpeg завершился сразу — похоже, нет доступа к микрофону.")
             part_path.unlink(missing_ok=True)
             return False
         input("    ▶ Говори (Enter — остановить): ")
-        proc.send_signal(signal.SIGINT)
-        try:
-            proc.wait(timeout=10)
-            stopped_cleanly = True
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        stopped_cleanly = _stop_ffmpeg(proc, timeout=10)
     except (KeyboardInterrupt, EOFError):
         # Не оставляем осиротевший ffmpeg и половинку файла.
-        proc.send_signal(signal.SIGINT)
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait()
+        _stop_ffmpeg(proc, timeout=5)
         part_path.unlink(missing_ok=True)
         raise
     if not stopped_cleanly or not _is_recorded(part_path):
@@ -336,7 +385,7 @@ def _record(phrases: list[Phrase], out_dir: Path, device: str | None, force: boo
         print("Все фразы уже записаны. 👍")
         return 0
     print("Первый запуск: macOS может спросить доступ Терминала к микрофону — разреши.")
-    print("Держи паузу ~1 секунду до и после фразы, говори своим обычным темпом.")
+    print("Микрофон включится сам; говори после «Говори». Пауза ~1 с после фразы.")
 
     done = 0
     try:
@@ -344,7 +393,6 @@ def _record(phrases: list[Phrase], out_dir: Path, device: str | None, force: boo
             path = out_dir / f"{phrase.phrase_id}.wav"
             print(f"\n[{idx}/{len(todo)}] {phrase.phrase_id}:\n    «{phrase.text}»")
             while True:
-                input("    Enter — начать запись (Ctrl+C — выйти): ")
                 if _record_one(device, path):
                     done += 1
                     break
