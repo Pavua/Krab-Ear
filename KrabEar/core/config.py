@@ -751,6 +751,24 @@ class Settings(BaseSettings):
         return parts
 
 
+# Кураторский языковой словарь для Whisper initial_prompt. Это НЕ поле Settings:
+# settings.json перекрывает STT_HOTWORDS_* целиком, и живой ES-список тогда
+# выкидывает tramadol/pregabalina. Engine всегда мержит этот кортеж с runtime.
+CURATED_STT_HOTWORDS_RU: tuple[str, ...] = (
+    "openclaw",
+    "оверлей",
+    "прегабалин",
+    "трамадол",
+)
+CURATED_STT_HOTWORDS_ES: tuple[str, ...] = (
+    "oxicodona",
+    "tramadol",
+    "receta médica",
+    "pregabalina",
+)
+CURATED_STT_HOTWORDS_EN: tuple[str, ...] = ()
+
+
 # Singleton инстанс настроек
 def _build_settings() -> Settings:
     """Initialize Settings с runtime overrides из settings.json.

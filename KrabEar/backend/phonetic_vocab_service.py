@@ -29,23 +29,45 @@ _MAX_ENTRIES = 200
 _MAX_VARIANT_LEN = 200
 _MAX_CANONICAL_LEN = 200
 
-# Кураторский seed (W4, утверждён владельцем 17.09): пары «вариант → канон»,
-# кладутся при первом запуске, если phonetic_vocab.json ещё не существует.
-# Сознательно НЕ включены `maby` (легитимное EN "maybe", ждёт примеров R2)
-# и пары кетопрофеновой ловушки (те варианты относятся к другому препарату).
-# 10 записей / 28 вариантов — укладывается в лимиты 200 записей / 200 символов.
+# Кураторский seed (W4, утверждён владельцем 17.09 + golden 2026-11-02):
+# пары «вариант → канон». Первый запуск пишет файл целиком; существующий
+# файл получает только недостающие варианты и новые каноны (не W4-удаления).
+# Сознательно НЕ включены `maby` (легитимное EN "maybe") и `war`→`work`.
 _DEFAULT_ENTRIES: list[dict] = [
-    {"canonical": "openclaw", "variants": ["openclow"]},
+    {"canonical": "openclaw", "variants": ["openclow", "open clow", "open clevel"]},
     {"canonical": "трамадол", "variants": ["травмадол", "траммадол", "тромадол", "рамадол"]},
     {"canonical": "прегабалин", "variants": ["пегабалин", "пегбалин", "прегалин", "пригаболин"]},
     {"canonical": "парацетамол", "variants": ["парацетамон", "парацемолом"]},
-    {"canonical": "oxicodona", "variants": ["oxicodon", "oxycodona", "oxipodona", "oxigodona", "оxicodona"]},
+    {"canonical": "oxicodona", "variants": [
+        "oxicodon", "oxycodona", "oxipodona", "oxigodona", "оxicodona",
+        "psicodona", "o se podona",
+    ]},
     {"canonical": "pregabalina", "variants": ["pregabalin", "pregabalino", "pregabalín", "pegabarina", "пregabalina"]},
     {"canonical": "paracetamol", "variants": ["fartestamol"]},
-    {"canonical": "tramadol", "variants": ["ramadol", "tromadol", "dramadol"]},
+    {"canonical": "tramadol", "variants": ["ramadol", "tromadol", "dramadol", "tramodol"]},
     {"canonical": "whisper", "variants": ["висперед"]},
     {"canonical": "p0lrd", "variants": ["лрд", "lrd"]},
+    {"canonical": "receta médica", "variants": ["Reset America"]},
 ]
+
+# Каноны W4: в живой файл не возвращаем, если пользователь их удалил.
+_ORIGINAL_W4_CANONICALS = frozenset(
+    {
+        "openclaw",
+        "трамадол",
+        "прегабалин",
+        "парацетамол",
+        "oxicodona",
+        "pregabalina",
+        "paracetamol",
+        "tramadol",
+        "whisper",
+        "p0lrd",
+    }
+)
+_MEDICAL_SEED_MARKERS = frozenset(
+    {"openclaw", "oxicodona", "tramadol", "прегабалин", "pregabalina"}
+)
 
 
 def _default_entries() -> List[dict]:
@@ -55,6 +77,48 @@ def _default_entries() -> List[dict]:
         {"canonical": e["canonical"], "variants": list(e["variants"])}
         for e in _DEFAULT_ENTRIES
     ]
+
+
+def _merge_curated_defaults(entries: List[dict]) -> bool:
+    """Доливает недостающие варианты и новые каноны в уже существующий store.
+
+    Не воскрешает удалённые W4-каноны. Новый канон (receta médica) добавляется
+    только если файл уже похож на кураторский medical-seed.
+    """
+    changed = False
+    by_canon = {
+        str(entry.get("canonical", "")).casefold(): entry
+        for entry in entries
+        if isinstance(entry, dict) and str(entry.get("canonical", "")).strip()
+    }
+    markers_present = bool(by_canon.keys() & _MEDICAL_SEED_MARKERS)
+    for curated in _DEFAULT_ENTRIES:
+        key = curated["canonical"].casefold()
+        existing = by_canon.get(key)
+        if existing is None:
+            if markers_present and key not in _ORIGINAL_W4_CANONICALS:
+                copied = {
+                    "canonical": curated["canonical"],
+                    "variants": list(curated["variants"]),
+                }
+                entries.append(copied)
+                by_canon[key] = copied
+                changed = True
+            continue
+        variants = existing.get("variants")
+        if not isinstance(variants, list):
+            existing["variants"] = list(curated["variants"])
+            changed = True
+            continue
+        existing_lower = {
+            str(item).casefold() for item in variants if isinstance(item, str)
+        }
+        for variant in curated["variants"]:
+            if variant.casefold() not in existing_lower:
+                variants.append(variant)
+                existing_lower.add(variant.casefold())
+                changed = True
+    return changed
 
 
 class PhoneticVocabService:
@@ -119,16 +183,25 @@ class PhoneticVocabService:
     # ── Public read API (called by engine.py via provider callback) ──────────
 
     def ensure_seeded(self) -> None:
-        """Кладёт кураторский seed, если файла ещё нет (первый запуск).
+        """Кладёт кураторский seed на первом запуске и доливает новые варианты.
 
-        Существующий файл НЕ перезаписывается: пользовательские записи и
-        удаления (в т.ч. clear_all) уважаются. Идемпотентен.
+        Существующий файл не затирается: пользовательские записи остаются,
+        удалённые W4-каноны не воскрешаются, clear_all уважается.
         """
         with self._lock:
-            if self._seed_suppressed or self._path.exists():
+            if self._seed_suppressed:
                 return
-            self._save(_default_entries())
-            logger.info("PhoneticVocab: засеяно %d дефолтных записей", len(_DEFAULT_ENTRIES))
+            if not self._path.exists():
+                self._save(_default_entries())
+                logger.info(
+                    "PhoneticVocab: засеяно %d дефолтных записей",
+                    len(_DEFAULT_ENTRIES),
+                )
+                return
+            entries = self._load()
+            if _merge_curated_defaults(entries):
+                self._save(entries)
+                logger.info("PhoneticVocab: долит кураторские варианты в существующий store")
 
     def get_entries(self) -> List[dict]:
         """Возвращает текущий список записей (thread-safe).

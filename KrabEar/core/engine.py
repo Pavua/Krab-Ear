@@ -112,7 +112,12 @@ except Exception:
     _VoxtralChatRequest = None  # type: ignore[assignment,misc]
     _voxtral_available = False
 
-from .config import settings
+from .config import (
+    CURATED_STT_HOTWORDS_EN,
+    CURATED_STT_HOTWORDS_ES,
+    CURATED_STT_HOTWORDS_RU,
+    settings,
+)
 from .confidence_calibrator import ConfidenceCalibrator
 from .gigaam_compat import GIGAAM_SHORTFORM_MAX_SEC, engine_name_from_mode
 from .text_diff import TextDiffAnalyzer
@@ -1211,6 +1216,27 @@ class AudioEngine:
             logger.warning("[STT] denoising error, skipping: %s", exc)
         return audio
 
+    def _language_hotwords(
+        self,
+        runtime_key: str,
+        pydantic_attr: str,
+        curated: tuple[str, ...],
+    ) -> list[str]:
+        """Кураторский список + pydantic-снимок + live settings.json, без дублей.
+
+        GigaAM этот список не читает (нет initial_prompt). Whisper — да.
+        """
+        settings_get = getattr(self, "_settings_get", None) or (lambda k, d: d)
+        runtime = settings_get(runtime_key, None)
+        if not isinstance(runtime, list):
+            runtime = []
+        pydantic_list = list(getattr(settings, pydantic_attr, []) or [])
+        return merge_language_hotwords(
+            list(curated) + pydantic_list + [str(item) for item in runtime],
+            None,
+            None,
+        )
+
     def _build_dynamic_prompt(
         self,
         audio_data: Any,
@@ -1253,10 +1279,18 @@ class AudioEngine:
             # медицинские термины бесполезны в русской диктовке, а место в
             # промпте выкупают у контекста истории (бюджет 224 токена уже
             # режется — см. лог «initial_prompt truncated»).
+            # Runtime settings.json (через _settings_get) важнее pydantic-снимка
+            # на старте; кураторский кортеж settings.json перекрыть не может.
             _lang_hotwords = {
-                "ru": list(getattr(settings, "STT_HOTWORDS_RU", []) or []),
-                "es": list(getattr(settings, "STT_HOTWORDS_ES", []) or []),
-                "en": list(getattr(settings, "STT_HOTWORDS_EN", []) or []),
+                "ru": self._language_hotwords(
+                    "stt_hotwords_ru", "STT_HOTWORDS_RU", CURATED_STT_HOTWORDS_RU
+                ),
+                "es": self._language_hotwords(
+                    "stt_hotwords_es", "STT_HOTWORDS_ES", CURATED_STT_HOTWORDS_ES
+                ),
+                "en": self._language_hotwords(
+                    "stt_hotwords_en", "STT_HOTWORDS_EN", CURATED_STT_HOTWORDS_EN
+                ),
             }
             context_suffix = build_initial_prompt(
                 history_items=history_context or [],
