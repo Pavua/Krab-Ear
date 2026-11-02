@@ -293,6 +293,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// строки — создаётся в rebuildStatusMenu, обновляется из menuWillOpen
     /// (main+MemoryLine.swift).
     var memoryLineMenuItem: NSMenuItem?
+    /// Последняя ошибка ErrorBus (например `system.unclean_restart`) — disabled
+    /// строка status-меню, НЕ `NSStatusBarButton.toolTip`. Native toolTip на
+    /// Tahoe следует за курсором, если mouseExited съедает StatusBarDropView.
+    /// Создаётся в rebuildStatusMenu, обновляется из menuWillOpen
+    /// (main+LastErrorLine.swift).
+    var lastErrorMenuItem: NSMenuItem?
     var lastToggleRequestAt: TimeInterval = 0
     let toggleDebounceSec: TimeInterval = 0.35
     var recordingTargetApp: NSRunningApplication?
@@ -653,7 +659,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
         applyMode(settings.mode, persist: false)
 
-        // Start dynamic menu bar tooltip refresh (10 s interval).
+        // Native NSStatusBarButton.toolTip must stay nil: the old 10s refresh
+        // reassigned it and the help window followed the pointer.
         startTooltipRefresh()
 
         if !settings.onboardingCompleted && !options.launchedByLaunchd {

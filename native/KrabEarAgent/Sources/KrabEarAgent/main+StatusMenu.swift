@@ -33,7 +33,9 @@ extension AgentAppDelegate {
         if statusItem == nil {
             let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
             item.button?.title = "KE"
-            item.button?.toolTip = "Krab Ear"
+            // Do not set button.toolTip: AppKit help window tracks the pointer
+            // and StatusBarDropView can swallow mouseExited (Tahoe / macOS 26).
+            item.button?.toolTip = nil
             statusItem = item
             // Drag-drop аудиофайлов на иконку menu bar (main+StatusDragDrop.swift).
             setupStatusItemDragDrop()
@@ -159,19 +161,16 @@ extension AgentAppDelegate {
         return lines.joined(separator: "\n")
     }
 
-    /// Refresh tooltip every 10 s in a background Task.
+    /// Keep `NSStatusBarButton.toolTip` cleared.
+    ///
     /// Call once from completeStartupAfterBackendReady (after status item created).
+    /// A previous 10s loop reassigned `button.toolTip` from `buildStatusBarTooltip()`
+    /// (including sticky `Last error: system.unclean_restart`). Native help
+    /// windows follow the pointer; StatusBarDropView can swallow mouseExited,
+    /// so the tooltip never dismissed. Last error is a status-menu line now.
     func startTooltipRefresh() {
-        Task.detached { [weak self] in
-            while !Task.isCancelled {
-                guard let self else { return }
-                let tip = await self.buildStatusBarTooltip()
-                await MainActor.run {
-                    self.statusItem?.button?.toolTip = tip
-                }
-                try? await Task.sleep(nanoseconds: 10_000_000_000)  // 10 s
-            }
-        }
+        statusItem?.button?.toolTip = nil
+        statusItem?.button?.subviews.forEach { $0.toolTip = nil }
     }
 
     // MARK: - Menu construction
@@ -206,7 +205,15 @@ extension AgentAppDelegate {
             systemSymbolName: "memorychip", accessibilityDescription: nil)
         menu.addItem(memoryItem)
         self.memoryLineMenuItem = memoryItem
-        
+        // Last ErrorBus code — disabled line, refresh in menuWillOpen.
+        // Not NSStatusBarButton.toolTip: that window followed the pointer.
+        let lastErrorItem = NSMenuItem(title: "Last error: —", action: nil, keyEquivalent: "")
+        lastErrorItem.image = NSImage(
+            systemSymbolName: "exclamationmark.triangle", accessibilityDescription: nil)
+        lastErrorItem.isHidden = true
+        menu.addItem(lastErrorItem)
+        self.lastErrorMenuItem = lastErrorItem
+
         let memoryDashboardItem = NSMenuItem(
             title: "Память (подробно)...",
             action: #selector(onOpenMemoryDashboard),
@@ -220,6 +227,7 @@ extension AgentAppDelegate {
         recapView.refresh(ipcClient: ipcClient)   // первичный fetch при построении меню
         refreshBrainLeaseMenuItem()               // первичный fetch brain-lease строки
         refreshMemoryLineMenuItem()                // первичный fetch строки «Память»
+        refreshLastErrorMenuItem()                 // первичный fetch строки Last error
         // ─────────────────────────────────────────────────────────────────────
 
         let recordItem = NSMenuItem(
