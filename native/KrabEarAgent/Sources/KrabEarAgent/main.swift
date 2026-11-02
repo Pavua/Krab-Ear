@@ -769,7 +769,9 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 onWedgedEscalation: { [weak self] in
                     guard let self else { return }
                     self.logger.warn("Wake word: backend wedged — принудительный рестарт backend")
-                    BackendToast.shared.show("Wake word завис — перезапускаю backend...", duration: 5.0)
+                    // 🔴 kickstart до любого BackendToast на main: зависший show
+                    // блокировал DispatchQueue.global и весь wake-word поллинг
+                    // (инцидент 2026-11-02).
                     DispatchQueue.global(qos: .utility).async { [weak self] in
                         guard let self else { return }
                         let ok = self.backendSupervisor.forceRestartBackend()
