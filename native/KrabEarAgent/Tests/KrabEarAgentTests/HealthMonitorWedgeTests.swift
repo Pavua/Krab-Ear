@@ -156,6 +156,20 @@ final class WedgeWiringSourceContractTests: XCTestCase {
         )
     }
 
+    /// Toast эфемерен; ночной hang диагностируется по agent-recovery.log.
+    func test_escalation_logs_force_restart_to_agent_recovery() throws {
+        let src = try healthMonitorWiringSource()
+        let body = Self.regionBetween(src, from: "setOnWedgeDetected", to: "await monitor.start()")
+        XCTAssertTrue(
+            body.contains("logForceRestartBackend"),
+            "эскалация не пишет force_restart в agent-recovery.log"
+        )
+        XCTAssertTrue(
+            body.contains("health_wedge"),
+            "эскалация должна маркировать источник health_wedge"
+        )
+    }
+
     /// Рейт-лимит обязан быть: без него подтверждённое заклинивание
     /// перезапускало бы backend каждую минуту.
     /// Весь фикс HIGH прошлого раунда держится на ОДНОЙ строке в пробе.

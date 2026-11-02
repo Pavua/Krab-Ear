@@ -71,6 +71,17 @@ final class AgentRecoveryLoggerTests: XCTestCase {
                       "Строка должна содержать duration=42ms при передаче durationMs")
     }
 
+    /// Принудительный рестарт backend (forceRestartBackend) пишется в recovery.log
+    /// с источником и исходом — для ночной диагностики wedge/hang.
+    func test_logForceRestartBackend_writesSourceAndSuccess() {
+        let logger = AgentRecoveryLogger(dataDirPath: tmpDir.path)
+        logger.logForceRestartBackend(source: "health_wedge", success: true)
+        waitFor(keyword: "force_restart_backend")
+        let text = logContents()
+        XCTAssertTrue(text.contains("source=health_wedge"))
+        XCTAssertTrue(text.contains("success=true"))
+    }
+
     /// logFatal(_:) записывает строку с меткой [FATAL].
     func test_logFatal_writesFATALLine() {
         let logger = AgentRecoveryLogger(dataDirPath: tmpDir.path)

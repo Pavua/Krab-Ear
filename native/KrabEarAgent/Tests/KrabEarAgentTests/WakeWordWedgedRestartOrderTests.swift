@@ -47,4 +47,23 @@ final class WakeWordWedgedRestartOrderTests: XCTestCase {
             "kickstart (forceRestartBackend) должен инициироваться до BackendToast.show — иначе AppHang на toast блокирует рестарт и поллинг"
         )
     }
+
+    func test_onWedgedEscalation_logs_force_restart_to_agent_recovery() throws {
+        let src = try mainSwiftSource()
+        guard let start = src.range(of: "onWedgedEscalation:") else {
+            XCTFail("onWedgedEscalation не найден в main.swift")
+            return
+        }
+        let tail = src[start.upperBound...]
+        guard let end = tail.range(of: "onWedgedGiveUp:") else {
+            XCTFail("onWedgedGiveUp не найден после onWedgedEscalation")
+            return
+        }
+        let body = String(tail[..<end.lowerBound])
+        XCTAssertTrue(
+            body.contains("logForceRestartBackend"),
+            "wake-word wedged эскалация должна писать в agent-recovery.log"
+        )
+        XCTAssertTrue(body.contains("wake_word_wedged"))
+    }
 }

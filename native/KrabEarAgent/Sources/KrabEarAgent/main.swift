@@ -775,6 +775,10 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                     DispatchQueue.global(qos: .utility).async { [weak self] in
                         guard let self else { return }
                         let ok = self.backendSupervisor.forceRestartBackend()
+                        AgentRecoveryLogger.shared.logForceRestartBackend(
+                            source: "wake_word_wedged",
+                            success: ok
+                        )
                         DispatchQueue.main.async {
                             BackendToast.shared.show(
                                 ok ? "Backend перезапущен (wake word)"

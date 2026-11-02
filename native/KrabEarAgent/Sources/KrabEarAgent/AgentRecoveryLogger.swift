@@ -113,6 +113,34 @@ final class AgentRecoveryLogger: @unchecked Sendable {
         }
     }
 
+    /// Персистентная запись принудительного рестарта backend (kickstart -k).
+    ///
+    /// Toast исчезает; эта строка остаётся в `agent-recovery.log` для ночной диагностики wedge/hang.
+    func logForceRestartBackend(source: String, success: Bool) {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(processStart)
+        let elapsedMs = Int(elapsed * 1000)
+        let ts = formatter.string(from: now)
+        let line =
+            "\(ts) [RECOVERY] stage=force_restart_backend source=\(source) "
+            + "success=\(success) elapsed=\(elapsedMs)ms\n"
+        writeRaw(line)
+
+        let data: [String: Any] = [
+            "stage": "force_restart_backend",
+            "source": source,
+            "success": success,
+            "elapsed_ms": elapsedMs,
+        ]
+        DispatchQueue.main.async {
+            SentryConfig.recordBreadcrumb(
+                category: "recovery",
+                message: "force_restart_backend",
+                data: data
+            )
+        }
+    }
+
     /// Convenience: логирует фатальную ошибку в agent-recovery.log.
     ///
     /// Используется для диагностики FATAL cold-start >20 s (Wave 551).

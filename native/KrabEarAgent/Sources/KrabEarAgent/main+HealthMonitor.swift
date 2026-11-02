@@ -437,6 +437,7 @@ extension AgentAppDelegate {
                 // short-circuit'ится на живом процессе и именно поэтому не
                 // вылечил инцидент.
                 let ok = supervisor.forceRestartBackend()
+                AgentRecoveryLogger.shared.logForceRestartBackend(source: "health_wedge", success: ok)
                 await MainActor.run {
                     BackendToast.shared.show(
                         ok ? "Backend завис — перезапускаю" : "⚠ Backend завис, рестарт не удался",
