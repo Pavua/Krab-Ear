@@ -9,10 +9,10 @@
 ## Как записывать (30–40 минут)
 
 1. `mkdir -p ~/Library/Application Support/KrabEar/golden`
-2. Узнать номер микрофона: `ffmpeg -f avfoundation -list_devices true -i "" 2>&1 | grep -i micro` (обычно `:0`).
+2. Предпочтительно `Record Golden Set.command`: скрипт сам берёт физический микрофон и не выбирает BlackHole. Ручной путь: `ffmpeg -f avfoundation -list_devices true -i ""` — номер **MacBook / Built-in**, не виртуальный loopback (BlackHole часто `:0`).
 3. На каждую фразу — отдельный файл (пауза 1 с до/после, естественная диктовка, не по слогам):
-   `ffmpeg -f avfoundation -i ":0" -ar 16000 -ac 1 -c:a pcm_s16le ~/Library/Application\ Support/KrabEar/golden/ru_001.wav`
-   (имена: `ru_001…ru_030`, `es_001…es_012`, `en_001…en_008`). Запасной вариант — QuickTime (Новая аудиозапись) + конвертация: `ffmpeg -i in.m4a -ar 16000 -ac 1 -c:a pcm_s16le out.wav`.
+   `ffmpeg -f avfoundation -i ":N" -ar 16000 -ac 1 -c:a pcm_s16le ~/Library/Application\ Support/KrabEar/golden/ru_001.wav`
+   (имена: `ru_001…ru_030`, `es_001…es_012`, `en_001…en_008`; `:N` — номер из шага 2). Запасной вариант — QuickTime (Новая аудиозапись) + конвертация: `ffmpeg -i in.m4a -ar 16000 -ac 1 -c:a pcm_s16le out.wav`.
 4. Формат на выходе проверить: `file ru_001.wav` → `WAVE PCM 16-bit mono 16000 Hz`.
 5. Для VG-полосы (опционально, вторым проходом): те же фразы даунсемплить `ffmpeg -i ru_001.wav -ar 8000 -ac 1 -c:a pcm_s16le tel/ru_001.wav` — пусть так, живой 8kHz-трек снимем отдельно при квалификации R5.
 6. Сообщить координатору «записал» — дальше стенд R2 считает WER сам.

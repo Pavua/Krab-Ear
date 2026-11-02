@@ -202,3 +202,103 @@ final class StatusBarTooltipTests: XCTestCase {
             "Без STT и без ошибок tooltip — только заголовок")
     }
 }
+
+// MARK: - Last-error menu line + no pointer-tracking toolTip
+//
+// Bug (2026-11-02): NSStatusBarButton.toolTip is reassigned every 10s from
+// list_recent_errors. On macOS 26 / Tahoe the native help window follows the
+// pointer, and StatusBarDropView can swallow mouseExited, so
+// "Last error: system.unclean_restart" sticks to the caret after a real
+// unclean restart. The error itself is honest (ErrorBus ring); the surface
+// must not be button.toolTip.
+
+final class LastErrorMenuTitleTests: XCTestCase {
+
+    func test_title_nil_when_code_missing() {
+        XCTAssertNil(lastErrorMenuTitle(code: nil))
+        XCTAssertNil(lastErrorMenuTitle(code: ""))
+    }
+
+    func test_title_includes_code() {
+        XCTAssertEqual(
+            lastErrorMenuTitle(code: "system.unclean_restart"),
+            "Last error: system.unclean_restart"
+        )
+    }
+
+    func test_code_from_empty_list_is_nil() {
+        XCTAssertNil(lastErrorCode(from: nil))
+        XCTAssertNil(lastErrorCode(from: []))
+        XCTAssertNil(lastErrorCode(from: [["severity": "error"]]))
+        XCTAssertNil(lastErrorCode(from: [["code": "   "]]))
+    }
+
+    func test_code_takes_newest_when_oldest_first() {
+        let errors: [[String: Any]] = [
+            ["code": "older.timeout"],
+            ["code": "system.unclean_restart"],
+        ]
+        XCTAssertEqual(lastErrorCode(from: errors), "system.unclean_restart")
+    }
+}
+
+final class StatusBarTooltipWiringTests: XCTestCase {
+    private func source(_ name: String) throws -> String {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent/\(name)")
+        return try String(contentsOf: url, encoding: .utf8)
+    }
+
+    func test_startTooltipRefresh_does_not_loop_assign_button_toolTip() throws {
+        let src = try source("main+StatusMenu.swift")
+        XCTAssertTrue(src.contains("func startTooltipRefresh()"),
+                      "startup hook обязан существовать")
+        XCTAssertFalse(src.contains("10_000_000_000"),
+                       "10s sleep больше не должен переназначать native toolTip")
+        XCTAssertFalse(src.contains("button?.toolTip = tip"),
+                       "startTooltipRefresh не должен писать dynamic tip на кнопку")
+        XCTAssertTrue(src.contains("statusItem?.button?.toolTip = nil"),
+                      "startup hook обязан сбрасывать native toolTip")
+    }
+
+    func test_ensureStatusItem_does_not_install_krab_ear_toolTip() throws {
+        let src = try source("main+StatusMenu.swift")
+        XCTAssertFalse(src.contains("item.button?.toolTip = \"Krab Ear\""),
+                       "статический toolTip на NSStatusBarButton тоже следует за курсором")
+        XCTAssertTrue(src.contains("item.button?.toolTip = nil"),
+                      "ensureStatusItem обязан явно обнулять toolTip")
+    }
+
+    func test_lastError_refresher_exists_and_calls_ipc() throws {
+        let src = try source("main+LastErrorLine.swift")
+        XCTAssertTrue(src.contains("func refreshLastErrorMenuItem"),
+                      "refresher обязан существовать")
+        XCTAssertTrue(src.contains("method: \"list_recent_errors\""),
+                      "IPC-ключ обязан совпадать с backend dispatch буква-в-букву")
+        XCTAssertTrue(src.contains("DispatchQueue.global"),
+                      "IPC обязан уходить off-main (AGENT-3)")
+    }
+
+    func test_menuWillOpen_actually_calls_lastError_refresher() throws {
+        let src = try source("main+MenuBarRecap.swift")
+        XCTAssertTrue(src.contains("refreshLastErrorMenuItem()"),
+                      "menuWillOpen обязан обновлять строку Last error")
+    }
+
+    func test_menu_item_created_in_rebuildStatusMenu() throws {
+        let src = try source("main+StatusMenu.swift")
+        XCTAssertTrue(src.contains("lastErrorMenuItem"),
+                      "пункт обязан создаваться при построении status-меню")
+        XCTAssertTrue(src.contains("refreshLastErrorMenuItem()"),
+                      "rebuildStatusMenu обязан сделать первичный fetch Last error")
+    }
+
+    func test_dropView_clears_inherited_toolTip() throws {
+        let src = try source("main+StatusDragDrop.swift")
+        XCTAssertTrue(src.contains("toolTip = nil"),
+                      "StatusBarDropView не должен наследовать pointer-tracking toolTip")
+    }
+}

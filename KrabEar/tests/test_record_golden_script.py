@@ -1,13 +1,17 @@
-"""Тесты scripts/record_golden.py: парсер сценария R2 и приём записи.
+"""Тесты scripts/record_golden.py: парсер, выбор микрофона, приём записи.
 
 Сценарий `docs/golden/r2-scenario.md` — источник фраз для записи
 golden-набора (стенд качества STT, эпик R2). Парсер обязан выдавать
 ровно 30 RU + 12 ES + 8 EN со сквозными id `ru_001…` и не тащить
 markdown-обёртки в текст фразы.
 
+Выбор устройства: дефолт не должен молча брать BlackHole / loopback,
+если в списке есть физический вход. Живой микрофон в тесте не нужен —
+подсовываем список устройств.
+
 Приём WAV: размер выше порога недостаточен. Цифровая тишина (peak≈0)
-не считается готовой записью — иначе loopback без микрофона даёт 50
-нулевых файлов как «успех».
+не считается готовой записью — иначе явный --device на loopback даёт
+нулевые файлы как «успех».
 """
 from __future__ import annotations
 
@@ -78,6 +82,156 @@ class ParseScenarioTests(unittest.TestCase):
 
     def test_text_without_phrase_sections_yields_nothing(self) -> None:
         self.assertEqual(self.mod.parse_scenario("# Заголовок\n\n1. не фраза\n"), [])
+
+
+FFMPEG_LIST_OWNER_MAC = """\
+[AVFoundation indev @ 0x123] AVFoundation video devices:
+[AVFoundation indev @ 0x123] [0] FaceTime HD Camera
+[AVFoundation indev @ 0x123] AVFoundation audio devices:
+[AVFoundation indev @ 0x123] [0] BlackHole 2ch
+[AVFoundation indev @ 0x123] [1] ZoomAudioDevice
+[AVFoundation indev @ 0x123] [2] MacBook Pro Microphone
+"""
+
+
+class ResolveRecordDeviceTests(unittest.TestCase):
+    """Дефолтный выбор не берёт виртуальный loopback при живом физическом входе."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.mod = _load_module()
+
+    def _devices(self, *pairs: tuple[int, str]):
+        return [self.mod.AudioInput(index=idx, name=name) for idx, name in pairs]
+
+    def test_main_omitted_device_is_not_hardcoded_colon_zero(self) -> None:
+        """Без --device скрипт не должен считать ':0' явным выбором владельца."""
+        captured: dict[str, object] = {}
+
+        def fake_record(phrases, out_dir, device, force):
+            captured["device"] = device
+            return 0
+
+        with patch.object(self.mod, "_record", fake_record):
+            rc = self.mod.main([])
+        self.assertEqual(rc, 0)
+        self.assertIsNone(captured.get("device"))
+
+    def test_main_keeps_explicit_device_even_if_zero(self) -> None:
+        captured: dict[str, object] = {}
+
+        def fake_record(phrases, out_dir, device, force):
+            captured["device"] = device
+            return 0
+
+        with patch.object(self.mod, "_record", fake_record):
+            rc = self.mod.main(["--device", ":0"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(captured.get("device"), ":0")
+
+    def test_default_skips_blackhole_when_physical_macbook_exists(self) -> None:
+        # Живой инцидент: ffmpeg :0 = BlackHole, микрофон MacBook = :2.
+        devices = self._devices(
+            (0, "BlackHole 2ch"),
+            (1, "ZoomAudioDevice"),
+            (2, "MacBook Pro Microphone"),
+        )
+        chosen = self.mod.resolve_record_device(devices)
+        self.assertEqual(chosen, ":2")
+        self.assertNotEqual(chosen, ":0")
+
+    def test_single_physical_input_is_taken_even_if_not_builtin(self) -> None:
+        devices = self._devices(
+            (0, "BlackHole 2ch"),
+            (3, "USB PnP Sound Device"),
+        )
+        self.assertEqual(self.mod.resolve_record_device(devices), ":3")
+
+    def test_multiple_physical_picks_builtin_microphone(self) -> None:
+        devices = self._devices(
+            (0, "BlackHole 16ch"),
+            (1, "USB Microphone"),
+            (4, "Built-in Microphone"),
+        )
+        self.assertEqual(self.mod.resolve_record_device(devices), ":4")
+
+    def test_multiple_physical_without_builtin_raises_russian_list(self) -> None:
+        devices = self._devices(
+            (0, "BlackHole 2ch"),
+            (1, "USB Microphone"),
+            (2, "Scarlett 2i2"),
+        )
+        with self.assertRaises(self.mod.RecordDeviceError) as ctx:
+            self.mod.resolve_record_device(devices)
+        message = str(ctx.exception)
+        self.assertIn("USB Microphone", message)
+        self.assertIn("Scarlett 2i2", message)
+        self.assertIn("BlackHole 2ch", message)
+        self.assertIn(":0", message)
+        self.assertIn(":1", message)
+        self.assertIn("--device", message)
+        self.assertRegex(message.lower(), r"физическ|микрофон|устройств")
+
+    def test_only_virtual_devices_raise(self) -> None:
+        devices = self._devices(
+            (0, "BlackHole 2ch"),
+            (1, "Loopback Audio"),
+        )
+        with self.assertRaises(self.mod.RecordDeviceError) as ctx:
+            self.mod.resolve_record_device(devices)
+        self.assertIn("BlackHole 2ch", str(ctx.exception))
+
+    def test_explicit_device_is_not_overwritten(self) -> None:
+        devices = self._devices(
+            (0, "BlackHole 2ch"),
+            (2, "MacBook Pro Microphone"),
+        )
+        self.assertEqual(
+            self.mod.resolve_record_device(devices, explicit_device=":0"),
+            ":0",
+        )
+        self.assertEqual(
+            self.mod.resolve_record_device(devices, explicit_device=":1"),
+            ":1",
+        )
+
+    def test_parse_avfoundation_audio_skips_video_devices(self) -> None:
+        parsed = self.mod.parse_avfoundation_audio_devices(FFMPEG_LIST_OWNER_MAC)
+        self.assertEqual(
+            [(item.index, item.name) for item in parsed],
+            [
+                (0, "BlackHole 2ch"),
+                (1, "ZoomAudioDevice"),
+                (2, "MacBook Pro Microphone"),
+            ],
+        )
+
+    def test_record_auto_selects_macbook_not_blackhole(self) -> None:
+        """Проводка: device=None + список как у владельца → ffmpeg получает :2."""
+        devices = self._devices(
+            (0, "BlackHole 2ch"),
+            (1, "ZoomAudioDevice"),
+            (2, "MacBook Pro Microphone"),
+        )
+        recorded: list[str] = []
+
+        def fake_record_one(device, out_path):
+            recorded.append(device)
+            return True
+
+        phrases = [self.mod.Phrase(phrase_id="ru_001", lang="ru", text="тест")]
+        buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(self.mod, "list_avfoundation_audio_devices", return_value=devices), \
+                 patch.object(self.mod, "_record_one", fake_record_one), \
+                 patch.object(self.mod.sys, "platform", "darwin"), \
+                 patch.object(self.mod.shutil, "which", return_value="/usr/bin/ffmpeg"), \
+                 patch("builtins.input", return_value=""), \
+                 redirect_stdout(buf):
+                rc = self.mod._record(phrases, Path(tmp), device=None, force=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(recorded, [":2"])
+        self.assertNotIn("Микрофон (avfoundation): :0", buf.getvalue())
 
 
 def _write_mono_pcm16_wav(path: Path, samples: list[int], rate: int = 16000) -> None:

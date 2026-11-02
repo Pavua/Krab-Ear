@@ -9,8 +9,11 @@ docs/golden/r2-scenario.md. Аудио остаётся ЛОКАЛЬНО, в git
     python3 scripts/record_golden.py --list       # показать фразы
     python3 scripts/record_golden.py --dry-run    # проверка без записи
     python3 scripts/record_golden.py              # живая запись (Enter: старт/стоп)
-    python3 scripts/record_golden.py --device :1  # если микрофон не :0
+    python3 scripts/record_golden.py --device :2  # явный вход; не перетирается
     python3 scripts/record_golden.py --force      # перезаписать всё
+
+Без --device не берёт виртуальный loopback (BlackHole и аналоги), если есть
+физический вход. Несколько физических без MacBook/Built-in — ошибка со списком.
 
 Повторный запуск продолжает с первой незаписанной фразы (resume).
 """
@@ -33,10 +36,31 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCENARIO_PATH = REPO_ROOT / "docs" / "golden" / "r2-scenario.md"
 DEFAULT_OUT = Path.home() / "Library" / "Application Support" / "KrabEar" / "golden"
-DEFAULT_DEVICE = ":0"
 LANG_CODES = {"RU": "ru", "ES": "es", "EN": "en"}
 MIN_WAV_BYTES = 16000  # ~0.5 c при 16 kHz mono PCM16 (32 КБ/с)
 MIN_PEAK_ABS = 16  # int16; цифровые нули / молчащий loopback не проходят
+_VIRTUAL_MARKERS = (
+    "blackhole",
+    "loopback",
+    "soundflower",
+    "zoom audio",
+    "zoomaudiodevice",
+    "vb-cable",
+    "vb cable",
+    "vb-audio",
+    "cable input",
+    "cable output",
+    "aggregate device",
+    "multi-output",
+    "multi output",
+    "virtual",
+    "krisp",
+    "teams audio",
+    "microsoft teams",
+    "discord",
+    "steam streaming",
+)
+_BUILTIN_MARKERS = ("macbook", "built-in", "built in")
 
 
 @dataclass(frozen=True)
@@ -44,6 +68,20 @@ class Phrase:
     phrase_id: str
     lang: str
     text: str
+
+
+@dataclass(frozen=True)
+class AudioInput:
+    index: int
+    name: str
+
+    @property
+    def ffmpeg_spec(self) -> str:
+        return f":{self.index}"
+
+
+class RecordDeviceError(ValueError):
+    """Не удалось выбрать физический микрофон без явного --device."""
 
 
 def parse_scenario(text: str) -> list[Phrase]:
@@ -71,6 +109,103 @@ def parse_scenario(text: str) -> list[Phrase]:
             )
         )
     return phrases
+
+
+def is_virtual_input(name: str) -> bool:
+    lowered = name.casefold()
+    return any(marker in lowered for marker in _VIRTUAL_MARKERS)
+
+
+def is_builtin_microphone(name: str) -> bool:
+    lowered = name.casefold()
+    return any(marker in lowered for marker in _BUILTIN_MARKERS)
+
+
+def parse_avfoundation_audio_devices(ffmpeg_output: str) -> list[AudioInput]:
+    """Разбирает stderr `ffmpeg -f avfoundation -list_devices` на аудиовходы."""
+    devices: list[AudioInput] = []
+    in_audio = False
+    device_re = re.compile(r"\[(\d+)\]\s+(.+?)\s*$")
+    for raw in ffmpeg_output.splitlines():
+        line = raw.strip()
+        lowered = line.casefold()
+        if "avfoundation audio devices:" in lowered:
+            in_audio = True
+            continue
+        if "avfoundation video devices:" in lowered:
+            in_audio = False
+            continue
+        if not in_audio:
+            continue
+        match = device_re.search(line)
+        if not match:
+            continue
+        devices.append(AudioInput(index=int(match.group(1)), name=match.group(2).strip()))
+    return devices
+
+
+def list_avfoundation_audio_devices() -> list[AudioInput]:
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-f",
+            "avfoundation",
+            "-list_devices",
+            "true",
+            "-i",
+            "",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return parse_avfoundation_audio_devices((proc.stderr or "") + (proc.stdout or ""))
+
+
+def _format_device_list(devices: list[AudioInput]) -> str:
+    lines: list[str] = []
+    for item in devices:
+        kind = "виртуальный" if is_virtual_input(item.name) else "физический"
+        lines.append(f"  {item.ffmpeg_spec}  {item.name}  ({kind})")
+    return "\n".join(lines)
+
+
+def resolve_record_device(
+    devices: list[AudioInput],
+    explicit_device: str | None = None,
+) -> str:
+    """Выбирает ffmpeg-спеку `:N`. Явный --device не перетирается."""
+    if explicit_device is not None and str(explicit_device).strip():
+        return str(explicit_device).strip()
+    listing = _format_device_list(devices)
+    if not devices:
+        raise RecordDeviceError(
+            "не нашёл ни одного аудиовхода avfoundation.\n"
+            'Проверь: ffmpeg -f avfoundation -list_devices true -i ""'
+        )
+    physical = [item for item in devices if not is_virtual_input(item.name)]
+    if not physical:
+        raise RecordDeviceError(
+            "нет физического микрофона — только виртуальные устройства "
+            "(BlackHole / loopback).\n"
+            "Укажи явно, если это намеренно: python3 scripts/record_golden.py --device :N\n"
+            f"Доступные устройства:\n{listing}"
+        )
+    if len(physical) == 1:
+        return physical[0].ffmpeg_spec
+    macbooks = [item for item in physical if "macbook" in item.name.casefold()]
+    if macbooks:
+        return macbooks[0].ffmpeg_spec
+    builtins = [item for item in physical if is_builtin_microphone(item.name)]
+    if builtins:
+        return builtins[0].ffmpeg_spec
+    raise RecordDeviceError(
+        "несколько физических входов, встроенный микрофон (MacBook / Built-in) "
+        "не найден.\n"
+        "Укажи явно: python3 scripts/record_golden.py --device :N\n"
+        f"Доступные устройства:\n{listing}"
+    )
 
 
 def _wav_peak_abs(path: Path) -> int:
@@ -165,7 +300,7 @@ def _dry_run(phrases: list[Phrase], out_dir: Path) -> int:
     return 0
 
 
-def _record(phrases: list[Phrase], out_dir: Path, device: str, force: bool) -> int:
+def _record(phrases: list[Phrase], out_dir: Path, device: str | None, force: bool) -> int:
     if sys.platform != "darwin":
         print("ERROR: запись golden доступна только на macOS (avfoundation).")
         return 1
@@ -173,11 +308,28 @@ def _record(phrases: list[Phrase], out_dir: Path, device: str, force: bool) -> i
         print("ERROR: ffmpeg не найден в PATH. Установи: brew install ffmpeg")
         return 1
 
+    selected_name = ""
+    if not (device and str(device).strip()):
+        try:
+            inputs = list_avfoundation_audio_devices()
+            device = resolve_record_device(inputs)
+            selected_name = next(
+                (item.name for item in inputs if item.ffmpeg_spec == device),
+                "",
+            )
+        except RecordDeviceError as exc:
+            print(f"ERROR: {exc}")
+            return 1
+
     out_dir.mkdir(parents=True, exist_ok=True)
     todo = [p for p in phrases if force or not _is_recorded(out_dir / f"{p.phrase_id}.wav")]
     skipped = len(phrases) - len(todo)
     print(f"Каталог: {out_dir}")
-    print(f"Микрофон (avfoundation): {device}  (список устройств: ffmpeg -f avfoundation -list_devices true -i \"\")")
+    name_suffix = f"  — {selected_name}" if selected_name else ""
+    print(
+        f"Микрофон (avfoundation): {device}{name_suffix}  "
+        '(список устройств: ffmpeg -f avfoundation -list_devices true -i "")'
+    )
     if skipped:
         print(f"Пропускаю {skipped} уже записанных (--force — перезаписать всё).")
     if not todo:
@@ -218,7 +370,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--list", action="store_true", help="только показать фразы")
     parser.add_argument("--dry-run", action="store_true", help="прогон без записи")
     parser.add_argument("--force", action="store_true", help="перезаписать существующие файлы")
-    parser.add_argument("--device", default=DEFAULT_DEVICE, help='avfoundation audio device (по умолчанию ":0")')
+    parser.add_argument(
+        "--device",
+        default=None,
+        help='avfoundation-вход, например ":2". Если не задан — физический микрофон, не BlackHole',
+    )
     parser.add_argument("--out", default=str(DEFAULT_OUT), help="каталог для WAV-файлов")
     args = parser.parse_args(argv)
 
