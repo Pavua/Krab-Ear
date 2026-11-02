@@ -140,23 +140,39 @@ def evaluate_pair(reference_raw: str, hypothesis_raw: str) -> dict[str, Any]:
 
 def aggregate_results(rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_lang: dict[str, list[float]] = {}
+    errors_by_lang: dict[str, int] = {}
     for row in rows:
+        lang = str(row.get("lang", "unknown"))
         if "error" in row:
+            # Падения STT/REST — часть замера, а не невидимый пропуск:
+            # иначе 9 ошибок + 1 успех дадут mean по одному успеху без следа.
+            errors_by_lang[lang] = errors_by_lang.get(lang, 0) + 1
+            by_lang.setdefault(lang, [])
             continue
-        lang = row["lang"]
         by_lang.setdefault(lang, []).append(float(row["wer"]))
 
     def _mean(vals: list[float]) -> float | None:
         return sum(vals) / len(vals) if vals else None
 
     by_lang_agg = {
-        lang: {"count": len(wers), "mean_wer": _mean(wers)}
-        for lang, wers in sorted(by_lang.items())
+        lang: {
+            "count": len(by_lang.get(lang, [])),
+            "mean_wer": _mean(by_lang.get(lang, [])),
+            "errors": errors_by_lang.get(lang, 0),
+            "total": len(by_lang.get(lang, [])) + errors_by_lang.get(lang, 0),
+        }
+        for lang in sorted(set(list(by_lang) + list(errors_by_lang)))
     }
     all_wers = [w for wers in by_lang.values() for w in wers]
+    total_errors = sum(errors_by_lang.values())
     return {
         "by_lang": by_lang_agg,
-        "overall": {"count": len(all_wers), "mean_wer": _mean(all_wers)},
+        "overall": {
+            "count": len(all_wers),
+            "mean_wer": _mean(all_wers),
+            "errors": total_errors,
+            "total": len(all_wers) + total_errors,
+        },
     }
 
 
@@ -302,6 +318,26 @@ def transcribe_wav_rest(
             body = resp.json()
         except ValueError as exc:
             raise RestUnavailableError("REST вернул не-JSON") from exc
+        if not isinstance(body, dict):
+            raise RestUnavailableError("REST вернул не-JSON объект")
+        # AudioEngine отдаёт ошибку словарём, а не исключением. Error-carrying
+        # payload (status=error или truthy error — 503 stt_failed после PR
+        # #2120, либо 200 от прокси/legacy) обязан считаться ошибкой замера,
+        # а не гипотезой "": иначе падение STT тихо портит WER вместо явной
+        # строки ERROR. Голый 200/ok с пустым текстом без маркеров — серверная
+        # сторона, чинится в PR #2120; здесь его отличить от штатной тишины
+        # (vad_skip/empty_audio с reason) нельзя без ложных срабатываний.
+        if body.get("status") == "error" or body.get("error"):
+            if body.get("skipped") == "privacy_mode":
+                raise RestPrivacyError(
+                    "privacy_mode активен — выключите privacy_mode_enabled перед замером WER."
+                )
+            err_code = body.get("error") or "stt_failed"
+            raise RestUnavailableError(
+                f"REST STT failed ({err_code}, HTTP {resp.status_code}): "
+                "engine вернул ошибку, гипотезы нет. "
+                "Проверьте бэкенд/MLX и повторите замер."
+            )
         text = body.get("text")
         if text is None and body.get("skipped") == "privacy_mode":
             raise RestPrivacyError(
