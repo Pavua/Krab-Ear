@@ -3978,9 +3978,7 @@ class RecordingCoreService:
                 # wave-1770 HIGH + crypto-audit (2026-06-20): gate .md write behind data
                 # protection (privacy_mode ИЛИ history_encryption_enabled), consistent with
                 # the live path. require_auto_save=False — import пишет .md без этого флага.
-                if persist_history and self._should_write_plaintext_md(
-                    settings, _privacy_mode, require_auto_save=False
-                ):
+                if persist_history and self._should_write_plaintext_md(settings, _privacy_mode, require_auto_save=False):
                     try:
                         transcripts_dir = Path(self.store.data_dir) / "transcripts"
                         transcripts_dir.mkdir(exist_ok=True)
