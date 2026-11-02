@@ -1,18 +1,22 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: **2026-10-30** — синхронизация с `.remember/` (страница отставала на 5–6 недель,
-последняя правка была 18–26.09). Одна страница: база, деплой-блокеры, активные потоки, баны.
+Обновлено: **2026-11-02** — база догнана до HEAD колеи `#2141`/`839e75f4`; закрытые
+хвосты сняты из «открыто». Runtime 02.11 не перепроверялся. Одна страница: база,
+деплой-блокеры, активные потоки, баны.
 Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Как работать —
 [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
-## База и runtime snapshot (2026-10-30)
+## База и runtime snapshot (source 2026-11-02, runtime-журнал 30.10)
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
-- **Source-колея:** `origin/codex/krab-ear-v2` @ **`f100ced4`** — PR [#2137](https://github.com/Pavua/Krab-Ear/pull/2137)
-  слит 30.10 (10:58), дерево совпадает с draft-SHA `2861c288`, post-merge CI зелёный
-  (1138 файлов / 16 групп). Внутри: нормализаторы дат/времени (ES-время `16:35 → 16:00:35`,
-  границы дат, RU/ES порядковые даты `3-е`/`3-го`/`3.º`, «ч/мин», частичные порядковые даты —
-  цепочка `80f86c26 → b7906637 → ab640f65 → 754c4b81 → 09383c76`, публичный кандидат `b05988d3`).
+- **Source-колея:** `origin/codex/krab-ear-v2` @ **`839e75f4`** — PR [#2141](https://github.com/Pavua/Krab-Ear/pull/2141)
+  слит 30.10 (23:56): golden-set WER harness (`wer_eval.py`). Предки того же дня:
+  [#2140](https://github.com/Pavua/Krab-Ear/pull/2140) docs-артефакты,
+  [#2139](https://github.com/Pavua/Krab-Ear/pull/2139) verdicts,
+  [#2138](https://github.com/Pavua/Krab-Ear/pull/2138) NOW-sync,
+  [#2137](https://github.com/Pavua/Krab-Ear/pull/2137)/`f100ced4` нормализаторы дат/времени
+  (ES-время `16:35 → 16:00:35`, границы дат, RU/ES порядковые даты `3-е`/`3-го`/`3.º`,
+  «ч/мин»; цепочка `80f86c26 → b7906637 → ab640f65 → 754c4b81 → 09383c76`).
 - **Prod/runtime:** **`5a09e630`** — установленная версия по фиксации журналов 30.10
   (история её выката вне октябрьских журналов). **Выкат `22a3c0e3` (мерж #2125–#2127 +
   docs #2128 от 29.10) ОТМЕНЁН как устаревший** — runtime уже на `5a09e630`; staged
@@ -22,8 +26,8 @@
 - **Канонический чекаут:** ветка `chore/agent-parity-0928`, ДЕРЕВО ГРЯЗНОЕ (чужой WIP:
   бинарники `Krab Ear.app`, Sparkle, `native/runtime`, untracked). Чужой WIP не трогать;
   новые работы — только в owned worktree (`~/.codex/worktrees/<slug>`).
-- Живое здоровье runtime/STT/звонков в октябрьских срезах НЕ перепроверялось — source-приёмки
-  офлайн, runtime не перезапускался.
+- Живое здоровье runtime/STT/звонков 02.11 не проверялось — сверка только git,
+  runtime не перезапускался, IPC-smoke не делался.
 - Main Krab Q2 (:8080) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md).
 
 ## Деплой — 0%. Блокеры (все три обязательны, ни один не закрыт)
@@ -55,8 +59,10 @@
   ждёт ревью и нового START Main.
 - **ear-e2-e5-causal-1030** — JOIN-контракт переводчика (43 сценария) + изолированный
   Ear E2/E5 `0dd7eaba` на `139d`; локальный Whisper CPU без сети квалифицирован.
-- **ear-date-boundaries-1030** — нормализаторы испечены в PR #2137 (слит, `f100ced4`);
-  остаток: описание ограничения дат без пунктуации перед временем/другой датой.
+- **ear-date-boundaries-1030** — нормализаторы в PR #2137 (`f100ced4`); ограничение
+  дат без пунктуации перед временем/другой датой уже описано в
+  [`2026-10-30-normalizer-contracts.md`](superpowers/plans/2026-10-30-normalizer-contracts.md)
+  — не открытый хвост.
 - **ear-normalizers-public-1030** — публикация и слив #2137 выполнены 30.10; Main/Gateway/
   координатор уведомлены.
 - **ear-full-lifecycle-1029** — `close()` при живом export-потоке починен (`9d9be174`,
@@ -72,8 +78,9 @@
 
 ## Задачи владельца
 
-- **Запись Golden Set для WER** до/после лексики W4 — инструмент `Record Golden Set.command`
-  (открыто ещё с 09-18; без эталонов WER-замер не закрыт).
+- **Запись Golden Set (30 русских фраз)** — ждёт владельца, не блокер кода.
+  Инструмент `Record Golden Set.command`; харнесс WER уже в колее (#2141/`839e75f4`).
+  Не требовать диктовку и не начинать WER-прогон без эталонов.
 - **Решение по деплой-окну:** условия (конец диктовки + STT-only пауза Gateway + Main FINISH)
   не выполнены; пока решения нет — выкат 0%, staged `22a3` не кандидат без перепроверки.
 
@@ -108,17 +115,15 @@ Ear-only 27B. Ear `llm_brain_model` = `qwen/qwen3.6-27b` — lease/unload/OOM-UI
 - Телефония только через Voice Gateway; REST-контракт паузы/503 — в потоках `-1029/-1030`
   выше, не строить заново.
 - W4/F1 STT-лексика в проде с 18.09 (`35b32bab`): hotwords 43, phonetic 11/31;
-  live-добор выполнен. WER до/после — ждёт Golden Set (задача владельца выше).
+  live-добор выполнен. WER до/после — ждёт записи Golden Set владельцем (не блокер
+  кода; харнесс #2141 в колее).
 - **A5.2a** — DONE source-only (26.09, #2052, в прод не задеплоено). **A5.2b** —
-  DONE в source и ВЛИТО в колею: b1 #2056/`4971c24a` (encrypted snapshot), b2
-  #2058/`96554b75` (restore/recovery), b3 #2060/`7afa21da` (diskguard+retention),
-  integrity #2066/#2068/#2069 accepted. Runtime-активации НЕТ —
-  `history_encryption_enabled` остаётся OFF. Активный код-долг
-  `A5_2B_CALLER_SUCCESS_LOG_DEBT` (`service.py` логирует migration-complete при
-  `MigrationResult.reason=history_encryption_operation_unavailable`; callback
-  `push_error` у PolicyReader есть, но manager-вызовы его не пробрасывают). Спека
-  `2026-09-24-a5-history-at-rest-design.md` и хендофф `2026-09-25-a5-lifecycle-start.md`
-  в силе; очередь сместилась на нормализаторы/REST.
+  DONE в source и ВЛИТО в колею: b1 #2056/`4971c24a`, b2 #2058/`96554b75`,
+  b3 #2060/`7afa21da`, integrity #2066/#2068/#2069. Лог-долг
+  `A5_2B_CALLER_SUCCESS_LOG_DEBT` закрыт `3a253bc52` (честный startup-лог
+  refused vs complete). Runtime-активации НЕТ — `history_encryption_enabled` OFF.
+  Спека `2026-09-24-a5-history-at-rest-design.md` и хендофф
+  `2026-09-25-a5-lifecycle-start.md` в силе; очередь сместилась на нормализаторы/REST.
 - Инцидент Glovo (26.09) закрыт: вариант C (whisper-поле в Call Observer, #2054) в колее;
   вариант B (TG-бот) — спека в VG-репо, правки отдельной сессией.
 - GigaAM `confidence=0.9` (#1985) — ретрай по уверенности для RU мёртв; решение за владельцем.
