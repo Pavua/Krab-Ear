@@ -139,6 +139,36 @@ final class SingleInstanceGuardTests: XCTestCase {
         XCTAssertTrue(mainSource.contains("legacy PID cleanup disabled"))
     }
 
+    /// KeepAlive-spawn дубликата логирует app_launched до flock и засоряет recovery.log.
+    func test_appLaunchedRecoveryLog_afterFileLockAcquired() throws {
+        let packageRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let mainSource = try String(
+            contentsOf: packageRoot
+                .appendingPathComponent("Sources/KrabEarAgent/main.swift"),
+            encoding: .utf8
+        )
+        guard let duplicatePath = mainSource.range(
+            of: "acquire_file_lock_duplicate"
+        ) else {
+            XCTFail("Не найден callsite duplicate flock в main.swift")
+            return
+        }
+        guard let launchLog = mainSource.range(
+            of: "AgentRecoveryLogger.shared.logStage(\"app_launched\")"
+        ) else {
+            XCTFail("Не найден bootstrap-лог app_launched")
+            return
+        }
+        XCTAssertGreaterThan(
+            launchLog.lowerBound,
+            duplicatePath.upperBound,
+            "app_launched должен писаться только после успешного flock, не на duplicate-spawn"
+        )
+    }
+
     // MARK: - POSIX file lock
 
     /// Уникальный временный lock-файл можно захватить неблокирующим flock.
