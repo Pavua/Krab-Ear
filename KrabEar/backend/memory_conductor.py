@@ -198,6 +198,7 @@ class MemoryConductor:
         t = self._thread
         if t is not None:
             t.join(timeout=2.0)
+        self.wait_workers(timeout=5.0)
         try:
             self._ledger.remove_own()
         except Exception:

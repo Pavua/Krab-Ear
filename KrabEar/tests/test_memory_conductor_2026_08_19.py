@@ -407,5 +407,34 @@ class LivenessAndPolicySourceTest(unittest.TestCase):
                          "C-POLICY-SOURCE: политика читает только in-process состояние")
 
 
+class StopDriverTest(unittest.TestCase):
+    """ear-full-lifecycle-1029: stop() обязан дождаться фоновых воркеров."""
+
+    def test_stop_drains_spawned_workers(self):
+        import threading
+
+        started = threading.Event()
+        finished = threading.Event()
+
+        def slow_worker() -> None:
+            started.set()
+            time.sleep(0.4)
+            finished.set()
+
+        c = _mk()
+        c._spawn(slow_worker)
+        self.assertTrue(started.wait(timeout=2.0))
+        self.assertFalse(finished.is_set())
+
+        c.stop()
+
+        self.assertTrue(finished.is_set(), "stop() must wait for worker to finish")
+        self.assertEqual(
+            [w for w in c._workers if w.is_alive()],
+            [],
+            "stop() must wait for memory-conductor-worker threads",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
