@@ -1,32 +1,34 @@
 # NOW — что делать сейчас (Krab Ear)
 
-Обновлено: **2026-11-02 (вечер)** — база догнана до HEAD колеи `#2152`/`6d881004`;
-волна Golden/WER/agent-fixes 02.11 зафиксирована. Python runtime не перезапускался.
+Обновлено: **2026-11-03** — база догнана до HEAD колеи `#2158`/`f6afd456`;
+волна lifecycle/agent/backend 02–03.11 (#2153–#2158). Python runtime не перезапускался.
 Одна страница: база, деплой-блокеры, активные потоки, баны.
 Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Как работать —
 [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
-## База и runtime snapshot (source 2026-11-02, runtime-журнал 30.10)
+## База и runtime snapshot (source 2026-11-03, runtime read-back 03.11)
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
-- **Source-колея:** `origin/codex/krab-ear-v2` @ **`6d881004`** — PR [#2152](https://github.com/Pavua/Krab-Ear/pull/2152)
-  слит 02.11: WER-харнесс не прячет падения STT. Волна 02.11 (не дублировать):
-  [#2142](https://github.com/Pavua/Krab-Ear/pull/2142) NOW-sync → `47dd7088`,
-  [#2144](https://github.com/Pavua/Krab-Ear/pull/2144) golden device + status tooltip,
-  [#2145](https://github.com/Pavua/Krab-Ear/pull/2145) RU→GigaAM router,
-  [#2146–#2149](https://github.com/Pavua/Krab-Ear/pull/2146) golden capture/silence/vocab,
-  [#2150](https://github.com/Pavua/Krab-Ear/pull/2150) maby verdict,
-  [#2151](https://github.com/Pavua/Krab-Ear/pull/2151) wake restart order.
-  Предки 30.10: [#2141](https://github.com/Pavua/Krab-Ear/pull/2141)/`839e75f4` WER harness.
-- **Prod/runtime (Python):** **`5a09e630`** — launchd-бэкенд без рестарта 02.11
-  (qualification / VG #551 / Main FINISH — выкат 0%). **Swift-агент** на машине
-  обновлён отдельно до **`97a1b1ee`** (#2151/#2144), бэкенд PID не менялся.
+- **Source-колея:** `origin/codex/krab-ear-v2` @ **`f6afd456`** — PR [#2158](https://github.com/Pavua/Krab-Ear/pull/2158)
+  (AST-тесты после EventBus detach). Хвост 02–03.11 после [#2152](https://github.com/Pavua/Krab-Ear/pull/2152)/`6d881004`:
+  [#2153](https://github.com/Pavua/Krab-Ear/pull/2153) NOW → `d9471793`,
+  [#2154](https://github.com/Pavua/Krab-Ear/pull/2154) agent recovery log → `6bb76e0c`,
+  [#2155](https://github.com/Pavua/Krab-Ear/pull/2155) flock → `14e40251`,
+  [#2156](https://github.com/Pavua/Krab-Ear/pull/2156) MemoryConductor stop-driver → `250b3c56`,
+  [#2157](https://github.com/Pavua/Krab-Ear/pull/2157) EventBus detach on close → `b225aeaf`,
+  [#2158](https://github.com/Pavua/Krab-Ear/pull/2158) → `f6afd456`.
+  Golden/WER 02.11 (не дублировать): [#2142](https://github.com/Pavua/Krab-Ear/pull/2142)–[#2151](https://github.com/Pavua/Krab-Ear/pull/2151)
+  — см. [#2153](https://github.com/Pavua/Krab-Ear/pull/2153). Предки 30.10: [#2141](https://github.com/Pavua/Krab-Ear/pull/2141)/`839e75f4`.
+- **Split runtime (prod ≠ колея):** **Python** **`5a09e630`**, PID **1390**
+  (`ear-release-5a09e630`, data-dir prod) — без рестарта с 02.11; **03.11** IPC `ping` ok,
+  `is_recording=false`. **Swift-агент** PID **65661** (`.app` в каноне); бэкенд PID не менялся.
+  Фиксы агента #2154/#2155 и backend #2156–#2158 в source-колее — **Python deploy 0%**,
+  пересборка `.app` только по отдельному idle-окну владельца.
 - Промежуточные точки колеи (29.10): `16552643` (#2136) — база всех октябрьских worktree-потоков.
 - **Канонический чекаут:** ветка `chore/agent-parity-0928`, ДЕРЕВО ГРЯЗНОЕ (чужой WIP:
   бинарники `Krab Ear.app`, Sparkle, `native/runtime`, untracked). Чужой WIP не трогать;
   новые работы — только в owned worktree (`~/.codex/worktrees/<slug>`).
-- Живое здоровье runtime/STT/звонков 02.11 не проверялось — сверка только git,
-  runtime не перезапускался, IPC-smoke не делался.
+- Полный STT/звонковый smoke 03.11 не делался; сверка: git + `ps` + IPC ping (см. выше).
 - Main Krab Q2 (:8080) — **не Ear**: [`ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md`](../ANTIGRAVITY_HANDOFF/2026-09-05-krab-8080-model-routing.md).
 
 ## Деплой — 0%. Блокеры (все три обязательны, ни один не закрыт)
@@ -64,9 +66,10 @@
   — не открытый хвост.
 - **ear-normalizers-public-1030** — публикация и слив #2137 выполнены 30.10; Main/Gateway/
   координатор уведомлены.
-- **ear-full-lifecycle-1029** — `close()` при живом export-потоке починен (`9d9be174`,
-  RED→2 PASS); ложный `healthy` отсутствующего лога → `UNKNOWN`/exit 2 (`173e86c9`);
-  открыты: listener/replay ownership-aware detach, MemoryConductor stop-driver.
+- **ear-full-lifecycle-1029** — **DONE в колее 03.11** (хвосты закрыты, поток не дублировать):
+  export `close()` (`9d9be174`), log health (`173e86c9`), MemoryConductor stop-driver
+  ([#2156](https://github.com/Pavua/Krab-Ear/pull/2156)), EventBus listener detach on
+  `BackendService.close()` ([#2157](https://github.com/Pavua/Krab-Ear/pull/2157)/[#2158](https://github.com/Pavua/Krab-Ear/pull/2158)).
 - **ear-aggregate-offline-1029** — offline-агрегат wiring (`91a9b714`, 84 component/cache
   cases + 2 lifecycle, ревью GO); полный backend import/конструктор НЕ квалифицирован.
 
