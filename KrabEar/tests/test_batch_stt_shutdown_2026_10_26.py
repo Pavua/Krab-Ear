@@ -113,8 +113,14 @@ class BatchShutdownTests(unittest.TestCase):
         )
         self.core.transcriber = transcriber
         service_type = _load_class(
-            ROOT / "backend/service.py", "BackendService", {"close"},
-            {"logger": self.namespace["logger"]},
+            ROOT / "backend/service.py", "BackendService", {"close", "_detach_event_bus_wiring"},
+            {
+                "logger": self.namespace["logger"],
+                "event_bus": types.SimpleNamespace(
+                    remove_listener=lambda *_args, **_kw: None,
+                    _event_replay=None,
+                ),
+            },
         )
         self.service = service_type.__new__(service_type)
         self.service.transcriber = transcriber
