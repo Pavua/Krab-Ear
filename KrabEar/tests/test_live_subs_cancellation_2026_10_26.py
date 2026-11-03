@@ -105,6 +105,7 @@ def test_backend_close_does_not_release_transcriber_with_live_subs_worker(raises
     service = SimpleNamespace(
         _memory_conductor=Mock(), _meeting_svc=meeting,
         _live_subs=live_subs, transcriber=transcriber,
+        _detach_event_bus_wiring=lambda: None,
     )
     assert namespace["close"](service) is False
     transcriber.close.assert_not_called()
