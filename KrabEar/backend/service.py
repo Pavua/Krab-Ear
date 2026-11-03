@@ -754,6 +754,7 @@ class BackendService:
             return bool(searcher is not None and searcher.unload_if_idle(threshold))
 
         self._memory_ledger = LedgerClient("krab_ear")
+        self._event_bus_listener_refs: list = []
         self._memory_conductor = MemoryConductor(
             settings_service=self._settings_svc,
             ledger=self._memory_ledger,
@@ -768,6 +769,7 @@ class BackendService:
             last_stt_activity_ts_fn=_rcs_mod.last_stt_activity_ts,
         )
         event_bus.add_listener(self._memory_conductor.handle_oom_event)
+        self._event_bus_listener_refs.append(self._memory_conductor.handle_oom_event)
         self._memory_conductor.start()
 
         # Wire error_bus into rewriter so it can push timeout/connection/etc errors
@@ -1032,6 +1034,7 @@ class BackendService:
         # PII fields they carry.
         try:
             event_bus.add_listener(self._forward_event_to_webhooks)
+            self._event_bus_listener_refs.append(self._forward_event_to_webhooks)
         except Exception:
             logger.exception("wave1775: failed to wire webhook EventBus listener")
         # Sync the webhook privacy gate with the current persisted setting at startup,
@@ -1195,6 +1198,7 @@ class BackendService:
         )
         try:
             event_bus.add_listener(self._event_bridge.on_event)
+            self._event_bus_listener_refs.append(self._event_bridge.on_event)
         except Exception:
             logger.exception("event-bridge: failed to wire EventBus listener")
         self._event_bridge.start()
@@ -2496,6 +2500,21 @@ class BackendService:
             "lease_observation": observe_brain_lease(),
         }
 
+    def _detach_event_bus_wiring(self) -> None:
+        """Снять листенеры/replay, проводимые этим экземпляром (reinit/close)."""
+        refs = getattr(self, "_event_bus_listener_refs", None)
+        if not refs:
+            return
+        for callback in list(refs):
+            try:
+                event_bus.remove_listener(callback)
+            except Exception:
+                logger.debug("event_bus listener detach failed", exc_info=True)
+        refs.clear()
+        replay = getattr(self, "_event_replay", None)
+        if replay is not None and event_bus._event_replay is replay:
+            event_bus._event_replay = None
+
     def close(self) -> bool:
         """Graceful shutdown: останавливает фоновые потоки (LLM probe и др.).
 
@@ -2707,6 +2726,8 @@ class BackendService:
             except Exception:
                 all_workers_stopped = False
                 logger.exception("Transcriber.close() raised during close()")
+
+        self._detach_event_bus_wiring()
 
         return all_workers_stopped and wake_word_stopped and call_stt_stopped
 
