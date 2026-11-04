@@ -2,6 +2,7 @@
 
 Обновлено **04.11.2026**. Текущий поток — единый Python release candidate
 `codex/ear-release-compose-1104` на базе `6e2043fb` (#2159).
+[Релизная карточка и гейты](superpowers/plans/2026-11-04-coordinated-python-release.md).
 
 ## Четыре source-фикса
 
