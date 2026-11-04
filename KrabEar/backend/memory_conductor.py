@@ -194,7 +194,8 @@ class MemoryConductor:
         self._thread.start()
 
     def stop(self) -> None:
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
         t = self._thread
         if t is not None:
             t.join(timeout=2.0)
@@ -602,10 +603,14 @@ class MemoryConductor:
     # -- сервис --------------------------------------------------------------
 
     def _spawn(self, target) -> None:
-        w = threading.Thread(target=target, name="memory-conductor-worker", daemon=True)
         with self._lock:
+            if self._stop.is_set():
+                return
+            w = threading.Thread(target=target, name="memory-conductor-worker", daemon=True)
             self._workers = [x for x in self._workers if x.is_alive()] + [w]
-        w.start()
+            # stop() должен видеть уже стартовавший поток, а не is_alive=False
+            # между регистрацией и start(). Поздние callbacks шины отклоняются.
+            w.start()
 
     def _note(self, msg: str) -> None:
         logger.info("conductor: %s", msg)

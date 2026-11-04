@@ -6,6 +6,20 @@
 Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Как работать —
 [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
+## Локальный source-блок 04.11 (ещё не опубликован)
+
+- `codex/ear-conductor-stop-1104`, база `6e2043fb`: закрыт допуск новых
+  MemoryConductor workers после `stop()`, регистрация/старт атомарны относительно
+  закрытия допуска. RED: 3 ожидаемых FAIL; GREEN: 119 тестов в 9 отдельных
+  процессах, 33 на Python 3.12 без MLX, `audit-all` exit 0; независимое
+  Astra/ultra source review GO. [Карточка](superpowers/plans/2026-11-04-conductor-worker-stop.md).
+- Это не общий backend drain и не установленная причина wake-word hang.
+  Runtime не менялся и заново не квалифицировался; PR/hosted CI/deploy отсутствуют.
+- Текущая координация Main/Ear/Gateway возобновлена с разрешения владельца 04.11.
+  Gateway сообщил `server_drained=null`, `diagnostic_ready=false`: допуска к
+  Ear lifecycle нет. Разделы с октябрьскими потоками ниже — исторические
+  указатели, их ownership перед продолжением требует свежей сверки.
+
 ## База и runtime snapshot (source 2026-11-03, runtime read-back 03.11)
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)
