@@ -313,3 +313,19 @@ fd и сохраняет UNKNOWN в текущем процессе, но это
 другой процесс может получить lock. Реальный control owner обязан отдельно
 решить этот случай и доказать fencing/recovery до любых production grants или
 receipt. Сам по себе локальный объект HOLD не обеспечивает защиту после crash.
+
+## Дополнение Main: Perceptor и первая установка
+
+Read-only owner Main подтвердил ещё один реальный путь: `src/modules/perceptor.py`
+при неуспехе Gateway запускает локальный `_transcribe_mlx_whisper`; bounded
+ThreadPoolExecutor может продолжать реальную работу после отмены await.
+`voice_processing_lock` относится к отдельному чату и не является общим
+admission/drain; opt-in startup warmup тоже не runtime gate. Помимо Telegram MCP
+нужны pre-submit grant и actual-worker lifetime для Perceptor и согласованный
+no-fallback при maintenance. REST voice-notes/VideoStudio, IPC TTS/history/MCP
+и старые независимые MCP-процессы требуют собственной инвентаризации/контроля.
+
+Owner Main не нашёл готовую общую owner-controlled паузу всех producers без
+lifecycle. Поэтому текущий idle snapshot и новый server-side отказ не дают
+first-install GO. Информация — owner source review, не доказательство runtime
+shutdown; проверки и любые изменения в Main выполняются его владельцем.
