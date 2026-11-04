@@ -36,10 +36,11 @@ reap keeper; неподтверждённый cleanup/reap не возвраща
   Реальные тесты подтверждают сохранность чужого процесса, уборку тестового
   потомка, отмену и control EOF при SIGKILL parent. Pure mocks отдельно проверяют
   порядок kill-before-reap, malformed status и отсутствие небезопасного запуска.
-- CI-policy flake8 и diff check: exit 0. Независимое whole-diff re-review GO.
+- `audit-all`, CI-policy flake8 и diff check: exit 0. Независимое whole-diff re-review GO.
 - Это локальные проверки helper, не hosted CI нового SHA и не runtime acceptance.
 
 ## Публикация
 
-Ветка локальная; конкретный draft PR/CI требует отдельного scope владельца.
+Владелец 04.11 отдельно разрешил draft PR и hosted CI для этой ветки,
+без merge/deploy. Код сохранён коммитом `bdba89be`.
 Runtime, модели, Gateway/Main и существующие PR #2160–#2162 не менялись.
