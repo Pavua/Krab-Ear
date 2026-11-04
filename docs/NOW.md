@@ -6,6 +6,20 @@
 Журнал волн — [`ROADMAP-2026H2.md`](ROADMAP-2026H2.md), не очередь. Как работать —
 [`EXECUTOR_PLAYBOOK.md`](EXECUTOR_PLAYBOOK.md).
 
+## Локальный source-блок 04.11: файлы MLX Whisper cache
+
+- `codex/ear-hf-cache-1104`, база `6e2043fb`: startup и downloader используют
+  общий локальный предикат config + непустых выбранных весов текущего main.
+  Возврат snapshot_download без этих файлов больше не даёт state/event done.
+  [Карточка и пределы](superpowers/plans/2026-11-04-mlx-whisper-cache-readiness.md).
+- Causal RED получен; GREEN 197 тестов на Python 3.14, 117 на Python 3.12 без
+  MLX, audit-all exit 0, независимое Astra/ultra review GO. Это наличие файлов,
+  не проверка валидности весов или inference readiness.
+- Настоящий turbo cache остаётся config-only, без весов; загрузок, cache repair,
+  runtime/модельных изменений, публикации и deploy этого блока нет.
+- Conductor-блок `be9f8a71` находится в отдельной ветке, не включён сюда.
+  Октябрьские потоки ниже — исторические указатели без свежего ownership ACK.
+
 ## База и runtime snapshot (source 2026-11-03, runtime read-back 03.11)
 
 - Репозиторий: [Pavua/Krab-Ear](https://github.com/Pavua/Krab-Ear)

@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from backend.model_cache_manager import ModelCacheManager
+
 if TYPE_CHECKING:
     from backend.event_bus import EventBus
 
@@ -276,29 +278,10 @@ class ModelDownloader:
             return self._states[model_id]
 
     def _is_cached(self, model_id: str) -> bool:
-        """Check HuggingFace hub cache presence (same logic as startup_diagnostics)."""
-        hf_home_env = ""
-        try:
-            import os
-            hf_home_env = os.environ.get("HF_HOME", "")
-        except Exception:
-            pass
-
-        if hf_home_env:
-            hf_cache = Path(hf_home_env) / "hub"
-        else:
-            hf_cache = Path.home() / ".cache" / "huggingface" / "hub"
-
-        model_dir_name = "models--" + model_id.replace("/", "--")
-        model_dir = hf_cache / model_dir_name
-        # A model is considered cached when the snapshots sub-dir exists and is non-empty.
-        snapshots = model_dir / "snapshots"
-        if not snapshots.exists():
-            return False
-        try:
-            return any(True for _ in snapshots.iterdir())
-        except OSError:
-            return False
+        """Не пропускать загрузку из-за config-only/оборванного snapshot."""
+        return ModelCacheManager(
+            cache_dir=self._model_cache_path(model_id).parent,
+        ).is_mlx_whisper_cached(model_id)
 
     def _model_cache_path(self, model_id: str) -> Path:
         """Return the expected model folder path in the HF cache (may not exist)."""
@@ -474,6 +457,10 @@ class ModelDownloader:
                     if _hf_const is not None and _prev_const is not None:
                         _hf_const.HF_HUB_OFFLINE = _prev_const
 
+                if not ModelCacheManager.mlx_whisper_snapshot_has_files(Path(local_path)):
+                    raise RuntimeError(
+                        "Неполный snapshot MLX Whisper: нужны config.json и непустые веса"
+                    )
                 cache_path = str(local_path)
                 state.update(status="done", pct=100.0, cache_path=cache_path)
                 self._emit(model_id, "done", 100.0)
