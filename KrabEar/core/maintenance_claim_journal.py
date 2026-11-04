@@ -240,9 +240,11 @@ class ClaimJournal(foundation.MaintenanceStore):
             _, _, revision, admission = _validate(
                 self._connection, self._installation_id, allow_test_open=self._active,
             )
-            count = self._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone()[0]
+            count, claimed = self._connection.execute(
+                "SELECT COUNT(*), COUNT(claim_id) FROM scoped_grants"
+            ).fetchone()
             return {"admission": admission, "control_revision": revision, "outstanding_count": count,
-                    "unknown": self._poisoned or (not self._active and count > 0),
+                    "unknown": self._poisoned or claimed > 0 or (not self._active and count > 0),
                     "inspection_only": not self._active, "production_execution_authority": False,
                     "drain_authority": False}
         except BaseException as exc:

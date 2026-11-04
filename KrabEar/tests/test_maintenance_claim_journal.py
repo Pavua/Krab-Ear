@@ -44,6 +44,11 @@ class ClaimJournalTests(unittest.TestCase):
         self.assertFalse(replay["fresh"])
         self.assertIsNone(replay["permit"])
 
+    def test_claim_remains_execution_unknown_until_terminal_is_proven(self):
+        grant = self.reserve()["grant_id"]
+        self.claim(grant)
+        self.assertTrue(self.store.status()["unknown"])
+
     def test_claim_is_bound_to_recorded_executor(self):
         grant = self.reserve()["grant_id"]
         with self.assertRaises(journal.JournalConflict):
