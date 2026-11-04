@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -53,7 +54,10 @@ class _StubEventBus:
 # ---------------------------------------------------------------------------
 
 _FAKE_MODEL = "mlx-community/whisper-large-v3-turbo"
-_FAKE_PATH = "/tmp/fake_hf_cache/models--mlx-community--whisper-large-v3-turbo"
+_FAKE_CACHE = tempfile.TemporaryDirectory(prefix="ear-model-download-tests-")
+_FAKE_PATH = _FAKE_CACHE.name
+(Path(_FAKE_PATH) / "config.json").write_text("{}")
+(Path(_FAKE_PATH) / "weights.npz").write_bytes(b"test-weights")
 
 
 def _make_downloader(bus: "_StubEventBus | None" = None) -> ModelDownloader:

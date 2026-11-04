@@ -21,6 +21,7 @@ from typing import Any, Callable
 
 from KrabEar.__version__ import __version__ as APP_VERSION
 from backend.observability import add_breadcrumb
+from backend.model_cache_manager import ModelCacheManager
 
 logger = logging.getLogger("KrabEar.Backend.StartupDiagnostics")
 
@@ -581,7 +582,7 @@ class StartupDiagnostics:
             # Ищем папку модели (формат: models--{owner}--{name})
             model_dir_name = "models--" + model_name.replace("/", "--")
             model_dir = hf_cache / model_dir_name
-            cached = model_dir.exists()
+            cached = ModelCacheManager(cache_dir=hf_cache).is_mlx_whisper_cached(model_name)
             elapsed = (time.monotonic() - t0) * 1000.0
             if cached:
                 return CheckResult(
@@ -596,7 +597,7 @@ class StartupDiagnostics:
             return CheckResult(
                 name="stt_model_cached",
                 status="warning",
-                message=f"STT модель {model_name} отсутствует в кэше — первый запуск займёт больше времени",
+                message=f"STT модель {model_name} отсутствует или неполна в кэше — требуется загрузка",
                 duration_ms=elapsed,
                 details={"model": model_name, "cached": False, "cache_dir": str(hf_cache)},
             )

@@ -665,6 +665,13 @@ class TestCheckSttModelCached(unittest.TestCase):
             hf_cache = Path(tmpdir) / ".cache" / "huggingface" / "hub"
             model_dir = hf_cache / "models--mlx-community--whisper-large-v3-turbo"
             model_dir.mkdir(parents=True)
+            revision = "a" * 40
+            (model_dir / "refs").mkdir()
+            (model_dir / "refs" / "main").write_text(revision)
+            snapshot = model_dir / "snapshots" / revision
+            snapshot.mkdir(parents=True)
+            (snapshot / "config.json").write_text("{}")
+            (snapshot / "weights.npz").write_bytes(b"test-weights")
 
             mock_settings = MagicMock()
             mock_settings.MODEL_BALANCED = "mlx-community/whisper-large-v3-turbo"
