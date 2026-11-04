@@ -172,3 +172,45 @@ incarnation; различие свежего claim и исторического
   и incarnation получателя. Владелец повторно использует существующие
   `CallSTTService` и `_GigaAMCallLease` только после изучения их границ, не
   подменяет их одним Future.done.
+
+## Следующий исследовательский срез: scoped terminal
+
+Локальные `243072d6`, `aeaeb814`, `4080306f` и `16a31805` добавили ограниченный
+claim, process-bound submit и наблюдение синхронного wrapper вместе с точным
+Future стандартного `ThreadPoolExecutor`. После claim общий статус остаётся
+UNKNOWN. Наблюдение не закрывает callbacks, потоки executor, дочерние процессы
+или асинхронную работу, отданную callable; оно не даёт production authority.
+
+Предложение независимого review, пока не реализация:
+
+1. Один actor владеет SQLite и заранее связывает journal ID, controller epoch,
+   claim ID, grant ID, executor incarnation и версию scope с конкретным
+   `LeafObservation`. Не принимать переданный клиентом `state=finished` или
+   произвольный observer как свидетельство; actor сам находит именно тот
+   observer, который был привязан к claim до submit.
+2. Разрешить только `FINISHED_CALLABLE_FUTURE` (finally wrapper и terminal
+   соответствующего Future, включая exception) и `CANCELLED_BEFORE_ENTRY`
+   (подтверждённая отмена до входа wrapper). `PENDING`, отсутствие связи,
+   неоднозначный submit и `UNKNOWN` не создают terminal. Позднее завершение
+   после неоднозначного submit не исцеляет его без отдельного reconciliation.
+3. Отдельная immutable terminal-запись и команда общего idempotency ledger
+   фиксируются одной транзакцией с уникальностью claim/scope. Стабильный ключ
+   повтора возвращает прежний receipt; конфликтующий payload и новая команда
+   для уже закрытого scope отвергаются. Не сохранять аудио, текст, результат
+   callable или сообщение исключения. Старый claim остаётся в истории.
+4. Даже сохранённый terminal — только scoped факт. Счётчики scoped terminal и
+   unsettled scoped claims не изменяют общий `outstanding_count/unknown` и
+   не предоставляют `drain_authority`. При прерывании до commit долг остаётся;
+   неоднозначный commit удерживает UNKNOWN; после подтверждённого commit
+   reopen остаётся inspection-only. Исторический receipt не является permit.
+5. Проверить подмену observer A для незавершённого claim B, чужую incarnation,
+   отмену очереди и попытку отменить уже работающий callable, а также crash до
+   commit, после commit и после действительного ACK. Дополнительно удержать
+   callback/descendant после scoped terminal и убедиться, что общий drain
+   не разрешён. Нужен отдельный независимый review окончательных blobs.
+
+Это не решение legacy bootstrap: старые Main MCP-процессы могут использовать
+локальный fallback и перезапускаются launchd, а Perceptor worker может пережить
+отмену await. До реального cutover нужны owner-controlled закрытие всех путей,
+учёт начатых работ и потомков, transport identity, fencing и проверка первого
+перехода. Прежний рискованный вариант пользователь не выбирал.
