@@ -14,11 +14,12 @@ class SubmitRefused(RuntimeError):
 class SyntheticExecutor:
     """Неизменяемая кооперативная локальная привязка к executor."""
 
-    __slots__ = ("_identity", "_executor", "_creator_pid")
+    __slots__ = ("_identity", "_executor", "_submit_method", "_creator_pid")
 
     def __init__(self, executor):
         object.__setattr__(self, "_identity", uuid.uuid4().hex)
         object.__setattr__(self, "_executor", executor)
+        object.__setattr__(self, "_submit_method", executor.submit)
         object.__setattr__(self, "_creator_pid", os.getpid())
 
     def __setattr__(self, name, value):
@@ -40,7 +41,7 @@ class SyntheticExecutor:
     def _submit(self, fn):
         if os.getpid() != self._creator_pid:
             raise SubmitRefused("Synthetic executor не используется после fork")
-        return self._executor.submit(fn)
+        return self._submit_method(fn)
 
 
 def submit_once(permit, scope, executor, fn):
