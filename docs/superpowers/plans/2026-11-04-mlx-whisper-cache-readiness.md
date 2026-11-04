@@ -68,6 +68,8 @@ backend/startup_diagnostics.py; tests/test_mlx_whisper_cache_readiness_2026_11_0
   reviewer независимо подтвердил 12/12 новых тестов.
 - Raw-логи, PER_FILE_RESULTS.json и PY312_RESULTS.json сохранены в локальном
   каталоге артефактов текущей Codex-сессии hf-cache-readiness/; в Git не входят.
-- Настоящий turbo snapshot остаётся без весов: кэш не исправлялся и не
-  скачивался. Runtime/STT readiness, IPC и inference не квалифицированы.
-  Публикации, hosted CI, merge и deploy этого изменения нет.
+- На source-checkpoint turbo snapshot оставался без весов: кэш не исправлялся
+  и не скачивался, inference не квалифицировался. Последующее отдельное
+  owner-approved восстановление и узкий ES probe записаны в
+  [runtime-карточке](2026-11-04-turbo-cache-recovery.md).
+  Публикации, hosted CI, merge и deploy этого source-изменения нет.

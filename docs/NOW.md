@@ -15,10 +15,29 @@
 - Causal RED получен; GREEN 197 тестов на Python 3.14, 117 на Python 3.12 без
   MLX, audit-all exit 0, независимое Astra/ultra review GO. Это наличие файлов,
   не проверка валидности весов или inference readiness.
-- Настоящий turbo cache остаётся config-only, без весов; загрузок, cache repair,
-  runtime/модельных изменений, публикации и deploy этого блока нет.
+- На source-checkpoint turbo cache был config-only, без весов. После отдельного
+  разрешения владельца 04.11 выполнено восстановление pinned weights и один ES
+  speech probe; см. [runtime-карточку](superpowers/plans/2026-11-04-turbo-cache-recovery.md).
+  Сам source-фикс остаётся локальным, без PR/hosted CI/merge/deploy.
 - Conductor-блок `be9f8a71` находится в отдельной ветке, не включён сюда.
   Октябрьские потоки ниже — исторические указатели без свежего ownership ACK.
+
+## Восстановление turbo 04.11, отдельный runtime scope
+
+- Владелец явно разрешил pinned weights + controlled cache repair + bounded
+  speech test; Main/Gateway подтвердили тихое окно. Публикация файлов считалась
+  допуском возможного model autoload, не обещанием global server drain.
+- `weights.safetensors`, revision `a4aaeec0636e6fef84abdcbe3544cb2bf7e9f6fb`,
+  1 613 977 612 B: staging полностью проверен по HF ETag/LFS SHA256. Аддитивная
+  публикация 20:35:42 CET под строгим UnixFileLock; refs/config/partial сохранены,
+  backup создан. Рестартов и смены настроек/model ID не было.
+- Один opt-in ES REST speech probe: HTTP 200 за 0.617 s, server STT 478 ms,
+  ожидаемая публичная синтезированная фраза распознана, actual model turbo.
+  Post-check: REST PID 27451/epoch прежние, tracked STT idle, worker inflight=0.
+  Это узкий успешный прогон, не полная runtime-квалификация и не global drain.
+- Sentry read-only receipt: последние возвращённые backend issues относятся
+  к утренним wake-word/shutdown событиям. Полнота ingress не доказана; их причины
+  восстановлением весов не закрыты. PSTN проверяется отдельно владельцем Gateway.
 
 ## База и runtime snapshot (source 2026-11-03, runtime read-back 03.11)
 
