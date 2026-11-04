@@ -1,5 +1,17 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 04.11: CI process-group ownership — локальный source-only gate
+
+Owned `codex/ear-ci-group-owner-1104`, база `6e2043fb` (#2159). Общий CI-helper
+удерживает отдельного session leader до group-kill, затем делает bounded reap.
+Два pipe сохраняют результат команды и обеспечивают cleanup при гибели parent;
+SIGCHLD/session/fd guards не допускают потерю владения и сигналы caller group.
+22 теста на Python 3.12 + 22 на 3.14, lint/diff check и Astra/Ultra re-review GO.
+Карточка: [CI group ownership](superpowers/plans/2026-11-04-ci-group-ownership.md).
+Ветка локальная: публикация ещё не разрешена, merge/deploy/restart не выполнялись.
+Ниже исторический snapshot 03.11; его PID и старые worktree-статусы не являются
+актуальным runtime read-back. Отдельные draft #2160–#2162 в эту ветку не входят.
+
 Обновлено: **2026-11-03** — база догнана до HEAD колеи `#2158`/`f6afd456`;
 волна lifecycle/agent/backend 02–03.11 (#2153–#2158). Python runtime не перезапускался.
 Одна страница: база, деплой-блокеры, активные потоки, баны.
