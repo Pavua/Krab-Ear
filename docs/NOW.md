@@ -11,7 +11,9 @@ RED шесть ложных `200` → GREEN шесть `503` + два silence `2
 Проверочный parent не сигналит после reap; финальный receipt только после cleanup.
 Независимое Astra/Ultra whole-diff review: GO после причинного закрытия teardown-P2.
 Карточка: [REST error-result](superpowers/plans/2026-11-04-rest-error-status.md).
-Публикация этой ветки ещё не разрешена; merge/deploy/restart не выполнялись.
+После отдельного разрешения владельца опубликован draft
+[#2162](https://github.com/Pavua/Krab-Ear/pull/2162), код `50c3adaa`;
+hosted CI выполняется. Merge/deploy/restart не выполнялись.
 Ни `503`, ни этот sandbox-прогон не доказывают общий server/nested-native drain.
 
 Ниже — исторический snapshot 03.11; PID/старые worktree-статусы не являются

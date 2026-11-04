@@ -11,6 +11,10 @@ Scope: source/tests/docs внутри Ear; no публикация/merge/deploy/
 настройки/модели/download/IPC/inference/phone. Sourcecache и текущийruntime
 восстановлены отдельной завершённой операцией; эта карточка их не меняет.
 
+Дополнение scope 04.11: владелец отдельно разрешил draft PR и hosted CI,
+без merge/deploy. Опубликован [#2162](https://github.com/Pavua/Krab-Ear/pull/2162),
+код `50c3adaa`; hosted CI ещё выполняется. Остальные границы сохранены.
+
 - [x] Existing isolated Flask regression harness из50cb: сначала RED на6e,
   ожидаемые шесть ошибочных HTTP200/history/metrics side effects, два silence200.
   /tmp/py312, -I-B, disposable HOME/TMP/data, OS networkdeny, provider/file/thread
