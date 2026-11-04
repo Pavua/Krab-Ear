@@ -69,6 +69,34 @@ class ModelCacheManager:
         folder = self._model_folder_name(model_name)
         return (self._cache_dir / folder).exists()
 
+    @staticmethod
+    def mlx_whisper_snapshot_has_files(snapshot: Path) -> bool:
+        """Файлы, которые читает mlx_whisper.load_model; без чтения весов/ML.
+
+        Это проверка наличия, не валидация содержимого или inference-ready.
+        Приоритет safetensors перед npz совпадает с загрузчиком MLX Whisper.
+        """
+        try:
+            config = snapshot / "config.json"
+            weights = snapshot / "weights.safetensors"
+            if not weights.exists():
+                weights = snapshot / "weights.npz"
+            return all(p.is_file() and p.stat().st_size > 0 for p in (config, weights))
+        except OSError:
+            return False  # Включая гонку с удалением кэша.
+
+    def is_mlx_whisper_cached(self, model_id: str) -> bool:
+        """Проверяет файлы текущего main snapshot, не произвольной старой ревизии."""
+        try:
+            from huggingface_hub import try_to_load_from_cache
+
+            config = try_to_load_from_cache(
+                model_id, "config.json", cache_dir=self._cache_dir, revision="main",
+            )
+            return isinstance(config, str) and self.mlx_whisper_snapshot_has_files(Path(config).parent)
+        except (ImportError, OSError, ValueError):
+            return False
+
     def list_cached_models(self) -> list[ModelInfo]:
         """Возвращает список всех кэшированных моделей.
 

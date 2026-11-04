@@ -1,5 +1,51 @@
 # NOW — что делать сейчас (Krab Ear)
 
+Обновлено **04.11.2026**. Текущий поток — единый Python release candidate
+`codex/ear-release-compose-1104` на базе `6e2043fb` (#2159).
+[Релизная карточка и гейты](superpowers/plans/2026-11-04-coordinated-python-release.md).
+
+## Четыре исходных source-фикса и релизная регрессия
+
+- [#2160](https://github.com/Pavua/Krab-Ear/pull/2160), `be9f8a71`:
+  MemoryConductor закрывает admission и атомарно регистрирует/запускает workers
+  относительно stop. [Карточка](superpowers/plans/2026-11-04-conductor-worker-stop.md).
+- [#2161](https://github.com/Pavua/Krab-Ear/pull/2161), `2c1d95a5`:
+  startup/downloader используют общий config + непустые выбранные веса predicate.
+  Это наличие файлов, не inference readiness.
+  [Карточка](superpowers/plans/2026-11-04-mlx-whisper-cache-readiness.md).
+- [#2162](https://github.com/Pavua/Krab-Ear/pull/2162), код `50c3adaa`, HEAD `1acf605c`:
+  engine error-result даёт REST 503 до history/metrics, privacy403 приоритетен,
+  легитимная тишина200 сохранена. [Карточка](superpowers/plans/2026-11-04-rest-error-status.md).
+- [#2163](https://github.com/Pavua/Krab-Ear/pull/2163), код `bdba89be`, HEAD `c8cee205`:
+  CI-helper удерживает session leader до group-kill/reap, cleanup при parent death
+  и исключениях, guards PID/PGID/SID, fd, SIGCHLD и status protocol.
+  [Карточка](superpowers/plans/2026-11-04-ci-group-ownership.md).
+- Дополнительный phonetic fix: curated seed мигрирует однократно, удалённая
+  запись не возвращается при чтении; backend и REST сериализуют запись через
+  bounded flock. 54 теста на каждой из Python 3.12/3.14, независимое source GO.
+  [Карточка](superpowers/plans/2026-11-04-phonetic-seed-migration.md).
+
+## Runtime и release gates
+
+- До нового cutover Python runtime остаётся `5a09e630`; Swift app в каноническом
+  dirty checkout не пересобирается и WIP не меняется.
+- 04.11 отдельно разрешены и выполнены pinned turbo weights recovery и один
+  ES REST speech probe: HTTP200/actual MLX turbo/0.617s, REST PID/epoch прежние.
+  [Факты и пределы](superpowers/plans/2026-11-04-turbo-cache-recovery.md).
+  Это не global drain и не Ear PSTN acceptance. Старое тихое окно истекло.
+- Владелец отдельно разрешил draft PR/CI, затем передал через текущий Gateway
+  scope merge/deploy готовых исправлений и повторный сложный звонок после
+  стабильности. Звонок единолично диспетчеризует Gateway после совместного GO.
+- Пока release HOLD: exact source/combined/post-merge CI, whole runtime-diff review,
+  Sentry/readiness, свежие Main FINISH и Gateway STT pause, recording/meeting idle,
+  passive Swift supervision, staged plist backups и rollback ещё надо подтвердить.
+  Применять существующий safe cutover; health200 не доказывает idle/drain.
+
+## Исторический snapshot 03.11
+
+Далее старые PID, статусы октябрьских worktrees и HOLD — исторические указатели,
+не текущий runtime read-back или разрешение общаться со старыми чатами.
+
 Обновлено: **2026-11-03** — база догнана до HEAD колеи `#2158`/`f6afd456`;
 волна lifecycle/agent/backend 02–03.11 (#2153–#2158). Python runtime не перезапускался.
 Одна страница: база, деплой-блокеры, активные потоки, баны.

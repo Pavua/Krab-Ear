@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -434,6 +435,105 @@ class StopDriverTest(unittest.TestCase):
             [],
             "stop() must wait for memory-conductor-worker threads",
         )
+
+    def test_event_bus_snapshot_cannot_spawn_after_stop(self):
+        """Уже снятый callback из emit-снимка не запускает работу после stop."""
+        from backend.event_bus import EventBus
+
+        c = _mk()
+        work_ran = threading.Event()
+        c._pressure_fn = lambda: work_ran.set() or 0
+        bus = EventBus()
+
+        def stop_and_detach(*_):
+            c.stop()
+            bus.remove_listener(c.handle_oom_event)
+
+        bus.add_listener(stop_and_detach)
+        bus.add_listener(c.handle_oom_event)
+        try:
+            bus.emit("krab_error", {"code": "mlx.oom"})
+            c.wait_workers(timeout=2.0)
+            self.assertFalse(work_ran.is_set(), "снятый callback запустил OOM-работу после stop")
+        finally:
+            c.stop()
+
+    def test_recording_callback_cannot_spawn_after_stop(self):
+        c = _mk(_settings(memory_conductor_enforce=False))
+        try:
+            c.stop()
+            c.on_recording_start()
+            c.wait_workers(timeout=2.0)
+            self.assertEqual(c.get_diagnostics()["residents"]["brain"]["would"], 0)
+        finally:
+            c.stop()
+
+    def test_explicit_start_reopens_worker_admission(self):
+        c = _mk(_settings(memory_conductor_enforce=False))
+        try:
+            c.stop()
+            c.start()
+            c.on_recording_start()
+            c.wait_workers(timeout=2.0)
+            self.assertEqual(c.get_diagnostics()["residents"]["brain"]["would"], 1)
+        finally:
+            c.stop()
+
+    def test_stop_waits_for_worker_whose_start_is_in_progress(self):
+        """Регистрация ещё не стартовавшего потока не должна давать ложный drain."""
+        c = _mk()
+        start_entered = threading.Event()
+        allow_start = threading.Event()
+        stop_requested = threading.Event()
+        stopped = threading.Event()
+        worker_finished = threading.Event()
+        errors = []
+        real_thread = threading.Thread
+
+        class PausedStartThread(real_thread):
+            def start(self):
+                start_entered.set()
+                if not allow_start.wait(timeout=3.0):
+                    raise RuntimeError("тест не отпустил старт воркера")
+                super().start()
+
+        def spawn():
+            try:
+                c._spawn(worker_finished.set)
+            except Exception as exc:
+                errors.append(exc)
+
+        def stop():
+            stop_requested.set()
+            c.stop()
+            stopped.set()
+
+        producer = real_thread(target=spawn)
+        stopper = real_thread(target=stop)
+        try:
+            with patch("backend.memory_conductor.threading.Thread", PausedStartThread):
+                producer.start()
+                self.assertTrue(start_entered.wait(timeout=2.0))
+                stopper.start()
+                self.assertTrue(stop_requested.wait(timeout=2.0))
+                self.assertFalse(
+                    stopped.wait(timeout=0.2),
+                    "stop() объявил drain до завершения принятого старта потока",
+                )
+                allow_start.set()
+                producer.join(timeout=2.0)
+                stopper.join(timeout=2.0)
+            self.assertFalse(producer.is_alive())
+            self.assertFalse(stopper.is_alive())
+            self.assertEqual(errors, [])
+            self.assertTrue(worker_finished.is_set())
+            self.assertTrue(stopped.is_set())
+        finally:
+            allow_start.set()
+            producer.join(timeout=3.0)
+            if stopper.ident is not None:
+                stopper.join(timeout=3.0)
+            c.stop()
 
 
 if __name__ == "__main__":

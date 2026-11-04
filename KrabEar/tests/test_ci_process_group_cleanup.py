@@ -13,6 +13,7 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RUNNER = REPO_ROOT / "scripts" / "run_isolated_pytest.py"
@@ -123,3 +124,169 @@ def test_termination_handler_defers_cleanup_until_process_group_is_known() -> No
     runner._termination_signal = None
     assert runner._mark_termination(signal.SIGTERM, None) is None
     assert runner._termination_signal == signal.SIGTERM
+
+
+@pytest.mark.parametrize("payload, expected", [
+    (b"0\n", 0), (b"255\n", 255), (b"999\n", 125),
+    (b"", 125), (b"0\nx", 125), (b"1", 125),
+])
+def test_cleanup_signals_before_reaping_its_group_leader(monkeypatch, payload, expected) -> None:
+    """После wait PID/PGID может стать чужим; держим leader до group cleanup."""
+    import os
+
+    runner = _load_runner_module()
+    runner._termination_signal = None
+    events = []
+
+    class Leader:
+        pid = 999999
+        returncode = None
+
+        def wait(self, timeout=None):
+            events.append("reap")
+            self.returncode = 0
+            return 0
+
+    leader = Leader()
+
+    def popen(*args, **kwargs):
+        # Новый keeper protocol. Настоящих subprocess/signal в этом тесте нет.
+        descriptors = kwargs.get("pass_fds", ())
+        if descriptors:
+            os.write(descriptors[0], payload)
+        return leader
+
+    def killpg(pid, signum):
+        assert pid == leader.pid
+        assert leader.returncode is None, "group ownership lost after reap"
+        events.append("signal")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+    monkeypatch.setattr(runner.os, "killpg", killpg)
+    assert runner.run_isolated(["synthetic-command"]) == expected
+    assert events == ["signal", "reap"]
+
+
+def test_auto_reaping_sigchld_fails_before_start(monkeypatch) -> None:
+    """SIGCHLD=IGN лишает parent гарантии резервирования PID даже без wait."""
+    import pytest
+
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner.signal, "getsignal", lambda signum: signal.SIG_IGN)
+    monkeypatch.setattr(runner.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("unsafe auto-reaping parent started a child"))
+    with pytest.raises(RuntimeError, match="SIGCHLD"):
+        runner.run_isolated(["synthetic-command"])
+
+
+def test_pipe_cannot_alias_standard_streams(monkeypatch) -> None:
+    import pytest
+
+    runner = _load_runner_module()
+    endpoints = iter(((0, 1), (2, 3)))
+    closed = []
+    monkeypatch.setattr(runner.os, "pipe", lambda: next(endpoints))
+    monkeypatch.setattr(runner.os, "close", closed.append)
+    monkeypatch.setattr(runner.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("stdio-aliasing pipe reached command launch"))
+    with pytest.raises(RuntimeError, match="stdio"):
+        runner.run_isolated(["synthetic-command"])
+    assert set(closed) == {0, 1, 2, 3}
+
+
+def test_internal_keeper_rejects_callers_process_group(monkeypatch) -> None:
+    import pytest
+
+    runner = _load_runner_module()
+    monkeypatch.setattr(runner.os, "getpid", lambda: 100)
+    monkeypatch.setattr(runner.os, "getpgrp", lambda: 99)
+    monkeypatch.setattr(runner.os, "getsid", lambda pid: 99)
+    monkeypatch.setattr(runner.subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("unowned keeper launched command"))
+    monkeypatch.setattr(runner.os, "killpg",
+                        lambda *a: pytest.fail("unowned keeper signalled caller group"))
+    with pytest.raises(RuntimeError, match="session leader"):
+        runner._run_group_leader(["synthetic-command"], 10, 11)
+
+
+def test_parent_sigkill_still_cleans_running_group(tmp_path: Path) -> None:
+    """Control EOF позволяет keeper завершить только свою группу после parent death."""
+    ready = tmp_path / "keeper-ready"
+    escaped = tmp_path / "unexpected-survivor"
+    code = (
+        "import pathlib,time; "
+        f"pathlib.Path({str(ready)!r}).write_text('ready'); "
+        "time.sleep(0.5); "
+        f"pathlib.Path({str(escaped)!r}).write_text('survived')"
+    )
+    runner = subprocess.Popen([sys.executable, str(RUNNER), sys.executable, "-c", code])
+    try:
+        assert _wait_for(ready), "owned command did not start"
+        runner.kill()
+        runner.wait(timeout=3)
+        time.sleep(0.65)
+        assert not escaped.exists(), "parent SIGKILL left the owned group running"
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+            runner.wait(timeout=2)
+
+
+def test_command_start_failure_returns_127() -> None:
+    result = subprocess.run(
+        [sys.executable, str(RUNNER), "/definitely-not-an-ear-test-command"],
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 127, result.stderr
+
+
+def test_failed_keeper_start_closes_own_pipe_descriptors(monkeypatch) -> None:
+    import os
+    import pytest
+
+    runner = _load_runner_module()
+    descriptors = []
+    real_pipe = os.pipe
+
+    def pipe():
+        pair = real_pipe()
+        descriptors.extend(pair)
+        return pair
+
+    def unavailable(*args, **kwargs):
+        raise OSError("synthetic keeper start failure")
+
+    monkeypatch.setattr(runner.os, "pipe", pipe)
+    monkeypatch.setattr(runner.subprocess, "Popen", unavailable)
+    with pytest.raises(OSError, match="synthetic keeper"):
+        runner.run_isolated(["synthetic-command"])
+    assert len(descriptors) == 4
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_keeper_status_write_failure_still_cleans_its_group(monkeypatch) -> None:
+    """Parent death между control check и status write не оставляет orphan."""
+    runner = _load_runner_module()
+    leader_pid = 999999
+    signals = []
+    monkeypatch.setattr(runner.os, "getpid", lambda: leader_pid)
+    monkeypatch.setattr(runner.os, "getpgrp", lambda: leader_pid)
+    monkeypatch.setattr(runner.os, "getsid", lambda pid: leader_pid)
+    monkeypatch.setattr(runner.select, "select", lambda *args: ([], [], []))
+
+    class FinishedCommand:
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: FinishedCommand())
+
+    def broken_write(*args):
+        raise BrokenPipeError("synthetic parent death at status write")
+
+    monkeypatch.setattr(runner.os, "write", broken_write)
+    monkeypatch.setattr(runner.os, "killpg", lambda *args: signals.append(args))
+    with pytest.raises(BrokenPipeError, match="synthetic parent death"):
+        runner._run_group_leader(["synthetic-command"], 10, 11)
+    assert signals == [(leader_pid, signal.SIGKILL)]
