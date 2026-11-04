@@ -231,6 +231,33 @@ class ReservationJournalTests(unittest.TestCase):
         with self.assertRaises(journal.JournalError):
             self.reserve("new-key")
 
+    def test_control_cannot_reopen_after_begin(self):
+        self.open_for_test()
+        self.reserve()
+        self.store.begin_maintenance("principal", "client-1", "begin", "epoch-1", 0)
+        self.store._connection.execute("UPDATE control SET admission='TEST_OPEN'")
+        self.store._connection.commit()
+        self.assertEqual(self.store._connection.execute("PRAGMA quick_check").fetchone(), ("ok",))
+        with self.assertRaises(journal.JournalError):
+            self.reserve("new-key")
+
+    def test_control_revision_requires_matching_begin_history(self):
+        self.open_for_test()
+        self.reserve()
+        self.store._connection.execute("UPDATE control SET control_revision=77")
+        self.store._connection.commit()
+        with self.assertRaises(journal.JournalError):
+            self.store.status()
+
+    def test_controller_epoch_cannot_change_without_history_transition(self):
+        self.open_for_test()
+        self.reserve()
+        self.store._connection.execute("UPDATE control SET controller_epoch='epoch-2'")
+        self.store._connection.commit()
+        self.assertEqual(self.store._connection.execute("PRAGMA quick_check").fetchone(), ("ok",))
+        with self.assertRaises(journal.JournalError):
+            self.store.acquire("principal", "client-1", "new-key", "epoch-2", "stt")
+
     def test_invalid_identifiers_and_kind_do_not_change_ledger(self):
         for key in ("", "a" * 129, "ключ", "bad space"):
             with self.subTest(key=key), self.assertRaises(journal.JournalError):

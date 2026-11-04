@@ -92,6 +92,8 @@ def _validate(connection: sqlite3.Connection, installation: str, *, allow_test_o
     ).fetchall()
     if len(entries) > _MAX_RECORDS:
         raise JournalError("Неподдерживаемый размер журнала")
+    history_admission = None
+    history_revision = 0
     for principal, incarnation, key, stored_operation, encoded, outcome, grant_id, result_revision in entries:
         for value in (principal, incarnation, key):
             _name(value)
@@ -109,13 +111,22 @@ def _validate(connection: sqlite3.Connection, installation: str, *, allow_test_o
         operation = payload.get("operation")
         if operation != stored_operation:
             raise JournalError("Несовпадающая операция записи")
-        _name(payload.get("controller_epoch"))
+        if _name(payload.get("controller_epoch")) != epoch:
+            raise JournalError("Epoch записи не соответствует control")
         if operation == "acquire":
             if (set(payload) != {"operation", "controller_epoch", "kind"}
                     or not isinstance(payload["kind"], str)
                     or payload["kind"] not in _ALLOWED_KINDS
                     or outcome not in {"RESERVED", "DENIED_CLOSED"}):
                 raise JournalError("Неизвестное решение acquire")
+            if outcome == "RESERVED":
+                if history_admission == "CLOSED":
+                    raise JournalError("Acquire после закрытия")
+                history_admission = "TEST_OPEN"
+            else:
+                if history_admission == "TEST_OPEN":
+                    raise JournalError("Отказ при открытом допуске")
+                history_admission = "CLOSED"
         elif operation == "begin":
             expected = payload.get("expected_revision")
             if (set(payload) != {"operation", "controller_epoch", "expected_revision"}
@@ -123,6 +134,15 @@ def _validate(connection: sqlite3.Connection, installation: str, *, allow_test_o
                     or outcome not in {"CLOSED", "ALREADY_CLOSED"}
                     or result_revision != expected + (outcome == "CLOSED")):
                 raise JournalError("Неизвестное решение begin")
+            if expected != history_revision:
+                raise JournalError("Revision begin не соответствует истории")
+            if outcome == "CLOSED":
+                if history_admission == "CLOSED":
+                    raise JournalError("Повторное закрытие без reopen")
+                history_revision += 1
+            elif history_admission == "TEST_OPEN":
+                raise JournalError("ALREADY_CLOSED при открытом допуске")
+            history_admission = "CLOSED"
         else:
             raise JournalError("Неизвестная операция")
         if outcome == "RESERVED":
@@ -133,6 +153,10 @@ def _validate(connection: sqlite3.Connection, installation: str, *, allow_test_o
                 raise JournalError("Неизвестный grant") from exc
         elif grant_id is not None:
             raise JournalError("Неожиданный grant")
+        if result_revision != history_revision:
+            raise JournalError("Revision записи не соответствует истории")
+    if revision != history_revision or (history_admission is not None and admission != history_admission):
+        raise JournalError("Control не соответствует истории")
     if admission == "TEST_OPEN" and not allow_test_open:
         raise RecoveryRequired("TEST_OPEN требует отдельного восстановления")
     return epoch, revision, admission
