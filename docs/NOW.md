@@ -1,5 +1,22 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## 04.11: REST error-result — локальный source-only gate
+
+Owned `codex/ear-rest-errors-1104`, база `6e2043fb` (#2159). Восстановлен
+существующий механизм из `50cbcdc3`/`c9e62600`: engine error-result возвращает
+`503/stt_failed` до history/успешных metrics; privacy `403` сохраняет приоритет,
+нормальный пустой результат остаётся `200`. Actual Flask upload/executor:
+RED шесть ложных `200` → GREEN шесть `503` + два silence `200`, восемь workers
+завершены; синтетический STT leaf, без моделей/сети/live runtime.
+Проверочный parent не сигналит после reap; финальный receipt только после cleanup.
+Независимое Astra/Ultra whole-diff review: GO после причинного закрытия teardown-P2.
+Карточка: [REST error-result](superpowers/plans/2026-11-04-rest-error-status.md).
+Публикация этой ветки ещё не разрешена; merge/deploy/restart не выполнялись.
+Ни `503`, ни этот sandbox-прогон не доказывают общий server/nested-native drain.
+
+Ниже — исторический snapshot 03.11; PID/старые worktree-статусы не являются
+текущим runtime read-back. Отдельные draft #2160/#2161 не входят в эту ветку.
+
 Обновлено: **2026-11-03** — база догнана до HEAD колеи `#2158`/`f6afd456`;
 волна lifecycle/agent/backend 02–03.11 (#2153–#2158). Python runtime не перезапускался.
 Одна страница: база, деплой-блокеры, активные потоки, баны.
