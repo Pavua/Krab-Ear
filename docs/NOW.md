@@ -4,7 +4,7 @@
 `codex/ear-release-compose-1104` на базе `6e2043fb` (#2159).
 [Релизная карточка и гейты](superpowers/plans/2026-11-04-coordinated-python-release.md).
 
-## Четыре source-фикса
+## Четыре исходных source-фикса и релизная регрессия
 
 - [#2160](https://github.com/Pavua/Krab-Ear/pull/2160), `be9f8a71`:
   MemoryConductor закрывает admission и атомарно регистрирует/запускает workers
@@ -20,6 +20,10 @@
   CI-helper удерживает session leader до group-kill/reap, cleanup при parent death
   и исключениях, guards PID/PGID/SID, fd, SIGCHLD и status protocol.
   [Карточка](superpowers/plans/2026-11-04-ci-group-ownership.md).
+- Дополнительный phonetic fix: curated seed мигрирует однократно, удалённая
+  запись не возвращается при чтении; backend и REST сериализуют запись через
+  bounded flock. 54 теста на каждой из Python 3.12/3.14, независимое source GO.
+  [Карточка](superpowers/plans/2026-11-04-phonetic-seed-migration.md).
 
 ## Runtime и release gates
 

@@ -6,16 +6,21 @@
     list_phonetic_entries — получить все записи
     remove_phonetic_entry — удалить по canonical
 
-Формат файла: {"entries": [{"canonical": str, "variants": [str, ...]}], "updated_at": "ISO8601"}
+Формат файла: entries, updated_at и версия однократной curated-seed миграции.
 
-Атомарная запись (tmp → replace), потокобезопасность через threading.Lock.
+Атомарная запись (tmp → replace), thread lock + bounded межпроцессный flock.
 """
 
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+import fcntl
 import logging
+import os
+import stat
 import threading
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List
@@ -28,10 +33,12 @@ _PHONETIC_VOCAB_FILENAME = "phonetic_vocab.json"
 _MAX_ENTRIES = 200
 _MAX_VARIANT_LEN = 200
 _MAX_CANONICAL_LEN = 200
+_CURATED_SEED_VERSION = 1
+_STORE_LOCK_TIMEOUT_SEC = 2.0
 
 # Кураторский seed (W4, утверждён владельцем 17.09 + golden 2026-11-02):
 # пары «вариант → канон». Первый запуск пишет файл целиком; существующий
-# файл получает только недостающие варианты и новые каноны (не W4-удаления).
+# файл однократно получает недостающие варианты/новые каноны (не W4-удаления).
 # Сознательно НЕ включены `maby` (легитимное EN "maybe") и `war`→`work`.
 _DEFAULT_ENTRIES: list[dict] = [
     {"canonical": "openclaw", "variants": ["openclow", "open clow", "open clevel"]},
@@ -130,6 +137,7 @@ class PhoneticVocabService:
 
     def __init__(self, data_dir: Path) -> None:
         self._path = data_dir / _PHONETIC_VOCAB_FILENAME
+        self._lock_path = data_dir / "phonetic_vocab.lock"
         data_dir.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         # После clear_all (privacy-purge) авто-seed в этом процессе подавлен,
@@ -138,36 +146,70 @@ class PhoneticVocabService:
 
     # ── Storage ──────────────────────────────────────────────────────────────
 
-    def _load(self) -> List[dict]:
-        """Загружает список записей с диска. Пустой список при ошибке."""
+    @contextmanager
+    def _locked_store(self):
+        """Одна read-modify-write секция для backend и REST; без fail-open."""
+        with self._lock:
+            fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                    raise OSError("phonetic vocabulary lock must be an owned regular file")
+                deadline = time.monotonic() + _STORE_LOCK_TIMEOUT_SEC
+                while True:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("phonetic vocabulary store lock unavailable")
+                        time.sleep(0.01)
+                yield
+            finally:
+                # close освобождает flock. Пустой lock-файл не unlink: inode общий.
+                os.close(fd)
+
+    def _load_document(self) -> dict | None:
+        """Читает store с метаданными; None при ошибке, без перезаписи данных."""
         if not self._path.exists():
-            return []
+            return {"entries": []}
         try:
             raw = self._path.read_text(encoding="utf-8")
         except OSError as exc:
             logger.warning("phonetic_vocab.json: не удалось прочитать: %s", exc)
-            return []
+            return None
         payload = safe_json_loads(raw, default=None, context="phonetic_vocab.json")
         if not isinstance(payload, dict):
             logger.warning("phonetic_vocab.json: неожиданный формат, возвращаем пустой список")
-            return []
+            return None
         entries = payload.get("entries", [])
         if not isinstance(entries, list):
             logger.warning("phonetic_vocab.json: поле 'entries' не список")
-            return []
-        return [
+            return None
+        payload["entries"] = [
             e for e in entries
             if isinstance(e, dict)
             and isinstance(e.get("canonical"), str) and e["canonical"].strip()
             and isinstance(e.get("variants"), list)
         ]
+        return payload
 
-    def _save(self, entries: List[dict]) -> None:
-        """Атомарная запись (tmp → replace)."""
-        payload = {
+    def _load(self) -> List[dict]:
+        """Загружает список записей с диска. Пустой список при ошибке."""
+        payload = self._load_document()
+        return payload["entries"] if payload is not None else []
+
+    def _save(self, entries: List[dict], *, seed_version: int | None = None) -> None:
+        """Атомарная запись (tmp → replace) с сохранением seed/прочих метаданных."""
+        payload = self._load_document()
+        if payload is None:
+            raise RuntimeError("phonetic_vocab.json: отказ перезаписывать непрочитанный store")
+        payload.update({
             "entries": entries,
             "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        }
+        })
+        if seed_version is not None:
+            payload["curated_seed_version"] = seed_version
         tmp = self._path.with_suffix(".json.tmp")
         try:
             tmp.write_text(
@@ -183,25 +225,35 @@ class PhoneticVocabService:
     # ── Public read API (called by engine.py via provider callback) ──────────
 
     def ensure_seeded(self) -> None:
-        """Кладёт кураторский seed на первом запуске и доливает новые варианты.
+        """Кладёт seed на первом запуске и однократно обновляет старый store.
 
         Существующий файл не затирается: пользовательские записи остаются,
         удалённые W4-каноны не воскрешаются, clear_all уважается.
         """
-        with self._lock:
-            if self._seed_suppressed:
-                return
-            if not self._path.exists():
-                self._save(_default_entries())
-                logger.info(
-                    "PhoneticVocab: засеяно %d дефолтных записей",
-                    len(_DEFAULT_ENTRIES),
-                )
-                return
-            entries = self._load()
-            if _merge_curated_defaults(entries):
-                self._save(entries)
-                logger.info("PhoneticVocab: долит кураторские варианты в существующий store")
+        with self._locked_store():
+            self._ensure_seeded_locked()
+
+    def _ensure_seeded_locked(self) -> None:
+        """Вызывать под _lock; remove мигрирует до удаления в той же секции."""
+        if self._seed_suppressed:
+            return
+        if not self._path.exists():
+            self._save(_default_entries(), seed_version=_CURATED_SEED_VERSION)
+            logger.info("PhoneticVocab: засеяно %d дефолтных записей", len(_DEFAULT_ENTRIES))
+            return
+        payload = self._load_document()
+        if payload is None:
+            return
+        version = payload.get("curated_seed_version", 0)
+        if type(version) is not int or version < 0:
+            logger.warning("phonetic_vocab.json: неверная версия curated seed, миграция пропущена")
+            return
+        if version >= _CURATED_SEED_VERSION:
+            return
+        entries = payload["entries"]
+        _merge_curated_defaults(entries)
+        self._save(entries, seed_version=_CURATED_SEED_VERSION)
+        logger.info("PhoneticVocab: однократная миграция curated seed завершена")
 
     def get_entries(self) -> List[dict]:
         """Возвращает текущий список записей (thread-safe).
@@ -209,8 +261,8 @@ class PhoneticVocabService:
         На первом запуске (файл отсутствует) предварительно засевает
         кураторские записи — см. ensure_seeded().
         """
-        self.ensure_seeded()
-        with self._lock:
+        with self._locked_store():
+            self._ensure_seeded_locked()
             return self._load()
 
     def clear_all(self) -> None:
@@ -219,7 +271,7 @@ class PhoneticVocabService:
         Идемпотентен — не бросает исключений если файл уже отсутствует.
         Подавляет авто-seed в текущем процессе (не воскрешаем словарь).
         """
-        with self._lock:
+        with self._locked_store():
             self._seed_suppressed = True
             try:
                 self._path.unlink(missing_ok=True)
@@ -268,7 +320,7 @@ class PhoneticVocabService:
                 )
             clean_variants.append(v.strip())
 
-        with self._lock:
+        with self._locked_store():
             entries = self._load()
             if len(entries) >= _MAX_ENTRIES and not any(
                 e["canonical"].lower() == canonical.lower() for e in entries
@@ -327,7 +379,9 @@ class PhoneticVocabService:
             raise ValueError("Параметр 'canonical' обязателен")
         canonical = canonical.strip()
 
-        with self._lock:
+        with self._locked_store():
+            if self._path.exists():
+                self._ensure_seeded_locked()
             entries = self._load()
             before = len(entries)
             entries = [e for e in entries if e["canonical"].lower() != canonical.lower()]

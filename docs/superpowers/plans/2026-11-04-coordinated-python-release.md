@@ -14,6 +14,14 @@ clone/OrbStack/VPN, вмешательство в неизвестные про�
 без изменений. Все шесть production/helper файлов byte-identical исходным
 reviewed heads. Карточки отдельных фиксов содержат RED/GREEN и review evidence.
 
+Whole runtime-diff review выявил дополнительную регрессию phonetic seed:
+успешное удаление новой curated-записи отменялось следующим чтением. Добавлены
+однократная versioned миграция и bounded межпроцессный flock для двух writers
+(backend/REST). 54 теста на каждой из Python 3.12/3.14, включая два реальных
+процесса; независимый review дал source GO. Подробности в
+[карточке](2026-11-04-phonetic-seed-migration.md). Это дополнительное изменение
+runtime candidate; исходные шесть production/helper файлов четырёх веток сохранены.
+
 Итоговый release требует отдельного exact combined CI и post-merge CI. Green
 одного исходного PR не является приёмкой комбинации. До terminal результатов
 merge/cutover HOLD. Дополнительно сильное read-only ревью фактического Python
@@ -73,6 +81,11 @@ Swift app/бинарники общего dirty checkout не пересобир
 нового idle gate: новая диктовка/UNKNOWN запрещает автоматическое завершение.
 При частично заменённых plist не запускать смешанную пару; verify bundle,
 восстановить оба before и порядок backend→REST, затем exact SHA/PID/smoke.
+
+Старый `5a09e630` читает новый phonetic JSON, однако его CRUD удаляет metadata
+версии seed. Если после отката редактировался словарь, повторное обновление
+требует отдельной проверки marker и пользовательских удалений. Автоматически
+восстанавливать старый snapshot entries нельзя: это затрёт новые правки.
 
 ## Состояние подготовки
 
