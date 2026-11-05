@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# safe_backend_restart.command — рестарт IPC-бэкенда БЕЗ убийства живой диктовки.
+# safe_backend_restart.command — idle-проверка; рестарт без fence запрещён.
 #
 # Инцидент 2026-07-22 02:05 CEST: деплой сделал `launchctl kickstart -k` в
 # момент, когда владелец диктовал через GUI → сокет умер под записью → две
 # диктовки потеряны с «Backend не ответил за таймаут». Аудио живёт в памяти
 # backend-процесса — kickstart под активной записью теряет его безвозвратно.
 #
-# Скрипт спрашивает get_recording_state / get_meeting_live_state через IPC и
-# отказывается рестартовать, пока идёт запись или живая встреча (можно ждать
-# с --wait). Отсутствующий/неотвечающий сокет — UNKNOWN, не разрешение
-# убивать процесс. Восстановление неизвестного endpoint требует отдельного
-# осознанного действия владельца; автоматический recovery здесь запрещён.
+# Скрипт спрашивает get_recording_state / get_meeting_live_state через IPC.
+# Idle-снимок не закрывает доступ новым запросам/записи после проверки и не
+# подтверждает drain. Поэтому обычный рестарт сейчас всегда отказывает;
+# --check-only сообщает только снимок. Восстановление неизвестного endpoint
+# и безопасный cutover требуют отдельно квалифицированного механизма.
 #
 # ИСПОЛЬЗОВАНИЕ:
-#   scripts/safe_backend_restart.command            # backend, отказ при записи
+#   scripts/safe_backend_restart.command            # отказ: нет admission fence
 #   scripts/safe_backend_restart.command --wait 120 # ждать окончания до 120с
-#   scripts/safe_backend_restart.command --with-rest# + рестарт REST-юнита
+#   scripts/safe_backend_restart.command --with-rest# тот же безопасный отказ
 #   scripts/safe_backend_restart.command --check-only # только idle-проба, без рестарта
 #
 # ⚠️ ВНЕШНИЙ КОНТРАКТ: скрипт вызывается лаунчерами Voice Gateway (их PR #113,
@@ -25,17 +25,31 @@
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
-SOCK="$HOME/Library/Application Support/KrabEar/krabear.sock"
-BACKEND_UNIT="gui/$(id -u)/ai.krab.ear.backend"
-REST_UNIT="gui/$(id -u)/ai.krab.ear.rest"
-
 WAIT_SEC=0
-WITH_REST=0
 CHECK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --wait) WAIT_SEC="${2:-60}"; shift 2 ;;
-    --with-rest) WITH_REST=1; shift ;;
+    --wait)
+      if [ "$#" -lt 2 ]; then
+        echo "invalid --wait: expected nonnegative integer seconds" >&2
+        exit 2
+      fi
+      WAIT_VALUE="$2"
+      case "$WAIT_VALUE" in
+        ''|*[!0-9]*) echo "invalid --wait: expected nonnegative integer seconds" >&2; exit 2 ;;
+      esac
+      if [ "${#WAIT_VALUE}" -gt 10 ]; then
+        echo "invalid --wait: value too large" >&2
+        exit 2
+      fi
+      WAIT_SEC=$((10#$WAIT_VALUE))
+      if [ "$WAIT_SEC" -gt 2147483647 ]; then
+        echo "invalid --wait: value too large" >&2
+        exit 2
+      fi
+      shift 2
+      ;;
+    --with-rest) shift ;;
     --check-only) CHECK_ONLY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -146,26 +160,5 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   exit 0
 fi
 
-echo "[safe-restart] kickstart $BACKEND_UNIT"
-launchctl kickstart -k "$BACKEND_UNIT"
-
-# Ожидание готовности: ping до 60с (warmup тяжёлых моделей идёт дольше, но
-# сокет поднимается раньше; нам важна IPC-доступность для GUI).
-# REST поднимаем ТОЛЬКО после ping: параллельный kickstart даёт новому REST
-# закэшировать bridge-токен до того, как новый backend допишет файл → 401
-# на /internal/event (SSE/тосты молчат).
-for _ in $(seq 1 30); do
-  sleep 2
-  RESP=$(ipc_call ping)
-  if [ -n "$RESP" ] && printf '%s' "$RESP" | grep -q '"ok": true'; then
-    NEW_PID=$(launchctl print "$BACKEND_UNIT" 2>/dev/null | grep -m1 'pid = ' | tr -dc '0-9')
-    echo "[safe-restart] OK: backend жив (pid=${NEW_PID:-?}), IPC ping ok."
-    if [ "$WITH_REST" -eq 1 ]; then
-      echo "[safe-restart] kickstart $REST_UNIT (после IPC ping)"
-      launchctl kickstart -k "$REST_UNIT"
-    fi
-    exit 0
-  fi
-done
-echo "FAIL: backend не ответил на ping за 60с после рестарта." >&2
+echo "REFUSED: idle-снимок не подтверждает admission fence и drain; рестарт запрещён." >&2
 exit 1
