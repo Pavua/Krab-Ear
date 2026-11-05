@@ -181,6 +181,9 @@ def adopt_external_singletons(
         )
 
     g = globals()
+    # Принадлежность процесса нельзя отменить освобождением зависимостей:
+    # поздний timeout callback всё ещё может выполняться в backend.
+    g["_external_process_owner_seen"] = True
     for name in _ADOPTABLE_NAMES:
         g[name] = incoming[name]
     g["_singletons_adopted"] = True
@@ -694,7 +697,10 @@ def _exit_poisoned_rest_process(exit_code: int) -> None:
     самоубийство запрещено: остаёмся с отравленным MLX-локом до штатного
     рестарта — деградация STT предпочтительнее потери записи владельца.
     """
-    if bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)):
+    if (
+        bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False))
+        or globals().get("_external_process_owner_seen") is not False
+    ):
         logger.error(
             "REST transcribe timeout: MLX-локом, возможно, владеет зависший "
             "поток, но процесс НЕ завершается — REST работает внутри backend, "
@@ -900,6 +906,9 @@ _OWN_SINGLETONS: dict[str, _Any] = {
     "tts_service": tts_service,
 }
 _singletons_adopted = False
+# Sticky process identity: once embedded, this process must never self-exit
+# through the standalone REST timeout path, even after dependencies are released.
+_external_process_owner_seen = False
 
 
 def _propagate_hf_token_to_env() -> None:
