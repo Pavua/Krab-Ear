@@ -260,6 +260,20 @@ def test_inspection_without_grants_is_still_unknown_after_reopen():
             reopened.close()
 
 
+def test_open_state_reopen_requires_recovery_without_issuing_a_permit():
+    with tempfile.TemporaryDirectory(prefix="ear-open-recovery-") as directory:
+        path = Path(directory) / "lab.sqlite3"
+        store = journal.create_claim_journal(path, "inst", "epoch")
+        try:
+            store._connection.execute("UPDATE control SET admission='TEST_OPEN'")
+            store._connection.commit()
+            store.reserve_leaf("p", "inc", "reserve", "epoch", "exec", "stt")
+        finally:
+            store.close()
+        with pytest.raises(journal.RecoveryRequired):
+            journal.open_claim_journal(path, "inst")
+
+
 def test_forged_sealed_control_without_ledger_fails_validation(opened_journal):
     store = opened_journal
     store._connection.execute("UPDATE control SET admission='SEALED'")
