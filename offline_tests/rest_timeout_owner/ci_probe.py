@@ -139,7 +139,8 @@ def _backend(rest, scratch, *, setup_failure=False, mutation=None):
     assert settings.REST_IN_PROCESS_ENABLED is False
     store = StateStore(scratch / "data")
     store.save_settings({"rest_in_process_enabled": True, "stt_warmup_on_startup": False,
-                         "rewriter_warmup_on_startup": False})
+                         "rewriter_warmup_on_startup": False,
+                         "binary_drift_check_on_startup": False})
     events, patches = _instrument(rest)
     server = MagicMock(name="fake_inprocess_server")
     standalone_engine = rest.engine
