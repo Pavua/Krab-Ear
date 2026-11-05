@@ -139,12 +139,28 @@ class WarnBatcher:
             return
         latest = batch[-1]
         count = len(batch)
+        # Delivery can be delayed until shutdown. Preserve the original warning
+        # range independently of Sentry's event timestamp (the flush time).
+        # Naive timestamps mean UTC, matching KrabError's IPC serializer.
+        timestamps = [
+            (err.timestamp.replace(tzinfo=timezone.utc)
+             if err.timestamp.tzinfo is None else err.timestamp).astimezone(timezone.utc)
+            for err in batch
+        ]
         summary = f"[warn batch x{count}] {latest.message_debug}"
         self._sentry.capture_message(
             summary,
             level="warning",
             tags={"phase": "b", "code": code, "component": latest.component},
-            extras={"count": count, **latest.context},
+            extras={
+                "count": count,
+                **latest.context,
+                "warn_batch": {
+                    "first_error_at": min(timestamps).isoformat(),
+                    "last_error_at": max(timestamps).isoformat(),
+                    "flushed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            },
         )
 
 

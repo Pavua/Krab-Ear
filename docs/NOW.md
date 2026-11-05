@@ -1,5 +1,15 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## Source update — 2026-11-05: warning batch provenance
+
+ErrorBus retains original warning timestamps in reserved Sentry extras
+`warn_batch.first_error_at` / `last_error_at` (UTC range) and `flushed_at`.
+This distinguishes delayed delivery from a newly occurring warning without
+changing batching, outbound caps, dedupe or IPC. Four causal regression
+cases, 52 named Python3.12 tests, standard no-MLX parity and independent
+source review passed. This source change does not qualify a runtime rollout;
+the admission/drain and shutdown gates below remain in force.
+
 Обновлено **04.11.2026**. Текущий поток — единый Python release candidate
 `codex/ear-release-compose-1104` на базе `6e2043fb` (#2159).
 [Релизная карточка и гейты](superpowers/plans/2026-11-04-coordinated-python-release.md).
