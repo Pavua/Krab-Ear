@@ -23,6 +23,7 @@ jobs:
           filters: |
             swift:
               - 'native/**'
+              - 'offline_tests/call_assist_ui/**'
               - '.github/workflows/ci.yml'
               - '.github/workflows/krabear-ci.yml'
 
@@ -277,6 +278,10 @@ jobs:
           cd native/KrabEarAgent
           swift build --build-tests
           swift test --skip-build --filter "WiringTests|SourceContract|PlaintextExportCoordinatorTests|HistoryMigrationObservationCoordinatorTests|HistoryEncryptionOutcomesTests|SecuritySettingsWiringContractTests|EncryptionToggleUnknownStateTests|PasteService.*Tests|PasteFailureNotificationTests|InputAutomationIntegrationTests|SelectionInputQueueTests|StreamingPasteControllerTests|HealthMonitorTests|ProbeSSERecoveryTests|SSESubscriptionRecoveryTests|SSESubscriptionLoopbackTests|RealtimePartialSSERecoveryTests|RealtimeOverlayTailTests|StreamingPasteSSERecoveryTests"
+
+      - name: Call Assist refusal Swift harness
+        timeout-minutes: 5
+        run: python3 offline_tests/call_assist_ui/test_response_state_swift.py
 
   public-runner-isolation-guard:
     name: Public runner isolation guard

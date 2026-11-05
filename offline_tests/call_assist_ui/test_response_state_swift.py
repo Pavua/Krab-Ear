@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import subprocess
+import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,3 +141,13 @@ print("PASS")
     run_result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15, env=env)
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
     assert run_result.stdout.strip() == "PASS"
+
+
+if __name__ == "__main__":
+    for label, test in (
+        ("state", test_refusal_notifies_without_replacing_state_and_success_still_applies),
+        ("start", test_start_only_saves_settings_after_an_accepted_response),
+    ):
+        with tempfile.TemporaryDirectory(prefix="call-assist-swift-") as temp_dir:
+            test(Path(temp_dir))
+        print(f"PASS {label}")
