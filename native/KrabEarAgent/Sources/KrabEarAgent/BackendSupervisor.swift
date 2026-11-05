@@ -10,8 +10,8 @@ import Foundation
 
 /// Режим супервизии backend'а.
 enum SupervisionMode {
-    /// Swift сам управляет lifecycle: спавнит child, чистит socket, respawn'ит.
-    /// Используется для standalone developer flow без установленного Variant B.
+    /// Swift запускает child в standalone developer flow без Variant B.
+    /// Автоматическое восстановление при неудачном ping временно отложено.
     case active
 
     /// Variant B `ai.krab.ear.backend` bootstrapped в launchd. Swift только
@@ -29,10 +29,9 @@ enum BackendRestartOutcome: Equatable {
     /// `isBackendAlive()` подтвердил живой backend с первой проверки — ложная
     /// тревога вызывающего (обычно более тугой таймаут пинга у HealthMonitor).
     case alreadyAlive
-    /// Backend не ответил первой проверке; дождались восстановления (launchd
-    /// respawn в passive, собственный respawn в active).
+    /// Backend не ответил первой проверке; дождались восстановления в passive.
     case recovered
-    /// Восстановить не удалось (лимит попыток в active, таймаут ожидания в passive).
+    /// Восстановление отложено в active или ожидание не удалось в passive.
     case failed
 }
 
@@ -275,9 +274,9 @@ final class BackendSupervisor: @unchecked Sendable {
 
     /// Перезапускает backend, если он мёртв, и honestly сообщает, что произошло.
     ///
-    /// В active режиме ограничен `maxConsecutiveRestarts` попытками подряд,
-    /// чтобы не зациклить перезапуски при системном OOM. В passive режиме
-    /// полагается на launchd KeepAlive и только ждёт восстановления.
+    /// В active режиме автоматический lifecycle отложен до общего admission/drain:
+    /// неответивший ping не доказывает, что дочерний процесс не обрабатывает данные.
+    /// В passive режиме полагается на launchd KeepAlive и только ждёт восстановления.
     ///
     /// `.alreadyAlive` — намеренно ОТДЕЛЕНО от `.recovered`. Живой инцидент
     /// 2026-08-03: `HealthMonitor` пингует с таймаутом 2с; под нагрузкой (load
@@ -306,29 +305,9 @@ final class BackendSupervisor: @unchecked Sendable {
             }
 
         case .active:
-            stateLock.lock()
-            // Wave 59: cooldown reset — если прошло >= restartCooldownSec с
-            // последней попытки, обнуляем счётчик. Backend получает свежий
-            // бюджет на maxConsecutiveRestarts попыток после периода тишины.
-            if let lastAttempt = lastRestartAttemptAt,
-               Date().timeIntervalSince(lastAttempt) >= restartCooldownSec {
-                consecutiveRestarts = 0
-            }
-            guard consecutiveRestarts < Self.maxConsecutiveRestarts else {
-                stateLock.unlock()
-                return .failed
-            }
-            consecutiveRestarts += 1
-            lastRestartAttemptAt = Date()
-            stateLock.unlock()
-
-            stopBackend()
-            do {
-                try ensureBackendRunning()
-                return .recovered
-            } catch {
-                return .failed
-            }
+            // Нельзя останавливать child по одному ping: запись или внешний
+            // запрос могут продолжаться. Пока общего drain нет, отказываем.
+            return .failed
         }
     }
 
