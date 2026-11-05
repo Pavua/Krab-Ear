@@ -331,8 +331,8 @@ final class WakeWordPoller {
                 // записью), но гейт держим и здесь: цена ошибки несимметрична —
                 // отложенное лечение wake word обратимо (эскалация придёт
                 // следующим тиком), убитая диктовка — нет. `pausedReasons`
-                // непуст ровно во время записи/разговора/privacy, то есть
-                // именно тогда, когда рестарт разрушителен.
+                // отражает известную локальную активность, но не другие
+                // клиенты и не все промежуточные состояния старта записи.
                 let escalationBlocked = !self.pausedReasons.isEmpty
                 if escalationBlocked && wedged {
                     AgentLogger.shared.info(
@@ -342,24 +342,23 @@ final class WakeWordPoller {
                     wedged: wedged, now: ProcessInfo.processInfo.systemUptime
                 ) {
                     AgentLogger.shared.warn(
-                        "[WakeWord] backend сообщил wedged — эскалация: принудительный рестарт backend")
+                        "[WakeWord] backend сообщил wedged — проверяем возможность восстановления")
                     self.onWedgedEscalation?()
                     return
                 }
-                // Give-up: кап подряд-эскалаций исчерпан, wedged держится —
-                // рестарты не лечат (restart-immune микрофон), уведомляем
-                // один раз и ждём ручного вмешательства.
+                // Кап проверок исчерпан, wedged держится — уведомляем один
+                // раз. Защитный supervisor мог отложить все рестарты.
                 if wedged && self.wedgedTracker.exhausted && !self.gaveUpNotified {
                     self.gaveUpNotified = true
                     AgentLogger.shared.warn(
-                        "[WakeWord] wedged держится после \(WedgedEscalationTracker.maxConsecutive) рестартов — авто-рестарты остановлены до ручного вмешательства")
+                        "[WakeWord] wedged сохраняется после \(WedgedEscalationTracker.maxConsecutive) проверок восстановления")
                     self.onWedgedGiveUp?()
                     return
                 }
                 // Пока backend объявил wedged — НЕ респавним слушатель:
                 // start() сбросил бы wedged и замаскировал эскалацию, а
                 // рестарт треда этот класс клина не лечит (живое
-                // свидетельство 13-07). Лечение — kickstart по эскалации.
+                // свидетельство 13-07). Эскалация передаётся supervisor-у.
                 if !running && !wedged {
                     self.sendStart(force: false)
                 }

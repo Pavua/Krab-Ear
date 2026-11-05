@@ -344,7 +344,7 @@ final class BackendSupervisor: @unchecked Sendable {
     /// `BackendService` в одном процессе). Тот же фикс уже применён к
     /// `ai.krab.ear.backend.plist.template` (passive/launchd-режим) —
     /// standalone-путь имел ровно тот же класс бага. Выделено в чистую
-    /// функцию для юнит-тестов (тот же приём, что `kickstartArguments`).
+    /// функцию для юнит-тестов.
     static func backendScriptPath(projectRoot: String) -> String {
         (projectRoot as NSString).appendingPathComponent("KrabEar/main.py")
     }
@@ -377,39 +377,11 @@ final class BackendSupervisor: @unchecked Sendable {
         return env
     }
 
-    /// Аргументы launchctl для принудительного рестарта launchd-owned backend.
-    /// Выделено в чистую функцию для юнит-тестов.
-    static func kickstartArguments(uid: uid_t) -> [String] {
-        ["kickstart", "-k", "gui/\(uid)/\(backendLaunchdLabel)"]
-    }
-
-    /// Принудительный рестарт ЗАВЕДОМО ЖИВОГО backend-процесса (audio-wedge:
-    /// жив по IPC, мёртв по аудио — спека 2026-07-15). НЕ смешивать с
-    /// restartIfDead(): тот short-circuit'ится на живом процессе, а
-    /// stopBackend() в passive-режиме — no-op. В passive это ровно ручной
-    /// рецепт живого инцидента 13-07: launchctl kickstart -k.
+    /// Автоматический принудительный restart отложен до появления общего
+    /// admission/drain: локальный idle-снимок не охватывает другие клиенты и
+    /// не запрещает запись между проверкой и реальным lifecycle-действием.
     func forceRestartBackend() -> Bool {
-        switch supervisionMode {
-        case .passive:
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-            p.arguments = Self.kickstartArguments(uid: getuid())
-            do {
-                try p.run()
-            } catch {
-                return false
-            }
-            p.waitUntilExit()
-            return p.terminationStatus == 0
-        case .active:
-            stopBackend()
-            do {
-                try ensureBackendRunning()
-                return true
-            } catch {
-                return false
-            }
-        }
+        false
     }
 
     func stopBackend() {

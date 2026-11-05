@@ -141,10 +141,9 @@ final class WedgeWiringSourceContractTests: XCTestCase {
         )
     }
 
-    /// Лечить обязан forceRestartBackend: restartIfDeadDetailed на ЖИВОМ
-    /// процессе возвращает .alreadyAlive и ничего не делает — именно поэтому
-    /// он не вылечил инцидент 2026-08-07.
-    func test_escalation_uses_force_restart_not_restart_if_dead() throws {
+    /// Эскалация идёт через общий защитный supervisor, не через отдельный
+    /// небезопасный lifecycle-путь.
+    func test_escalation_uses_guarded_force_restart() throws {
         let src = try healthMonitorWiringSource()
         // Регион, а НЕ префикс фиксированной длины: окно на 2000 символов
         // сломалось от одного добавленного гарда — хрупкий тест краснеет на
@@ -152,7 +151,7 @@ final class WedgeWiringSourceContractTests: XCTestCase {
         let body = Self.regionBetween(src, from: "setOnWedgeDetected", to: "await monitor.start()")
         XCTAssertTrue(
             body.contains("forceRestartBackend"),
-            "эскалация не зовёт forceRestartBackend — на живом процессе лечения не будет"
+            "эскалация не передана общему защитному supervisor"
         )
     }
 
@@ -168,6 +167,8 @@ final class WedgeWiringSourceContractTests: XCTestCase {
             body.contains("health_wedge"),
             "эскалация должна маркировать источник health_wedge"
         )
+        XCTAssertTrue(body.contains("deferred: true"))
+        XCTAssertTrue(body.contains("автоматический рестарт отложен"))
     }
 
     /// Рейт-лимит обязан быть: без него подтверждённое заклинивание
