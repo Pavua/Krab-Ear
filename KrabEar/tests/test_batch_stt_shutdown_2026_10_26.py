@@ -35,6 +35,16 @@ def _load_class(path, class_name, names, namespace):
             exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), namespace)
     # Малый join budget только у изолированного экземпляра функций теста.
     namespace["_SHUTDOWN_BATCH_TIMEOUT_SEC"] = 0.02
+    if class_name == "BackendService":
+        helper = next(
+            n for n in tree.body
+            if isinstance(n, ast.FunctionDef) and n.name == "_begin_rest_shutdown"
+        )
+        helper_module = ast.Module(body=[
+            ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0),
+            helper,
+        ], type_ignores=[])
+        exec(compile(ast.fix_missing_locations(helper_module), str(path), "exec"), namespace)
     owner.body = methods
     owner.decorator_list = []
     module = ast.Module(body=[ast.ImportFrom(
@@ -113,7 +123,7 @@ class BatchShutdownTests(unittest.TestCase):
         )
         self.core.transcriber = transcriber
         service_type = _load_class(
-            ROOT / "backend/service.py", "BackendService", {"close", "_detach_event_bus_wiring"},
+            ROOT / "backend/service.py", "BackendService", {"close", "_close_impl", "_detach_event_bus_wiring"},
             {
                 "logger": self.namespace["logger"],
                 "event_bus": types.SimpleNamespace(
@@ -123,6 +133,9 @@ class BatchShutdownTests(unittest.TestCase):
             },
         )
         self.service = service_type.__new__(service_type)
+        self.service._close_guard = threading.Lock()
+        self.service._close_state = "OPEN"
+        self.service._rest_gate_unknown = False
         self.service.transcriber = transcriber
         self.service._recording_core_svc = self.core
         self.service._memory_conductor = types.SimpleNamespace(stop=lambda: None)
