@@ -5,7 +5,8 @@
 `offline_tests/rest_timeout_owner/ci_probe.py`; её фактический результат нужно
 проверять в CI точного SHA. Она вызывает `BackendService` и канонический
 `backend.rest_server` с подменёнными аудио, сервером и watchdog, проверяет
-response-close и ошибку adoption. Реальный timeout-handler, повторный start и
+response-close и ошибку adoption. В тестовом процессе отключён rate limiter;
+его взаимодействие с этим путём, реальный timeout-handler, повторный start и
 watchdog эта проба не проверяет. Она не подтверждает живой runtime или drain.
 
 Ниже описан исходный более широкий план; его требования к локальной изоляции
