@@ -106,6 +106,8 @@ class InProcessRestServer:
         self._shutting_down = threading.Event()
         self._active_requests = 0
         self._active_lock = threading.Lock()
+        self._stops_in_progress = 0
+        self._stop_failed = False
         self._install_drain_hooks()
 
         # R2-фикс 1 (финальное adversarial-ревью волны S3): НЕОБРАТИМАЯ
@@ -235,6 +237,12 @@ class InProcessRestServer:
                     "защёлка уже взведена (backend завершает работу)"
                 )
                 return False
+            if self._stops_in_progress:
+                logger.warning("InProcessRestServer: start() отклонён — stop() ещё выполняется")
+                return False
+            if self._stop_failed:
+                logger.warning("InProcessRestServer: start() отклонён — исход stop() неизвестен")
+                return False
             self._shutting_down.clear()
         if not self._enabled:
             logger.info("InProcessRestServer: выключен рубильником")
@@ -247,7 +255,7 @@ class InProcessRestServer:
             try:
                 from werkzeug.serving import make_server
 
-                self._server = make_server(
+                candidate = make_server(
                     "127.0.0.1", self._port, self._app, threaded=True
                 )
             except (OSError, SystemExit) as exc:
@@ -275,14 +283,31 @@ class InProcessRestServer:
                 self._push_error("rest.port_conflict", self._error)
                 return False
 
-            self._serving.clear()
-            self._thread = threading.Thread(
-                target=self._serve,
-                args=(self._server,),
-                name="rest-inprocess",
-                daemon=True,
-            )
-            self._thread.start()
+            # Bind может закончиться после begin_shutdown()/stop(). Проверка
+            # и публикация сервера атомарны относительно закрытия допуска.
+            with self._active_lock:
+                cancelled = (
+                    self._terminal.is_set()
+                    or self._shutting_down.is_set()
+                    or self._stops_in_progress > 0
+                    or self._stop_failed
+                )
+                if not cancelled:
+                    self._server = candidate
+                    self._serving.clear()
+                    self._thread = threading.Thread(
+                        target=self._serve,
+                        args=(candidate,),
+                        name="rest-inprocess",
+                        daemon=True,
+                    )
+                    self._thread.start()
+            if cancelled:
+                try:
+                    candidate.server_close()
+                except Exception:
+                    logger.exception("InProcessRestServer: не удалось закрыть сокет после отмены старта")
+                return False
             # Сбрасываем ошибку прошлой попытки ПОД тем же локом, что и
             # остальные мутации состояния. Вне лока здесь возникало окно, в
             # котором конкурентный status() (поллинг диагностики) видел уже
@@ -364,8 +389,20 @@ class InProcessRestServer:
         именно вызывающий решает, будет ли за этим stop() ещё один start().
         """
         with self._active_lock:
+            self._stops_in_progress += 1
             self._shutting_down.set()
 
+        try:
+            self._stop_server(timeout)
+        except BaseException:
+            with self._active_lock:
+                self._stop_failed = True
+            raise
+        finally:
+            with self._active_lock:
+                self._stops_in_progress -= 1
+
+    def _stop_server(self, timeout: float) -> None:
         with self._lock:
             server, thread = self._server, self._thread
             self._server, self._thread = None, None
