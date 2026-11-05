@@ -2,6 +2,7 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 
 
@@ -144,6 +145,10 @@ print("PASS")
 
 
 if __name__ == "__main__":
+    if sys.flags.optimize:
+        raise SystemExit("optimized Python disables required assertions")
+    if "CALL_ASSIST_UI_TEST_SOURCE" in os.environ:
+        raise SystemExit("source override is forbidden for the CI entrypoint")
     for label, test in (
         ("state", test_refusal_notifies_without_replacing_state_and_success_still_applies),
         ("start", test_start_only_saves_settings_after_an_accepted_response),

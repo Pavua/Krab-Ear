@@ -281,7 +281,9 @@ jobs:
 
       - name: Call Assist refusal Swift harness
         timeout-minutes: 5
-        run: python3 offline_tests/call_assist_ui/test_response_state_swift.py
+        run: |
+          python3 offline_tests/call_assist_ui/test_ci_entrypoint_guards.py
+          python3 offline_tests/call_assist_ui/test_response_state_swift.py
 
   public-runner-isolation-guard:
     name: Public runner isolation guard
