@@ -768,31 +768,28 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 },
                 onWedgedEscalation: { [weak self] in
                     guard let self else { return }
-                    self.logger.warn("Wake word: backend wedged — принудительный рестарт backend")
-                    // 🔴 kickstart до любого BackendToast на main: зависший show
-                    // блокировал DispatchQueue.global и весь wake-word поллинг
-                    // (инцидент 2026-11-02).
+                    self.logger.warn("Wake word: backend wedged — автоматический рестарт отложен")
                     DispatchQueue.global(qos: .utility).async { [weak self] in
                         guard let self else { return }
                         let ok = self.backendSupervisor.forceRestartBackend()
                         AgentRecoveryLogger.shared.logForceRestartBackend(
                             source: "wake_word_wedged",
-                            success: ok
+                            success: ok,
+                            deferred: true
                         )
                         DispatchQueue.main.async {
                             BackendToast.shared.show(
-                                ok ? "Backend перезапущен (wake word)"
-                                   : "⚠ Рестарт backend не удался — перезапустите Krab Ear вручную",
-                                duration: ok ? 3.0 : 10.0
+                                "⚠ Wake word недоступен — автоматический рестарт отложен до проверки активности",
+                                duration: 10.0
                             )
                         }
                     }
                 },
                 onWedgedGiveUp: { [weak self] in
                     guard let self else { return }
-                    self.logger.warn("Wake word: авто-рестарты исчерпаны (wedged держится) — нужно ручное вмешательство")
+                    self.logger.warn("Wake word: авто-восстановление отложено, wedged сохраняется")
                     BackendToast.shared.show(
-                        "⚠ Wake word не оживает после 3 рестартов — проверьте микрофон (громкость входа) или выключите тумблер wake word",
+                        "⚠ Wake word недоступен — проверьте микрофон или выключите wake word",
                         duration: 12.0
                     )
                 }
