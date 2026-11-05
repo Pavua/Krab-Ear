@@ -291,7 +291,10 @@ def main():
         with patch.object(mlx_whisper_session, "close_mlx_whisper_session") as close_worker:
             rest._rest_engine_cleanup()
             close_worker.assert_called_once_with()
-    assert not boundary.violations, boundary.violations
+    # Только имя функции/файла и строка: пути и содержимое не публикуются.
+    assert not boundary.violations, [
+        {"label": item["label"], "frames": item["frames"]} for item in boundary.denials
+    ]
     assert not (set(threading.enumerate()) - initial_threads), "unaccounted Python threads"
     receipt["violations"] = boundary.violations
     receipt["canaries"] = checked_canaries
