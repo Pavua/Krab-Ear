@@ -57,6 +57,21 @@ def test_seal_revokes_unclaimed_grants_and_replays_without_authority(opened_jour
         store.claim_leaf("p", "inc", "claim", "epoch", "exec", grant)
 
 
+def test_seal_preserves_claimed_debt_and_revokes_other_grant(opened_journal):
+    store = opened_journal
+    claimed = store.reserve_leaf("p", "inc", "reserve-1", "epoch", "exec", "stt")["grant_id"]
+    pending = store.reserve_leaf("p", "inc", "reserve-2", "epoch", "exec", "stt")["grant_id"]
+    first = store.claim_leaf("p", "inc", "claim", "epoch", "exec", claimed)
+    store.begin_maintenance("p", "inc", "close", "epoch", 0)
+    store.seal("p", "inc", "seal", "epoch", 1)
+    assert first["permit"] is not None
+    assert store.claim_leaf("p", "inc", "claim", "epoch", "exec", claimed)["permit"] is None
+    with pytest.raises(journal.JournalConflict):
+        store.claim_leaf("p", "inc", "other-claim", "epoch", "exec", pending)
+    assert store.status()["unknown"] is True
+    assert store.status()["drain_authority"] is False
+
+
 def test_revoke_replay_is_same_outcome_and_different_key_cannot_undo_it(opened_journal):
     store = opened_journal
     grant = store.reserve_leaf("p", "inc", "reserve", "epoch", "exec", "stt")["grant_id"]
