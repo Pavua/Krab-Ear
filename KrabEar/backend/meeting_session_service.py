@@ -346,9 +346,39 @@ class MeetingSessionService:
             # None-проверку и стартует запись/воркер второй раз (двойной
             # клик в UI / два IPC-клиента). Резервация снимается в finally
             # при ошибке или заменяется реальной сессией при успехе.
+            previous_session = self._session
             reservation = _MeetingSession()
-            self._session = reservation
-            self._setup_done_event.clear()
+            setup_was_done = self._setup_done_event.is_set()
+
+            def claim_reservation() -> None:
+                self._session = reservation
+                self._setup_done_event.clear()
+
+            def rollback_reservation() -> None:
+                if self._session is reservation:
+                    self._session = previous_session
+                if setup_was_done:
+                    self._setup_done_event.set()
+                else:
+                    self._setup_done_event.clear()
+
+            admit = getattr(self._recording_core, "_try_admit_recording_root", None)
+            try:
+                admitted = admit(claim_reservation) if callable(admit) else None
+            except Exception:
+                rollback_reservation()
+                logger.exception("meeting: проверка допуска maintenance не удалась")
+                return {"ok": False, "error": "maintenance_unknown"}
+            except BaseException:
+                rollback_reservation()
+                raise
+            if admitted is not True:
+                rollback_reservation()
+                error = "maintenance_active" if admitted is False else "maintenance_unknown"
+                return {"ok": False, "error": error}
+            if self._session is not reservation or self._setup_done_event.is_set():
+                rollback_reservation()
+                return {"ok": False, "error": "maintenance_unknown"}
 
         session: _MeetingSession | None = None
         promoted = False

@@ -65,6 +65,10 @@ class _FakeExtractor:
 
 
 class _FakeRecordingCore:
+    def _try_admit_recording_root(self, claim):
+        claim()
+        return True
+
     def __init__(self) -> None:
         self.paused = 0
         self.resumed = 0
