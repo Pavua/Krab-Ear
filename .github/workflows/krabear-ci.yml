@@ -31,6 +31,10 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Require GitHub-hosted runner
+        env:
+          TASK_RUNNER_KIND: ${{ runner.environment }}
+        run: test "$TASK_RUNNER_KIND" = github-hosted
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -81,7 +85,7 @@ jobs:
               KRAB_EAR_RECAP_EMAIL_ENABLED=false \
               timeout --kill-after=2s 40s python -I -S -B offline_tests/rest_timeout_owner/ci_probe.py \
                 "$task_scratch" "$task_site_packages" "$task_scenario"
-            python -I -S -B offline_tests/rest_timeout_owner/validate_ci_receipt.py \
+            timeout --kill-after=2s 10s python -I -S -B offline_tests/rest_timeout_owner/validate_ci_receipt.py \
               "$task_scratch/receipt.json" "$task_scenario"
           done
 

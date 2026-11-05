@@ -32,7 +32,7 @@ def validate(path, scenario):
         raise ValueError("receipt must be an owned private regular file")
     if not 2 <= info.st_size <= 8192:
         raise ValueError("invalid receipt size")
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     with os.fdopen(fd, "rb") as stream:
         opened = os.fstat(stream.fileno())
         if ((opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)

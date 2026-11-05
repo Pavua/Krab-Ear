@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+SOURCE_ROOT = Path(__file__).resolve().parents[2]
+
 # This functional probe is restricted to an explicitly requested disposable
 # GitHub-hosted Linux runner. Never point it at the owner's local runtime.
 if os.environ.get("GITHUB_ACTIONS") != "true" or sys.platform != "linux":
@@ -24,7 +26,7 @@ def _prepare(scratch, site_packages):
     sys.pycache_prefix = str(scratch / "cache")
     # Без site.addsitedir(): этот путь не должен исполнять .pth.
     sys.path.insert(0, site_packages)
-    test_root = Path(__file__).resolve().parents[2] / "KrabEar" / "tests"
+    test_root = SOURCE_ROOT / "KrabEar" / "tests"
     package_root = test_root.parent
     sys.path.insert(0, str(test_root))
     sys.path.insert(0, str(package_root))
@@ -108,18 +110,16 @@ def _response(rest, scratch):
 
 
 def _standalone(rest, scratch, static_enabled):
+    from contextlib import ExitStack
     from unittest.mock import patch
 
     assert rest._PROCESS_HOSTS_BACKEND is False
     events, patches = _instrument(rest)
-    with patch.object(rest.settings, "REST_IN_PROCESS_ENABLED", static_enabled):
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(rest.settings, "REST_IN_PROCESS_ENABLED", static_enabled))
         for item in patches:
-            item.start()
-        try:
-            _response(rest, scratch).close()
-        finally:
-            for item in reversed(patches):
-                item.stop()
+            stack.enter_context(item)
+        _response(rest, scratch).close()
     expected = [] if static_enabled else [("kill", None), ("flush", None), ("exit", 70)]
     assert events == expected, events
     assert rest._PROCESS_HOSTS_BACKEND is False
@@ -142,6 +142,7 @@ def _backend(rest, scratch, *, setup_failure=False, mutation=None):
                          "rewriter_warmup_on_startup": False})
     events, patches = _instrument(rest)
     server = MagicMock(name="fake_inprocess_server")
+    standalone_engine = rest.engine
     server_state = {"running": False}
     server.start.side_effect = lambda: server_state.update(running=True)
     server.stop.side_effect = lambda: server_state.update(running=False)
@@ -203,6 +204,7 @@ def _backend(rest, scratch, *, setup_failure=False, mutation=None):
                 server.stop.assert_called()
                 assert server.status()["running"] is False
                 assert rest._singletons_adopted is False
+                assert rest.engine is standalone_engine
             assert sys.modules.get("backend.rest_server") is rest
             settings.REST_IN_PROCESS_ENABLED = False
             response.close()
@@ -232,7 +234,6 @@ def main():
     import atexit
     import json
     import threading
-    from types import SimpleNamespace
     from unittest.mock import patch
 
     if len(sys.argv) != 4:
@@ -241,13 +242,25 @@ def main():
     info = scratch.stat()
     if not scratch.is_dir() or info.st_uid != os.getuid() or info.st_mode & 0o077:
         raise ValueError("scratch must be an owned private directory")
+    os.chdir(scratch)
     initial_threads = set(threading.enumerate())
     boundary = _prepare(scratch, sys.argv[2])
     protected = os.environ.get("EAR_CI_PROTECTED_CANARY")
     if not protected:
         raise ValueError("missing protected canary path")
     checked_canaries = _canaries(boundary, protected)
-    from backend import rest_server as rest
+    from core import engine as engine_module
+
+    class SyntheticStandaloneEngine:
+        def __init__(self, **_kwargs):
+            self._router = None
+
+    # rest_server создаёт собственный движок при импорте. Меняем именно
+    # конструктор до импорта, не ожидая очистки настоящего ML-ресурса.
+    with patch.object(engine_module, "AudioEngine", SyntheticStandaloneEngine):
+        from backend import rest_server as rest
+
+    assert type(rest.engine) is SyntheticStandaloneEngine
     from core import mlx_whisper_session
     # Cleanup должен быть проверен ДО receipt; процесс всё равно одноразовый.
     atexit.unregister(rest._rest_engine_cleanup)
@@ -270,8 +283,9 @@ def main():
         else:
             raise ValueError("unrecognised scenario")
     finally:
-        with patch.object(rest, "engine", SimpleNamespace(_router=None)), \
-             patch.object(mlx_whisper_session, "close_mlx_whisper_session") as close_worker:
+        assert type(rest.engine) is SyntheticStandaloneEngine
+        assert rest._singletons_adopted is False
+        with patch.object(mlx_whisper_session, "close_mlx_whisper_session") as close_worker:
             rest._rest_engine_cleanup()
             close_worker.assert_called_once_with()
     assert not boundary.violations, boundary.violations
