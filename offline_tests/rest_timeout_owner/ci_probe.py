@@ -137,7 +137,9 @@ def _backend(rest, scratch, *, setup_failure=False, mutation=None):
 
     assert rest._PROCESS_HOSTS_BACKEND is False
     assert settings.REST_IN_PROCESS_ENABLED is False
-    store = StateStore(scratch / "data")
+    # REST import уже создал собственный data-каталог; backend получает новый
+    # профиль, владельцем первичной записи которого является именно этот store.
+    store = StateStore(scratch / "backend-data")
     store.save_settings({"rest_in_process_enabled": True, "stt_warmup_on_startup": False,
                          "rewriter_warmup_on_startup": False,
                          "binary_drift_check_on_startup": False})
