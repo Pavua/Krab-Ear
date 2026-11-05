@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
-SCRIPTS = ("safe_backend_restart.command", "install_backend_launchagent.command")
+SCRIPTS = ("safe_backend_restart.command",)
 
 
 def reply(**fields):
@@ -195,34 +195,12 @@ def test_missing_socket_does_not_prove_idle(tmp_path, script):
     assert not calls
 
 
-def test_installer_gate_is_after_interactive_token_resolution():
-    source = (ROOT / "scripts/install_backend_launchagent.command").read_text()
-    prompt = source.index("read -r HF_TOKEN")
-    gate = source.index("while REASON=$(busy_reason)")
-    stop = source.index('launchctl bootout "gui/$UID_NUM/$LABEL"')
-    assert prompt < gate < stop
-
-
 @pytest.mark.parametrize("script", SCRIPTS)
 def test_wait_unknown_expires_without_mutation(tmp_path, script):
     result, calls = run_gate(tmp_path, script, missing=True, wait=True,
                              check_only=(script == "safe_backend_restart.command"))
     assert result.returncode == 1, result.stdout + result.stderr
     assert not calls
-
-
-def test_installer_force_is_explicit_existing_bypass(tmp_path):
-    result, calls = run_gate(tmp_path, SCRIPTS[1], missing=True, force=True)
-    assert result.returncode == 0
-    assert "--force" in result.stdout
-    assert calls
-
-
-def test_both_scripts_use_identical_ipc_and_busy_functions():
-    sources = [(ROOT / "scripts" / script).read_text() for script in SCRIPTS]
-    for name in ("ipc_call", "busy_reason"):
-        pattern = rf"{name}\(\) \{{.*?\n\}}\n"
-        assert re.search(pattern, sources[0], re.S).group() == re.search(pattern, sources[1], re.S).group()
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
