@@ -61,6 +61,10 @@ check(controller.alerts.count == 3 && !controller.alerts[2].1.contains("private-
 controller.applyCallAssistState(["active": false, "status": "idle"])
 check(controller.callAssistStatusLabel.stringValue == "Call Assist: idle", "legacy state applied")
 check(!controller.callAssistActive && controller.callAssistStartButton.isEnabled, "idle buttons")
+controller.applyCallAssistState(["status": "running"])
+check(controller.callAssistActive && controller.callAssistStopButton.isEnabled, "legacy running allows stop")
+controller.applyCallAssistState(["status": "starting"])
+check(!controller.callAssistActive && !controller.callAssistStopButton.isEnabled, "legacy starting does not allow stop")
 controller.applyCallAssistState(["ok": true, "active": true, "status": "running"])
 check(controller.callAssistActive && controller.callAssistStopButton.isEnabled, "active state applied")
 print("PASS")
@@ -138,7 +142,9 @@ final class Button { var state: State = .on }
 struct Settings { let translationMode = "off" }
 final class IPC {
     var result: [String: Any] = [:]
+    var methods: [String] = []
     func call(method: String, params: [String: Any]) throws -> [String: Any] {
+        methods.append(method)
         return ["result": result]
     }
 }
@@ -148,11 +154,13 @@ final class Controller: NSObject {
     let callAutoSummaryButton = Button()
     var patchCount = 0
     var received = false
+    var lastResult: [String: Any] = [:]
+    var alertCount = 0
     func settingsProvider() -> Settings { Settings() }
     func selectedCaptureSourceMode() -> String { "microphone" }
     func applySettingsPatch(_ patch: [String: Any]) { patchCount += 1 }
-    func applyCallAssistState(_ result: [String: Any]) { received = true }
-    func showInfoAlert(title: String, body: String) { received = true }
+    func applyCallAssistState(_ result: [String: Any]) { lastResult = result; received = true }
+    func showInfoAlert(title: String, body: String) { alertCount += 1; received = true }
 __ACTUAL_METHOD__
 }
 func check(_ condition: Bool, _ name: String) {
@@ -170,6 +178,16 @@ controller.ipcClient.result = ["ok": false, "error": "maintenance_active"]
 controller.onStartCallAssist()
 waitForReply(controller)
 check(controller.patchCount == 0, "refusal must not save settings")
+for status in ["running", "starting", ""] {
+    controller.received = false
+    controller.ipcClient.result = ["ok": false, "error": "already_active", "status": status]
+    controller.onStartCallAssist()
+    waitForReply(controller)
+    check(controller.patchCount == 0, "already active must not save settings")
+    check(controller.lastResult["ok"] == nil, "already active uses legacy state projection")
+    check((controller.lastResult["status"] as? String) == status, "status preserved")
+}
+check(controller.alertCount == 3, "already active is explained")
 controller.received = false
 controller.ipcClient.result = ["ok": true, "active": true]
 controller.onStartCallAssist()
@@ -180,6 +198,7 @@ controller.ipcClient.result = ["active": true]
 controller.onStartCallAssist()
 waitForReply(controller)
 check(controller.patchCount == 2, "legacy start saves settings")
+check(controller.ipcClient.methods.allSatisfy { $0 == "start_call_assist" }, "no stop or refresh is issued")
 print("PASS")
 '''.replace("__ACTUAL_METHOD__", _actual_method("    @objc func onStartCallAssist("))
     swift_source = tmp_path / "CallAssistStartHarness.swift"

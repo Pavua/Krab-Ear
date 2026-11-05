@@ -48,6 +48,13 @@ extension HistoryPanelController {
                         "call_auto_summary": autoSummaryOn,
                     ])
                 }
+                if (result["ok"] as? Bool) == false, (result["error"] as? String) == "already_active" {
+                    var legacyState = result
+                    legacyState.removeValue(forKey: "ok")
+                    self.applyCallAssistState(legacyState)
+                    self.showInfoAlert(title: "Call Assist", body: "Сессия Call Assist уже активна.")
+                    return
+                }
                 self.applyCallAssistState(result)
             }
         }
