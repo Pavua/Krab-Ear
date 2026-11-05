@@ -8,9 +8,10 @@ ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController+CallAssist.swift"
 
 
-def _actual_method():
-    source = SOURCE.read_text(encoding="utf-8")
-    begin = source.index("    func applyCallAssistState(")
+def _actual_method(marker="    func applyCallAssistState("):
+    source_path = Path(os.environ.get("CALL_ASSIST_UI_TEST_SOURCE", str(SOURCE)))
+    source = source_path.read_text(encoding="utf-8")
+    begin = source.index(marker)
     opening = source.index("{", begin)
     depth = 0
     for position in range(opening, len(source)):
@@ -70,5 +71,72 @@ print("PASS")
     )
     assert compile_result.returncode == 0, compile_result.stderr
     run_result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=10, env=env)
+    assert run_result.returncode == 0, run_result.stdout + run_result.stderr
+    assert run_result.stdout.strip() == "PASS"
+
+
+def test_start_only_saves_settings_after_an_accepted_response(tmp_path):
+    harness = r'''
+import Foundation
+enum State { case on, off }
+final class Button { var state: State = .on }
+struct Settings { let translationMode = "off" }
+final class IPC {
+    var result: [String: Any] = [:]
+    func call(method: String, params: [String: Any]) throws -> [String: Any] {
+        return ["result": result]
+    }
+}
+final class Controller: NSObject {
+    let ipcClient = IPC()
+    let callNotifyButton = Button()
+    let callAutoSummaryButton = Button()
+    var patchCount = 0
+    var received = false
+    func settingsProvider() -> Settings { Settings() }
+    func selectedCaptureSourceMode() -> String { "microphone" }
+    func applySettingsPatch(_ patch: [String: Any]) { patchCount += 1 }
+    func applyCallAssistState(_ result: [String: Any]) { received = true }
+    func showInfoAlert(title: String, body: String) { received = true }
+__ACTUAL_METHOD__
+}
+func check(_ condition: Bool, _ name: String) {
+    if !condition { print("FAIL: " + name); exit(1) }
+}
+func waitForReply(_ controller: Controller) {
+    let deadline = Date().addingTimeInterval(3)
+    while !controller.received && Date() < deadline {
+        RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+    }
+    check(controller.received, "handler completed")
+}
+let controller = Controller()
+controller.ipcClient.result = ["ok": false, "error": "maintenance_active"]
+controller.onStartCallAssist()
+waitForReply(controller)
+check(controller.patchCount == 0, "refusal must not save settings")
+controller.received = false
+controller.ipcClient.result = ["ok": true, "active": true]
+controller.onStartCallAssist()
+waitForReply(controller)
+check(controller.patchCount == 1, "accepted start saves settings")
+controller.received = false
+controller.ipcClient.result = ["active": true]
+controller.onStartCallAssist()
+waitForReply(controller)
+check(controller.patchCount == 2, "legacy start saves settings")
+print("PASS")
+'''.replace("__ACTUAL_METHOD__", _actual_method("    @objc func onStartCallAssist("))
+    swift_source = tmp_path / "CallAssistStartHarness.swift"
+    binary = tmp_path / "call-assist-start-harness"
+    swift_source.write_text(harness, encoding="utf-8")
+    env = os.environ.copy()
+    env["TMPDIR"] = str(tmp_path)
+    compile_result = subprocess.run(
+        ["/usr/bin/swiftc", "-module-cache-path", str(tmp_path / "module-cache"), str(swift_source), "-o", str(binary)],
+        capture_output=True, text=True, timeout=90, env=env,
+    )
+    assert compile_result.returncode == 0, compile_result.stderr
+    run_result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=15, env=env)
     assert run_result.returncode == 0, run_result.stdout + run_result.stderr
     assert run_result.stdout.strip() == "PASS"
