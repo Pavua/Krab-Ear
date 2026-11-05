@@ -17,11 +17,13 @@ def _load_timeout_functions(*, backend_owner=False, static_setting=False):
     tree = ast.parse(_SOURCE.read_text(encoding="utf-8"), filename=str(_SOURCE))
     names = {"_mark_backend_process", "_exit_poisoned_rest_process", "_arm_timeout_exit"}
     definitions = [node for node in tree.body
-                   if isinstance(node, ast.FunctionDef) and node.name in names]
+                   if (isinstance(node, ast.FunctionDef) and node.name in names)
+                   or (isinstance(node, ast.Assign) and any(
+                       isinstance(target, ast.Name) and target.id == "_PROCESS_HOSTS_BACKEND"
+                       for target in node.targets))]
     fake_os = types.SimpleNamespace(_exit=Mock())
     namespace = {
         "settings": types.SimpleNamespace(REST_IN_PROCESS_ENABLED=static_setting),
-        "_PROCESS_HOSTS_BACKEND": backend_owner,
         "logger": Mock(),
         "os": fake_os,
         "_flush_logs_before_exit": Mock(),
@@ -31,6 +33,8 @@ def _load_timeout_functions(*, backend_owner=False, static_setting=False):
     }
     module = ast.fix_missing_locations(ast.Module(body=definitions, type_ignores=[]))
     exec(compile(module, str(_SOURCE), "exec"), namespace)
+    if backend_owner:
+        namespace["_mark_backend_process"]()
     return namespace, fake_os
 
 
@@ -72,15 +76,20 @@ class RestTimeoutProcessOwnerTests(unittest.TestCase):
         kill.assert_not_called()
 
     def test_mark_is_sticky_when_settings_change_before_response_close(self):
-        namespace, fake_os = _load_timeout_functions()
+        namespace, fake_os = _load_timeout_functions(static_setting=True)
         namespace["_mark_backend_process"]()
         response = Mock()
         namespace["_arm_timeout_exit"](response, Mock())
         namespace["settings"].REST_IN_PROCESS_ENABLED = False
-        response.call_on_close.call_args.args[0]()
+        kill = Mock()
+        fake_worker = types.ModuleType("core.mlx_whisper_session")
+        fake_worker.kill_mlx_whisper_session = kill
+        with patch.dict(sys.modules, {"core.mlx_whisper_session": fake_worker}):
+            response.call_on_close.call_args.args[0]()
         namespace["_mark_backend_process"]()
         self.assertIs(namespace["_PROCESS_HOSTS_BACKEND"], True)
         fake_os._exit.assert_not_called()
+        kill.assert_not_called()
 
     def test_owner_mark_precedes_adoption_and_app_creation(self):
         tree = ast.parse(_SERVICE.read_text(encoding="utf-8"), filename=str(_SERVICE))

@@ -678,13 +678,14 @@ def _flush_logs_before_exit() -> None:
             pass
 
 
-# Односторонняя метка жизни процесса: поздний response-close может произойти
-# после stop/release встроенного REST, когда настройки уже изменились.
+# Односторонняя метка экземпляра модуля: поздний response-close может
+# произойти после stop/release REST, когда настройки уже изменились. Штатный
+# backend использует канонический импорт; reload/alias не являются fence.
 _PROCESS_HOSTS_BACKEND = False
 
 
 def _mark_backend_process() -> None:
-    """Запретить аварийный выход REST на всё оставшееся время жизни backend."""
+    """Запретить аварийный выход через этот экземпляр REST-модуля."""
     global _PROCESS_HOSTS_BACKEND
     _PROCESS_HOSTS_BACKEND = True
 
