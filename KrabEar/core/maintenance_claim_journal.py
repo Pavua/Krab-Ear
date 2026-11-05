@@ -1,6 +1,6 @@
 """Synthetic scoped claims; не production admission и не право на execution.
 
-Schema v3 не открывает и не мигрирует v2. Нет transport/auth, executor, terminal,
+Schema v4 не открывает и не мигрирует старые схемы. Нет transport/auth, executor, terminal,
 recovery или drain. Все файлы должны быть тестовыми в доверенном namespace.
 """
 from __future__ import annotations
@@ -23,7 +23,8 @@ _CONTROL_SQL = (
 )
 _GRANTS_SQL = (
     "CREATE TABLE scoped_grants (grant_id TEXT PRIMARY KEY, principal TEXT NOT NULL, "
-    "incarnation TEXT NOT NULL, executor TEXT NOT NULL, kind TEXT NOT NULL, claim_id TEXT UNIQUE)"
+    "incarnation TEXT NOT NULL, executor TEXT NOT NULL, kind TEXT NOT NULL, claim_id TEXT UNIQUE, "
+    "revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)))"
 )
 _LEDGER_SQL = (
     "CREATE TABLE command_ledger (sequence INTEGER PRIMARY KEY, principal TEXT NOT NULL, "
@@ -33,7 +34,9 @@ _LEDGER_SQL = (
     "CHECK((operation = 'reserve' AND outcome = 'RESERVED' AND grant_id IS NOT NULL AND claim_id IS NULL) OR "
     "(operation = 'reserve' AND outcome = 'DENIED_CLOSED' AND grant_id IS NULL AND claim_id IS NULL) OR "
     "(operation = 'begin' AND outcome IN ('CLOSED', 'ALREADY_CLOSED') AND grant_id IS NULL AND claim_id IS NULL) OR "
-    "(operation = 'claim' AND outcome = 'CLAIMED' AND grant_id IS NOT NULL AND claim_id IS NOT NULL)))"
+    "(operation = 'claim' AND outcome = 'CLAIMED' AND grant_id IS NOT NULL AND claim_id IS NOT NULL) OR "
+    "(operation = 'revoke' AND outcome IN ('REVOKED', 'CLAIMED_UNKNOWN') AND grant_id IS NOT NULL AND claim_id IS NULL) OR "
+    "(operation = 'seal' AND outcome = 'SEALED' AND grant_id IS NULL AND claim_id IS NULL)))"
 )
 _MAX_RECORDS = 1024
 
@@ -102,7 +105,7 @@ def _validate(connection, installation, *, allow_test_open):
         ("table", "scoped_grants", _GRANTS_SQL),
     ]
     if objects != expected:
-        raise JournalError("Неизвестная schema v3")
+        raise JournalError("Неизвестная schema v4")
     rows = connection.execute(
         "SELECT version, installation_id, journal_id, controller_epoch, control_revision, admission "
         "FROM control LIMIT 2"
@@ -110,8 +113,8 @@ def _validate(connection, installation, *, allow_test_open):
     if len(rows) != 1:
         raise JournalError("Неизвестный control")
     version, found, journal_id, epoch, revision, admission = rows[0]
-    if (version != 3 or found != installation or not isinstance(revision, int) or revision < 0
-            or admission not in {"CLOSED", "TEST_OPEN"}):
+    if (version != 4 or found != installation or not isinstance(revision, int) or revision < 0
+            or admission not in {"CLOSED", "TEST_OPEN", "SEALED"}):
         raise JournalError("Неизвестное состояние")
     _uuid(journal_id)
     _name(epoch)
@@ -122,11 +125,11 @@ def _validate(connection, installation, *, allow_test_open):
            for table in ("command_ledger", "scoped_grants")):
         raise JournalError("Лимит журнала превышен")
     grant_rows = connection.execute(
-        "SELECT grant_id, principal, incarnation, executor, kind, claim_id "
+        "SELECT grant_id, principal, incarnation, executor, kind, claim_id, revoked "
         "FROM scoped_grants ORDER BY grant_id LIMIT ?", (_MAX_RECORDS + 1,),
     ).fetchall()
     grants = {}
-    for grant_id, principal, incarnation, executor, kind, claim_id in grant_rows:
+    for grant_id, principal, incarnation, executor, kind, claim_id, revoked in grant_rows:
         _uuid(grant_id)
         for value in (principal, incarnation, executor):
             _name(value)
@@ -134,15 +137,18 @@ def _validate(connection, installation, *, allow_test_open):
             raise JournalError("Неизвестный scope grant")
         if claim_id is not None:
             _uuid(claim_id)
-        grants[grant_id] = (principal, incarnation, executor, kind, claim_id)
+        if revoked not in (0, 1) or (revoked and claim_id is not None):
+            raise JournalError("Неизвестный отзыв grant")
+        grants[grant_id] = (principal, incarnation, executor, kind, claim_id, revoked)
     entries = connection.execute(
         "SELECT principal, incarnation, request_key, operation, payload, outcome, "
         "grant_id, claim_id, result_revision FROM command_ledger ORDER BY sequence LIMIT ?",
         (_MAX_RECORDS + 1,),
     ).fetchall()
-    reserved, claimed = set(), set()
+    reserved, claimed, revoked = set(), set(), set()
     history_admission = None
     history_revision = 0
+    history_has_begin = False
     for principal, incarnation, key, operation, encoded, outcome, grant_id, claim_id, result_revision in entries:
         for value in (principal, incarnation, key):
             _name(value)
@@ -162,7 +168,7 @@ def _validate(connection, installation, *, allow_test_open):
                 raise JournalError("Неизвестный reserve")
             _name(payload["executor"])
             if outcome == "RESERVED":
-                if history_admission == "CLOSED":
+                if history_admission in {"CLOSED", "SEALED"}:
                     raise JournalError("Reserve после закрытия")
                 history_admission = "TEST_OPEN"
                 _uuid(grant_id)
@@ -174,12 +180,14 @@ def _validate(connection, installation, *, allow_test_open):
             elif outcome == "DENIED_CLOSED" and grant_id is None and claim_id is None:
                 if history_admission == "TEST_OPEN":
                     raise JournalError("Отказ при открытом допуске")
-                history_admission = "CLOSED"
+                if history_admission != "SEALED":
+                    history_admission = "CLOSED"
             else:
                 raise JournalError("Неизвестный исход reserve")
         elif operation == "begin":
             expected_revision = payload.get("expected_revision")
-            if (set(payload) != {"operation", "controller_epoch", "expected_revision"}
+            if (history_admission == "SEALED"
+                    or set(payload) != {"operation", "controller_epoch", "expected_revision"}
                     or type(expected_revision) is not int or expected_revision < 0
                     or outcome not in {"CLOSED", "ALREADY_CLOSED"}
                     or result_revision != expected_revision + (outcome == "CLOSED")
@@ -194,6 +202,7 @@ def _validate(connection, installation, *, allow_test_open):
             elif history_admission == "TEST_OPEN":
                 raise JournalError("ALREADY_CLOSED при открытом допуске")
             history_admission = "CLOSED"
+            history_has_begin = True
         elif operation == "claim":
             if set(payload) != {"operation", "controller_epoch", "executor", "grant_id"}:
                 raise JournalError("Неизвестный claim")
@@ -201,18 +210,42 @@ def _validate(connection, installation, *, allow_test_open):
             _uuid(grant_id)
             _uuid(claim_id)
             grant = grants.get(grant_id)
-            if (outcome != "CLAIMED" or grant_id not in reserved or grant_id in claimed
+            if (outcome != "CLAIMED" or grant_id not in reserved or grant_id in claimed or grant_id in revoked
                     or payload["grant_id"] != grant_id or grant is None
                     or grant[:3] != (principal, incarnation, payload["executor"]) or grant[4] != claim_id):
                 raise JournalError("Несовпадающий claim")
             claimed.add(grant_id)
+        elif operation == "revoke":
+            if (set(payload) != {"operation", "controller_epoch", "grant_id"}
+                    or payload["grant_id"] != grant_id or grant_id not in reserved
+                    or history_admission != "CLOSED" or claim_id is not None):
+                raise JournalError("Неизвестный revoke")
+            grant = grants[grant_id]
+            if grant[:2] != (principal, incarnation):
+                raise JournalError("Несовпадающий владелец grant")
+            if outcome == "REVOKED" and grant_id not in claimed and grant_id not in revoked:
+                revoked.add(grant_id)
+            elif outcome != "CLAIMED_UNKNOWN" or grant_id not in claimed:
+                raise JournalError("Некорректный исход revoke")
+        elif operation == "seal":
+            if (set(payload) != {"operation", "controller_epoch", "expected_revision"}
+                    or type(payload["expected_revision"]) is not int
+                    or payload["expected_revision"] != history_revision
+                    or history_admission != "CLOSED" or not history_has_begin or outcome != "SEALED"
+                    or grant_id is not None or claim_id is not None):
+                raise JournalError("Неизвестный seal")
+            revoked.update(reserved - claimed)
+            history_revision += 1
+            history_admission = "SEALED"
         else:
             raise JournalError("Неизвестная операция")
         if result_revision != history_revision:
             raise JournalError("Revision записи не соответствует истории")
-    if reserved != set(grants) or claimed != {key for key, value in grants.items() if value[4] is not None}:
+    if (reserved != set(grants) or claimed != {key for key, value in grants.items() if value[4] is not None}
+            or revoked != {key for key, value in grants.items() if value[5] == 1}):
         raise JournalError("Потеряна связь grant и ledger")
-    if revision != history_revision or (history_admission is not None and admission != history_admission):
+    if (revision != history_revision or (history_admission is not None and admission != history_admission)
+            or (admission == "SEALED" and history_admission != "SEALED")):
         raise JournalError("Control не соответствует истории")
     return journal_id, epoch, revision, admission
 
@@ -244,7 +277,7 @@ class ClaimJournal(foundation.MaintenanceStore):
                 "SELECT COUNT(*), COUNT(claim_id) FROM scoped_grants"
             ).fetchone()
             return {"admission": admission, "control_revision": revision, "outstanding_count": count,
-                    "unknown": self._poisoned or claimed > 0 or (not self._active and count > 0),
+                    "unknown": self._poisoned or claimed > 0 or not self._active,
                     "inspection_only": not self._active, "production_execution_authority": False,
                     "drain_authority": False}
         except BaseException as exc:
@@ -273,6 +306,19 @@ class ClaimJournal(foundation.MaintenanceStore):
         return self._command(principal, incarnation, key, {
             "operation": "claim", "controller_epoch": _name(controller_epoch),
             "executor": _name(executor), "grant_id": _uuid(grant_id),
+        })
+
+    def revoke_unclaimed(self, principal, incarnation, key, controller_epoch, grant_id):
+        return self._command(principal, incarnation, key, {
+            "operation": "revoke", "controller_epoch": _name(controller_epoch), "grant_id": _uuid(grant_id),
+        })
+
+    def seal(self, principal, incarnation, key, controller_epoch, expected_revision):
+        if type(expected_revision) is not int or expected_revision < 0:
+            raise JournalError("Некорректная revision")
+        return self._command(principal, incarnation, key, {
+            "operation": "seal", "controller_epoch": _name(controller_epoch),
+            "expected_revision": expected_revision,
         })
 
     def _command(self, principal, incarnation, key, payload):
@@ -309,24 +355,48 @@ class ClaimJournal(foundation.MaintenanceStore):
                 if admission == "TEST_OPEN":
                     outcome, grant_id = "RESERVED", str(uuid.uuid4())
                     connection.execute(
-                        "INSERT INTO scoped_grants VALUES (?, ?, ?, ?, ?, NULL)",
+                        "INSERT INTO scoped_grants VALUES (?, ?, ?, ?, ?, NULL, 0)",
                         (grant_id, principal, incarnation, payload["executor"], payload["kind"]),
                     )
             elif operation == "begin":
                 if payload["expected_revision"] != revision:
                     raise JournalConflict("Несовпадающая revision")
+                if admission == "SEALED":
+                    raise JournalConflict("Admission запечатан")
                 outcome = "ALREADY_CLOSED"
                 if admission == "TEST_OPEN":
                     revision += 1
                     connection.execute("UPDATE control SET admission='CLOSED', control_revision=?", (revision,))
                     outcome = "CLOSED"
+            elif operation == "revoke":
+                grant_id = payload["grant_id"]
+                grant = connection.execute(
+                    "SELECT principal, incarnation, claim_id, revoked FROM scoped_grants WHERE grant_id=?",
+                    (grant_id,),
+                ).fetchone()
+                if admission != "CLOSED" or grant is None or grant[:2] != (principal, incarnation) or grant[3]:
+                    raise JournalConflict("Отзыв недоступен")
+                outcome = "CLAIMED_UNKNOWN" if grant[2] is not None else "REVOKED"
+                if outcome == "REVOKED":
+                    connection.execute("UPDATE scoped_grants SET revoked=1 WHERE grant_id=?", (grant_id,))
+            elif operation == "seal":
+                has_begin = connection.execute(
+                    "SELECT 1 FROM command_ledger WHERE operation='begin' LIMIT 1"
+                ).fetchone() is not None
+                if admission != "CLOSED" or payload["expected_revision"] != revision or not has_begin:
+                    raise JournalConflict("Seal недоступен")
+                connection.execute("UPDATE scoped_grants SET revoked=1 WHERE claim_id IS NULL")
+                revision += 1
+                connection.execute("UPDATE control SET admission='SEALED', control_revision=?", (revision,))
+                outcome = "SEALED"
             else:
                 grant_id = payload["grant_id"]
                 grant = connection.execute(
-                    "SELECT principal, incarnation, executor, kind, claim_id FROM scoped_grants WHERE grant_id=?",
+                    "SELECT principal, incarnation, executor, kind, claim_id, revoked FROM scoped_grants WHERE grant_id=?",
                     (grant_id,),
                 ).fetchone()
-                if grant is None or grant[:3] != (principal, incarnation, payload["executor"]) or grant[4] is not None:
+                if (grant is None or grant[:3] != (principal, incarnation, payload["executor"])
+                        or grant[4] is not None or grant[5]):
                     raise JournalConflict("Grant отсутствует, занят или принадлежит другому scope")
                 claim_kind = grant[3]
                 outcome, claim_id = "CLAIMED", str(uuid.uuid4())
@@ -381,7 +451,7 @@ def _open(path, installation, epoch, *, create):
             connection.execute(_GRANTS_SQL)
             connection.execute(_LEDGER_SQL)
             connection.execute("INSERT INTO control VALUES (?, ?, ?, ?, ?, ?)",
-                               (3, installation, str(uuid.uuid4()), _name(epoch), 0, "CLOSED"))
+                               (4, installation, str(uuid.uuid4()), _name(epoch), 0, "CLOSED"))
             connection.commit()
             os.fsync(directory_fd)
         _validate(connection, installation, allow_test_open=False)
