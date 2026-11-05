@@ -106,7 +106,7 @@ class InProcessRestServer:
         self._shutting_down = threading.Event()
         self._active_requests = 0
         self._active_lock = threading.Lock()
-        self._stops_in_progress = 0
+        self._stop_owner: object | None = None
         self._stop_failed = False
         self._install_drain_hooks()
 
@@ -237,7 +237,7 @@ class InProcessRestServer:
                     "защёлка уже взведена (backend завершает работу)"
                 )
                 return False
-            if self._stops_in_progress:
+            if self._stop_owner is not None:
                 logger.warning("InProcessRestServer: start() отклонён — stop() ещё выполняется")
                 return False
             if self._stop_failed:
@@ -250,6 +250,16 @@ class InProcessRestServer:
 
         with self._lock:
             if self._server is not None:
+                with self._active_lock:
+                    if (self._terminal.is_set() or self._shutting_down.is_set()
+                            or self._stop_owner is not None or self._stop_failed):
+                        return False
+                if self._thread is None or not self._thread.is_alive():
+                    with self._active_lock:
+                        self._stop_failed = True
+                        self._shutting_down.set()
+                    logger.warning("InProcessRestServer: серверный тред не работает; start() отклонён")
+                    return False
                 self._start_whisper_idle_reaper()
                 return True
             try:
@@ -285,27 +295,48 @@ class InProcessRestServer:
 
             # Bind может закончиться после begin_shutdown()/stop(). Проверка
             # и публикация сервера атомарны относительно закрытия допуска.
-            with self._active_lock:
-                cancelled = (
-                    self._terminal.is_set()
-                    or self._shutting_down.is_set()
-                    or self._stops_in_progress > 0
-                    or self._stop_failed
-                )
-                if not cancelled:
-                    self._server = candidate
-                    self._serving.clear()
-                    self._thread = threading.Thread(
-                        target=self._serve,
-                        args=(candidate,),
-                        name="rest-inprocess",
-                        daemon=True,
+            try:
+                with self._active_lock:
+                    cancelled = (
+                        self._terminal.is_set()
+                        or self._shutting_down.is_set()
+                        or self._stop_owner is not None
+                        or self._stop_failed
                     )
-                    self._thread.start()
+                    if not cancelled:
+                        self._server = candidate
+                        self._serving.clear()
+                        self._thread = threading.Thread(
+                            target=self._serve,
+                            args=(candidate,),
+                            name="rest-inprocess",
+                            daemon=True,
+                        )
+                        self._thread.start()
+            except BaseException as exc:
+                # start() нити мог запустить её ещё до исключения. Нельзя
+                # закрывать candidate или утверждать, что сервер не работает.
+                self._server = candidate
+                with self._active_lock:
+                    self._stop_failed = True
+                    self._shutting_down.set()
+                if not isinstance(exc, Exception):
+                    raise
+                logger.exception("InProcessRestServer: запуск server thread не подтверждён")
+                return False
             if cancelled:
                 try:
                     candidate.server_close()
-                except Exception:
+                except BaseException as exc:
+                    # Закрытие не подтверждено: сохраняем владельца сокета,
+                    # пока _lock не позволил stop() увидеть пустое состояние.
+                    self._server = candidate
+                    self._thread = None
+                    with self._active_lock:
+                        self._stop_failed = True
+                        self._shutting_down.set()
+                    if not isinstance(exc, Exception):
+                        raise
                     logger.exception("InProcessRestServer: не удалось закрыть сокет после отмены старта")
                 return False
             # Сбрасываем ошибку прошлой попытки ПОД тем же локом, что и
@@ -360,7 +391,9 @@ class InProcessRestServer:
             logger.exception("InProcessRestServer: serve_forever упал")
             with self._lock:
                 self._error = "serve_forever crashed"
-                self._server = None
+                with self._active_lock:
+                    self._stop_failed = True
+                    self._shutting_down.set()
 
     def stop(self, timeout: float = SHUTDOWN_JOIN_TIMEOUT_SEC) -> None:
         """Идемпотентный останов: сентинел → дренаж реестра → shutdown() + join.
@@ -388,24 +421,38 @@ class InProcessRestServer:
         shutting_down безусловно (кроме терминальной защёлки), поэтому
         именно вызывающий решает, будет ли за этим stop() ещё один start().
         """
+        token = object()
         with self._active_lock:
-            self._stops_in_progress += 1
             self._shutting_down.set()
+            if self._stop_failed or self._stop_owner is not None:
+                self._stop_failed = True
+                raise RuntimeError("REST stop имеет неизвестный исход или уже выполняется")
+            self._stop_owner = token
 
         try:
-            self._stop_server(timeout)
+            server, thread = self._stop_server(timeout)
+            with self._lock:
+                with self._active_lock:
+                    if self._stop_owner is not token or self._stop_failed:
+                        raise RuntimeError("REST stop имеет неизвестный исход")
+                    if self._server is not server or self._thread is not thread:
+                        raise RuntimeError("Владелец REST server изменился при stop")
+                    self._server, self._thread = None, None
+                    self._stop_owner = None
         except BaseException:
             with self._active_lock:
-                self._stop_failed = True
+                if self._stop_owner is token:
+                    self._stop_failed = True
+                    self._stop_owner = None
             raise
-        finally:
-            with self._active_lock:
-                self._stops_in_progress -= 1
 
-    def _stop_server(self, timeout: float) -> None:
+    def _stop_server(self, timeout: float) -> tuple[Any, threading.Thread | None]:
         with self._lock:
             server, thread = self._server, self._thread
-            self._server, self._thread = None, None
+
+        with self._active_lock:
+            if self._stop_failed:
+                raise RuntimeError("Параллельный REST stop имеет неизвестный исход")
 
         if server is not None:
             # Сентинел ПЕРЕД дренажем реестра (не после) — SSE/WS-подписчики
@@ -418,38 +465,37 @@ class InProcessRestServer:
                 except Exception:
                     logger.exception("InProcessRestServer: sentinel_push бросил")
 
-            self._drain_active_requests(REST_DRAIN_BUDGET_SEC)
+        if not self._drain_active_requests(REST_DRAIN_BUDGET_SEC):
+            raise RuntimeError("REST drain не подтверждён")
 
+        if server is not None:
             # shutdown() ждёт событие, которое выставляет ТОЛЬКО finally внутри
             # serve_forever(), причём ждёт БЕЗ таймаута. Позвать его до входа
             # треда в цикл = повиснуть навсегда (параметр timeout ниже
             # ограничивает лишь join, до него управление не дойдёт).
             # Поэтому сначала барьер: дождаться фактического входа в цикл.
             if self._serving.wait(timeout=SERVE_ENTER_TIMEOUT_SEC):
-                try:
-                    server.shutdown()
-                except Exception:
-                    logger.exception("InProcessRestServer: shutdown() бросил")
+                with self._active_lock:
+                    if self._stop_failed:
+                        raise RuntimeError("REST shutdown не допущен после неизвестного stop")
+                server.shutdown()
             else:
-                # Тред не вошёл в цикл за отведённое время. shutdown() тут
-                # запрещён; закрытие слушающего сокета ниже само выведет тред,
-                # если он всё-таки войдёт позже.
-                logger.warning(
-                    "InProcessRestServer: тред не вошёл в serve_forever за %.1fс "
-                    "— пропускаем shutdown(), закрываем сокет",
-                    SERVE_ENTER_TIMEOUT_SEC,
-                )
-            try:
-                server.server_close()
-            except Exception:
-                logger.exception("InProcessRestServer: server_close() бросил")
-
+                raise RuntimeError("Вход REST в serve_forever не подтверждён")
         if thread is not None and thread.is_alive():
+            with self._active_lock:
+                if self._stop_failed:
+                    raise RuntimeError("REST join не допущен после неизвестного stop")
             thread.join(timeout=timeout)
             if thread.is_alive():
-                logger.warning(
-                    "InProcessRestServer: тред не вышел за %.1fс", timeout
-                )
+                raise RuntimeError("Завершение REST server thread не подтверждено")
+
+        if server is not None:
+            with self._active_lock:
+                if self._stop_failed:
+                    raise RuntimeError("REST close не допущен после неизвестного stop")
+            server.server_close()
+
+        return server, thread
 
     def status(self) -> dict[str, Any]:
         with self._lock:
@@ -478,10 +524,14 @@ class InProcessRestServer:
         эскалации вместо вечного зависания собственного тика.
         """
         done = threading.Event()
+        errors: list[BaseException] = []
 
         def _do_stop() -> None:
             try:
                 self.stop()
+            except BaseException as exc:
+                errors.append(exc)
+                logger.exception("InProcessRestServer.restart(): stop() не подтверждён")
             finally:
                 done.set()
 
@@ -498,6 +548,8 @@ class InProcessRestServer:
             )
             return False
 
+        if errors:
+            return False
         return self.start()
 
     # ------------------------------------------------------------------

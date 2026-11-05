@@ -71,6 +71,54 @@ def test_shutdown_during_bind_does_not_start_server(monkeypatch, close_method):
         server.stop()
 
 
+def test_cancelled_bind_close_failure_is_unknown_to_concurrent_stop(monkeypatch):
+    binding, finish_bind = Event(), Event()
+    starts, stop_errors = [], []
+
+    class UnclosedServer:
+        def server_close(self):
+            raise OSError("synthetic close failure")
+
+    candidate = UnclosedServer()
+
+    def delayed_bind(*_args, **_kwargs):
+        binding.set()
+        if not finish_bind.wait(5):
+            raise TimeoutError("bind not released")
+        return candidate
+
+    monkeypatch.setattr(werkzeug.serving, "make_server", delayed_bind)
+    server = InProcessRestServer(Flask(__name__), SimpleNamespace(REST_SERVER_PORT=0), True)
+
+    def stop():
+        try:
+            server.stop()
+        except Exception as exc:
+            stop_errors.append(exc)
+
+    starter = Thread(target=lambda: starts.append(server.start()))
+    stopper = Thread(target=stop)
+    starter.start()
+    try:
+        assert binding.wait(3)
+        stopper.start()
+        assert server._shutting_down.wait(3)
+        finish_bind.set()
+        starter.join(5)
+        stopper.join(5)
+        assert not starter.is_alive() and not stopper.is_alive()
+        assert starts == [False]
+        assert len(stop_errors) == 1 and isinstance(stop_errors[0], RuntimeError)
+        assert server._server is candidate and server._thread is None
+        assert server._stop_failed and server._shutting_down.is_set()
+        assert server.start() is False
+    finally:
+        finish_bind.set()
+        starter.join(5)
+        if stopper.ident is not None:
+            stopper.join(5)
+
+
 def test_second_start_cannot_hide_stop_from_first_bind(monkeypatch):
     binding, finish_bind, second_observed, bound, closed = (Event() for _ in range(5))
     results = []
@@ -157,19 +205,17 @@ def test_second_start_cannot_hide_stop_from_first_bind(monkeypatch):
         server.stop()
 
 
-def test_parallel_stops_keep_admission_closed_until_both_finish():
+def test_parallel_stops_are_reported_as_unknown():
     server = InProcessRestServer(Flask(__name__), SimpleNamespace(REST_SERVER_PORT=0), False)
-    entered = [Event(), Event()]
-    release = [Event(), Event()]
+    entered = Event()
+    release = Event()
     errors = []
 
     def controlled_stop(_timeout):
-        from threading import current_thread
-
-        index = 0 if current_thread() is first else 1
-        entered[index].set()
-        if not release[index].wait(5):
+        entered.set()
+        if not release.wait(5):
             raise TimeoutError("stop not released")
+        return None, None
 
     def stop():
         try:
@@ -180,25 +226,26 @@ def test_parallel_stops_keep_admission_closed_until_both_finish():
     server._stop_server = controlled_stop
     first, second = Thread(target=stop), Thread(target=stop)
     first.start()
-    second.start()
     try:
-        assert all(event.wait(3) for event in entered), "both stops must enter"
-        release[0].set()
-        first.join(5)
-        assert not first.is_alive()
-        assert server._stops_in_progress == 1
-        assert server.start() is False
-        assert server._shutting_down.is_set(), "one stop reopened admission"
-        release[1].set()
+        assert entered.wait(3), "first stop did not enter"
+        second.start()
         second.join(5)
         assert not second.is_alive()
-        assert server._stops_in_progress == 0
-        assert not errors, errors
-    finally:
-        for event in release:
-            event.set()
+        assert len(errors) == 1
+        assert server._stop_owner is not None
+        assert server.start() is False
+        assert server._shutting_down.is_set(), "overlap reopened admission"
+        release.set()
         first.join(5)
-        second.join(5)
+        assert not first.is_alive()
+        assert server._stop_owner is None
+        assert len(errors) == 2 and all(isinstance(exc, RuntimeError) for exc in errors)
+        assert server._stop_failed
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
 
 
 def test_failed_stop_keeps_start_closed():
@@ -210,11 +257,12 @@ def test_failed_stop_keeps_start_closed():
     server._stop_server = failed_stop
     with pytest.raises(RuntimeError, match="synthetic stop failure"):
         server.stop()
-    assert server._stops_in_progress == 0
+    assert server._stop_owner is None
     assert server._stop_failed
     assert server.start() is False
     assert server._shutting_down.is_set(), "failed stop must not reopen admission"
     server._stop_server = lambda _timeout: None
-    server.stop()
+    with pytest.raises(RuntimeError):
+        server.stop()
     assert server.start() is False
     assert server._shutting_down.is_set(), "later stop must not erase the failure"

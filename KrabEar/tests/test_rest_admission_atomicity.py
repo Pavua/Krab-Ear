@@ -17,10 +17,18 @@ def test_close_serializes_with_request_admission(close_method):
     release_handler = Event()
     close_done = Event()
     close_observed = Event()
+    drain_entered = Event()
     worker_errors = []
     server = InProcessRestServer(app, SimpleNamespace(REST_SERVER_PORT=0), True)
     original_is_set = server._shutting_down.is_set
     original_lock = server._active_lock
+    original_drain = server._drain_active_requests
+
+    def observed_drain(timeout):
+        drain_entered.set()
+        return original_drain(timeout)
+
+    server._drain_active_requests = observed_drain
 
     class ObservedLock:
         def __enter__(self):
@@ -74,10 +82,15 @@ def test_close_serializes_with_request_admission(close_method):
         assert close_observed.wait(3), "close did not reach its admission lock"
         closed_before_registration = close_done.is_set()
         resume_gate.set()
-        assert entered_handler.wait(3), "accepted request did not enter handler"
-        assert close_done.wait(3), "close did not return after registration"
         assert not closed_before_registration, "close overtook admission registration"
-        assert not server._drain_active_requests(0), "live request missing from drain"
+        assert entered_handler.wait(3), "accepted request did not enter handler"
+        if close_method == "stop":
+            assert drain_entered.wait(3), "stop did not enter drain"
+        else:
+            assert close_done.wait(3), "begin_shutdown did not return"
+        assert not original_drain(0), "live request missing from drain"
+        release_handler.set()
+        assert close_done.wait(3), "close did not return after request finished"
     finally:
         resume_gate.set()
         release_handler.set()
