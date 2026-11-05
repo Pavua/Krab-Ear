@@ -143,6 +143,9 @@ cleanup_worker_snapshots() {
 }
 trap cleanup_worker_snapshots EXIT
 
+TEST_BRAIN_LEASE_ROOT="$(CDPATH= cd "$WORKER_SNAPSHOT_DIR" && pwd -P)" \
+  || { err "не удалось получить абсолютный test lease path"; exit 2; }
+
 fails=()
 test_index=0
 for t in "${TESTS[@]}"; do
@@ -158,7 +161,9 @@ for t in "${TESTS[@]}"; do
   fi
 
   log "→ $t"
-  if PYTHONPATH="$REPO_ROOT/KrabEar" "$HARNESS_VENV/bin/python" -m pytest "$t" -p no:xdist -q; then
+  # Тестовый RecordingCore не должен читать/освобождать общий lease владельца.
+  if KRAB_EAR_BRAIN_LEASE_PATH="$TEST_BRAIN_LEASE_ROOT/${test_index}.brain-lease.json" \
+    PYTHONPATH="$REPO_ROOT/KrabEar" "$HARNESS_VENV/bin/python" -m pytest "$t" -p no:xdist -q; then
     :
   else
     file_failed=1
