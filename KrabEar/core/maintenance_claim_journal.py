@@ -512,6 +512,9 @@ def _open(path, installation, epoch, *, create, version=4, owner_epoch=None):
     if version == 5 and (type(installation) is not str
                          or (create and (type(epoch) is not str or type(owner_epoch) is not str))):
         raise JournalError("Некорректный контекст v1 journal")
+    if version == 5 and create:
+        _name(epoch)
+        _name(owner_epoch)
     path, installation = Path(path), _name(installation)
     connections = []
     directory_fd = lock_fd = None

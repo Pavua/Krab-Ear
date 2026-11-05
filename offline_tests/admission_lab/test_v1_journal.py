@@ -295,6 +295,19 @@ def test_inherited_store_is_rejected_before_any_sql(lab):
 
 
 @pytest.mark.parametrize("pin", ["owner", "controller"])
+@pytest.mark.parametrize("invalid", ["", "bad name", "x" * 129, "не-ascii"])
+def test_invalid_creation_epoch_leaves_path_available(tmp_path, pin, invalid):
+    path = tmp_path / "epochs.sqlite3"
+    controller = invalid if pin == "controller" else "epoch"
+    owner = invalid if pin == "owner" else "owner"
+    with pytest.raises(journal.JournalError):
+        journal.create_v1_lab_journal(path, "inst", controller, owner)
+    assert not path.exists()
+    store = journal.create_v1_lab_journal(path, "inst", "epoch", "owner")
+    store.close()
+
+
+@pytest.mark.parametrize("pin", ["owner", "controller"])
 @pytest.mark.parametrize("form", ["object", "string_subclass"])
 def test_epoch_pins_require_exact_strings(tmp_path, pin, form):
     class Spoof:
@@ -443,7 +456,7 @@ def test_mutation_before_payload_snapshot_cannot_bypass_type_check(lab):
     assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
 
 
-@pytest.mark.parametrize("field", ["operation", "executor", "kind", "grant_id", "expected_revision"])
+@pytest.mark.parametrize("field", ["operation", "executor", "kind", "expected_revision"])
 def test_journal_rejects_subclassed_operation_fields(lab, field):
     store, _ = lab
 
@@ -453,9 +466,7 @@ def test_journal_rejects_subclassed_operation_fields(lab, field):
     class IntSubclass(int):
         pass
 
-    if field == "grant_id":
-        command = request("revoke", "op", grant_id="00000000-0000-0000-0000-000000000001")
-    elif field == "expected_revision":
+    if field == "expected_revision":
         command = request("begin", "op", expected_revision=0)
     else:
         command = request("reserve", "op", executor="worker", kind="stt")
@@ -470,6 +481,32 @@ def test_journal_rejects_subclassed_operation_fields(lab, field):
                        expected_journal_id=journal_id, expected_owner_epoch="owner")
     assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (0,)
     assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("operation", ["claim", "revoke"])
+def test_subclassed_grant_rejected_for_existing_actionable_grant(lab, operation):
+    store, owner = lab
+
+    class StringSubclass(str):
+        pass
+
+    grant = owner.execute(request("reserve", "reserve", executor="worker", kind="stt"))["grant_id"]
+    if operation == "revoke":
+        assert owner.execute(request("begin", "close", expected_revision=0))["outcome"] == "CLOSED"
+    fields = {"grant_id": grant}
+    if operation == "claim":
+        fields["executor"] = "worker"
+    command = request(operation, "op", **fields)
+    payload = {"operation": operation, "controller_epoch": "epoch", **fields}
+    payload["grant_id"] = StringSubclass(grant)
+    journal_id = store._connection.execute("SELECT journal_id FROM control").fetchone()[0]
+    before = store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone()
+    with pytest.raises(journal.JournalError):
+        store._command("lab-client", "inc", "op", payload, v1_request=canonical(command),
+                       expected_journal_id=journal_id, expected_owner_epoch="owner")
+    assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == before
+    assert store._connection.execute("SELECT claim_id, revoked FROM scoped_grants").fetchone() == (None, 0)
+    assert owner.execute(command)["outcome"] == {"claim": "CLAIMED", "revoke": "REVOKED"}[operation]
 
 
 def test_journal_rejects_extra_payload_field_before_effect(lab):
