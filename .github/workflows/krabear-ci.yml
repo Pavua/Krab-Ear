@@ -77,7 +77,7 @@ jobs:
               backend_skip_mark backend_wrong_module backend_bypass_guard; do
             task_scratch="$(mktemp -d "$RUNNER_TEMP/ear-timeout-${task_scenario}.XXXXXX")"
             chmod 700 "$task_scratch"
-            env -i PATH="$PATH" GITHUB_ACTIONS=true EAR_CI_PROTECTED_CANARY="$task_protected" \
+            env -i PATH="$PATH" TMPDIR="$task_scratch" GITHUB_ACTIONS=true EAR_CI_PROTECTED_CANARY="$task_protected" \
               OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
               KRAB_EAR_DATA_DIR="$task_scratch/data" KRAB_EAR_MLX_WHISPER_WORKER=0 \
               KRAB_EAR_RATE_LIMIT_ENABLED=false \
