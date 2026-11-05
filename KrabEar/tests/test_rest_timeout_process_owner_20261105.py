@@ -86,6 +86,7 @@ class RestTimeoutProcessOwnerTests(unittest.TestCase):
         fake_worker.kill_mlx_whisper_session = kill
         with patch.dict(sys.modules, {"core.mlx_whisper_session": fake_worker}):
             response.call_on_close.call_args.args[0]()
+        self.assertIs(namespace["_PROCESS_HOSTS_BACKEND"], True)
         namespace["_mark_backend_process"]()
         self.assertIs(namespace["_PROCESS_HOSTS_BACKEND"], True)
         fake_os._exit.assert_not_called()
