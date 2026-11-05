@@ -1123,6 +1123,9 @@ class BackendService:
         if _rest_enabled:
             try:
                 import backend.rest_server as _rest_module
+                # Защита принадлежит процессу, а не текущему значению настроек
+                # или времени жизни сервера: ответ может закрыться после stop.
+                _rest_module._mark_backend_process()
                 from backend.rest_inprocess import InProcessRestServer
 
                 _rest_module.adopt_external_singletons(
