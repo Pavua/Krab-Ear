@@ -52,11 +52,10 @@ REST_DRAIN_BUDGET_SEC = 2.0
 # ждёт именно треды-handler'ы, а не запросы.
 _DRAIN_POLL_INTERVAL_SEC = 0.05
 
-# Долгоживущие стримы НЕ считаются в реестре активных запросов — иначе
-# дренаж всегда выгорал бы весь бюджет на один подключённый клиент. Их ТРИ:
-# SSE GET /v1/events, WS /v1/stream и WS /ws/events (rest_server.py:2402,
-# хендлер ws_events на 2125) — последний легко пропустить, он не про STT.
-_STREAMING_PATHS = frozenset({"/v1/events", "/v1/stream", "/ws/events"})
+# Подписки на события не считаются в реестре: они могут простаивать сколь
+# угодно долго. STT WebSocket /v1/stream учитывается до выхода обработчика:
+# он может хранить аудио и выполнять распознавание, пока соединение открыто.
+_STREAMING_PATHS = frozenset({"/v1/events", "/ws/events"})
 
 
 class InProcessRestServer:
