@@ -548,7 +548,10 @@ class TestTranscribeTimeoutProcessRecovery(_Base):
 
     def test_process_boundary_uses_non_finalizing_exit_code_70(self):
         """Терминальная граница вызывает os._exit(70), а не sys.exit."""
-        with patch.object(_rest_mod.os, "_exit") as raw_exit:
+        with patch.object(_rest_mod.os, "_exit") as raw_exit, \
+                patch.object(_rest_mod, "_external_process_owner_seen", False), \
+                patch.object(_rest_mod.settings, "REST_IN_PROCESS_ENABLED", False), \
+                patch("core.mlx_whisper_session.kill_mlx_whisper_session"):
             self.real_process_exit(
                 _rest_mod._TRANSCRIBE_TIMEOUT_EXIT_CODE,
             )
