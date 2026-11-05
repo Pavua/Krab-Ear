@@ -31,7 +31,8 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/KrabEar" /tmp/py312/bin/python -m pyt
   offline_tests/admission_lab/test_codec.py \
   offline_tests/admission_lab/test_owner.py \
   KrabEar/tests/test_maintenance_claim_journal.py \
-  KrabEar/tests/test_maintenance_synthetic_submit.py -q --tb=short -o addopts=''
+  KrabEar/tests/test_maintenance_synthetic_submit.py -q --tb=short -o addopts='' \
+  --timeout=60 --timeout-method=thread -p no:cacheprovider
 ```
 
 Не доказаны production authentication, fencing, межъязыковой parser и duplicate
