@@ -9,6 +9,8 @@ from response_v1 import valid_request
 class LabV1:
     def __init__(self, store, *, owner_epoch, controller_epoch):
         store._check_process()
+        if type(owner_epoch) is not str or type(controller_epoch) is not str:
+            raise JournalError("Эпохи должны быть точными строками")
         if store._version != 5 or not store._active:
             raise JournalError("Требуется новый lab journal v5")
         stored_owner, stored_controller = store._connection.execute(

@@ -104,6 +104,7 @@ def _check_v1_binding(encoded, principal, incarnation, key, operation, payload, 
     fields = {"reserve": {"executor", "kind"}, "claim": {"executor", "grant_id"},
               "revoke": {"grant_id"}, "begin": {"expected_revision"}, "seal": {"expected_revision"}}
     if (type(request) is not dict or operation not in fields or set(request) != common | fields[operation]
+            or set(payload) != {"operation", "controller_epoch"} | fields[operation]
             or json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True) != encoded
             or type(request["v"]) is not int or request["v"] != 1
             or request["op"] != operation or request["request_id"] != key
@@ -114,6 +115,19 @@ def _check_v1_binding(encoded, principal, incarnation, key, operation, payload, 
     for field in fields[operation]:
         if field not in payload or type(request[field]) is not type(payload[field]) or request[field] != payload[field]:
             raise JournalError("Несовпадающий v1 payload")
+    if operation in {"reserve", "claim"}:
+        if type(request["executor"]) is not str:
+            raise JournalError("Некорректный executor")
+        _name(request["executor"])
+    if operation == "reserve" and (type(request["kind"]) is not str or request["kind"] not in {"stt", "tts"}):
+        raise JournalError("Некорректный kind")
+    if operation in {"claim", "revoke"}:
+        if type(request["grant_id"]) is not str:
+            raise JournalError("Некорректный grant")
+        _uuid(request["grant_id"])
+    if operation in {"begin", "seal"} and (type(request["expected_revision"]) is not int
+                                           or not 0 <= request["expected_revision"] < (1 << 63) - 1):
+        raise JournalError("Некорректная revision")
 
 
 def _validate(connection, installation, *, allow_test_open, expected_version=None):
@@ -364,6 +378,15 @@ class ClaimJournal(foundation.MaintenanceStore):
     def _command(self, principal, incarnation, key, payload, *, v1_request=None, expected_journal_id=None,
                  expected_owner_epoch=None):
         self._check_process()
+        if self._version == 5:
+            if (any(type(value) is not str for value in (principal, incarnation, key))
+                    or type(payload) is not dict):
+                raise JournalError("Некорректный v1 payload или identity")
+            payload = payload.copy()
+            if (any(type(field) is not str for field in payload)
+                    or type(payload.get("operation")) is not str
+                    or type(payload.get("controller_epoch")) is not str):
+                raise JournalError("Некорректный v1 payload или identity")
         principal, incarnation, key = map(_name, (principal, incarnation, key))
         if not self._active or self._poisoned:
             raise JournalError("Только inspection или UNKNOWN")
@@ -371,6 +394,8 @@ class ClaimJournal(foundation.MaintenanceStore):
         if len(encoded.encode("utf-8")) > 2048:
             raise JournalError("Слишком большие параметры")
         if self._version == 5:
+            if type(expected_owner_epoch) is not str or type(expected_journal_id) is not str:
+                raise JournalError("Некорректный контекст журнала")
             _check_v1_binding(v1_request, principal, incarnation, key, payload["operation"], payload,
                               expected_owner_epoch)
         elif v1_request is not None:
@@ -484,6 +509,9 @@ class ClaimJournal(foundation.MaintenanceStore):
 
 
 def _open(path, installation, epoch, *, create, version=4, owner_epoch=None):
+    if version == 5 and (type(installation) is not str
+                         or (create and (type(epoch) is not str or type(owner_epoch) is not str))):
+        raise JournalError("Некорректный контекст v1 journal")
     path, installation = Path(path), _name(installation)
     connections = []
     directory_fd = lock_fd = None
@@ -533,7 +561,7 @@ def open_claim_journal(path, installation_id):
 
 
 def create_v1_lab_journal(path, installation_id, controller_epoch, owner_epoch):
-    return _open(path, installation_id, _name(controller_epoch), create=True, version=5, owner_epoch=owner_epoch)
+    return _open(path, installation_id, controller_epoch, create=True, version=5, owner_epoch=owner_epoch)
 
 
 def inspect_v1_lab_journal(path, installation_id):

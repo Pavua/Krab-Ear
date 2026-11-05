@@ -1,5 +1,6 @@
 """Synthetic v1/journal contract; no production authority or recovery."""
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ import sqlite3
 import select
 import subprocess
 import sys
-import uuid
+import time
 
 import pytest
 
@@ -293,6 +294,229 @@ def test_inherited_store_is_rejected_before_any_sql(lab):
         store._connection, store._creator_pid = connection, creator
 
 
+@pytest.mark.parametrize("pin", ["owner", "controller"])
+@pytest.mark.parametrize("form", ["object", "string_subclass"])
+def test_epoch_pins_require_exact_strings(tmp_path, pin, form):
+    class Spoof:
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    class SpoofString(str):
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    spoof = Spoof() if form == "object" else SpoofString("spoof")
+    store = journal.create_v1_lab_journal(tmp_path / "pins.sqlite3", "inst", "epoch", "owner")
+    try:
+        owner_pin = spoof if pin == "owner" else "owner"
+        controller_pin = spoof if pin == "controller" else "epoch"
+        with pytest.raises(journal.JournalError):
+            LabV1(store, owner_epoch=owner_pin, controller_epoch=controller_pin)
+        assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (0,)
+        assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
+        valid = LabV1(store, owner_epoch="owner", controller_epoch="epoch")
+        assert valid.execute(request("reserve", "valid", executor="worker", kind="stt"))["outcome"] == "DENIED_CLOSED"
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize("pin", ["owner", "journal_id"])
+def test_journal_context_rejects_string_subclasses_before_writing(lab, pin):
+    store, owner = lab
+
+    class SpoofString(str):
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    command = request("reserve", "reserve", executor="worker", kind="stt")
+    payload = {"operation": "reserve", "controller_epoch": "epoch", "executor": "worker", "kind": "stt"}
+    journal_id = store._connection.execute("SELECT journal_id FROM control").fetchone()[0]
+    owner_pin = SpoofString("spoof") if pin == "owner" else "owner"
+    journal_pin = SpoofString("spoof") if pin == "journal_id" else journal_id
+    with pytest.raises(journal.JournalError):
+        store._command("lab-client", "inc", "reserve", payload, v1_request=canonical(command),
+                       expected_journal_id=journal_pin, expected_owner_epoch=owner_pin)
+    assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (0,)
+    assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
+    assert owner.execute(command)["outcome"] == "RESERVED"
+
+
+def test_forged_owner_after_reserve_cannot_claim_with_another_epoch(lab):
+    store, owner = lab
+    reserve = request("reserve", "reserve", executor="worker", kind="stt")
+    grant = owner.execute(reserve)["grant_id"]
+
+    class SpoofString(str):
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+    # Обходим проверку конструктора: проверяем второй барьер самого журнала.
+    owner._owner_epoch = SpoofString("spoof")
+    claim = dict(request("claim", "claim", executor="worker", grant_id=grant), owner_epoch="other")
+    assert owner.execute(claim) is None
+    assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (1,)
+    assert store._connection.execute("SELECT COUNT(claim_id) FROM scoped_grants").fetchone() == (0,)
+    assert not owner._permits
+    assert store.status()["unknown"] is True
+
+
+@pytest.mark.parametrize("field", ["controller", "principal", "incarnation", "key"])
+def test_journal_rejects_forged_identity_and_controller_types(lab, field):
+    store, owner = lab
+
+    class SpoofString(str):
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+        __hash__ = str.__hash__
+
+    command = request("reserve", "reserve", executor="worker", kind="stt")
+    payload = {"operation": "reserve", "controller_epoch": "epoch", "executor": "worker", "kind": "stt"}
+    principal, incarnation, key = "lab-client", "inc", "reserve"
+    if field == "controller":
+        payload["controller_epoch"] = SpoofString("wrong")
+    elif field == "principal":
+        principal = SpoofString("wrong")
+    elif field == "incarnation":
+        incarnation = SpoofString("wrong")
+    else:
+        key = SpoofString("wrong")
+    journal_id = store._connection.execute("SELECT journal_id FROM control").fetchone()[0]
+    with pytest.raises(journal.JournalError):
+        store._command(principal, incarnation, key, payload, v1_request=canonical(command),
+                       expected_journal_id=journal_id, expected_owner_epoch="owner")
+    assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (0,)
+    assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
+    assert owner.execute(command)["outcome"] == "RESERVED"
+
+
+def test_mutation_before_payload_snapshot_cannot_bypass_type_check(lab):
+    store, _ = lab
+
+    class SpoofString(str):
+        def __eq__(self, _other):
+            return True
+
+        def __ne__(self, _other):
+            return False
+
+        __hash__ = str.__hash__
+
+    command = request("reserve", "reserve", executor="worker", kind="stt")
+    payload = {"operation": "reserve", "controller_epoch": "epoch", "executor": "worker", "kind": "stt"}
+    source, start = inspect.getsourcelines(journal.ClaimJournal._command)
+    snapshot_line = start + next(i for i, line in enumerate(source) if "payload = payload.copy()" in line)
+    journal_id = store._connection.execute("SELECT journal_id FROM control").fetchone()[0]
+    mutated = []
+
+    def inject(frame, event, _argument):
+        if frame.f_code is journal.ClaimJournal._command.__code__ and event == "line" and frame.f_lineno == snapshot_line:
+            payload["controller_epoch"] = SpoofString("wrong")
+            mutated.append(True)
+        return inject
+
+    prior_trace = sys.gettrace()
+    sys.settrace(inject)
+    try:
+        with pytest.raises(journal.JournalError):
+            store._command("lab-client", "inc", "reserve", payload, v1_request=canonical(command),
+                           expected_journal_id=journal_id, expected_owner_epoch="owner")
+    finally:
+        sys.settrace(prior_trace)
+    assert mutated == [True]
+    assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (0,)
+    assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
+
+
+@pytest.mark.parametrize("field", ["operation", "executor", "kind", "grant_id", "expected_revision"])
+def test_journal_rejects_subclassed_operation_fields(lab, field):
+    store, _ = lab
+
+    class StringSubclass(str):
+        pass
+
+    class IntSubclass(int):
+        pass
+
+    if field == "grant_id":
+        command = request("revoke", "op", grant_id="00000000-0000-0000-0000-000000000001")
+    elif field == "expected_revision":
+        command = request("begin", "op", expected_revision=0)
+    else:
+        command = request("reserve", "op", executor="worker", kind="stt")
+    payload = {"operation": command["op"], "controller_epoch": "epoch"}
+    for name in ("executor", "kind", "grant_id", "expected_revision"):
+        if name in command:
+            payload[name] = command[name]
+    payload[field] = IntSubclass(payload[field]) if field == "expected_revision" else StringSubclass(payload[field])
+    journal_id = store._connection.execute("SELECT journal_id FROM control").fetchone()[0]
+    with pytest.raises(journal.JournalError):
+        store._command("lab-client", "inc", "op", payload, v1_request=canonical(command),
+                       expected_journal_id=journal_id, expected_owner_epoch="owner")
+    assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (0,)
+    assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
+
+
+def test_journal_rejects_extra_payload_field_before_effect(lab):
+    store, owner = lab
+    command = request("reserve", "reserve", executor="worker", kind="stt")
+    payload = {"operation": "reserve", "controller_epoch": "epoch", "executor": "worker", "kind": "stt", "extra": 1}
+    journal_id = store._connection.execute("SELECT journal_id FROM control").fetchone()[0]
+    with pytest.raises(journal.JournalError):
+        store._command("lab-client", "inc", "reserve", payload, v1_request=canonical(command),
+                       expected_journal_id=journal_id, expected_owner_epoch="owner")
+    assert store._connection.execute("SELECT COUNT(*) FROM command_ledger").fetchone() == (0,)
+    assert store._connection.execute("SELECT COUNT(*) FROM scoped_grants").fetchone() == (0,)
+    assert owner.execute(command)["outcome"] == "RESERVED"
+
+
+@pytest.mark.parametrize("field", ["installation", "controller", "owner"])
+def test_new_v5_journal_rejects_subclassed_context_before_creation(tmp_path, field):
+    class SpoofString(str):
+        pass
+
+    path = tmp_path / "new.sqlite3"
+    installation = SpoofString("inst") if field == "installation" else "inst"
+    controller = SpoofString("epoch") if field == "controller" else "epoch"
+    owner = SpoofString("owner") if field == "owner" else "owner"
+    with pytest.raises(journal.JournalError):
+        journal.create_v1_lab_journal(path, installation, controller, owner)
+    assert not path.exists()
+    store = journal.create_v1_lab_journal(path, "inst", "epoch", "owner")
+    store.close()
+
+
+def test_v5_inspection_rejects_subclassed_installation(tmp_path):
+    class SpoofString(str):
+        pass
+
+    path = tmp_path / "inspect.sqlite3"
+    store = journal.create_v1_lab_journal(path, "inst", "epoch", "owner")
+    store.close()
+    with pytest.raises(journal.JournalError):
+        journal.inspect_v1_lab_journal(path, SpoofString("inst"))
+    inspected = journal.inspect_v1_lab_journal(path, "inst")
+    try:
+        assert inspected.status()["unknown"] is True
+    finally:
+        inspected.close()
+
+
 def test_v5_reopen_is_inspection_only_and_v4_open_rejects(lab, tmp_path):
     store, owner = lab
     owner.execute(request("begin", "close", expected_revision=0))
@@ -319,9 +543,39 @@ def assert_lost_ack_observation(command, committed, replay, counts, same_permit)
     assert same_permit is True
 
 
-def test_cross_process_lost_ack_replay_and_negative_controls(tmp_path):
+def read_bounded_line(fd, *, timeout):
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    while len(data) < 8192:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not select.select([fd], [], [], remaining)[0]:
+            raise TimeoutError("synthetic owner response timed out")
+        chunk = os.read(fd, 1)
+        if not chunk:
+            raise EOFError("synthetic owner exited before complete response")
+        data.extend(chunk)
+        if chunk == b"\n":
+            return data.decode("utf-8")
+    raise ValueError("synthetic owner response too long")
+
+
+def test_incomplete_line_cannot_bypass_read_deadline():
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b'{"event":')
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            read_bounded_line(read_fd, timeout=0.05)
+        assert time.monotonic() - start < 5.0
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.parametrize("mutation", ["none", "changed_id", "new_permit"])
+def test_cross_process_lost_ack_replay_and_negative_controls(tmp_path, mutation):
     script = r'''
-import json, sys
+import json, sys, uuid
 from core import maintenance_claim_journal as journal
 from v1_journal import LabV1
 store = journal.create_v1_lab_journal(sys.argv[1], "inst", "epoch", "owner")
@@ -329,6 +583,19 @@ try:
     store._connection.execute("UPDATE control SET admission='TEST_OPEN'")
     store._connection.commit()
     owner = LabV1(store, owner_epoch="owner", controller_epoch="epoch")
+    original_command = store._command
+    seen_claim = False
+    def synthetic_mutant(*args, **kwargs):
+        global seen_claim
+        result = original_command(*args, **kwargs)
+        if args[3]["operation"] == "claim":
+            if seen_claim and sys.argv[2] == "changed_id":
+                result["claim_id"] = str(uuid.uuid4())
+            if seen_claim and sys.argv[2] == "new_permit":
+                result["permit"] = object()
+            seen_claim = True
+        return result
+    store._command = synthetic_mutant
     print(json.dumps({"event": "ready"}), flush=True)
     first = True
     original_permit = None
@@ -355,17 +622,13 @@ finally:
     store.close()
 '''
     env_path = str(Path(__file__).parent)
-    process = subprocess.Popen([sys.executable, "-u", "-c", script, str(tmp_path / "child.sqlite3")],
+    process = subprocess.Popen([sys.executable, "-u", "-c", script, str(tmp_path / "child.sqlite3"), mutation],
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                text=True, bufsize=1, env={**os.environ,
                                                          "PYTHONPATH": env_path + os.pathsep + os.environ["PYTHONPATH"]})
 
     def receive():
-        ready, _, _ = select.select([process.stdout], [], [], 5)
-        assert ready, "synthetic owner timed out"
-        line = process.stdout.readline()
-        assert line, "synthetic owner exited"
-        return json.loads(line)
+        return json.loads(read_bounded_line(process.stdout.fileno(), timeout=5))
 
     def send(value):
         process.stdin.write(json.dumps(value) + "\n")
@@ -389,13 +652,19 @@ finally:
         observed = receive()
         assert observed["private_permits"] == 1
         counts = observed["counts"]
-        assert_lost_ack_observation(command, committed["claim_id"], replay, counts, observed["same_permit"])
-        with pytest.raises(AssertionError):
-            assert_lost_ack_observation(command, committed["claim_id"], dict(replay, claim_id=str(uuid.uuid4())), counts, True)
-        with pytest.raises(AssertionError):
-            assert_lost_ack_observation(command, committed["claim_id"], replay, [1, 1, 3], True)
-        with pytest.raises(AssertionError):
-            assert_lost_ack_observation(command, committed["claim_id"], replay, counts, False)
+        if mutation == "none":
+            assert_lost_ack_observation(command, committed["claim_id"], replay, counts, observed["same_permit"])
+            with pytest.raises(AssertionError):
+                assert_lost_ack_observation(command, committed["claim_id"], replay, [1, 1, 3], True)
+        else:
+            assert classify(command, replay) == "RECEIPT_ONLY"
+            assert counts == [1, 1, 2]
+            if mutation == "changed_id":
+                assert replay["claim_id"] != committed["claim_id"] and observed["same_permit"] is True
+            else:
+                assert replay["claim_id"] == committed["claim_id"] and observed["same_permit"] is False
+            with pytest.raises(AssertionError):
+                assert_lost_ack_observation(command, committed["claim_id"], replay, counts, observed["same_permit"])
     finally:
         try:
             try:
