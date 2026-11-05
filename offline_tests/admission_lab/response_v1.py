@@ -43,6 +43,29 @@ def _number(value):
     return type(value) is int and 0 <= value <= _MAX_REVISION
 
 
+def valid_request(request):
+    """Только строгая проверка уже разобранного synthetic объекта."""
+    if type(request) is not dict or any(type(key) is not str for key in request):
+        return False
+    op = request.get("op")
+    if type(op) is not str or op not in _REQUEST_FIELDS or set(request) != _REQUEST_FIELDS[op]:
+        return False
+    if type(request.get("v")) is not int or request["v"] != 1:
+        return False
+    if any(not _name(request[key]) for key in _COMMON - {"v", "op"}):
+        return False
+    if op in {"reserve", "claim"} and not _name(request["executor"]):
+        return False
+    if op == "reserve" and (type(request["kind"]) is not str or request["kind"] not in {"stt", "tts"}):
+        return False
+    if op in {"claim", "revoke"} and not _uuid(request["grant_id"]):
+        return False
+    if op in {"begin", "seal"} and (not _number(request["expected_revision"])
+                                    or request["expected_revision"] == _MAX_REVISION):
+        return False
+    return True
+
+
 def classify_response(request, response, *, lab_binding, expected_request_sha256,
                       expected_owner_epoch, expected_controller_epoch):
     """Строгая классификация fixture; lab_binding не проверяет подлинность."""
@@ -50,24 +73,9 @@ def classify_response(request, response, *, lab_binding, expected_request_sha256
         return "UNKNOWN"
     request = request.copy()
     response = response.copy()
-    if any(type(key) is not str for key in request) or any(type(key) is not str for key in response):
+    if not valid_request(request) or any(type(key) is not str for key in response):
         return "UNKNOWN"
-    op = request.get("op")
-    if type(op) is not str or op not in _REQUEST_FIELDS or set(request) != _REQUEST_FIELDS[op]:
-        return "UNKNOWN"
-    if type(request.get("v")) is not int or request["v"] != 1:
-        return "UNKNOWN"
-    if any(not _name(request[key]) for key in _COMMON - {"v", "op"}):
-        return "UNKNOWN"
-    if op in {"reserve", "claim"} and not _name(request["executor"]):
-        return "UNKNOWN"
-    if op == "reserve" and (type(request["kind"]) is not str or request["kind"] not in {"stt", "tts"}):
-        return "UNKNOWN"
-    if op in {"claim", "revoke"} and not _uuid(request["grant_id"]):
-        return "UNKNOWN"
-    if op in {"begin", "seal"} and (not _number(request["expected_revision"])
-                                    or request["expected_revision"] == _MAX_REVISION):
-        return "UNKNOWN"
+    op = request["op"]
     if (not _name(expected_owner_epoch) or not _name(expected_controller_epoch)
             or request["owner_epoch"] != expected_owner_epoch
             or request["controller_epoch"] != expected_controller_epoch

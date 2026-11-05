@@ -1,7 +1,8 @@
 """Synthetic scoped claims; не production admission и не право на execution.
 
-Schema v4 не открывает и не мигрирует старые схемы. Нет transport/auth, executor, terminal,
-recovery или drain. Все файлы должны быть тестовыми в доверенном namespace.
+Synthetic схемы v4 и v5 не мигрируют друг друга или старые схемы. Нет production
+transport/auth, executor, terminal, recovery или drain. Все файлы должны быть
+тестовыми в доверенном namespace.
 """
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ _CONTROL_SQL = (
     "journal_id TEXT NOT NULL, controller_epoch TEXT NOT NULL, "
     "control_revision INTEGER NOT NULL, admission TEXT NOT NULL)"
 )
+_CONTROL_V5_SQL = _CONTROL_SQL.replace("controller_epoch TEXT NOT NULL,", "controller_epoch TEXT NOT NULL, owner_epoch TEXT NOT NULL,")
 _GRANTS_SQL = (
     "CREATE TABLE scoped_grants (grant_id TEXT PRIMARY KEY, principal TEXT NOT NULL, "
     "incarnation TEXT NOT NULL, executor TEXT NOT NULL, kind TEXT NOT NULL, claim_id TEXT UNIQUE, "
@@ -38,6 +40,7 @@ _LEDGER_SQL = (
     "(operation = 'revoke' AND outcome IN ('REVOKED', 'CLAIMED_UNKNOWN') AND grant_id IS NOT NULL AND claim_id IS NULL) OR "
     "(operation = 'seal' AND outcome = 'SEALED' AND grant_id IS NULL AND claim_id IS NULL)))"
 )
+_LEDGER_V5_SQL = _LEDGER_SQL.replace("payload TEXT NOT NULL,", "payload TEXT NOT NULL, v1_request TEXT NOT NULL,")
 _MAX_RECORDS = 1024
 
 
@@ -90,7 +93,30 @@ def _uuid(value):
     return value
 
 
-def _validate(connection, installation, *, allow_test_open):
+def _check_v1_binding(encoded, principal, incarnation, key, operation, payload, owner_epoch):
+    if type(encoded) is not str or len(encoded.encode("utf-8")) > 2048:
+        raise JournalError("Некорректный v1 request")
+    try:
+        request = json.loads(encoded)
+    except (ValueError, RecursionError) as exc:
+        raise JournalError("Некорректный v1 request") from exc
+    common = {"v", "op", "request_id", "client_incarnation", "owner_epoch", "controller_epoch"}
+    fields = {"reserve": {"executor", "kind"}, "claim": {"executor", "grant_id"},
+              "revoke": {"grant_id"}, "begin": {"expected_revision"}, "seal": {"expected_revision"}}
+    if (type(request) is not dict or operation not in fields or set(request) != common | fields[operation]
+            or json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True) != encoded
+            or type(request["v"]) is not int or request["v"] != 1
+            or request["op"] != operation or request["request_id"] != key
+            or request["client_incarnation"] != incarnation or principal != "lab-client"
+            or request["controller_epoch"] != payload["controller_epoch"] or request["owner_epoch"] != owner_epoch):
+        raise JournalError("Несовпадающий v1 request")
+    _name(request["owner_epoch"])
+    for field in fields[operation]:
+        if field not in payload or type(request[field]) is not type(payload[field]) or request[field] != payload[field]:
+            raise JournalError("Несовпадающий v1 payload")
+
+
+def _validate(connection, installation, *, allow_test_open, expected_version=None):
     if connection.execute("PRAGMA quick_check(1)").fetchone() != ("ok",):
         raise JournalError("Целостность не подтверждена")
     objects = connection.execute(
@@ -104,8 +130,14 @@ def _validate(connection, installation, *, allow_test_open):
         ("table", "control", _CONTROL_SQL),
         ("table", "scoped_grants", _GRANTS_SQL),
     ]
-    if objects != expected:
+    expected_v5 = [(kind, name, _LEDGER_V5_SQL if name == "command_ledger" else
+                    _CONTROL_V5_SQL if name == "control" else sql)
+                   for kind, name, sql in expected]
+    if objects not in (expected, expected_v5):
         raise JournalError("Неизвестная schema v4")
+    schema_version = 4 if objects == expected else 5
+    if expected_version is not None and schema_version != expected_version:
+        raise JournalError("Подменена версия журнала")
     rows = connection.execute(
         "SELECT version, installation_id, journal_id, controller_epoch, control_revision, admission "
         "FROM control LIMIT 2"
@@ -113,11 +145,14 @@ def _validate(connection, installation, *, allow_test_open):
     if len(rows) != 1:
         raise JournalError("Неизвестный control")
     version, found, journal_id, epoch, revision, admission = rows[0]
-    if (version != 4 or found != installation or not isinstance(revision, int) or revision < 0
+    if (version != schema_version or found != installation or not isinstance(revision, int) or revision < 0
             or admission not in {"CLOSED", "TEST_OPEN", "SEALED"}):
         raise JournalError("Неизвестное состояние")
     _uuid(journal_id)
     _name(epoch)
+    owner_epoch = connection.execute("SELECT owner_epoch FROM control").fetchone()[0] if version == 5 else None
+    if version == 5:
+        _name(owner_epoch)
     if admission == "TEST_OPEN" and not allow_test_open:
         raise RecoveryRequired("TEST_OPEN требует восстановления")
     # До materialization проверяем count и предел отдельных значений SQLite.
@@ -142,14 +177,16 @@ def _validate(connection, installation, *, allow_test_open):
         grants[grant_id] = (principal, incarnation, executor, kind, claim_id, revoked)
     entries = connection.execute(
         "SELECT principal, incarnation, request_key, operation, payload, outcome, "
-        "grant_id, claim_id, result_revision FROM command_ledger ORDER BY sequence LIMIT ?",
+        "grant_id, claim_id, result_revision" + (", v1_request" if version == 5 else "")
+        + " FROM command_ledger ORDER BY sequence LIMIT ?",
         (_MAX_RECORDS + 1,),
     ).fetchall()
     reserved, claimed, revoked = set(), set(), set()
     history_admission = None
     history_revision = 0
     history_has_begin = False
-    for principal, incarnation, key, operation, encoded, outcome, grant_id, claim_id, result_revision in entries:
+    for entry in entries:
+        principal, incarnation, key, operation, encoded, outcome, grant_id, claim_id, result_revision = entry[:9]
         for value in (principal, incarnation, key):
             _name(value)
         if (not isinstance(encoded, str) or len(encoded.encode("utf-8")) > 2048
@@ -162,6 +199,8 @@ def _validate(connection, installation, *, allow_test_open):
         if (not isinstance(payload, dict) or json.dumps(payload, sort_keys=True, separators=(",", ":")) != encoded
                 or payload.get("operation") != operation or payload.get("controller_epoch") != epoch):
             raise JournalError("Несовпадающий payload")
+        if version == 5:
+            _check_v1_binding(entry[9], principal, incarnation, key, operation, payload, owner_epoch)
         if operation == "reserve":
             if (set(payload) != {"operation", "controller_epoch", "executor", "kind"}
                     or not isinstance(payload.get("kind"), str) or payload["kind"] not in {"stt", "tts"}):
@@ -253,9 +292,10 @@ def _validate(connection, installation, *, allow_test_open):
 class ClaimJournal(foundation.MaintenanceStore):
     """Single-threaded synthetic actor; только локальный учебный permit."""
 
-    def __init__(self, connection, installation, directory_fd, lock_fd, *, active):
+    def __init__(self, connection, installation, directory_fd, lock_fd, *, active, version=4):
         super().__init__(connection, installation, directory_fd, lock_fd)
         self._active = active
+        self._version = version
         self._poisoned = False
         self._creator_pid = os.getpid()
 
@@ -271,7 +311,7 @@ class ClaimJournal(foundation.MaintenanceStore):
         self._check_process()
         try:
             _, _, revision, admission = _validate(
-                self._connection, self._installation_id, allow_test_open=self._active,
+                self._connection, self._installation_id, allow_test_open=self._active, expected_version=self._version,
             )
             count, claimed = self._connection.execute(
                 "SELECT COUNT(*), COUNT(claim_id) FROM scoped_grants"
@@ -321,7 +361,8 @@ class ClaimJournal(foundation.MaintenanceStore):
             "expected_revision": expected_revision,
         })
 
-    def _command(self, principal, incarnation, key, payload):
+    def _command(self, principal, incarnation, key, payload, *, v1_request=None, expected_journal_id=None,
+                 expected_owner_epoch=None):
         self._check_process()
         principal, incarnation, key = map(_name, (principal, incarnation, key))
         if not self._active or self._poisoned:
@@ -329,19 +370,29 @@ class ClaimJournal(foundation.MaintenanceStore):
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         if len(encoded.encode("utf-8")) > 2048:
             raise JournalError("Слишком большие параметры")
+        if self._version == 5:
+            _check_v1_binding(v1_request, principal, incarnation, key, payload["operation"], payload,
+                              expected_owner_epoch)
+        elif v1_request is not None:
+            raise JournalError("v1 недоступен в schema v4")
         connection = self._connection
         try:
             connection.execute("BEGIN IMMEDIATE")
             journal_id, epoch, revision, admission = _validate(
-                connection, self._installation_id, allow_test_open=True,
+                connection, self._installation_id, allow_test_open=True, expected_version=self._version,
             )
+            if self._version == 5 and (expected_journal_id is None or journal_id != expected_journal_id):
+                raise JournalError("Несовпадающий экземпляр журнала")
+            if self._version == 5 and connection.execute("SELECT owner_epoch FROM control").fetchone()[0] != expected_owner_epoch:
+                raise JournalError("Несовпадающая эпоха владельца")
             prior = connection.execute(
-                "SELECT payload, outcome, grant_id, claim_id, result_revision FROM command_ledger "
+                "SELECT payload, outcome, grant_id, claim_id, result_revision"
+                + (", v1_request" if self._version == 5 else "") + " FROM command_ledger "
                 "WHERE principal=? AND incarnation=? AND request_key=?",
                 (principal, incarnation, key),
             ).fetchone()
             if prior is not None:
-                if prior[0] != encoded:
+                if prior[0] != encoded or (self._version == 5 and prior[5] != v1_request):
                     raise JournalConflict("Ключ занят другими параметрами")
                 connection.rollback()
                 return _response(prior[1], prior[2], prior[3], prior[4])
@@ -401,12 +452,13 @@ class ClaimJournal(foundation.MaintenanceStore):
                 claim_kind = grant[3]
                 outcome, claim_id = "CLAIMED", str(uuid.uuid4())
                 connection.execute("UPDATE scoped_grants SET claim_id=? WHERE grant_id=?", (claim_id, grant_id))
-            connection.execute(
-                "INSERT INTO command_ledger "
-                "(principal, incarnation, request_key, operation, payload, outcome, grant_id, claim_id, result_revision) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (principal, incarnation, key, operation, encoded, outcome, grant_id, claim_id, revision),
-            )
+            columns = "principal, incarnation, request_key, operation, payload, outcome, grant_id, claim_id, result_revision"
+            values = (principal, incarnation, key, operation, encoded, outcome, grant_id, claim_id, revision)
+            if self._version == 5:
+                columns += ", v1_request"
+                values += (v1_request,)
+            placeholders = ", ".join("?" for _ in values)
+            connection.execute(f"INSERT INTO command_ledger ({columns}) VALUES ({placeholders})", values)
             connection.commit()
             permit = _SyntheticPermit(journal_id, grant_id, claim_id, payload["executor"], claim_kind) if claim_id else None
             return _response(outcome, grant_id, claim_id, revision, permit=permit)
@@ -431,7 +483,7 @@ class ClaimJournal(foundation.MaintenanceStore):
             raise
 
 
-def _open(path, installation, epoch, *, create):
+def _open(path, installation, epoch, *, create, version=4, owner_epoch=None):
     path, installation = Path(path), _name(installation)
     connections = []
     directory_fd = lock_fd = None
@@ -447,15 +499,22 @@ def _open(path, installation, epoch, *, create):
             raise JournalError("Предел SQLite не подтверждён")
         if create:
             foundation._configure(connection)
-            connection.execute(_CONTROL_SQL)
+            connection.execute(_CONTROL_SQL if version == 4 else _CONTROL_V5_SQL)
             connection.execute(_GRANTS_SQL)
-            connection.execute(_LEDGER_SQL)
-            connection.execute("INSERT INTO control VALUES (?, ?, ?, ?, ?, ?)",
-                               (4, installation, str(uuid.uuid4()), _name(epoch), 0, "CLOSED"))
+            connection.execute(_LEDGER_SQL if version == 4 else _LEDGER_V5_SQL)
+            if version == 4:
+                connection.execute("INSERT INTO control VALUES (?, ?, ?, ?, ?, ?)",
+                                   (version, installation, str(uuid.uuid4()), _name(epoch), 0, "CLOSED"))
+            else:
+                connection.execute("INSERT INTO control VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                   (version, installation, str(uuid.uuid4()), _name(epoch), _name(owner_epoch), 0, "CLOSED"))
             connection.commit()
             os.fsync(directory_fd)
-        _validate(connection, installation, allow_test_open=False)
-        return ClaimJournal(connection, installation, directory_fd, lock_fd, active=create)
+        _validate(connection, installation, allow_test_open=False, expected_version=version)
+        actual_version = connection.execute("SELECT version FROM control").fetchone()[0]
+        if actual_version != version:
+            raise JournalError("Несовместимая версия журнала")
+        return ClaimJournal(connection, installation, directory_fd, lock_fd, active=create, version=version)
     except BaseException as exc:
         foundation._abort_open(connections, directory_fd, lock_fd)
         if isinstance(exc, RecoveryRequired):
@@ -471,3 +530,11 @@ def create_claim_journal(path, installation_id, controller_epoch):
 
 def open_claim_journal(path, installation_id):
     return _open(path, installation_id, None, create=False)
+
+
+def create_v1_lab_journal(path, installation_id, controller_epoch, owner_epoch):
+    return _open(path, installation_id, _name(controller_epoch), create=True, version=5, owner_epoch=owner_epoch)
+
+
+def inspect_v1_lab_journal(path, installation_id):
+    return _open(path, installation_id, None, create=False, version=5)
