@@ -32,7 +32,10 @@ class MeetingDispatchInvariantTestCase(unittest.TestCase):
         src = SERVICE_PY.read_text(encoding="utf-8")
         close_start = src.index("def close(self)")
         close_end = src.index("\n    def ", close_start)
-        close_body = src[close_start:close_end]
+        self.assertIn("self._close_impl()", src[close_start:close_end])
+        impl_start = src.index("def _close_impl(self)")
+        impl_end = src.index("\n    def ", impl_start)
+        close_body = src[impl_start:impl_end]
         meeting_gate = close_body.index("meeting_service.begin_shutdown()")
         core_close = close_body.index("recording_core.close_background_workers()")
         self.assertLess(meeting_gate, core_close)
