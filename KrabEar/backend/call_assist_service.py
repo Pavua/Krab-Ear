@@ -271,6 +271,7 @@ class CallAssistService:
                     "status": self._state.get("status", "running"),
                 }
             # Claim the slot immediately so concurrent callers see active=True
+
             def claim() -> None:
                 self._state["active"] = True
                 self._state["status"] = "starting"
