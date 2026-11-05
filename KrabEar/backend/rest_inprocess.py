@@ -88,6 +88,7 @@ class InProcessRestServer:
 
         self._server: Any = None
         self._thread: threading.Thread | None = None
+        self._shutdown_worker: threading.Thread | None = None
         self._error: str | None = None
         self._lock = threading.Lock()
         # Выставляется тредом ПЕРЕД входом в serve_forever — барьер для stop().
@@ -468,6 +469,7 @@ class InProcessRestServer:
         if not self._drain_active_requests(REST_DRAIN_BUDGET_SEC):
             raise RuntimeError("REST drain не подтверждён")
 
+        deadline = time.monotonic() + max(0.0, timeout)
         if server is not None:
             # shutdown() ждёт событие, которое выставляет ТОЛЬКО finally внутри
             # serve_forever(), причём ждёт БЕЗ таймаута. Позвать его до входа
@@ -478,14 +480,32 @@ class InProcessRestServer:
                 with self._active_lock:
                     if self._stop_failed:
                         raise RuntimeError("REST shutdown не допущен после неизвестного stop")
-                server.shutdown()
+                errors: list[BaseException] = []
+
+                def shutdown_server() -> None:
+                    try:
+                        server.shutdown()
+                    except BaseException as exc:
+                        errors.append(exc)
+
+                worker = threading.Thread(
+                    target=shutdown_server, name="rest-inprocess-shutdown", daemon=True,
+                )
+                self._shutdown_worker = worker
+                worker.start()
+                worker.join(timeout=max(0.0, timeout))
+                if worker.is_alive():
+                    raise RuntimeError("Завершение REST shutdown не подтверждено")
+                if errors:
+                    raise RuntimeError("REST shutdown завершился ошибкой") from errors[0]
+                self._shutdown_worker = None
             else:
                 raise RuntimeError("Вход REST в serve_forever не подтверждён")
         if thread is not None and thread.is_alive():
             with self._active_lock:
                 if self._stop_failed:
                     raise RuntimeError("REST join не допущен после неизвестного stop")
-            thread.join(timeout=timeout)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
             if thread.is_alive():
                 raise RuntimeError("Завершение REST server thread не подтверждено")
 
