@@ -73,3 +73,16 @@ def test_unknown_process_identity_does_not_exit(isolated_rest):
     rest._exit_poisoned_rest_process(70)
     exit_process.assert_not_called()
     kill_session.assert_not_called()
+
+
+def test_late_timeout_callback_keeps_upload_after_backend_adoption(isolated_rest, tmp_path):
+    rest, exit_process, kill_session = isolated_rest
+    upload = tmp_path / "synthetic.wav"
+    upload.write_bytes(b"synthetic")
+    response = Response("timeout", status=504)
+    rest._arm_timeout_exit(response, upload)
+    rest.adopt_external_singletons(**{name: object() for name in rest._ADOPTABLE_NAMES})
+    response.close()
+    assert upload.exists()
+    exit_process.assert_not_called()
+    kill_session.assert_not_called()

@@ -631,6 +631,10 @@ def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | Non
 # свой ThreadPoolExecutor — два /v1/stt/transcribe грузили MLX параллельно.
 _STT_SINGLEFLIGHT = threading.Lock()
 _REST_ACTIVITY = ActivityReservations()
+# Единственный удержанный STT-слот ограничивает карантин одной записью.
+# Future может завершиться раньше вложенного native worker: автоматического
+# восстановления по Future.done() здесь намеренно нет.
+_REST_TIMEOUT_QUARANTINE: list[list[_Any]] = []
 
 
 def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
@@ -640,6 +644,30 @@ def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
 
 def release_stt_singleflight() -> None:
     _STT_SINGLEFLIGHT.release()
+
+
+def _classify_timed_out_future(future: _Any) -> str:
+    """Неизвестное или некорректное состояние не подтверждает остановку."""
+    try:
+        done = future.done()
+        if done is True:
+            return "done"
+        if done is not False:
+            return "unknown"
+        cancelled = future.cancel()
+        if cancelled is True:
+            return "cancelled"
+        if cancelled is not False:
+            return "unknown"
+        done = future.done()
+        if done is True:
+            return "done"
+        if done is not False:
+            return "unknown"
+        return "running" if future.running() is True else "unknown"
+    except Exception:
+        logger.exception("REST STT: состояние Future не подтверждено")
+        return "unknown"
 
 
 # EX_SOFTWARE из sysexits.h. Отдельный код отличает намеренный fail-fast после
@@ -738,6 +766,12 @@ def _arm_timeout_exit(response: Response, temp_path: _Any) -> Response:
     """
 
     def _cleanup_and_exit() -> None:
+        if (
+            bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False))
+            or globals().get("_external_process_owner_seen") is not False
+        ):
+            logger.error("REST timeout: upload оставлен владельцу общего процесса")
+            return
         try:
             temp_path.unlink(missing_ok=True)
         except Exception as exc:
@@ -1907,7 +1941,7 @@ def transcribe_audio():
         safe_base = os.path.splitext(safe_base)[0] + original_ext
 
     temp_path = TEMP_DIR / f"{uuid.uuid4().hex[:12]}_{safe_base}"
-    temp_cleanup_deferred = False
+    _retained_owner = False
 
     try:
         # F3 (W1766): file.save перемещён ВНУТРЬ try, чтобы finally-блок гарантированно
@@ -2018,9 +2052,25 @@ def transcribe_audio():
         if call_profile:
             _transcribe_kwargs.update(context_free=True, single_pass=True)
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        _pool_shutdown_nonblocking = False
+        _shutdown_complete = False
         _activity_token = _REST_ACTIVITY.reserve("post_stt")
         _future = None
+
+        def _retain_stt_owner() -> list[_Any]:
+            nonlocal _retained_owner
+            _retained_owner = True
+            owner = [None, _pool, temp_path]
+            _REST_TIMEOUT_QUARANTINE.append(owner)
+            return owner
+
+        def _finish_stt_owner(owner: list[_Any]) -> None:
+            nonlocal _retained_owner, _shutdown_complete
+            _pool.shutdown(wait=True)
+            _shutdown_complete = True
+            if _REST_TIMEOUT_QUARANTINE and _REST_TIMEOUT_QUARANTINE[-1] is owner:
+                _REST_TIMEOUT_QUARANTINE.pop()
+                _retained_owner = False
+
         # Спека 2026-08-26 §4.1/§6: scope открывается ВНУТРИ worker-треда
         # (call_in_scope) — ContextVar не наследуется тредом пула. Снапшот
         # настроек берётся здесь: engine в REST-процессе создан без
@@ -2034,6 +2084,7 @@ def transcribe_audio():
                 _transcribe_timeout_sec = call_deadline - time.monotonic()
                 if _transcribe_timeout_sec <= 0:
                     return jsonify({"error": "call STT timeout"}), 504
+            owner = _retain_stt_owner()
             _future = _pool.submit(
                 _REST_ACTIVITY.run,
                 _activity_token,
@@ -2045,6 +2096,7 @@ def transcribe_audio():
                 settings_snapshot=_budget_settings_snapshot,
                 **_transcribe_kwargs,
             )
+            owner[0] = _future
             _REST_ACTIVITY.follow_future(_activity_token, _future)
             try:
                 result = _future.result(timeout=(
@@ -2052,72 +2104,52 @@ def transcribe_audio():
                     if call_deadline is not None else _transcribe_timeout_sec
                 ))
             except concurrent.futures.TimeoutError:
-                if _future.done():
-                    # Сам транскрайбер тоже может завершиться исключением
-                    # TimeoutError. Это обычная завершившаяся error-ветка, а не
-                    # зависший executor; повторный result() вернёт результат
-                    # гонки либо пробросит исходное исключение в общий 500.
-                    result = _future.result()
-                elif _future.cancel():
-                    # Pending Future ещё не получил worker и успешно отменён:
-                    # poisoned процесса нет, поэтому обычный 504 безопасен.
-                    logger.warning(
-                        "Transcription timed out before worker start after %ss for %s",
-                        _transcribe_timeout_sec,
-                        safe_base,
-                    )
+                # Никакие Future probes не выполняются до сохранения владения.
+                # Даже done внешнего Future не подтверждает вложенный drain.
+                state = _classify_timed_out_future(_future)
+                if state == "cancelled" and type(_future) is concurrent.futures.Future:
+                    # Только точный stdlib Future доказывает, что callable не
+                    # начинался. Сначала закрываем executor, затем снимаем owner.
+                    _finish_stt_owner(owner)
                     timeout_response = jsonify({"error": "Transcription timeout"})
                     timeout_response.status_code = 504
                     return timeout_response
-                elif _future.done():
-                    # Future мог завершиться между первой done-проверкой и
-                    # cancel(). Забираем результат гонки без ложного hard-exit.
-                    result = _future.result()
-                elif _future.running():
-                    _pool_shutdown_nonblocking = True
-                    # Уже работающую задачу Future.cancel() не прерывает.
-                    # Не ждём non-daemon worker: ожидание снова превратило бы
-                    # быстрый 504 в зависание Python-finalize.
-                    _pool.shutdown(wait=False, cancel_futures=True)
-                    logger.error(
-                        "Transcription timed out after %ss for %s",
-                        _transcribe_timeout_sec,
-                        safe_base,
-                    )
-                    timeout_response = jsonify({"error": "Transcription timeout"})
-                    timeout_response.status_code = 504
+
+                _pool.shutdown(wait=False, cancel_futures=True)
+                logger.error(
+                    "Transcription timeout: upload and STT slot quarantined after %ss for %s",
+                    _transcribe_timeout_sec,
+                    safe_base,
+                )
+                timeout_response = jsonify({"error": "Transcription timeout"})
+                timeout_response.status_code = 504
+                if (
+                    state == "running"
+                    and not bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False))
+                    and globals().get("_external_process_owner_seen") is False
+                ):
                     _arm_timeout_exit(timeout_response, temp_path)
-                    temp_cleanup_deferred = True
-                    return timeout_response
-                else:
-                    # Для стандартного Future ветка недостижима. Нестандартному
-                    # executor не доверяем настолько, чтобы убивать процесс без
-                    # доказанного running; возвращаем fail-safe 504 без ожидания.
-                    _pool_shutdown_nonblocking = True
-                    _pool.shutdown(wait=False, cancel_futures=True)
-                    logger.error(
-                        "Transcription Future entered an unknown state after %ss for %s",
-                        _transcribe_timeout_sec,
-                        safe_base,
-                    )
-                    timeout_response = jsonify({"error": "Transcription timeout"})
-                    timeout_response.status_code = 504
-                    return timeout_response
+                return timeout_response
+            except Exception:
+                # Исключение внешнего callable не доказывает, что вложенные
+                # adapter workers завершились. Сохраняем owner до recovery.
+                _pool.shutdown(wait=False, cancel_futures=True)
+                raise
+            else:
+                _finish_stt_owner(owner)
         finally:
-            try:
-                release_stt_singleflight()
-            except RuntimeError:
-                # release без acquire не должен маскировать таймаут/ошибку STT.
-                pass
-            if not _pool_shutdown_nonblocking:
-                # На success/error/cancelled-pending Future нет работающей
-                # задачи, поэтому wait=True гарантирует отсутствие хвоста.
-                _pool.shutdown(wait=True)
-                # Submit мог упасть после постановки native work в очередь.
-                # Без Future снимаем token только после подтверждённого drain
-                # executor, а не по факту exception/HTTP response.
+            if not _retained_owner:
+                # Владение сохраняется на случай прерывания shutdown().
+                _retained_owner = True
+                if not _shutdown_complete:
+                    _pool.shutdown(wait=True)
                 if _future is None:
                     _REST_ACTIVITY.complete(_activity_token)
+                _retained_owner = False
+                try:
+                    release_stt_singleflight()
+                except RuntimeError:
+                    pass
         elapsed_sec = time.monotonic() - start_ts
 
         if call_profile and _call_profile_privacy_enabled():
@@ -2193,7 +2225,7 @@ def transcribe_audio():
         return jsonify({"error": "Internal processing error"}), 500
 
     finally:
-        if not temp_cleanup_deferred and temp_path.exists():
+        if not _retained_owner and temp_path.exists():
             try:
                 temp_path.unlink()
             except Exception as e:
