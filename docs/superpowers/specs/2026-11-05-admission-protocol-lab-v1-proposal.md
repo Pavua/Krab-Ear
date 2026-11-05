@@ -34,17 +34,40 @@ fallback. Это специально ограниченный lab-контра�
 
 Ниже — **не реализованный wire API**. Для эксперимента v1 все request и response
 несут точные `v=1`, `op`, `request_id`, `client_incarnation`, `owner_epoch` и
-`controller_epoch`. Ответ должен повторять эти общие корреляционные поля;
+`controller_epoch`. `v` — строго int 1, не bool. Строки идентификаторов и
+`executor` ограничены ASCII `[A-Za-z0-9_.:-]`, длиной 1..128; `kind` строго
+`stt` или `tts`, grant ID — канонический lowercase UUID. `expected_revision` —
+int без bool от 0 до 2^63−2. Никакие незаданные поля не принимаются.
+Ответ должен повторять эти общие корреляционные поля;
 `owner_epoch` — метка
 инкарнации fixture, не удостоверение личности. Поля версионируются строго;
 неизвестные поля, op, outcome, неверные типы и несовпадение хотя бы одного
 поля отбрасываются как UNKNOWN. Реальный транспорт, framing, bounds и proof
 будут согласованы отдельно; v0 остаётся неизменным.
 
-Для изолированного эксперимента ожидаемый `owner_epoch` задаётся harness заранее;
-узнавать его из самого ответа и тем самым считать этот ответ доверенным нельзя.
-Если ожидаемая метка не получена заранее или оказалась stale — UNKNOWN. В реальном
-протоколе происхождение и проверка этой привязки остаются открытыми.
+Для изолированного эксперимента ожидаемые `owner_epoch` и `controller_epoch`
+задаются harness заранее; узнавать их из самого ответа и тем самым считать этот
+ответ доверенным нельзя. Если любая ожидаемая метка не получена заранее или
+оказалась stale — UNKNOWN. В реальном протоколе происхождение и проверка этой
+привязки остаются открытыми.
+
+Команды привязаны ко **всему** исходному request payload: harness до отправки
+фиксирует его канонические байты и SHA-256; response несёт lowercase hex
+`request_sha256`, который должен совпадать с независимо сохранённым значением и
+с повторно вычисленным digest фактического request. Для lab canonical encoding —
+UTF-8 JSON object, ASCII keys в лексическом порядке, без пробелов, числа только
+указанных integer типов, строки ASCII указанных выше правил; никаких повторных
+ключей и неизвестных полей. Потеря исходного закреплённого digest или эпох,
+включая crash/reopen, означает UNKNOWN. Hash и echo не удостоверяют отправителя;
+в production нужна отдельная аутентификация и надёжное хранение контекста.
+
+Ключ command ledger: проверенная identity, incarnation и request_id. Любое
+несовпадение полного canonical payload для занятого ключа — CONFLICT/UNKNOWN;
+replay идентичного payload обрабатывается до проверки CAS и возвращает исходный
+receipt с теми же grant_id/claim_id без нового permit и без второго synthetic
+debt. После потерянного ACK тест проверяет все три свойства, а не только
+совпадение receipt. В fixture identity является synthetic label, не auth.
+Status — read-only наблюдение и не занимает ключ command ledger.
 
 | Команда | Поля помимо общих | Receipt исходы | Особое условие |
 | --- | --- | --- | --- |
@@ -55,15 +78,15 @@ fallback. Это специально ограниченный lab-контра�
 | `seal` | `expected_revision` | `SEALED` | Уничтожает право на неиспользованные synthetic grants; claimed/unknown остаются долгом. |
 | `status` | нет | `OBSERVED` | Всегда `drain_authority=false`; одно наблюдение не разрешает stop. |
 
-Для обсуждаемого v1 command response имеет ровно общие поля и поля `outcome`,
-`grant_id`, `claim_id`, `control_revision`. Последний строго неотрицательный
-целый тип без bool; идентификаторы — null либо канонический lowercase UUID.
+Для обсуждаемого v1 command response имеет ровно общие поля и поля `request_sha256`, `outcome`,
+`grant_id`, `claim_id`, `control_revision`. Последний — целый тип без bool в
+диапазоне 0..2^63−1; именно `grant_id`/`claim_id` — null либо канонический lowercase UUID.
 `RESERVED` и `REVOKED`/`CLAIMED_UNKNOWN` несут grant_id и null claim_id;
 `CLAIMED` — оба ID; `DENIED_CLOSED`, `CLOSED`, `ALREADY_CLOSED`, `SEALED`,
 `CONFLICT`, `UNAVAILABLE` — оба null. Для успешного claim/revoke grant_id
-должен в точности совпадать с запросом. `status` response имеет ровно общие поля и
+должен в точности совпадать с запросом. `status` response имеет ровно общие поля, `request_sha256` и
 `outcome=OBSERVED`, `control_revision`, `outstanding_count`, `claimed_count`,
-`unknown`, `drain_authority`; counts — неотрицательные целые без bool,
+`unknown`, `drain_authority`; counts — целые без bool в диапазоне 0..2^63−1,
 `claimed_count ≤ outstanding_count`, оба флага строго bool и drain всегда false.
 Пока в lab нет terminal API, `claimed_count > 0` требует `unknown=true`;
 противоречие классифицируется как UNKNOWN. Обратное неверно: пустые counts
@@ -72,11 +95,15 @@ fallback. Это специально ограниченный lab-контра�
 `ALREADY_CLOSED` — `expected_revision`; переполнение или несовпадение — UNKNOWN.
 Эта проверка не делает revision вектором всех ресурсов или доказательством drain.
 
+Для любой command разрешены `CONFLICT` и `UNAVAILABLE`, оба классифицируются
+как UNKNOWN независимо от причины. Для status transport/protocol error тоже
+даёт UNKNOWN, даже если корректный ответ не получен.
+
 Все command outcomes, кроме `DENIED_CLOSED`, `CLAIMED_UNKNOWN`, `CONFLICT`, `UNAVAILABLE`, —
 RECEIPT_ONLY при корректной корреляции и учебном свидетельстве; корректный
 `OBSERVED` даёт RECEIPT_ONLY лишь при `unknown=false`; `unknown=true` даёт
 UNKNOWN. `CLAIMED_UNKNOWN`, `CONFLICT`, `UNAVAILABLE`, нераспознанный статус
-или спорный receipt — UNKNOWN. Исходы
+или спорный receipt — UNKNOWN. Кроме общих ошибок команд, исходы
 разрешены только для соответствующей операции из таблицы; одинаковые названия
 в другом op не принимаются. Claim на revoked grant не считается доказательством
 отсутствия ранее заявленной работы. Ни клиент, ни consumer не должны принимать
@@ -119,7 +146,16 @@ child и сохранения, протокол исключения legacy вх
 цепочки Ear IPC → fallback. Последняя воспроизведена на синтетическом коде
 ошибки, не на подтверждённом текущем ответе Ear. Также надо учитывать
 потенциального прямого Ear POST клиента, флаговый Ear IPC TTS и MLX warmup.
+Main отдельно воспроизвёл на synthetic IPC error без WAV переход admin
+`/api/admin/voice/test_tts` через `voice_engine` и `KrabEarClient` к fake
+cloud TTS fallback при включённом local TTS; фактический runtime-флаг и
+формат живой ошибки Ear не подтверждены. Учёт origin и продолжения этой
+работы требует отдельного согласования.
 Production wiring VideoStudioEarSttClient и живая активность путей не подтверждены.
+По Main source, MCP до Ear IPC вызывает `_bridge.get_voice_file`, а voice-profile
+скачивает файл до Gateway; fake-тест воспроизвёл порядок без сети/ML. Общая root
+должна регистрироваться до первого внешнего dispatch/download, а не только у STT.
+Для уже принятого parent сохраняются отдельно согласованные continuation и долги.
 Gateway source также содержит fallback после Ear HTTP 503 на локальный
 faster-whisper и потенциально cloud при выключенном privacy. Отрицательный
 health/degraded может обойти Ear, а cloud-primary — выполниться раньше Ear;
