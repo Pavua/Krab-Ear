@@ -21,8 +21,11 @@ Run:
 """
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import io
 import sys
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -122,6 +125,29 @@ class _TranscribeBase(unittest.TestCase):
     }
 
     def setUp(self):
+        # Exception-path quarantine must not contaminate the next test.
+        temporary = tempfile.TemporaryDirectory(prefix="ear-rest-unit-")
+        self.addCleanup(temporary.cleanup)
+        self._temp_patcher = patch.object(_rest_mod, "TEMP_DIR", Path(temporary.name) / "uploads")
+        self._temp_patcher.start()
+        self.addCleanup(self._temp_patcher.stop)
+        self._slot_patcher = patch.object(_rest_mod, "_STT_SINGLEFLIGHT", threading.Lock())
+        self._quarantine_patcher = patch.object(_rest_mod, "_REST_TIMEOUT_QUARANTINE", [])
+        self._slot_patcher.start()
+        self.addCleanup(self._slot_patcher.stop)
+        self._quarantine_patcher.start()
+        self.addCleanup(self._quarantine_patcher.stop)
+        self._test_executors = []
+
+        def create_executor(*args, **kwargs):
+            executor = ThreadPoolExecutor(*args, **kwargs)
+            self._test_executors.append(executor)
+            return executor
+
+        self._executor_patcher = patch.object(_rest_mod.concurrent.futures, "ThreadPoolExecutor", create_executor)
+        self._executor_patcher.start()
+        self.addCleanup(self._executor_patcher.stop)
+        self.addCleanup(self._join_test_executors)
         self.mock_store = MagicMock()
         self.mock_store.load_vocabulary.return_value = []
         self.mock_store.is_idempotent.return_value = False
@@ -154,7 +180,12 @@ class _TranscribeBase(unittest.TestCase):
 
         self.client = _make_client()
 
+    def _join_test_executors(self):
+        for executor in self._test_executors:
+            executor.shutdown(wait=True)
+
     def tearDown(self):
+        self._join_test_executors()
         _rest_mod.limiter.enabled = self._orig_limiter_enabled
         self._patcher_store.stop()
         self._patcher_transcriber.stop()
