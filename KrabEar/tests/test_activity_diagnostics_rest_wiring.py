@@ -19,12 +19,26 @@ AUTH = {'Authorization': 'Bearer test-residency-key'}
 
 
 @pytest.fixture
-def route(rest, monkeypatch):
+def route(rest, monkeypatch, tmp_path):
     import backend.rest_server as rs
     tracker = ActivityReservations()
     monkeypatch.setattr(rs, '_REST_ACTIVITY', tracker, raising=False)
+    # Каждый тест владеет собственным synthetic STT slot и карантином.
+    monkeypatch.setattr(rs, '_STT_SINGLEFLIGHT', threading.Lock())
+    monkeypatch.setattr(rs, '_REST_TIMEOUT_QUARANTINE', [])
+    monkeypatch.setattr(rs, 'TEMP_DIR', tmp_path / 'uploads')
     monkeypatch.setattr('backend.brain_lease.observe_brain_lease', lambda: {'known': False, 'state': 'contention'})
-    return rest[0], rs, tracker
+    executors = []
+
+    def create_executor(*args, **kwargs):
+        executor = ThreadPoolExecutor(*args, **kwargs)
+        executors.append(executor)
+        return executor
+
+    monkeypatch.setattr(rs.concurrent.futures, 'ThreadPoolExecutor', create_executor)
+    yield rest[0], rs, tracker
+    for executor in executors:
+        executor.shutdown(wait=True)
 
 
 def wav_upload():
@@ -100,7 +114,7 @@ def test_post_timeout_retains_actual_server_work_until_completion(route, monkeyp
     assert tracker.snapshot()['reservations'] == 0
 
 
-def test_pending_cancel_and_submit_failure_do_not_leak_reservation(route, monkeypatch):
+def test_pending_cancel_and_ambiguous_submit_have_distinct_ownership(route, monkeypatch):
     client, rs, tracker = route
     pending = Future()
     executor = Mock()
@@ -113,7 +127,9 @@ def test_pending_cancel_and_submit_failure_do_not_leak_reservation(route, monkey
     assert tracker.snapshot()['reservations'] == 0
     executor.submit.side_effect = RuntimeError('submit failed')
     assert post(client).status_code == 500
-    assert tracker.snapshot()['reservations'] == 0
+    assert rs._STT_SINGLEFLIGHT.locked()
+    assert len(rs._REST_TIMEOUT_QUARANTINE) == 1
+    assert tracker.snapshot()['reservations'] == 1
 
 
 def test_actual_native_ws_handler_passes_tracked_slot_callbacks(route, monkeypatch):
@@ -137,7 +153,7 @@ def test_actual_native_ws_handler_passes_tracked_slot_callbacks(route, monkeypat
 
 def test_submit_error_after_queueing_retains_activity_until_executor_drains(route, monkeypatch):
     client, rs, tracker = route
-    started, finish, draining = threading.Event(), threading.Event(), threading.Event()
+    started, finish = threading.Event(), threading.Event()
     pool = ThreadPoolExecutor(max_workers=1)
 
     def native(*args, **kwargs):
@@ -152,7 +168,6 @@ def test_submit_error_after_queueing_retains_activity_until_executor_drains(rout
             raise RuntimeError('submit failed after queueing')
 
         def shutdown(self, wait=True, **kwargs):
-            draining.set()
             pool.shutdown(wait=wait)
 
     monkeypatch.setattr(client.application.config['REST_DEPS'].transcriber, 'transcribe', native)
@@ -166,8 +181,12 @@ def test_submit_error_after_queueing_retains_activity_until_executor_drains(rout
     thread = threading.Thread(target=request)
     thread.start()
     try:
-        assert draining.wait(1)
+        assert started.wait(1)
+        thread.join(1)
+        assert not thread.is_alive()
         assert tracker.snapshot()['inflight'] == 1
+        assert rs._STT_SINGLEFLIGHT.locked()
+        assert len(rs._REST_TIMEOUT_QUARANTINE) == 1
     finally:
         finish.set()
         thread.join(3)
@@ -175,3 +194,4 @@ def test_submit_error_after_queueing_retains_activity_until_executor_drains(rout
     assert not thread.is_alive()
     assert statuses == [500]
     assert tracker.snapshot()['reservations'] == 0
+    assert rs._STT_SINGLEFLIGHT.locked()

@@ -121,6 +121,8 @@ def _make_wav_bytes() -> bytes:
 # ---------------------------------------------------------------------------
 class _Base(unittest.TestCase):
     def setUp(self):
+        import threading
+
         self.engine = MagicMock()
         self.engine.quality_profile = "balanced"
         self.engine.normalize_audio = MagicMock()
@@ -170,6 +172,10 @@ class _Base(unittest.TestCase):
             patch.object(_rest_mod, "transcriber", self.transcriber),
             patch.object(_rest_mod, "metrics", self.metrics),
             patch.object(_rest_mod, "_exit_poisoned_rest_process", self.process_exit),
+            patch.object(_rest_mod, "_STT_SINGLEFLIGHT", threading.Lock()),
+            patch.object(_rest_mod, "_REST_TIMEOUT_QUARANTINE", []),
+            patch.object(_rest_mod, "_external_process_owner_seen", False),
+            patch.object(_rest_mod.settings, "REST_IN_PROCESS_ENABLED", False),
         ]
         for p in self._patches:
             p.start()
@@ -412,10 +418,181 @@ class TestTranscribeTimeoutFutureStates(_Base):
                 ["result", "done", "cancel", "done", "running"],
             )
             self.assertEqual(shutdown_calls, [(False, True)])
-            self.assertEqual(list(upload_dir.iterdir()), [])
+            uploads = list(upload_dir.iterdir())
+            self.assertEqual(len(uploads), 1)
+            self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
             self.process_exit.assert_not_called()
             resp.close()
+            self.assertTrue(uploads[0].exists())
+            self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
             self.process_exit.assert_not_called()
+
+
+    def test_future_state_error_preserves_upload_and_slot(self):
+        import concurrent.futures as _cf
+
+        class _BrokenFuture:
+            def result(self, timeout=None):
+                raise _cf.TimeoutError("timed out")
+
+            def done(self):
+                raise RuntimeError("future state unavailable")
+
+        class _FakeExecutor:
+            def submit(self, *_args, **_kwargs):
+                return _BrokenFuture()
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                pass
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-future-error-") as root:
+            upload_dir = Path(root) / "uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=MagicMock(duration=5.0)), \
+                    patch("concurrent.futures.ThreadPoolExecutor", return_value=_FakeExecutor()):
+                response = self.client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(_make_wav_bytes()), "broken.wav")},
+                    content_type="multipart/form-data",
+                )
+            self.assertEqual(response.status_code, 504)
+            uploads = list(upload_dir.iterdir())
+            self.assertEqual(len(uploads), 1)
+            response.close()
+            self.assertTrue(uploads[0].exists())
+            self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
+            self.process_exit.assert_not_called()
+
+
+    def test_interrupted_future_probe_preserves_upload_and_slot(self):
+        import concurrent.futures as _cf
+
+        class _InterruptedFuture:
+            def result(self, timeout=None):
+                raise _cf.TimeoutError("timed out")
+
+            def done(self):
+                raise KeyboardInterrupt
+
+        class _FakeExecutor:
+            def submit(self, *_args, **_kwargs):
+                return _InterruptedFuture()
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                pass
+
+        with tempfile.TemporaryDirectory(prefix="krab-rest-interrupted-future-") as root:
+            upload_dir = Path(root) / "uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch("soundfile.info", return_value=MagicMock(duration=5.0)), \
+                    patch("concurrent.futures.ThreadPoolExecutor", return_value=_FakeExecutor()):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.client.post(
+                        "/v1/stt/transcribe",
+                        data={"file": (io.BytesIO(_make_wav_bytes()), "interrupted.wav")},
+                        content_type="multipart/form-data",
+                    )
+            self.assertEqual(len(list(upload_dir.iterdir())), 1)
+            self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
+            self.process_exit.assert_not_called()
+
+
+    def test_submit_starts_worker_then_raises_retains_ownership(self):
+        import threading
+
+        entered, release = threading.Event(), threading.Event()
+
+        class _AmbiguousExecutor:
+            def __init__(self):
+                self.thread = None
+
+            def submit(self, *_args, **_kwargs):
+                def work():
+                    entered.set()
+                    release.wait(timeout=5)
+                self.thread = threading.Thread(target=work)
+                self.thread.start()
+                assert entered.wait(2)
+                raise RuntimeError("submit result lost")
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                if self.thread is not None and wait:
+                    self.thread.join(2)
+
+        executor = _AmbiguousExecutor()
+        with tempfile.TemporaryDirectory(prefix="krab-rest-submit-error-") as root:
+            upload_dir = Path(root) / "uploads"
+            try:
+                with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                        patch("soundfile.info", return_value=MagicMock(duration=5.0)), \
+                        patch("concurrent.futures.ThreadPoolExecutor", return_value=executor):
+                    response = self.client.post(
+                        "/v1/stt/transcribe",
+                        data={"file": (io.BytesIO(_make_wav_bytes()), "submit.wav")},
+                        content_type="multipart/form-data",
+                    )
+                self.assertEqual(response.status_code, 500)
+                self.assertEqual(len(list(upload_dir.iterdir())), 1)
+                self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
+                self.assertIs(_rest_mod._REST_TIMEOUT_QUARANTINE[0][1], executor)
+                response.close()
+            finally:
+                release.set()
+                executor.shutdown(wait=True)
+                if executor.thread is not None:
+                    self.assertFalse(executor.thread.is_alive())
+
+
+    def test_interrupted_result_with_live_child_retains_ownership(self):
+        import threading
+
+        entered, release = threading.Event(), threading.Event()
+
+        class _InterruptedFuture:
+            def add_done_callback(self, _callback):
+                pass
+
+            def result(self, timeout=None):
+                raise KeyboardInterrupt
+
+        class _ExecutorWithChild:
+            def __init__(self):
+                self.child = None
+
+            def submit(self, *_args, **_kwargs):
+                def child():
+                    entered.set()
+                    release.wait(timeout=5)
+                self.child = threading.Thread(target=child)
+                self.child.start()
+                assert entered.wait(2)
+                return _InterruptedFuture()
+
+            def shutdown(self, wait=True, cancel_futures=False):
+                if self.child is not None and wait:
+                    self.child.join(2)
+
+        executor = _ExecutorWithChild()
+        with tempfile.TemporaryDirectory(prefix="krab-rest-interrupted-child-") as root:
+            upload_dir = Path(root) / "uploads"
+            try:
+                with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                        patch("soundfile.info", return_value=MagicMock(duration=5.0)), \
+                        patch("concurrent.futures.ThreadPoolExecutor", return_value=executor):
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.client.post(
+                            "/v1/stt/transcribe",
+                            data={"file": (io.BytesIO(_make_wav_bytes()), "child.wav")},
+                            content_type="multipart/form-data",
+                        )
+                self.assertEqual(len(list(upload_dir.iterdir())), 1)
+                self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
+                self.assertIs(_rest_mod._REST_TIMEOUT_QUARANTINE[0][1], executor)
+            finally:
+                release.set()
+                executor.shutdown(wait=True)
+                if executor.child is not None:
+                    self.assertFalse(executor.child.is_alive())
 
 
 @unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
@@ -589,6 +766,10 @@ class TestTranscribeTimeoutProcessRecovery(_Base):
             try:
                 started_at = _time.monotonic()
                 with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                        patch.object(_rest_mod, "_STT_SINGLEFLIGHT", threading.Lock()), \
+                        patch.object(_rest_mod, "_REST_TIMEOUT_QUARANTINE", []), \
+                        patch.object(_rest_mod, "_external_process_owner_seen", False), \
+                        patch.object(_rest_mod.settings, "REST_IN_PROCESS_ENABLED", False), \
                         patch.object(_rest_mod, "_TRANSCRIBE_TIMEOUT_SEC", self.TIMEOUT_SEC), \
                         patch("soundfile.info", return_value=mock_info):
                     response = self.client.post(
@@ -619,6 +800,71 @@ class TestTranscribeTimeoutProcessRecovery(_Base):
                 release.set()
                 self.assertTrue(finished.wait(timeout=2.0))
 
+    def test_embedded_timeout_retains_upload_and_slot_until_worker_finishes(self):
+        """HTTP 504 не завершает worker и не передаёт его файл другому запросу."""
+        import concurrent.futures
+        import threading
+
+        executors = []
+        executor_type = concurrent.futures.ThreadPoolExecutor
+
+        def make_executor(*args, **kwargs):
+            executor = executor_type(*args, **kwargs)
+            executors.append(executor)
+            return executor
+
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        own_slot = threading.Lock()
+        quarantine = []
+
+        def blocked(path, **_kwargs):
+            started.set()
+            try:
+                release.wait(timeout=5)
+                return {"text": "late" if Path(path).exists() else "missing"}
+            finally:
+                finished.set()
+
+        self.transcriber.transcribe.side_effect = blocked
+        with tempfile.TemporaryDirectory(prefix="krab-rest-owned-upload-") as root:
+            upload_dir = Path(root) / "uploads"
+            with patch.object(_rest_mod, "TEMP_DIR", upload_dir), \
+                    patch.object(_rest_mod, "_external_process_owner_seen", True), \
+                    patch.object(_rest_mod, "_STT_SINGLEFLIGHT", own_slot), \
+                    patch.object(_rest_mod, "_REST_TIMEOUT_QUARANTINE", quarantine), \
+                    patch.object(_rest_mod, "_TRANSCRIBE_TIMEOUT_SEC", self.TIMEOUT_SEC), \
+                    patch("concurrent.futures.ThreadPoolExecutor", side_effect=make_executor), \
+                    patch("soundfile.info", return_value=MagicMock(duration=5.0)):
+                response = None
+                try:
+                    response = self.client.post(
+                        "/v1/stt/transcribe",
+                        data={"file": (io.BytesIO(_make_wav_bytes()), "blocked.wav")},
+                        content_type="multipart/form-data",
+                    )
+                    self.assertTrue(started.wait(1))
+                    self.assertEqual(response.status_code, 504)
+                    uploads = list(upload_dir.iterdir())
+                    self.assertEqual(len(uploads), 1)
+                    response.close()
+                    self.assertEqual((uploads[0].exists(), own_slot.locked()), (True, True),
+                                     "running worker lost its upload or STT slot")
+                    self.assertFalse(_rest_mod.try_acquire_stt_singleflight(0))
+                    release.set()
+                    self.assertTrue(finished.wait(2))
+                    quarantine[0][0].result(timeout=2)
+                    self.assertEqual((uploads[0].exists(), own_slot.locked()), (True, True),
+                                     "outer Future completion must not release nested work")
+                finally:
+                    release.set()
+                    try:
+                        if response is not None:
+                            response.close()
+                    finally:
+                        for executor in executors:
+                            executor.shutdown(wait=True)
+                    self.assertTrue(finished.wait(2))
+
     def test_success_cleans_temp_without_process_exit(self):
         """Успешная транскрибация очищает upload и не ставит hard-exit."""
         wav_data = _make_wav_bytes()
@@ -639,8 +885,8 @@ class TestTranscribeTimeoutProcessRecovery(_Base):
             response.close()
             self.process_exit.assert_not_called()
 
-    def test_transcriber_error_cleans_temp_without_process_exit(self):
-        """Завершившаяся ошибка даёт 500 без рестарта и без остатка upload."""
+    def test_transcriber_error_retains_upload_and_slot(self):
+        """Ошибка внешнего callable не доказывает завершение его потомков."""
         self.transcriber.transcribe.side_effect = RuntimeError("decoder failed")
         wav_data = _make_wav_bytes()
         mock_info = MagicMock(duration=5.0)
@@ -656,12 +902,15 @@ class TestTranscribeTimeoutProcessRecovery(_Base):
                 )
 
             self.assertEqual(response.status_code, 500)
-            self.assertEqual(list(upload_dir.iterdir()), [])
+            uploads = list(upload_dir.iterdir())
+            self.assertEqual(len(uploads), 1)
+            self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
             response.close()
+            self.assertTrue(uploads[0].exists())
             self.process_exit.assert_not_called()
 
-    def test_completed_timeout_exception_does_not_poison_process(self):
-        """TimeoutError из decoder-а не равен wall-clock таймауту Future."""
+    def test_completed_decoder_timeout_remains_quarantined(self):
+        """Внешний Future не доказывает завершение вложенного decoder worker."""
         import concurrent.futures as _cf
 
         self.transcriber.transcribe.side_effect = _cf.TimeoutError("decoder timeout")
@@ -678,9 +927,12 @@ class TestTranscribeTimeoutProcessRecovery(_Base):
                     content_type="multipart/form-data",
                 )
 
-            self.assertEqual(response.status_code, 500)
-            self.assertEqual(list(upload_dir.iterdir()), [])
+            self.assertEqual(response.status_code, 504)
+            uploads = list(upload_dir.iterdir())
+            self.assertEqual(len(uploads), 1)
+            self.assertTrue(_rest_mod._STT_SINGLEFLIGHT.locked())
             response.close()
+            self.assertTrue(uploads[0].exists())
             self.process_exit.assert_not_called()
 
 
