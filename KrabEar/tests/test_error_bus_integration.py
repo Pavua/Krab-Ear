@@ -12,8 +12,10 @@ import sys
 import tempfile
 import time
 import unittest
+from collections import namedtuple
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -90,6 +92,19 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+        # IPC fixture получает заданное состояние диска, а не метрики runner.
+        self.disk_usage = namedtuple("DiskUsage", "total used free")
+        gib = 1024 ** 3
+        disk_probe = patch(
+            "backend.disk_monitor.shutil.disk_usage",
+            return_value=self.disk_usage(100 * gib, 50 * gib, 50 * gib),
+        )
+        self.disk_probe = disk_probe.start()
+        self.addCleanup(disk_probe.stop)
+        # Эти тесты не должны отправлять события в запущенный REST backend.
+        bridge_start = patch("backend.event_bridge.EventBridge.start", return_value=None)
+        bridge_start.start()
+        self.addCleanup(bridge_start.stop)
         store = StateStore(Path(self.tmp.name) / "data")
         self.service = BackendService(
             store=store,
@@ -97,6 +112,7 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
             transcriber=_FakeTranscriber(),
             translator=_FakeTranslator(),
         )
+        self.addCleanup(self.service.close)
 
     def _call(self, method: str, params: dict | None = None) -> dict:
         return self.service.handle_request(
@@ -115,6 +131,18 @@ class ErrorBusIntegrationTestCase(unittest.TestCase):
         self.assertIn("errors", result)
         self.assertIsInstance(result["errors"], list)
         self.assertEqual(result["errors"], [])
+
+    def test_explicit_disk_warning_remains_visible_in_ipc(self) -> None:
+        """Заданный low-disk сигнал проходит настоящий monitor → ErrorBus → IPC."""
+        gib = 1024 ** 3
+        self.disk_probe.return_value = self.disk_usage(100 * gib, 97 * gib, 3 * gib)
+        self.service._disk_monitor.check_now()
+        resp = self._call("list_recent_errors")
+        self.assertTrue(resp["ok"], msg=f"IPC error: {resp}")
+        self.assertTrue(any(
+            item["code"] == "disk.low_space" and item["component"] == "disk"
+            for item in resp["result"]["errors"]
+        ))
 
     # ------------------------------------------------------------------
     # 2. clear_recent_errors — should return cleared count (0 on fresh svc)
@@ -576,6 +604,10 @@ class STTRepetitionLoopIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
+
+        bridge_start = patch("backend.event_bridge.EventBridge.start", return_value=None)
+        bridge_start.start()
+        self.addCleanup(bridge_start.stop)
 
     # ------------------------------------------------------------------
     # 1. Positive: loop text → error bus contains stt.repetition_loop
