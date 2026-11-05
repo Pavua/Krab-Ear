@@ -678,6 +678,18 @@ def _flush_logs_before_exit() -> None:
             pass
 
 
+# Односторонняя метка экземпляра модуля: поздний response-close может
+# произойти после stop/release REST, когда настройки уже изменились. Штатный
+# backend использует канонический импорт; reload/alias не являются fence.
+_PROCESS_HOSTS_BACKEND = False
+
+
+def _mark_backend_process() -> None:
+    """Запретить аварийный выход через этот экземпляр REST-модуля."""
+    global _PROCESS_HOSTS_BACKEND
+    _PROCESS_HOSTS_BACKEND = True
+
+
 def _exit_poisoned_rest_process(exit_code: int) -> None:
     """Немедленно завершает только REST-процесс, не запуская Python-finalize.
 
@@ -694,7 +706,7 @@ def _exit_poisoned_rest_process(exit_code: int) -> None:
     самоубийство запрещено: остаёмся с отравленным MLX-локом до штатного
     рестарта — деградация STT предпочтительнее потери записи владельца.
     """
-    if bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)):
+    if _PROCESS_HOSTS_BACKEND or bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)):
         logger.error(
             "REST transcribe timeout: MLX-локом, возможно, владеет зависший "
             "поток, но процесс НЕ завершается — REST работает внутри backend, "

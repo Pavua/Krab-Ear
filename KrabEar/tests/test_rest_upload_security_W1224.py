@@ -547,13 +547,24 @@ class TestTranscribeTimeoutProcessRecovery(_Base):
     TIMEOUT_SEC = 0.05
 
     def test_process_boundary_uses_non_finalizing_exit_code_70(self):
-        """Терминальная граница вызывает os._exit(70), а не sys.exit."""
-        with patch.object(_rest_mod.os, "_exit") as raw_exit:
+        """Standalone выходит с кодом 70; backend-процесс остаётся жив."""
+        backend_owner = _rest_mod._PROCESS_HOSTS_BACKEND
+        self.assertIsInstance(backend_owner, bool)
+        with (
+            patch.object(_rest_mod.settings, "REST_IN_PROCESS_ENABLED", False),
+            patch("core.mlx_whisper_session.kill_mlx_whisper_session") as kill,
+            patch.object(_rest_mod.os, "_exit") as raw_exit,
+        ):
             self.real_process_exit(
                 _rest_mod._TRANSCRIBE_TIMEOUT_EXIT_CODE,
             )
 
-        raw_exit.assert_called_once_with(70)
+        if backend_owner:
+            kill.assert_not_called()
+            raw_exit.assert_not_called()
+        else:
+            kill.assert_called_once_with()
+            raw_exit.assert_called_once_with(70)
 
     def test_blocked_transcriber_defers_cleanup_and_exit_until_response_close(self):
         """Upload жив до выдачи 504; close удаляет его и вызывает exit(70)."""

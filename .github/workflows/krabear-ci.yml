@@ -29,9 +29,17 @@ jobs:
 
   backend-tests:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
+      - name: Require GitHub-hosted runner
+        env:
+          TASK_RUNNER_KIND: ${{ runner.environment }}
+        run: test "$TASK_RUNNER_KIND" = github-hosted
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -57,6 +65,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r KrabEar/requirements.txt
           pip install numpy pytest-xdist pytest-cov flake8
+
+      - name: Check timeout process ownership in fresh interpreters
+        shell: bash
+        run: |
+          set -euo pipefail
+          task_site_packages="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"
+          task_protected="$(mktemp "$RUNNER_TEMP/ear-protected-canary.XXXXXX")"
+          chmod 600 "$task_protected"
+          for task_scenario in standalone_false standalone_true backend backend_setup_failure \
+              backend_skip_mark backend_wrong_module backend_bypass_guard; do
+            task_scratch="$(mktemp -d "$RUNNER_TEMP/ear-timeout-${task_scenario}.XXXXXX")"
+            chmod 700 "$task_scratch"
+            env -i PATH="$PATH" TMPDIR="$task_scratch" GITHUB_ACTIONS=true EAR_CI_PROTECTED_CANARY="$task_protected" \
+              OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 VECLIB_MAXIMUM_THREADS=1 \
+              KRAB_EAR_DATA_DIR="$task_scratch/data" KRAB_EAR_MLX_WHISPER_WORKER=0 \
+              KRAB_EAR_RATE_LIMIT_ENABLED=false \
+              KRAB_EAR_EVENT_BRIDGE_ENABLED=false KRAB_EAR_DISK_MONITOR_ENABLED=false \
+              KRAB_EAR_RECORDING_DURATION_WATCHDOG_ENABLED=false KRAB_EAR_STT_AUTO_SEED_HOTWORDS=false \
+              KRAB_EAR_WAKE_WORD_ENABLED=false KRAB_EAR_AUTO_BACKUP_ENABLED=false \
+              KRAB_EAR_RECAP_EMAIL_ENABLED=false \
+              timeout --kill-after=2s 40s python -I -S -B offline_tests/rest_timeout_owner/ci_probe.py \
+                "$task_scratch" "$task_site_packages" "$task_scenario"
+            timeout --kill-after=2s 10s python -I -S -B offline_tests/rest_timeout_owner/validate_ci_receipt.py \
+              "$task_scratch/receipt.json" "$task_scenario"
+          done
 
       - name: Lint (flake8)
         # W784: mirrors flake8 config from ci.yml -- max-line-length=150, relaxed test ignores
