@@ -41,11 +41,13 @@ extension HistoryPanelController {
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.applySettingsPatch([
-                    "capture_source_mode": captureMode,
-                    "call_notify_default": notifyOn,
-                    "call_auto_summary": autoSummaryOn,
-                ])
+                if (result["ok"] as? Bool) != false {
+                    self.applySettingsPatch([
+                        "capture_source_mode": captureMode,
+                        "call_notify_default": notifyOn,
+                        "call_auto_summary": autoSummaryOn,
+                    ])
+                }
                 self.applyCallAssistState(result)
             }
         }
@@ -665,7 +667,21 @@ extension HistoryPanelController {
         callAssistOutputView.string = String(combined.prefix(6000))
     }
 
-    func applyCallAssistState(_ state: [String: Any]) {
+    func applyCallAssistState(_ state: [String: Any], showErrors: Bool = true) {
+        if (state["ok"] as? Bool) == false {
+            guard showErrors else { return }
+            let body: String
+            switch state["error"] as? String {
+            case "maintenance_active":
+                body = "Call Assist временно недоступен во время обслуживания. Попробуйте позже."
+            case "maintenance_unknown":
+                body = "Не удалось подтвердить возможность запуска Call Assist. Попробуйте позже."
+            default:
+                body = "Не удалось выполнить действие Call Assist. Проверьте состояние и попробуйте ещё раз."
+            }
+            showInfoAlert(title: "Call Assist", body: body)
+            return
+        }
         let active = (state["active"] as? Bool) ?? false
         let status = ((state["status"] as? String) ?? (active ? "running" : "idle")).lowercased()
         let gatewayStatus = (state["gateway_status"] as? String) ?? ""
@@ -704,7 +720,7 @@ extension HistoryPanelController {
                 return
             }
             DispatchQueue.main.async { [weak self] in
-                self?.applyCallAssistState(result)
+                self?.applyCallAssistState(result, showErrors: !silentOnError)
             }
         }
     }
