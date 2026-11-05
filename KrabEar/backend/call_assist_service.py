@@ -271,8 +271,31 @@ class CallAssistService:
                     "status": self._state.get("status", "running"),
                 }
             # Claim the slot immediately so concurrent callers see active=True
-            self._state["active"] = True
-            self._state["status"] = "starting"
+            def claim() -> None:
+                self._state["active"] = True
+                self._state["status"] = "starting"
+
+            core = self._recording_core
+            admit = getattr(core, "_try_admit_recording_root", None) if core is not None else None
+            before_claim = dict(self._state)
+            if core is not None and not callable(admit):
+                return {"ok": False, "error": "maintenance_unknown"}
+            if callable(admit):
+                try:
+                    admitted = admit(claim)
+                except Exception:
+                    self._state = before_claim
+                    logger.exception("call_assist: допуск записи не подтверждён")
+                    return {"ok": False, "error": "maintenance_unknown"}
+                except BaseException:
+                    self._state = before_claim
+                    raise
+                if admitted is not True:
+                    self._state = before_claim
+                    error = "maintenance_active" if admitted is False else "maintenance_unknown"
+                    return {"ok": False, "error": error}
+            else:
+                claim()
 
         if not self.recorder.is_recording:
             started = self.recorder.start()

@@ -321,6 +321,8 @@ class RecordingCoreService:
                 self._closed_event = closed_event
             if getattr(self, "_recording_maintenance_event", None) is None:
                 self._recording_maintenance_event = threading.Event()
+            if getattr(self, "_recording_maintenance_lock", None) is None:
+                self._recording_maintenance_lock = threading.Lock()
         return lifecycle_lock, closed_event
 
     def _begin_recording_maintenance(self) -> dict[str, str]:
@@ -330,8 +332,21 @@ class RecordingCoreService:
         start, прямые вызовы recorder и пути других сервисов. Не IPC API.
         """
         self._ensure_recording_lifecycle_state()
-        self._recording_maintenance_event.set()
+        with self._recording_maintenance_lock:
+            self._recording_maintenance_event.set()
         return self._recording_maintenance_status()
+
+    def _try_admit_recording_root(self, claim: Callable[[], None]) -> bool:
+        """Проверить gate и отметить локальный root; завершение остаётся UNKNOWN.
+
+        claim — только короткая локальная публикация состояния без I/O.
+        """
+        self._ensure_recording_lifecycle_state()
+        with self._recording_maintenance_lock:
+            if self._recording_maintenance_event.is_set():
+                return False
+            claim()
+            return True
 
     def _recording_maintenance_status(self) -> dict[str, str]:
         self._ensure_recording_lifecycle_state()
@@ -429,7 +444,7 @@ class RecordingCoreService:
                 "is_recording": False,
             }
         with lifecycle_lock:
-            if self._recording_maintenance_event.is_set():
+            if not self._try_admit_recording_root(lambda: None):
                 return {"status": "maintenance_active"}
             if closed_event.is_set():
                 return {
