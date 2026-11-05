@@ -32,7 +32,7 @@ def reply(**fields):
 
 def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
              fragmented=False, wait=False, function_only=False, with_rest=False, force=False,
-             silent=False, oversized=False, check_only=False):
+             silent=False, oversized=False, check_only=False, wait_value=None):
     """Читаем real shell и IPC-код; все mutation-команды замыкаются на marker."""
     marker = tmp_path / "launchctl.log"
     source = (ROOT / "scripts" / script).read_text()
@@ -126,7 +126,9 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
         driver = tmp_path / "driver.sh"
         driver.write_text(source)
         try:
-            result = subprocess.run(["/bin/bash", str(driver), *(["--wait", "1"] if wait else []),
+            wait_args = (["--wait", str(wait_value)] if wait_value is not None
+                         else (["--wait", "1"] if wait else []))
+            result = subprocess.run(["/bin/bash", str(driver), *wait_args,
                                      *(["--with-rest"] if with_rest else []),
                                      *(["--check-only"] if check_only else [])],
                                     env=env, capture_output=True, text=True, timeout=8)
@@ -160,29 +162,35 @@ BAD = [
 def test_unknown_activity_never_reaches_mutation(tmp_path, script, bad, which):
     rec = bad if which == "recording" else reply(is_recording=False)
     meet = bad if which == "meeting" else reply(ok=True, active=False)
-    result, calls = run_gate(tmp_path, script, rec, meet)
+    result, calls = run_gate(tmp_path, script, rec, meet,
+                             check_only=(script == "safe_backend_restart.command"))
     assert result.returncode == 1, result.stdout + result.stderr
     assert not calls, calls
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
-def test_verified_idle_allows_mutation(tmp_path, script):
+def test_verified_idle_is_only_a_snapshot(tmp_path, script):
     result, calls = run_gate(tmp_path, script, reply(is_recording=False), reply(ok=True, active=False))
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert calls
+    if script == "safe_backend_restart.command":
+        assert result.returncode == 1
+        assert not calls
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert calls
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
 def test_fragmented_activity_reply_is_read_completely(tmp_path, script):
     result, calls = run_gate(tmp_path, script, reply(is_recording=False), reply(ok=True, active=True),
-                             fragmented=True)
+                             fragmented=True, check_only=(script == "safe_backend_restart.command"))
     assert result.returncode == 1, result.stdout + result.stderr
     assert not calls
 
 
 @pytest.mark.parametrize("script", SCRIPTS)
 def test_missing_socket_does_not_prove_idle(tmp_path, script):
-    result, calls = run_gate(tmp_path, script, missing=True)
+    result, calls = run_gate(tmp_path, script, missing=True,
+                             check_only=(script == "safe_backend_restart.command"))
     assert result.returncode == 1, result.stdout + result.stderr
     assert not calls
 
@@ -197,7 +205,8 @@ def test_installer_gate_is_after_interactive_token_resolution():
 
 @pytest.mark.parametrize("script", SCRIPTS)
 def test_wait_unknown_expires_without_mutation(tmp_path, script):
-    result, calls = run_gate(tmp_path, script, missing=True, wait=True)
+    result, calls = run_gate(tmp_path, script, missing=True, wait=True,
+                             check_only=(script == "safe_backend_restart.command"))
     assert result.returncode == 1, result.stdout + result.stderr
     assert not calls
 
@@ -220,6 +229,6 @@ def test_both_scripts_use_identical_ipc_and_busy_functions():
 @pytest.mark.parametrize("mode", ["silent", "oversized"])
 def test_transport_limits_refuse_restart(tmp_path, script, mode):
     result, calls = run_gate(tmp_path, script, reply(is_recording=False), reply(ok=True, active=False),
-                             **{mode: True})
+                             check_only=(script == "safe_backend_restart.command"), **{mode: True})
     assert result.returncode == 1, result.stdout + result.stderr
     assert not calls
