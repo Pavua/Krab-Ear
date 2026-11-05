@@ -90,6 +90,40 @@ def test_seal_wrong_revision_is_unknown(example):
     assert classify(request, reply, pinned_digest=fingerprint(request)) == "RECEIPT_ONLY"
 
 
+@pytest.mark.parametrize("outcome,revision", [("CLOSED", 8), ("ALREADY_CLOSED", 7)])
+def test_begin_receipt_revision_rules(example, outcome, revision):
+    request, reply, _ = example
+    request.pop("executor")
+    request.pop("kind")
+    request.update(op="begin", expected_revision=7)
+    digest = fingerprint(request)
+    reply.update(op="begin", outcome=outcome, control_revision=revision, request_sha256=digest)
+    assert classify(request, reply, pinned_digest=digest) == "RECEIPT_ONLY"
+    reply["control_revision"] = 7 if revision == 8 else 8
+    assert classify(request, reply, pinned_digest=digest) == "UNKNOWN"
+
+
+@pytest.mark.parametrize("canonical,digest,outcome,revision", [
+    (b'{"client_incarnation":"inc-1","controller_epoch":"ctrl_1","executor":"worker-1",'
+     b'"kind":"stt","op":"reserve","owner_epoch":"owner.1","request_id":"req:1","v":1}',
+     "970c9e15da0e357bd28b78caac9096db7d430e23812944c6188a8152e862bb8a", "DENIED_CLOSED", 0),
+    (b'{"client_incarnation":"inc-1","controller_epoch":"ctrl_1",'
+     b'"expected_revision":9223372036854775806,"op":"seal","owner_epoch":"owner.1",'
+     b'"request_id":"seal:1","v":1}',
+     "46314f58ba9e1c4cce8434c20edd89cbfa8e2c9ebb2c4ea370cf3b36a773c8db", "SEALED", 9223372036854775807),
+])
+def test_canonical_vectors_bind_classifier_to_expected_bytes(canonical, digest, outcome, revision):
+    request = dict(reversed(list(json.loads(canonical).items())))
+    encoded = json.dumps(request, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    assert encoded == canonical
+    assert hashlib.sha256(canonical).hexdigest() == digest
+    reply = {key: request[key] for key in ("v", "op", "request_id", "client_incarnation", "owner_epoch",
+                                            "controller_epoch")}
+    reply.update(outcome=outcome, grant_id=None, claim_id=None, control_revision=revision, request_sha256=digest)
+    expected = "ADMISSION_REFUSED" if outcome == "DENIED_CLOSED" else "RECEIPT_ONLY"
+    assert classify(request, reply, pinned_digest=digest, owner="owner.1", controller="ctrl_1") == expected
+
+
 @pytest.mark.parametrize("mutation", ["payload", "both_epochs", "owner_epoch", "missing_context", "reply_digest",
                                       "nonascii_digest", "bool_version", "null_executor"])
 def test_request_binding_and_independently_pinned_epochs_are_required(example, mutation):
