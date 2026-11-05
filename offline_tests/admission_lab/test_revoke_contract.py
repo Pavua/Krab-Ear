@@ -72,6 +72,33 @@ def test_seal_preserves_claimed_debt_and_revokes_other_grant(opened_journal):
     assert store.status()["drain_authority"] is False
 
 
+def test_begin_replay_after_seal_preserves_receipt_and_debt(opened_journal):
+    store = opened_journal
+    grant = store.reserve_leaf("p", "inc", "reserve", "epoch", "exec", "stt")["grant_id"]
+    claim = store.claim_leaf("p", "inc", "claim", "epoch", "exec", grant)
+    begin = store.begin_maintenance("p", "inc", "close", "epoch", 0)
+    store.seal("p", "inc", "seal", "epoch", 1)
+    before = store._connection.execute(
+        "SELECT (SELECT COUNT(*) FROM command_ledger), "
+        "(SELECT COUNT(*) FROM scoped_grants), "
+        "(SELECT COUNT(claim_id) FROM scoped_grants)"
+    ).fetchone()
+
+    replay = store.begin_maintenance("p", "inc", "close", "epoch", 0)
+    assert replay == begin
+    assert replay["permit"] is None
+    assert store.claim_leaf("p", "inc", "claim", "epoch", "exec", grant)["claim_id"] == claim["claim_id"]
+    with pytest.raises(journal.JournalConflict, match="Ключ занят другими параметрами"):
+        store.begin_maintenance("p", "inc", "close", "epoch", 1)
+    assert store._connection.execute(
+        "SELECT (SELECT COUNT(*) FROM command_ledger), "
+        "(SELECT COUNT(*) FROM scoped_grants), "
+        "(SELECT COUNT(claim_id) FROM scoped_grants)"
+    ).fetchone() == before == (4, 1, 1)
+    assert store.status()["unknown"] is True
+    assert store.status()["drain_authority"] is False
+
+
 def test_revoke_replay_is_same_outcome_and_different_key_cannot_undo_it(opened_journal):
     store = opened_journal
     grant = store.reserve_leaf("p", "inc", "reserve", "epoch", "exec", "stt")["grant_id"]
