@@ -382,14 +382,20 @@ class RestPoisonedExitKillsWorkerTest(unittest.TestCase):
     def test_poisoned_exit_kills_worker_before_os_exit(self):
         import backend.rest_server as rs
 
+        backend_owner = rs._PROCESS_HOSTS_BACKEND
+        self.assertIsInstance(backend_owner, bool)
         with (
             patch.object(rs.settings, "REST_IN_PROCESS_ENABLED", False),
             patch("core.mlx_whisper_session.kill_mlx_whisper_session") as kill,
             patch.object(rs.os, "_exit") as exit_fn,
         ):
             rs._exit_poisoned_rest_process(70)
-        kill.assert_called_once()
-        exit_fn.assert_called_once_with(70)
+        if backend_owner:
+            kill.assert_not_called()
+            exit_fn.assert_not_called()
+        else:
+            kill.assert_called_once()
+            exit_fn.assert_called_once_with(70)
 
     def test_atexit_closes_mlx_session_when_not_adopted(self):
         import backend.rest_server as rs
