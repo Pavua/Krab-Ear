@@ -319,7 +319,27 @@ class RecordingCoreService:
             if closed_event is None:
                 closed_event = threading.Event()
                 self._closed_event = closed_event
+            if getattr(self, "_recording_maintenance_event", None) is None:
+                self._recording_maintenance_event = threading.Event()
         return lifecycle_lock, closed_event
+
+    def _begin_recording_maintenance(self) -> dict[str, str]:
+        """Закрыть новые start через этот сервис; сохранность не установлена.
+
+        Флаг необратим для этого экземпляра; он не останавливает уже принятый
+        start, прямые вызовы recorder и пути других сервисов. Не IPC API.
+        """
+        self._ensure_recording_lifecycle_state()
+        self._recording_maintenance_event.set()
+        return self._recording_maintenance_status()
+
+    def _recording_maintenance_status(self) -> dict[str, str]:
+        self._ensure_recording_lifecycle_state()
+        return {
+            "new_starts": "blocked" if self._recording_maintenance_event.is_set() else "open",
+            "inflight": "unknown",
+            "preservation": "unknown",
+        }
 
     def _get_runtime_setting(self, key: str, default: Any) -> Any:
         """Read a setting from the live cached_settings dict.
@@ -399,6 +419,8 @@ class RecordingCoreService:
     def handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
         """Запустить запись, если сервис ещё не вошёл в shutdown."""
         lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
+        if self._recording_maintenance_event.is_set():
+            return {"status": "maintenance_active"}
         # Быстрая проверка не даёт новому start встать за уже зависшим setup.
         # Повторная проверка под lock ниже закрывает гонку с началом shutdown.
         if closed_event.is_set():
@@ -407,6 +429,8 @@ class RecordingCoreService:
                 "is_recording": False,
             }
         with lifecycle_lock:
+            if self._recording_maintenance_event.is_set():
+                return {"status": "maintenance_active"}
             if closed_event.is_set():
                 return {
                     "status": "backend_closing",
