@@ -116,6 +116,9 @@ class RestWatchdog:
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
+        self._stopping = False
+        self._start_unknown = False
+        self._stop_unknown = False
         # S3/Задача 7b, п.7: терминальная защёлка — НЕОБРАТИМАЯ, в отличие от
         # start()/stop() (переиспользуемый lifecycle). single-flight внутри
         # _heal_or_escalate сериализует лечения между собой, но не запрещает
@@ -140,30 +143,49 @@ class RestWatchdog:
 
     def start(self) -> None:
         with self._lock:
+            if self._stopping or self._start_unknown or self._stop_unknown:
+                return
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop_event.clear()
             self._thread = threading.Thread(
                 target=self._run, daemon=True, name="RestWatchdog",
             )
+            self._start_unknown = True
             self._thread.start()
+            self._start_unknown = False
         logger.info(
             "RestWatchdog: запущен (tick=%.1fs, probe=%.1fs)",
             self._tick_interval_sec, self._probe_interval_sec,
         )
 
-    def stop(self) -> None:
+    def stop(self) -> bool:
         with self._lock:
+            self._stop_event.set()
+            if self._stopping or self._start_unknown or self._stop_unknown:
+                return False
             thread = self._thread
-            self._thread = None
-        self._stop_event.set()
-        if thread is not None and thread.is_alive():
-            thread.join(timeout=STOP_JOIN_TIMEOUT_SEC)
-            if thread.is_alive():
-                logger.warning(
-                    "RestWatchdog: тред не завершился за %.1fс",
-                    STOP_JOIN_TIMEOUT_SEC,
-                )
+            self._stopping = True
+            self._stop_unknown = True
+        try:
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=STOP_JOIN_TIMEOUT_SEC)
+                if thread.is_alive():
+                    logger.warning(
+                        "RestWatchdog: тред не завершился за %.1fс",
+                        STOP_JOIN_TIMEOUT_SEC,
+                    )
+                    with self._lock:
+                        self._stop_unknown = False
+                    return False
+            with self._lock:
+                if self._thread is thread:
+                    self._thread = None
+                self._stop_unknown = False
+            return True
+        finally:
+            with self._lock:
+                self._stopping = False
 
     def begin_shutdown(self) -> None:
         """Терминальная защёлка (S3/Задача 7b, п.7): лечение запрещено
