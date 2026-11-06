@@ -189,7 +189,7 @@ def build_harness(directory, settings, *, source=None):
 
     namespace.update({name: inert for name in (
         "PlaintextExportAuthorizer", "PlaintextExportIPC", "VocabularyStore", "TextSnippetService", "PhoneticVocabService")})
-    namespace["threading"] = SimpleNamespace(Thread=ImmediateThread, RLock=threading.RLock)
+    namespace["threading"] = SimpleNamespace(Thread=ImmediateThread, RLock=threading.RLock, Lock=threading.Lock)
     execute([definition(tree, "llm_warmup_needed"), service_class], namespace)
     cls = namespace["BackendService"]
     cls._init_llm_rewriter = init_rewriter

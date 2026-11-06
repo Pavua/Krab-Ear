@@ -233,6 +233,26 @@ def _exit_without_python_finalize_if_wake_word_hung(
 _IPC_DRAIN_BUDGET_SEC = 8.0
 
 
+def _begin_rest_shutdown(service: Any) -> bool:
+    """Закрыть оба терминальных допуска до ожидания любого из владельцев."""
+    previous_unknown = getattr(service, "_rest_gate_unknown", False) is True
+    service._rest_gate_unknown = True
+    confirmed = True
+    for attribute in ("_rest_watchdog", "_rest_inprocess"):
+        owner = getattr(service, attribute, None)
+        if owner is not None:
+            try:
+                if owner.begin_shutdown() is False:
+                    confirmed = False
+            except Exception:
+                confirmed = False
+                logger.exception("%s.begin_shutdown() не подтверждён", attribute)
+    if confirmed and not previous_unknown:
+        service._rest_gate_unknown = False
+        return True
+    return False
+
+
 def _shutdown_backend(
     service: Any,
     server: IPCServer,
@@ -247,42 +267,21 @@ def _shutdown_backend(
     ресурсам. Перед аварийным выходом telemetry сбрасывается, а при тестовой
     инъекции возвращается ``False`` без продолжения teardown.
     """
-    # S3/Задача 7b, п.7: терминальная защёлка + останов сторожа REST — САМЫЙ
-    # ПЕРВЫЙ шаг teardown, раньше даже rest_inprocess.begin_shutdown() ниже.
-    # Single-flight внутри сторожа сериализует его собственные stop()/heal, но
-    # не запрещает ему взять флайт ПОСЛЕ того, как close() его отпустит:
-    # shutdown идёт дальше (TTS и адаптеры уже закрываются), а сторож поднимает
-    # REST заново — сервер принимает запросы над полузакрытым backend'ом.
-    # begin_shutdown() — необратимое состояние (лечение запрещено НАВСЕГДА,
-    # переживает даже тик, который уже был в процессе на момент вызова);
-    # stop() — реальный останов daemon-треда (идемпотентный повтор в
-    # close() ниже по цепочке — тот же паттерн, что EventBridge/PurgeScheduler).
-    rest_watchdog = getattr(service, "_rest_watchdog", None)
-    if rest_watchdog is not None:
+    # Сначала оба терминальных gate, без ожидания между ними. Останов сторожа
+    # и REST следует позже в close(); его timeout не доказывает drain сторожа.
+    # Координатор и прямой close разделяют владение gate: иначе ошибка одного
+    # потока может стать известна уже после начала cleanup в другом.
+    guard = getattr(service, "_close_guard", None)
+    acquired = guard is not None and guard.acquire(blocking=False)
+    admission_closed = False
+    if acquired:
         try:
-            rest_watchdog.begin_shutdown()
-            rest_watchdog.stop()
-        except Exception:
-            logger.exception(
-                "RestWatchdog.begin_shutdown()/stop() выбросил при shutdown"
-            )
-
-    # ДО взвода shutting_down ниже — иначе сторож увидит 503 на /health уже
-    # останавливающегося REST и попытается его «вылечить» гонкой с этим же
-    # teardown'ом.
-    rest_inprocess = getattr(service, "_rest_inprocess", None)
-    if rest_inprocess is not None:
-        try:
-            # S3/Задача 5, п.5: закрываем REST-допуск РАНЬШЕ IPC-дренажа —
-            # тогда 8с ниже работают ОДНОВРЕМЕННО как окно дренажа REST, а не
-            # последовательно с ним. Полный stop() (сентинел + дренаж реестра
-            # + shutdown()/server_close()) всё равно происходит позже, внутри
-            # service.close() (см. rest_inprocess.stop() там).
-            rest_inprocess.begin_shutdown()
-        except Exception:
-            logger.exception(
-                "InProcessRestServer.begin_shutdown() выбросил при shutdown"
-            )
+            admission_closed = _begin_rest_shutdown(service)
+        finally:
+            guard.release()
+    if not admission_closed:
+        _exit_without_python_finalize_if_worker_hung(False, exit_fn=exit_fn, flush_fn=flush_fn)
+        return False
     call_stt = getattr(service, "_call_stt", None)
     if call_stt is not None:
         call_stt.begin_shutdown()
@@ -479,6 +478,9 @@ class BackendService:
         socket_path: Path | None = None,
         socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
     ) -> None:
+        self._close_guard = threading.Lock()
+        self._close_state = "OPEN"
+        self._rest_gate_unknown = False
         self.store = store
         # Startup LLM wiring reads runtime toggles before the other services are
         # built. Keep the single settings reader available from the first call.
@@ -2525,6 +2527,57 @@ class BackendService:
         signal handler run_server() и в finally serve_forever(). Возвращает
         False, когда любой нативный/audio worker не подтвердил завершение.
         """
+        guard = getattr(self, "_close_guard", None)
+        if guard is None or not guard.acquire(blocking=False):
+            return False
+        try:
+            if getattr(self, "_rest_gate_unknown", False) is True:
+                return False
+            state = getattr(self, "_close_state", None)
+            if state == "CLOSED":
+                return True
+            if state != "OPEN":
+                return False
+            self._close_state = "CLOSING"
+            try:
+                result = self._close_impl()
+            except BaseException:
+                self._close_state = "UNKNOWN"
+                raise
+            self._close_state = (
+                "CLOSED" if result is True else
+                "UNKNOWN" if getattr(self, "_rest_gate_unknown", False) is True else "OPEN"
+            )
+            return result is True
+        finally:
+            guard.release()
+
+    def _close_impl(self) -> bool:
+        if not _begin_rest_shutdown(self):
+            return False
+        rest_watchdog = getattr(self, "_rest_watchdog", None)
+        if rest_watchdog is not None:
+            try:
+                if rest_watchdog.stop() is False:
+                    self._rest_gate_unknown = True
+                    return False
+            except Exception:
+                self._rest_gate_unknown = True
+                logger.exception("RestWatchdog.stop() raised during close()")
+                return False
+        rest_inprocess = getattr(self, "_rest_inprocess", None)
+        if rest_inprocess is not None:
+            try:
+                if rest_inprocess.stop() is False:
+                    self._rest_gate_unknown = True
+                    return False
+            except Exception:
+                self._rest_gate_unknown = True
+                logger.exception("InProcessRestServer.stop() raised during close()")
+                return False
+        if getattr(self, "_rest_gate_unknown", False) is True:
+            return False
+
         authorizer = getattr(self, "_plaintext_export_authorizer", None)
         if authorizer is not None:
             authorizer.close()
@@ -2645,25 +2698,8 @@ class BackendService:
             except Exception:
                 logger.exception("EventBridge.stop() raised during close()")
 
-        # Stop RestWatchdog daemon thread (S3/Задача 7b, п.7) — ДО
-        # rest_inprocess.stop() ниже: терминальная защёлка уже взведена
-        # раньше в _shutdown_backend, здесь — идемпотентный повтор stop()
-        # для путей закрытия, которые не проходят через _shutdown_backend
-        # (например прямой BackendService.close() из тестов/скриптов).
-        rest_watchdog = getattr(self, "_rest_watchdog", None)
-        if rest_watchdog is not None:
-            try:
-                rest_watchdog.stop()
-            except Exception:
-                logger.exception("RestWatchdog.stop() raised during close()")
-
-        # Stop in-process REST (M2) — тот же daemon-thread teardown rule.
-        rest_inprocess = getattr(self, "_rest_inprocess", None)
+        # REST stop подтверждён ранним барьером до остальных cleanup.
         if rest_inprocess is not None:
-            try:
-                rest_inprocess.stop()
-            except Exception:
-                logger.exception("InProcessRestServer.stop() raised during close()")
             # S3/Задача 9, п.3: возвращает module-level имена rest_server
             # обратно к его собственному standalone-комплекту (парная
             # операция к adopt_external_singletons() выше в __init__) —

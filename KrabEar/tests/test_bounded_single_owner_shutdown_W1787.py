@@ -262,8 +262,8 @@ class RestInProcessBeginShutdownOrderTestCase(unittest.TestCase):
         )
         self.assertTrue(result)
 
-    def test_begin_shutdown_exception_does_not_abort_teardown(self) -> None:
-        """Сбой begin_shutdown() — не повод пропускать IPC/workers/metadata."""
+    def test_begin_shutdown_exception_refuses_teardown(self) -> None:
+        """Неизвестный REST gate запрещает следующий teardown."""
         service = MagicMock()
         service._rest_inprocess.begin_shutdown.side_effect = RuntimeError("boom")
         service.close.return_value = True
@@ -275,14 +275,14 @@ class RestInProcessBeginShutdownOrderTestCase(unittest.TestCase):
         result = _shutdown_backend(
             service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
         )
-        self.assertTrue(result)
-        service.close.assert_called_once_with()
-        handler.shutdown.assert_called_once_with(ipc_already_stopped=True)
+        self.assertFalse(result)
+        server.stop.assert_not_called()
+        service.close.assert_not_called()
+        handler.shutdown.assert_not_called()
 
 
 class RestWatchdogTerminalLatchOrderTestCase(unittest.TestCase):
-    """S3/Задача 7b, п.7: сторож REST останавливается САМЫМ ПЕРВЫМ шагом
-    ``_shutdown_backend`` — раньше даже ``rest_inprocess.begin_shutdown()``.
+    """Терминальный gate сторожа ставится перед gate REST и до IPC drain.
 
     Без этого узкое окно между «backend решил закрываться» и полным close()
     позволяло бы уже запущенному тику сторожа поднять REST через
@@ -290,7 +290,7 @@ class RestWatchdogTerminalLatchOrderTestCase(unittest.TestCase):
     уже закрываются) — сервер принимал бы запросы над полузакрытым backend'ом.
     """
 
-    def test_rest_watchdog_stopped_before_rest_inprocess_begin_shutdown(self) -> None:
+    def test_rest_terminal_gates_precede_ipc_and_teardown(self) -> None:
         events: list[str] = []
 
         server = MagicMock()
@@ -317,12 +317,11 @@ class RestWatchdogTerminalLatchOrderTestCase(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                "watchdog_begin_shutdown", "watchdog_stop",
-                "rest_begin_shutdown", "ipc", "workers", "metadata",
+                "watchdog_begin_shutdown", "rest_begin_shutdown", "ipc", "workers", "metadata",
             ],
         )
         service._rest_watchdog.begin_shutdown.assert_called_once_with()
-        service._rest_watchdog.stop.assert_called_once_with()
+        service._rest_watchdog.stop.assert_not_called()  # service.close() заменён mock
 
     def test_missing_rest_watchdog_does_not_break_shutdown(self) -> None:
         """service без _rest_watchdog (рубильник REST выключен) — не аварийная ветка."""
@@ -339,11 +338,10 @@ class RestWatchdogTerminalLatchOrderTestCase(unittest.TestCase):
         )
         self.assertTrue(result)
 
-    def test_watchdog_stop_exception_does_not_abort_teardown(self) -> None:
-        """Сбой begin_shutdown()/stop() сторожа — не повод пропускать
-        IPC/workers/metadata (тот же fail-safe класс, что у rest_inprocess)."""
+    def test_watchdog_begin_exception_refuses_teardown(self) -> None:
+        """Ошибка одного gate не мешает попробовать закрыть второй."""
         service = MagicMock()
-        service._rest_watchdog.stop.side_effect = RuntimeError("boom")
+        service._rest_watchdog.begin_shutdown.side_effect = RuntimeError("boom")
         service.close.return_value = True
         server = MagicMock()
         server.stop.return_value = True
@@ -353,9 +351,11 @@ class RestWatchdogTerminalLatchOrderTestCase(unittest.TestCase):
         result = _shutdown_backend(
             service, server, handler, flush_fn=lambda: None, exit_fn=lambda code: None,
         )
-        self.assertTrue(result)
-        service.close.assert_called_once_with()
-        handler.shutdown.assert_called_once_with(ipc_already_stopped=True)
+        self.assertFalse(result)
+        service._rest_inprocess.begin_shutdown.assert_called_once_with()
+        server.stop.assert_not_called()
+        service.close.assert_not_called()
+        handler.shutdown.assert_not_called()
 
 
 class HardExitObservabilityTestCase(unittest.TestCase):
