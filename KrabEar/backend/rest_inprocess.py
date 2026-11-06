@@ -143,15 +143,14 @@ class InProcessRestServer:
             return
 
         def _gate_or_count():
-            if self._shutting_down.is_set():
-                return jsonify({"error": "shutting_down"}), 503
-            if request.path not in _STREAMING_PATHS:
-                # Помечаем в g, а не по пути повторно в teardown: флаг
-                # shutting_down мог измениться МЕЖДУ before_request и
-                # teardown_request этого же запроса — decrement обязан
-                # зеркалить именно то, что реально было засчитано.
-                g.rest_inprocess_counted = True
-                with self._active_lock:
+            # Проверка допуска и регистрация — одна операция относительно
+            # закрытия: иначе stop() увидит ноль до регистрации запроса.
+            with self._active_lock:
+                if self._shutting_down.is_set():
+                    return jsonify({"error": "shutting_down"}), 503
+                if request.path not in _STREAMING_PATHS:
+                    # Teardown снимает только действительно учтённый запрос.
+                    g.rest_inprocess_counted = True
                     self._active_requests += 1
             return None
 
@@ -185,8 +184,9 @@ class InProcessRestServer:
         терминальность; сам ``begin_shutdown()`` остаётся идемпотентен и
         безопасен для повторного вызова оттуда же.
         """
-        self._shutting_down.set()
-        self._terminal.set()
+        with self._active_lock:
+            self._shutting_down.set()
+            self._terminal.set()
 
     def _drain_active_requests(self, timeout: float) -> bool:
         """Ждёт опустошения реестра активных (не-стриминговых) запросов.
@@ -224,19 +224,19 @@ class InProcessRestServer:
         # ПОСЛЕ того, как _shutdown_backend/close() продвинулись дальше.
         # Без этой проверки — "зомби"-start() поднимает Flask заново над
         # уже закрывающимся/закрытым backend'ом.
-        if self._terminal.is_set():
-            logger.warning(
-                "InProcessRestServer: start() отклонён — терминальная "
-                "защёлка уже взведена (backend завершает работу)"
-            )
-            return False
-
         # S3/Задача 5: сброс ОБЯЗАТЕЛЕН и БЕЗУСЛОВЕН — start() вызывается
         # повторно из лечения сторожа (restart() = stop() + start(), задача 7).
         # Без сброса REST навсегда отвечает 503 на всё, включая /health, после
         # первого же лечения — а сторож по контракту принимает любой
         # HTTP-ответ за доказательство жизни и больше никогда не лечит.
-        self._shutting_down.clear()
+        with self._active_lock:
+            if self._terminal.is_set():
+                logger.warning(
+                    "InProcessRestServer: start() отклонён — терминальная "
+                    "защёлка уже взведена (backend завершает работу)"
+                )
+                return False
+            self._shutting_down.clear()
         if not self._enabled:
             logger.info("InProcessRestServer: выключен рубильником")
             return False
@@ -364,7 +364,8 @@ class InProcessRestServer:
         shutting_down безусловно (кроме терминальной защёлки), поэтому
         именно вызывающий решает, будет ли за этим stop() ещё один start().
         """
-        self._shutting_down.set()
+        with self._active_lock:
+            self._shutting_down.set()
 
         with self._lock:
             server, thread = self._server, self._thread
