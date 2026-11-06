@@ -33,12 +33,13 @@ private nonisolated(unsafe) var statusItemRefreshGateKey: UInt8 = 0
 /// Считать ли ошибку IPC доказательством того, что backend ЗАКЛИНИЛ —
 /// то есть процесс жив, но его accept-loop мёртв (инцидент 2026-08-07).
 ///
-/// Решение безопасности: `true` здесь ведёт к `launchctl kickstart -k`, а
+/// Ранее `true` здесь мог привести к `launchctl kickstart -k`, а
 /// рестарт под активной диктовкой уничтожает её безвозвратно (инцидент
 /// 2026-07-22). Поэтому заклиниванием считается ТОЛЬКО отказ на этапе
 /// `connect()`: у заклинившего backend'а accept-loop не работает, backlog
 /// переполняется и connect() возвращает ECONNREFUSED — ровно это наблюдалось
-/// живьём.
+/// живьём. Сейчас общий supervisor отказывает в принудительном restart до
+/// появления квалифицированного admission/drain.
 ///
 /// 🔴 Намеренно УЖЕ, чем `AgentAppDelegate.isConnectionError`. Та считает
 /// отказом ещё и `readFailed`/`writeFailed`, и для СВОЕЙ задачи
@@ -431,16 +432,13 @@ extension AgentAppDelegate {
                 }
                 loggerRef.warn(
                     "HealthMonitor: backend ЗАКЛИНИЛ (соединение отвергается) — "
-                    + "принудительный рестарт через launchctl kickstart"
+                    + "автоматический рестарт отложен до подтверждения безопасности"
                 )
-                // forceRestartBackend, а НЕ restartIfDead: последний
-                // short-circuit'ится на живом процессе и именно поэтому не
-                // вылечил инцидент.
                 let ok = supervisor.forceRestartBackend()
-                AgentRecoveryLogger.shared.logForceRestartBackend(source: "health_wedge", success: ok)
+                AgentRecoveryLogger.shared.logForceRestartBackend(source: "health_wedge", success: ok, deferred: true)
                 await MainActor.run {
                     BackendToast.shared.show(
-                        ok ? "Backend завис — перезапускаю" : "⚠ Backend завис, рестарт не удался",
+                        "⚠ Backend завис — автоматический рестарт отложен до проверки активности",
                         duration: 10.0
                     )
                 }
