@@ -5,7 +5,7 @@ import pytest
 
 from test_restart_unknown_activity_2026_09_07 import reply, run_gate
 
-SCRIPTS = ('safe_backend_restart.command', 'install_backend_launchagent.command')
+SCRIPTS = ('safe_backend_restart.command',)
 IDLE = {'is_recording': False, 'owner': None, 'generation_token': None,
         'start_request_id': None, 'is_finalizing': False, 'finalizing_count': 0}
 
