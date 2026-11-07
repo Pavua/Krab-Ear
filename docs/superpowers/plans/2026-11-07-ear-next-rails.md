@@ -10,9 +10,12 @@
 - Каждая находка сверяется с кодом построчно; «не воспроизвёл» — так и писать.
 - Отчёт: DONE/BLOCKED, headSha, список прогнанных тестов с итогом.
 
-## Статус на 07.11
-- #2190 (Claude): close()→WebhookManager.shutdown; сторож wake-word не путает стопор процесса с зависанием; тест lang-id без гонки patch.dict. Прод hotfix `480e7300` (база 5a09e630 + только эти фиксы).
-- Прод отстаёт от main на 37 мержей (5a09e630 vs 4a84f6ac). Выкатка main целиком — отдельное решение владельца.
+## Статус на 07.11 (вечер)
+- СМЕРЖЕНО и ВЫКАЧЕНО: #2190 (close()→WebhookManager.shutdown; сторож wake-word не путает стопор процесса с зависанием; тест lang-id без гонки patch.dict) и #2191 (R5: adapter.stop() не ставит wedged при стопоре).
+- ПРОД = main `8ebb96ed`: backend+REST из `~/.codex/worktrees/ear-release-8ebb96ed/Krab Ear`. Откат: `ear-release-480e7300` (hotfix) или `ear-release-5a09e630` (старый). Бэкап plist: `~/.local/share/krab-ear/plist-backup-2026-11-07`.
+- CI main зелёный; `KeyError('mlx')` после #2190 не воспроизводится.
+- R2 ВЫПОЛНЕН вживую (temp-стенды, порты 5015/5016): таймаут REST STT не убивает backend ни в двухпроцессном режиме (REST выходит 70, launchd поднимает), ни in-process (#2183 подтверждён). Карантин не вечный.
+- R5, R6 ВЫПОЛНЕНЫ (R6: agy нашёл 3 кандидата, после гейта все LOW, правок нет; отчёт `.remember/tmp/workers/R6_REPORT_2026-11-07.md`).
 
 ## R1. Подтвердить/закрыть KeyError('mlx') (если CI #2190 снова красный)  — модель: Opus
 - Где: `KrabEar/tests/test_audio_lang_id.py::TestAudioLangIDConcurrentMlxLock`, `KrabEar/tests/conftest.py` (purge стабов ~стр. 760–780).
@@ -48,6 +51,17 @@
 ## Порядок по умолчанию
 R1 (если CI красный) → R5 → R2 → R3 → R4 → R6 параллельно всему.
 
+## R7. REST STT: singleflight отпускается раньше MLX (находка R2)  — модель: Sonnet / Opus low
+- Где: `KrabEar/backend/rest_server.py` — ветка `_future.running()` при таймауте (~стр. 2080–2095) + `finally: release_stt_singleflight()` (~2109).
+- Факт (живой замер R2): после 504 singleflight свободен, но брошенный поток держит MLX ещё ~90с; следующий НЕ-call запрос захватывает singleflight и молча висит до ~90с (вернул 200 через 92.6с). Call-профиль не ждёт (acquire 0с) — не затронут.
+- Цель: после таймаута с живым потоком следующий запрос получает честный 503 `stt_busy` (или ждёт ≤ разумного бюджета), а слот освобождается, когда поток реально завершился.
+- Идея: не отпускать singleflight в finally, если таймаут оставил running Future; освобождать через `_future.add_done_callback(lambda _: release_stt_singleflight())`. Проверить двухпроцессный режим: там процесс и так выходит с 70.
+- DoD: RED-тест (фейковый long-running transcribe + deadline) → GREEN; не сломать `test_rest_*timeout*`; живой повтор сценария B из R2.
+- Запрет: не трогать путь `_exit_poisoned_rest_process`.
+
+## Порядок (обновлён 07.11 вечер)
+R7 (малый) → R3 (Call Assist, нужен Opus medium/high) → R4. R1 закрыт, пока CI зелёный.
+
 ## Решения владельца (07.11)
-- Выкатка main целиком — только после R2 (живая проверка REST STT).
+- Выкатка main целиком — только после R2 (живая проверка REST STT). ✅ Выполнено 07.11, прод на 8ebb96ed.
 - Порядок задач — по умолчанию выше.
