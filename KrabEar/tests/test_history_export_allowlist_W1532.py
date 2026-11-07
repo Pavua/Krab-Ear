@@ -158,3 +158,50 @@ class TestHandleBatchExportAllowlist(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestIsSafeExportDirCwdIndependent(unittest.TestCase):
+    """2026-11-07: пустой/относительный путь резолвился в cwd процесса.
+
+    Если cwd лежит в разрешённом корне (/tmp, $TMPDIR, ~/Documents…), проверка
+    пропускала "" и "exports" — экспорт уходил в произвольный cwd. В CI cwd вне
+    корней, поэтому старый тест был зелёным случайно.
+    """
+
+    def setUp(self) -> None:
+        import os
+        import tempfile as _tf
+
+        self._old_cwd = os.getcwd()
+        self._tmp = _tf.mkdtemp()  # внутри tempfile.gettempdir() — разрешённый корень
+        os.chdir(self._tmp)
+
+    def tearDown(self) -> None:
+        import os
+        import shutil
+
+        os.chdir(self._old_cwd)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_empty_rejected_even_when_cwd_is_allowed(self) -> None:
+        self.assertFalse(_is_safe_export_dir(""))
+        self.assertFalse(_is_safe_export_dir("   "))
+
+    def test_relative_rejected_even_when_cwd_is_allowed(self) -> None:
+        self.assertFalse(_is_safe_export_dir("exports"))
+        self.assertFalse(_is_safe_export_dir("./x"))
+
+    def test_absolute_allowed_path_still_ok(self) -> None:
+        self.assertTrue(_is_safe_export_dir(self._tmp))
+
+
+class TestResolveExportDirRejectsRelative(unittest.TestCase):
+    def test_relative_output_dir_raises(self) -> None:
+        from backend.history_service import HistoryService
+
+        store = MagicMock()
+        store.data_dir = "/nonexistent-data-dir"
+        svc = HistoryService(store=store)
+        with self.assertRaises(ValueError):
+            svc._resolve_export_dir("exports")
+        self.assertIsNone(svc._resolve_export_dir(""))
