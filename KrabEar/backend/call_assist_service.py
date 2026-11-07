@@ -408,10 +408,33 @@ class CallAssistService:
 
     def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """Останавливает текущую сессию ассистента звонка."""
+        try:
+            return self._handle_stop_impl(params)
+        except BaseException:
+            # Залипшая stop_in_progress навсегда отвечала бы «в процессе» — снимаем.
+            with self._lock:
+                self._state.pop("stop_in_progress", None)
+            raise
+
+    def _handle_stop_impl(self, params: dict[str, Any]) -> dict[str, Any]:
         stopped_at = datetime.now().isoformat(timespec="seconds")
         with self._lock:
             active = bool(self._state.get("active"))
             state = dict(self._state)
+            if not active and state.get("stop_in_progress"):
+                # R3 шаг 2: первый stop ещё работает (summary/Gateway). Ничего не
+                # затираем — клиент повторит и получит итог.
+                return {
+                    "active": False,
+                    "status": "stopped",
+                    "stop_in_progress": True,
+                    "session_id": state.get("session_id"),
+                    "gateway_session_id": state.get("gateway_session_id"),
+                }
+            if not active and state.get("status") == "stopped" and "summary_status" in state:
+                # R3 шаг 2: повтор после завершённого stop (потерянный ответ) —
+                # отдаём тот же итог (summary_history_id), без новых записей.
+                return dict(state, replayed=True)
             if not active:
                 idle_state = {
                     "active": False,
@@ -427,6 +450,8 @@ class CallAssistService:
             self._state["status"] = "stopped"
             self._state["stopped_at"] = stopped_at
             state = dict(self._state)
+            # Метка только в self._state: финал ниже (self._state = dict(state)) её снимает.
+            self._state["stop_in_progress"] = True
 
         # F2 / C3 (wave-31): only stop recorder when call assist was actually active.
         # The recorder is shared with the main recording workflow; stopping it
