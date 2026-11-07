@@ -492,23 +492,27 @@ class TestAudioLangIDConcurrentMlxLock(unittest.TestCase):
         errors: list[Exception] = []
         results: list = [None] * 6
 
+        # patch.dict("sys.modules") НЕ потокобезопасен: __exit__ делает clear()+update()
+        # всего sys.modules, и параллельный import в соседнем потоке видит дыру
+        # (KeyError('mlx') в CI krab-ear-ci, 4a84f6ac). Патчим ОДИН раз снаружи потоков.
+        mock_mlx = MagicMock()
+        mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
+        mock_mlx.load_models.load_model.return_value = MagicMock()
+        mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.9})
+
         def worker(idx: int):
             try:
                 lid = AudioLanguageID()
-                mock_mlx = MagicMock()
-                mock_mlx.audio.log_mel_spectrogram.return_value = np.zeros((80, 3000))
-                mock_mlx.load_models.load_model.return_value = MagicMock()
-                mock_mlx.decoding.detect_language.return_value = ("ru", {"ru": 0.9})
-                with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
-                    results[idx] = lid.detect(_speech(seconds=2.0), sample_rate=16000)
+                results[idx] = lid.detect(_speech(seconds=2.0), sample_rate=16000)
             except Exception as exc:
                 errors.append(exc)
 
-        threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join(timeout=10)
+        with patch.dict("sys.modules", {"mlx_whisper": mock_mlx}):
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(6)]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join(timeout=10)
 
         self.assertEqual(errors, [], f"Concurrent detect errors: {errors}")
 
