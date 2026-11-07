@@ -140,6 +140,8 @@ import Foundation
 enum State { case on, off }
 final class Button { var state: State = .on }
 struct Settings { let translationMode = "off" }
+// Зеркало файлового глобала HistoryPanelController+CallAssist.swift (R3).
+var pendingCallTimelineSaveRequestId: String? = "stale-from-previous-call"
 final class IPC {
     var result: [String: Any] = [:]
     var methods: [String] = []
