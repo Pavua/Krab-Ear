@@ -17,6 +17,7 @@ GitHub: https://github.com/dscripka/openWakeWord
 from __future__ import annotations
 
 import logging
+import sys
 import threading
 import time
 from pathlib import Path
@@ -436,6 +437,23 @@ class OpenWakeWordAdapter:
                 "starvation_active": self._starved_since is not None,
                 "consecutive_starve_exits": self._consecutive_starve_exits,
             }
+
+    def listener_stack(self, max_frames: int = 12) -> str | None:
+        """Стек живого потока слушателя — след для события wedged (None, если треда нет).
+
+        Только чтение ``sys._current_frames()``: ни локов адаптера, ни I/O, поэтому
+        безопасно звать из сторожа даже когда слушатель завис.
+        """
+        thread = self._thread
+        ident = getattr(thread, "ident", None) if thread is not None else None
+        if ident is None:
+            return None
+        frame = sys._current_frames().get(ident)
+        if frame is None:
+            return None
+        import traceback
+
+        return "".join(traceback.format_stack(frame, limit=max_frames)).rstrip()
 
     def set_wedged(self, value: bool) -> None:
         with self._lock:
