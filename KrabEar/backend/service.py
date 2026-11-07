@@ -2708,6 +2708,16 @@ class BackendService:
                 all_workers_stopped = False
                 logger.exception("Transcriber.close() raised during close()")
 
+        # Webhook executor — поздние fire_webhook станут no-op.
+        # wait=False: доставка с retry/sleep не должна растягивать shutdown;
+        # in-flight задачи доработают сами, новые fire_webhook станут no-op.
+        webhook_manager = getattr(self, "_webhook_manager", None)
+        if webhook_manager is not None:
+            try:
+                webhook_manager.shutdown(wait=False)
+            except Exception:
+                logger.exception("WebhookManager.shutdown() raised during close()")
+
         return all_workers_stopped and wake_word_stopped and call_stt_stopped
 
     # ------------------------------------------------------------------ #
