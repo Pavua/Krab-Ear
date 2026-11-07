@@ -157,6 +157,8 @@ class OpenWakeWordAdapter:
         self._starved_since: float | None = None
         self._consecutive_starve_exits: int = 0
         self._stream_failure_cooldown_until: float = 0.0
+        # Инъекция для тестов: замер длительности join в stop() (R5).
+        self._clock = time.monotonic
 
     # ------------------------------------------------------------------
     # Проверка наличия библиотеки
@@ -353,8 +355,13 @@ class OpenWakeWordAdapter:
                 return True
             self._stop_event.set()
 
+        join_started = self._clock()
         thread.join(timeout=timeout)
+        join_elapsed = self._clock() - join_started
         exited = not thread.is_alive()
+        # R5 (инцидент 05.11): join, растянувшийся намного дольше timeout, —
+        # признак останова ВСЕГО процесса, а не клина слушателя.
+        process_stalled = join_elapsed > 2.0 * timeout + 1.0
         if exited:
             with self._lock:
                 if self._thread is thread:
@@ -390,9 +397,15 @@ class OpenWakeWordAdapter:
                 # живой клин и не создаст второй CFFI/PortAudio listener.
                 # Обычный Python-finalize для такого треда небезопасен;
                 # process-level policy в service.py завершит процесс без него.
-                if not _recording:
+                if not _recording and not process_stalled:
                     self._wedged = True
-            if _recording:
+            if process_stalled:
+                logger.warning(
+                    "OpenWakeWordAdapter: join слушателя длился %.1fs при timeout %.1fs — "
+                    "останов процесса целиком, wedged НЕ выставляем",
+                    join_elapsed, timeout,
+                )
+            elif _recording:
                 logger.info(
                     "OpenWakeWordAdapter: тред слушателя не вышел за %.1fs, "
                     "но идёт запись — wedged НЕ выставляем (легитимная пауза)",
