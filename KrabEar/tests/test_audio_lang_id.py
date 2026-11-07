@@ -513,6 +513,8 @@ class TestAudioLangIDConcurrentMlxLock(unittest.TestCase):
                 t.start()
             for t in threads:
                 t.join(timeout=10)
+            # Отставший поток пережил бы выход patch.dict и импортировал бы в чужом состоянии.
+            self.assertFalse([t for t in threads if t.is_alive()], "detect() не завершился за 10с")
 
         self.assertEqual(errors, [], f"Concurrent detect errors: {errors}")
 

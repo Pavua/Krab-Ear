@@ -441,11 +441,13 @@ class OpenWakeWordAdapter:
     def listener_stack(self, max_frames: int = 12) -> str | None:
         """Стек живого потока слушателя — след для события wedged (None, если треда нет).
 
-        Только чтение ``sys._current_frames()``: ни локов адаптера, ни I/O, поэтому
+        Только чтение ``sys._current_frames()`` (+ кэш linecache), без локов адаптера, поэтому
         безопасно звать из сторожа даже когда слушатель завис.
         """
         thread = self._thread
-        ident = getattr(thread, "ident", None) if thread is not None else None
+        if thread is None or not thread.is_alive():
+            return None  # мёртвый тред: ident мог быть переиспользован чужим
+        ident = thread.ident
         if ident is None:
             return None
         frame = sys._current_frames().get(ident)

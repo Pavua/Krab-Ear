@@ -1,7 +1,7 @@
 """BackendService.close() обязан завершать WebhookManager (2026-11-07).
 
 ЧТО НАЙДЕНО: close() останавливает все фоновые потоки, но не зовёт
-``WebhookManager.shutdown()``. Executor (4 непрерывных non-daemon воркера)
+``WebhookManager.shutdown()``. Executor (до 4 non-daemon воркеров, создаются лениво)
 переживает close(), а EventBus-листенер после detach уже не шлёт новых задач —
 но in-flight доставки с retry/sleep остаются без владельца.
 """

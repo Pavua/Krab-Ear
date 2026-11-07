@@ -2714,7 +2714,7 @@ class BackendService:
         webhook_manager = getattr(self, "_webhook_manager", None)
         if webhook_manager is not None:
             try:
-                webhook_manager.shutdown(wait=False)
+                webhook_manager.shutdown(wait=False, cancel_pending=True)
             except Exception:
                 logger.exception("WebhookManager.shutdown() raised during close()")
 
