@@ -1673,19 +1673,38 @@ class StateStore:
         privacy_mode: bool = False,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
-        return self._add_history_item_impl(
-            text=text, paste_status=paste_status, source_text=source_text,
-            translated_text=translated_text, translation_mode=translation_mode,
-            source_lang=source_lang, target_lang=target_lang,
-            translation_status=translation_status, translation_engine=translation_engine,
-            chat_id=chat_id, message_id=message_id, cleaned_text=cleaned_text,
-            llm_applied=llm_applied, llm_latency_ms=llm_latency_ms, diarization=diarization,
-            audio_duration_sec=audio_duration_sec, confidence=confidence, emotion=emotion,
-            word_timestamps=word_timestamps, speaker_turns=speaker_turns, tags=tags,
-            favorite=favorite, audio_path=audio_path, is_protected=is_protected,
-            reasoning=reasoning, action_items=action_items, decisions=decisions,
-            questions=questions, privacy_mode=privacy_mode,
-        )[0]
+        item = HistoryItem.create(
+            text=text,
+            paste_status=paste_status,
+            source_text=source_text,
+            translated_text=translated_text,
+            translation_mode=translation_mode,
+            source_lang=source_lang,
+            target_lang=target_lang,
+            translation_status=translation_status,
+            translation_engine=translation_engine,
+            chat_id=chat_id,
+            message_id=message_id,
+            cleaned_text=cleaned_text,
+            llm_applied=llm_applied,
+            llm_latency_ms=llm_latency_ms,
+            diarization=diarization,
+            audio_duration_sec=audio_duration_sec,
+            confidence=confidence,
+            emotion=emotion,
+            word_timestamps=word_timestamps,
+            speaker_turns=speaker_turns,
+            tags=tags,
+            favorite=favorite,
+            audio_path=audio_path,
+            is_protected=is_protected,
+            reasoning=reasoning,
+            action_items=action_items,
+            decisions=decisions,
+            questions=questions,
+            privacy_mode=privacy_mode,
+        )
+        return self._write_history_item(item, dedupe=False)[0]
 
     # R3 (2026-11-07): пространство имён детерминированных id идемпотентных записей.
     _RECEIPT_NAMESPACE = uuid.UUID("6f1c2a52-9d0b-4c7e-8a51-3e4b7d2f9a10")
@@ -1707,10 +1726,12 @@ class StateStore:
         key = str(receipt_key or "").strip()
         if not key or len(key) > self._RECEIPT_KEY_MAX:
             raise ValueError("receipt_key must be 1..128 non-blank chars")
-        return self._add_history_item_impl(item_id=self.receipt_item_id(key), **fields)
+        item = HistoryItem.create(item_id=self.receipt_item_id(key), **fields)
+        return self._write_history_item(item, dedupe=True)
 
-    def _add_history_item_impl(self, *, item_id: str | None = None, **fields: Any) -> tuple[HistoryItem | None, str]:
-        item = HistoryItem.create(item_id=item_id, **fields)
+    def _write_history_item(self, item: HistoryItem, *, dedupe: bool) -> tuple[HistoryItem | None, str]:
+        """Пишет запись; ``dedupe`` — сперва проверить id в удалённых/активных (под тем же локом)."""
+        item_id = item.id if dedupe else None
         existing: HistoryItem | None = None
         outcome = "created"
         try:
