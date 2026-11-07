@@ -777,7 +777,7 @@ def _purge_leaked_module_stubs():
         )
         is_mock = isinstance(mod, (Mock, MagicMock))
         if is_bare_stub or is_mock:
-            del sys.modules[name]
+            sys.modules.pop(name, None)  # TOCTOU: имя мог снять другой поток
 
     # Wave 1748: also purge bare "sounddevice" stub (was in _STUB_PURGE_EXTERNAL,
     # now handled separately so the logic stays readable).

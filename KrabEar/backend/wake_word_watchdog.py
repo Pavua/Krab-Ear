@@ -32,6 +32,9 @@ _STALE_SEC_MIN = 10.0
 _STALE_SEC_MAX = 120.0
 _STALE_SEC_DEFAULT = 30.0
 _CHECK_INTERVAL_SEC_DEFAULT = 5.0
+# Тик опоздал больше чем в N раз → стопор процесса; льготных тиков после него.
+_STALL_GAP_FACTOR = 3.0
+_STALL_GRACE_TICKS = 2
 # Анти-голодание (ревью Task 4): частые легитимные паузы (диктовки)
 # сбрасывают эпизод раньше второй stale-проверки — без окна поверх эпизодов
 # сломанный навсегда поток лечился бы вечно, не эскалируя. THREAD_HUNG-танцы
@@ -133,6 +136,11 @@ class WakeWordWatchdog:
         # Момент первого наблюдения dead-session аномалии (Fix D):
         # model выставлен, но тред не жив — сигнатура упавшего restore.
         self._anomaly_since: float | None = None
+        # Инцидент 2026-11-05: останов ВСЕГО процесса (~80с) выглядел как
+        # thread_hung. Опоздавший собственный тик = общий стопор → N льготных
+        # тиков без heal/эскалации (heartbeat успеет ожить сам).
+        self._stall_grace_ticks = 0
+        self._stall_gap_sec = 0.0  # длина последнего стопора: льгота только если он объясняет staleness
 
     # ------------------------------------------------------------------
     # Settings
@@ -217,8 +225,29 @@ class WakeWordWatchdog:
                     "и выйдет по stop_event"
                 )
 
+    def _note_tick_gap(self, gap_sec: float) -> None:
+        """Сколько реально ждали следующий тик. Сильно больше interval — стопор процесса."""
+        threshold = min(_STALL_GAP_FACTOR * self._check_interval_sec, self._stale_sec() / 2.0)
+        if gap_sec > threshold:
+            with self._lock:
+                self._stall_grace_ticks = _STALL_GRACE_TICKS
+                self._stall_gap_sec = gap_sec
+                # Таймеры аномалий (dead_session/blocked_start) не должны
+                # «насчитать» время, пока процесс стоял целиком.
+                if self._anomaly_since is not None:
+                    self._anomaly_since += gap_sec
+            logger.warning(
+                "WakeWordWatchdog: тик опоздал на %.1fs при interval=%.1fs — "
+                "вероятен останов процесса целиком; heal/эскалация отложены на %d тика",
+                gap_sec, self._check_interval_sec, _STALL_GRACE_TICKS,
+            )
+
     def _run(self) -> None:
-        while not self._stop_event.wait(self._check_interval_sec):
+        while True:
+            t0 = self._clock()
+            if self._stop_event.wait(self._check_interval_sec):
+                return
+            self._note_tick_gap(self._clock() - t0)
             try:
                 self.check_once()
             except Exception:
@@ -329,6 +358,13 @@ class WakeWordWatchdog:
         staleness = now - max(started, last or 0.0)
         if staleness < stale_sec:
             return None  # grace-окно прогрева: не алармим и не закрываем эпизод
+
+        with self._lock:
+            # Льгота — только если стопор объясняет staleness: при повторных
+            # коротких стопорах настоящее зависание продолжает расти и лечится.
+            if self._stall_grace_ticks > 0 and staleness <= self._stall_gap_sec + stale_sec:
+                self._stall_grace_ticks -= 1
+                return None  # стопор процесса: даём слушателю ожить, не лечим и не эскалируем
 
         with self._lock:
             heal_tried = self._heal_attempted_this_episode
@@ -461,6 +497,7 @@ class WakeWordWatchdog:
         with self._lock:
             self._heal_attempted_this_episode = False
             self._escalated_this_episode = False
+            self._stall_grace_ticks = 0
 
     def _close_episode_fresh(self) -> None:
         self._reset_episode()
@@ -481,10 +518,18 @@ class WakeWordWatchdog:
             f"; {_capture_progress_hint(heartbeat, self._clock())}"
             if heartbeat is not None else ""
         )
+        stack = None
+        stack_fn = getattr(self._adapter, "listener_stack", None)
+        if callable(stack_fn):
+            try:
+                stack = stack_fn()
+            except Exception:
+                logger.debug("WakeWordWatchdog: listener_stack упал", exc_info=True)
         logger.error(
             "WakeWordWatchdog: мягкое лечение невозможно/не помогло (%s, "
-            "staleness=%.1fs) — wedged:true, лечение на стороне агента%s",
+            "staleness=%.1fs) — wedged:true, лечение на стороне агента%s%s",
             reason, staleness, capture,
+            f"; стек слушателя:\n{stack}" if stack else "",
         )
         try:
             self._adapter.set_wedged(True)
@@ -510,7 +555,12 @@ class WakeWordWatchdog:
                     f"wake-word heartbeat stale {staleness:.1f}s, reason={reason}"
                 ),
                 timestamp=datetime.now(timezone.utc),
-                context={"staleness_sec": round(staleness, 1), "reason": reason},
+                context={
+                    "staleness_sec": round(staleness, 1),
+                    "reason": reason,
+                    # Блокирующий кадр — последний: храним хвост.
+                    **({"listener_stack": stack[-1500:]} if stack else {}),
+                },
                 actionable=False,
                 action_id=None,
             ))

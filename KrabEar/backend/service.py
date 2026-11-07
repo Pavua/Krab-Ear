@@ -2732,6 +2732,16 @@ class BackendService:
 
         self._detach_event_bus_wiring()
 
+        # Webhook executor — после detach листенера (новых submit уже нет).
+        # wait=False: доставка с retry/sleep не должна растягивать shutdown;
+        # in-flight задачи доработают сами, новые fire_webhook станут no-op.
+        webhook_manager = getattr(self, "_webhook_manager", None)
+        if webhook_manager is not None:
+            try:
+                webhook_manager.shutdown(wait=False, cancel_pending=True)
+            except Exception:
+                logger.exception("WebhookManager.shutdown() raised during close()")
+
         return all_workers_stopped and wake_word_stopped and call_stt_stopped
 
     # ------------------------------------------------------------------ #

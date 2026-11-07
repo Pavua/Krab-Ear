@@ -606,7 +606,7 @@ class WebhookManager:
             self._privacy_mode = enabled
         logger.info("WebhookManager: privacy_mode=%s", enabled)
 
-    def shutdown(self, wait: bool = True) -> None:
+    def shutdown(self, wait: bool = True, cancel_pending: bool = False) -> None:
         """Дренирует ThreadPoolExecutor, ожидая завершения in-flight доставок.
 
         Fix 1b: graceful shutdown executor'а — вызовы fire_webhook больше не
@@ -622,7 +622,9 @@ class WebhookManager:
                 return  # уже завершён — idempotent
             self._executor_shutdown = True
         # Дрейн вне lock чтобы не держать lock пока ждём потоки
-        self._executor.shutdown(wait=wait, cancel_futures=False)
+        # cancel_pending: путь BackendService.close() — очередь доставок не должна
+        # держать выход интерпретатора (atexit join воркеров) дольше ExitTimeOut.
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_pending)
         logger.info("WebhookManager: executor завершён (wait=%s)", wait)
 
     def fire_webhook(self, event_type: str, data: dict[str, Any]) -> None:
@@ -662,16 +664,24 @@ class WebhookManager:
             ]
 
         for wid, cfg in targets:
+            if self._executor_shutdown:
+                logger.debug("WebhookManager: fire_webhook(%s) пропущен (shutdown)", event_type)
+                return
             # BUG 4 fix: submit to bounded pool instead of spawning an unbounded daemon thread
-            self._executor.submit(
-                self._deliver_with_retry,
-                wid,
-                cfg["url"],
-                cfg.get("secret", ""),
-                body,
-                event_type,
-                cfg.get("allow_local", False),
-            )
+            try:
+                self._executor.submit(
+                    self._deliver_with_retry,
+                    wid,
+                    cfg["url"],
+                    cfg.get("secret", ""),
+                    body,
+                    event_type,
+                    cfg.get("allow_local", False),
+                )
+            except RuntimeError:
+                # Гонка с shutdown(): executor закрыли между проверкой и submit.
+                logger.debug("WebhookManager: submit после shutdown отброшен")
+                return
 
     def get_webhook_stats(self, webhook_id: str) -> dict[str, Any]:
         """Возвращает статистику доставки для webhook.
