@@ -606,7 +606,7 @@ class WebhookManager:
             self._privacy_mode = enabled
         logger.info("WebhookManager: privacy_mode=%s", enabled)
 
-    def shutdown(self, wait: bool = True) -> None:
+    def shutdown(self, wait: bool = True, cancel_pending: bool = False) -> None:
         """Дренирует ThreadPoolExecutor, ожидая завершения in-flight доставок.
 
         Fix 1b: graceful shutdown executor'а — вызовы fire_webhook больше не
@@ -622,7 +622,9 @@ class WebhookManager:
                 return  # уже завершён — idempotent
             self._executor_shutdown = True
         # Дрейн вне lock чтобы не держать lock пока ждём потоки
-        self._executor.shutdown(wait=wait, cancel_futures=False)
+        # cancel_pending: путь BackendService.close() — очередь доставок не должна
+        # держать выход интерпретатора (atexit join воркеров) дольше ExitTimeOut.
+        self._executor.shutdown(wait=wait, cancel_futures=cancel_pending)
         logger.info("WebhookManager: executor завершён (wait=%s)", wait)
 
     def fire_webhook(self, event_type: str, data: dict[str, Any]) -> None:

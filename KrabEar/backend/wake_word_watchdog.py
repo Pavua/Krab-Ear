@@ -140,6 +140,7 @@ class WakeWordWatchdog:
         # thread_hung. Опоздавший собственный тик = общий стопор → N льготных
         # тиков без heal/эскалации (heartbeat успеет ожить сам).
         self._stall_grace_ticks = 0
+        self._stall_gap_sec = 0.0  # длина последнего стопора: льгота только если он объясняет staleness
 
     # ------------------------------------------------------------------
     # Settings
@@ -226,9 +227,15 @@ class WakeWordWatchdog:
 
     def _note_tick_gap(self, gap_sec: float) -> None:
         """Сколько реально ждали следующий тик. Сильно больше interval — стопор процесса."""
-        if gap_sec > _STALL_GAP_FACTOR * self._check_interval_sec:
+        threshold = min(_STALL_GAP_FACTOR * self._check_interval_sec, self._stale_sec() / 2.0)
+        if gap_sec > threshold:
             with self._lock:
                 self._stall_grace_ticks = _STALL_GRACE_TICKS
+                self._stall_gap_sec = gap_sec
+                # Таймеры аномалий (dead_session/blocked_start) не должны
+                # «насчитать» время, пока процесс стоял целиком.
+                if self._anomaly_since is not None:
+                    self._anomaly_since += gap_sec
             logger.warning(
                 "WakeWordWatchdog: тик опоздал на %.1fs при interval=%.1fs — "
                 "вероятен останов процесса целиком; heal/эскалация отложены на %d тика",
@@ -353,7 +360,9 @@ class WakeWordWatchdog:
             return None  # grace-окно прогрева: не алармим и не закрываем эпизод
 
         with self._lock:
-            if self._stall_grace_ticks > 0:
+            # Льгота — только если стопор объясняет staleness: при повторных
+            # коротких стопорах настоящее зависание продолжает расти и лечится.
+            if self._stall_grace_ticks > 0 and staleness <= self._stall_gap_sec + stale_sec:
                 self._stall_grace_ticks -= 1
                 return None  # стопор процесса: даём слушателю ожить, не лечим и не эскалируем
 
@@ -488,11 +497,10 @@ class WakeWordWatchdog:
         with self._lock:
             self._heal_attempted_this_episode = False
             self._escalated_this_episode = False
+            self._stall_grace_ticks = 0
 
     def _close_episode_fresh(self) -> None:
         self._reset_episode()
-        with self._lock:
-            self._stall_grace_ticks = 0
         try:
             if self._adapter.is_wedged():
                 logger.info("WakeWordWatchdog: heartbeat ожил — снимаю wedged")
@@ -550,7 +558,8 @@ class WakeWordWatchdog:
                 context={
                     "staleness_sec": round(staleness, 1),
                     "reason": reason,
-                    **({"listener_stack": stack[:1500]} if stack else {}),
+                    # Блокирующий кадр — последний: храним хвост.
+                    **({"listener_stack": stack[-1500:]} if stack else {}),
                 },
                 actionable=False,
                 action_id=None,
