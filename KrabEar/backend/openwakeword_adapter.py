@@ -451,9 +451,12 @@ class OpenWakeWordAdapter:
         frame = sys._current_frames().get(ident)
         if frame is None:
             return None
+        import os
         import traceback
 
-        return "".join(traceback.format_stack(frame, limit=max_frames)).rstrip()
+        text = "".join(traceback.format_stack(frame, limit=max_frames)).rstrip()
+        # Стек уходит в Sentry: домашний каталог не светим.
+        return text.replace(os.path.expanduser("~"), "~")
 
     def set_wedged(self, value: bool) -> None:
         with self._lock:
