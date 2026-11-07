@@ -434,7 +434,13 @@ class CallAssistService:
             if not active and state.get("status") == "stopped" and "summary_status" in state:
                 # R3 шаг 2: повтор после завершённого stop (потерянный ответ) —
                 # отдаём тот же итог (summary_history_id), без новых записей.
-                return dict(state, replayed=True)
+                replay = dict(state, replayed=True)
+                # Privacy mode включили после stop — текст summary из кэша не отдаём,
+                # только метаданные (id, статусы). _settings_get для privacy fail-closed.
+                if self._settings_get("privacy_mode_enabled", False):
+                    replay.pop("summary", None)
+                    replay["privacy_mode_active"] = True
+                return replay
             if not active:
                 idle_state = {
                     "active": False,

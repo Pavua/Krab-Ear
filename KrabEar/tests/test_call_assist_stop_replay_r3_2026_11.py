@@ -102,6 +102,19 @@ class StopReplayTests(unittest.TestCase):
         res = svc.handle_stop({})
         self.assertFalse(res.get("stop_in_progress", False))
 
+    def test_replay_redacts_summary_when_privacy_enabled_later(self):
+        privacy = {"on": False}
+        svc = self._svc(_Gateway())
+        svc._settings_get = lambda k, d: privacy["on"] if k == "privacy_mode_enabled" else d
+        first = svc.handle_stop({"auto_summary": True})
+        self.assertIn("summary", first)
+        privacy["on"] = True
+        replay = svc.handle_stop({})
+        self.assertTrue(replay.get("replayed"))
+        self.assertNotIn("summary", replay)
+        self.assertEqual(replay.get("summary_history_id"), first["summary_history_id"])
+        self.assertTrue(replay.get("privacy_mode_active"))
+
 
 if __name__ == "__main__":
     unittest.main()
