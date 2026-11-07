@@ -1869,8 +1869,10 @@ _(documented in call_assist_service.py)_
 ### `call_assist_timeline_to_history`
 *(call_assist_service.py)*  
 Сохраняет экспорт timeline в историю Krab Ear.  
-Нет params.  
-Returns: `{ok, history_id}`
+Params (все необязательные): `{format: "md"|"ndjson", limit, include_summary, include_stats, max_tasks, request_id}`.  
+`request_id` (str, ≤128) — ключ намерения «сохранить» (R3, 2026-11-07): повтор с тем же ключом не создаёт дубль. Id записи детерминирован (`StateStore.add_history_item_once`, uuid5).  
+Returns: `{ok, gateway_session_id, format, history_id, chars, summary_included, stats_included, receipt?}`; `receipt` есть только при `request_id`: `created` | `existing` (возвращена ранее записанная) | `deleted` (запись по ключу удалена или purge — `ok:false`, `history_id:null`, ничего не пишется).  
+Privacy mode: `{ok:false, privacy_mode_active:true, history_id:null}`.
 
 ### `call_assist_list_templates`
 *(call_assist_service.py)*  

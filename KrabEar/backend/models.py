@@ -136,10 +136,14 @@ class HistoryItem:
         decisions: list | None = None,
         questions: list | None = None,
         privacy_mode: bool = False,
+        item_id: str | None = None,
     ) -> "HistoryItem":
-        """Создаёт новую запись с корректным идентификатором и временем."""
+        """Создаёт новую запись с корректным идентификатором и временем.
+
+        ``item_id`` — только для идемпотентной записи (StateStore.add_history_item_once).
+        """
         return cls(
-            id=str(uuid.uuid4()),
+            id=item_id or str(uuid.uuid4()),
             ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             text=text,
             paste_status=paste_status,

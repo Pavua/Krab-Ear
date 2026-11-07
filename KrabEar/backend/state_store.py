@@ -1673,43 +1673,62 @@ class StateStore:
         privacy_mode: bool = False,
     ) -> HistoryItem:
         """Добавляет запись в основной журнал истории."""
-        item = HistoryItem.create(
-            text=text,
-            paste_status=paste_status,
-            source_text=source_text,
-            translated_text=translated_text,
-            translation_mode=translation_mode,
-            source_lang=source_lang,
-            target_lang=target_lang,
-            translation_status=translation_status,
-            translation_engine=translation_engine,
-            chat_id=chat_id,
-            message_id=message_id,
-            cleaned_text=cleaned_text,
-            llm_applied=llm_applied,
-            llm_latency_ms=llm_latency_ms,
-            diarization=diarization,
-            audio_duration_sec=audio_duration_sec,
-            confidence=confidence,
-            emotion=emotion,
-            word_timestamps=word_timestamps,
-            speaker_turns=speaker_turns,
-            tags=tags,
-            favorite=favorite,
-            audio_path=audio_path,
-            is_protected=is_protected,
-            reasoning=reasoning,
-            action_items=action_items,
-            decisions=decisions,
-            questions=questions,
-            privacy_mode=privacy_mode,
-        )
+        return self._add_history_item_impl(
+            text=text, paste_status=paste_status, source_text=source_text,
+            translated_text=translated_text, translation_mode=translation_mode,
+            source_lang=source_lang, target_lang=target_lang,
+            translation_status=translation_status, translation_engine=translation_engine,
+            chat_id=chat_id, message_id=message_id, cleaned_text=cleaned_text,
+            llm_applied=llm_applied, llm_latency_ms=llm_latency_ms, diarization=diarization,
+            audio_duration_sec=audio_duration_sec, confidence=confidence, emotion=emotion,
+            word_timestamps=word_timestamps, speaker_turns=speaker_turns, tags=tags,
+            favorite=favorite, audio_path=audio_path, is_protected=is_protected,
+            reasoning=reasoning, action_items=action_items, decisions=decisions,
+            questions=questions, privacy_mode=privacy_mode,
+        )[0]
+
+    # R3 (2026-11-07): пространство имён детерминированных id идемпотентных записей.
+    _RECEIPT_NAMESPACE = uuid.UUID("6f1c2a52-9d0b-4c7e-8a51-3e4b7d2f9a10")
+    _RECEIPT_KEY_MAX = 128
+
+    @classmethod
+    def receipt_item_id(cls, receipt_key: str) -> str:
+        """Детерминированный id записи для клиентского ключа намерения."""
+        return str(uuid.uuid5(cls._RECEIPT_NAMESPACE, f"ear-history-receipt:{receipt_key}"))
+
+    def add_history_item_once(self, receipt_key: str, **fields: Any) -> tuple[HistoryItem | None, str]:
+        """Идемпотентная запись: один клиентский ключ — не больше одной записи.
+
+        Возвращает ``(item, outcome)``: ``created`` | ``existing`` | ``deleted``.
+        ``deleted`` — запись с этим ключом удалена (tombstone или реестр purge):
+        повтор её НЕ воскрешает и ничего не пишет. Проверка и запись идут под
+        одним локом стора, поэтому два параллельных повтора не дают дубль.
+        """
+        key = str(receipt_key or "").strip()
+        if not key or len(key) > self._RECEIPT_KEY_MAX:
+            raise ValueError("receipt_key must be 1..128 non-blank chars")
+        return self._add_history_item_impl(item_id=self.receipt_item_id(key), **fields)
+
+    def _add_history_item_impl(self, *, item_id: str | None = None, **fields: Any) -> tuple[HistoryItem | None, str]:
+        item = HistoryItem.create(item_id=item_id, **fields)
+        existing: HistoryItem | None = None
+        outcome = "created"
         try:
             with self._lock():
-                self._append_history_ndjson(item.to_dict())
-                # D1 (wave-35): keep in-memory id set consistent after write.
-                if self._active_ids is not None:
-                    self._active_ids.add(item.id)
+                if item_id is not None:
+                    if item_id in self._load_deleted_ids_unlocked():
+                        outcome = "deleted"
+                    elif item_id in self._ensure_active_ids_unlocked():
+                        outcome = "existing"
+                        existing = next(
+                            (it for it in self._load_active_items_unlocked() if it.id == item_id),
+                            None,
+                        )
+                if outcome == "created":
+                    self._append_history_ndjson(item.to_dict())
+                    # D1 (wave-35): keep in-memory id set consistent after write.
+                    if self._active_ids is not None:
+                        self._active_ids.add(item.id)
         except Exception as exc:
             logger.error("Ошибка записи в history.ndjson: %s", exc)
             # Phase B.2: history.write_fail — disk full, permission denied, lock timeout
@@ -1719,7 +1738,11 @@ class StateStore:
                 severity="critical",
             )
             raise
-        return item
+        if outcome == "existing":
+            return existing, outcome
+        if outcome == "deleted":
+            return None, outcome
+        return item, outcome
 
     def _id_exists_unlocked(self, item_id: str) -> bool:
         """Проверяет, существует ли активная запись с данным id (без захвата lock).

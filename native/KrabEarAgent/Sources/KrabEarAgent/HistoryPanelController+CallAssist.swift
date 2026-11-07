@@ -6,11 +6,19 @@
 
 import AppKit
 
+/// R3 (2026-11-07): ключ намерения «сохранить timeline». Живёт, пока сохранение
+/// не подтверждено ответом backend: повторный клик после «Не удалось сохранить»
+/// шлёт тот же ключ, и backend возвращает уже записанное, а не дубль.
+@MainActor private var pendingCallTimelineSaveRequestId: String?
+
 extension HistoryPanelController {
 
     // MARK: - Start / Stop
 
     @objc func onStartCallAssist() {
+        // Новый звонок — новое намерение: ключ прошлого неподтверждённого
+        // сохранения не должен вернуть timeline предыдущего звонка.
+        pendingCallTimelineSaveRequestId = nil
         let settings = settingsProvider()
         let captureMode = selectedCaptureSourceMode()
         let notifyMode = callNotifyButton.state == .on ? "auto_on" : "auto_off"
@@ -511,6 +519,8 @@ extension HistoryPanelController {
 
     @objc func onSaveCallTimelineToHistory() {
         let ipcClient = self.ipcClient
+        let requestId = pendingCallTimelineSaveRequestId ?? UUID().uuidString
+        pendingCallTimelineSaveRequestId = requestId
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard
                 let response = try? ipcClient.call(
@@ -518,6 +528,7 @@ extension HistoryPanelController {
                     params: [
                         "format": "md",
                         "limit": 500,
+                        "request_id": requestId,
                     ]
                 ),
                 let result = response["result"] as? [String: Any]
@@ -532,12 +543,23 @@ extension HistoryPanelController {
             }
             let historyId = (result["history_id"] as? String) ?? "-"
             let chars = (result["chars"] as? Int) ?? 0
+            let receipt = result["receipt"] as? String
             DispatchQueue.main.async {
+                // Ответ получен — намерение закрыто (успех, дубль или удалённая запись).
+                if pendingCallTimelineSaveRequestId == requestId {
+                    pendingCallTimelineSaveRequestId = nil
+                }
                 guard let self = self else { return }
-                self.appendCallAssistOutput(
-                    title: "Timeline -> история",
-                    body: "Сохранено в историю. id=\(historyId), chars=\(chars)"
-                )
+                let body: String
+                switch receipt {
+                case "existing":
+                    body = "Уже было сохранено ранее (повтор не создал дубль). id=\(historyId)"
+                case "deleted":
+                    body = "Эта запись timeline была удалена из истории — повторно не сохраняю."
+                default:
+                    body = "Сохранено в историю. id=\(historyId), chars=\(chars)"
+                }
+                self.appendCallAssistOutput(title: "Timeline -> история", body: body)
                 self.loadInitial()
             }
         }

@@ -1082,7 +1082,7 @@ class CallAssistService:
 
         sections.append(content)
         text = "\n\n".join(sections)
-        history_item = self.store.add_history_item(
+        history_fields = dict(
             text=text,
             paste_status="failed",
             source_text=content[:4000],
@@ -1092,6 +1092,30 @@ class CallAssistService:
             target_lang="",
             translation_status="not_requested",
             translation_engine="call_assist_timeline",
+        )
+        # R3: request_id — клиентский ключ намерения «сохранить». Повтор после
+        # потерянного ответа с тем же ключом возвращает ту же запись, а не дубль.
+        request_id = str(params.get("request_id") or "").strip()
+        receipt: str | None = None
+        if request_id:
+            if len(request_id) > 128:
+                raise ValueError("request_id must be at most 128 chars")
+            history_item, receipt = self.store.add_history_item_once(request_id, **history_fields)
+            if receipt == "deleted":
+                # Запись по этому ключу удалена владельцем (или purge) — не воскрешаем.
+                return {
+                    "ok": False,
+                    "gateway_session_id": gw_sid,
+                    "history_id": None,
+                    "receipt": receipt,
+                }
+        else:
+            history_item = self.store.add_history_item(**history_fields)
+        # existing без объекта (id активен, но строка не прочиталась) — id всё равно
+        # детерминирован ключом, отдаём его, а не ложный отказ.
+        history_id = (
+            history_item.id if history_item is not None
+            else self.store.receipt_item_id(request_id)
         )
         add_breadcrumb(
             category="call",
@@ -1104,15 +1128,18 @@ class CallAssistService:
                 "stats_included": bool(stats_payload),
             },
         )
-        return {
+        result = {
             "ok": True,
             "gateway_session_id": gw_sid,
             "format": export_format,
-            "history_id": history_item.id,
+            "history_id": history_id,
             "chars": len(content),
             "summary_included": bool(summary_payload),
             "stats_included": bool(stats_payload),
         }
+        if receipt is not None:
+            result["receipt"] = receipt
+        return result
 
     # ------------------------------------------------------------------
     # Internal
