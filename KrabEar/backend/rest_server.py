@@ -630,9 +630,30 @@ _STT_SINGLEFLIGHT = threading.Lock()
 _REST_ACTIVITY = ActivityReservations()
 
 
+# R7 (2026-11-07): слот передан брошенному после таймаута worker'у. Пока он
+# жив, MLX занят: ждать бессмысленно (живой замер — 92с), отвечаем 503 сразу.
+_STT_ORPHAN_ACTIVE = threading.Event()
+
+
 def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
     """Захватить STT-слот. False → 503 stt_busy, transcribe не стартует."""
+    if _STT_ORPHAN_ACTIVE.is_set():
+        return False
     return _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec)))
+
+
+def hand_off_stt_singleflight(future: "concurrent.futures.Future") -> None:
+    """Передать удерживаемый слот работающему Future: освободится по его завершении."""
+    _STT_ORPHAN_ACTIVE.set()
+
+    def _release_when_done(_f: _Any) -> None:
+        _STT_ORPHAN_ACTIVE.clear()
+        try:
+            _STT_SINGLEFLIGHT.release()
+        except RuntimeError:
+            pass
+
+    future.add_done_callback(_release_when_done)
 
 
 def release_stt_singleflight() -> None:
@@ -2022,6 +2043,7 @@ def transcribe_audio():
             _transcribe_kwargs.update(context_free=True, single_pass=True)
         _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         _pool_shutdown_nonblocking = False
+        _slot_handed_off = False
         _activity_token = _REST_ACTIVITY.reserve("post_stt")
         _future = None
         # Спека 2026-08-26 §4.1/§6: scope открывается ВНУТРИ worker-треда
@@ -2082,6 +2104,10 @@ def transcribe_audio():
                     # Не ждём non-daemon worker: ожидание снова превратило бы
                     # быстрый 504 в зависание Python-finalize.
                     _pool.shutdown(wait=False, cancel_futures=True)
+                    # R7: слот уходит вместе с работающим worker'ом — иначе
+                    # следующий запрос «получит» singleflight и повиснет на MLX.
+                    hand_off_stt_singleflight(_future)
+                    _slot_handed_off = True
                     logger.error(
                         "Transcription timed out after %ss for %s",
                         _transcribe_timeout_sec,
@@ -2108,7 +2134,8 @@ def transcribe_audio():
                     return timeout_response
         finally:
             try:
-                release_stt_singleflight()
+                if not _slot_handed_off:
+                    release_stt_singleflight()
             except RuntimeError:
                 # release без acquire не должен маскировать таймаут/ошибку STT.
                 pass
