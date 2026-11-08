@@ -1693,7 +1693,7 @@ class AudioEngine:
                     from core.diarized_transcription import run_diarized_transcription
                     try:
                         return run_diarized_transcription(
-                            self, audio_data, language=lang_hint,
+                            self, audio_data, language=resolved_lang,
                         )
                     except Exception as _diar_exc:
                         # Soft-fail: любой сбой конвейера → обычный путь ниже.
