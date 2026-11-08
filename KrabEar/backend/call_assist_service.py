@@ -202,6 +202,9 @@ class CallAssistService:
             "session_id": None,
             "gateway_session_id": None,
         }
+        # Приватный владелец идущего stop: токен операции, НЕ в публичном state
+        # (F2/F3 #2196): исключение/завершение чужого stop не трогает новую сессию.
+        self._stop_owner: object | None = None
         self._pending_post_count: int = 0
         self._max_pending_post_depth_observed: int = 0
 
@@ -273,6 +276,9 @@ class CallAssistService:
             # Claim the slot immediately so concurrent callers see active=True
             self._state["active"] = True
             self._state["status"] = "starting"
+            # Новая generation забирает владение: идущий stop прошлой сессии
+            # больше не вправе писать в общее состояние (F3).
+            self._stop_owner = None
 
         if not self.recorder.is_recording:
             started = self.recorder.start()
@@ -408,20 +414,22 @@ class CallAssistService:
 
     def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """Останавливает текущую сессию ассистента звонка."""
+        token = object()
         try:
-            return self._handle_stop_impl(params)
+            return self._handle_stop_impl(params, token)
         except BaseException:
-            # Залипшая stop_in_progress навсегда отвечала бы «в процессе» — снимаем.
+            # Снимаем владение только своё: у новой сессии/другого stop токен иной (F2).
             with self._lock:
-                self._state.pop("stop_in_progress", None)
+                if self._stop_owner is token:
+                    self._stop_owner = None
             raise
 
-    def _handle_stop_impl(self, params: dict[str, Any]) -> dict[str, Any]:
+    def _handle_stop_impl(self, params: dict[str, Any], token: object) -> dict[str, Any]:
         stopped_at = datetime.now().isoformat(timespec="seconds")
         with self._lock:
             active = bool(self._state.get("active"))
             state = dict(self._state)
-            if not active and state.get("stop_in_progress"):
+            if not active and self._stop_owner is not None:
                 # R3 шаг 2: первый stop ещё работает (summary/Gateway). Ничего не
                 # затираем — клиент повторит и получит итог.
                 return {
@@ -439,6 +447,9 @@ class CallAssistService:
                 # только метаданные (id, статусы). _settings_get для privacy fail-closed.
                 if self._settings_get("privacy_mode_enabled", False):
                     replay.pop("summary", None)
+                    # F1: тексты ошибок Gateway могут нести тело HTTP-ответа.
+                    for key in ("summary_error", "gateway_stop_error", "gateway_error"):
+                        replay.pop(key, None)
                     replay["privacy_mode_active"] = True
                 return replay
             if not active:
@@ -456,8 +467,7 @@ class CallAssistService:
             self._state["status"] = "stopped"
             self._state["stopped_at"] = stopped_at
             state = dict(self._state)
-            # Метка только в self._state: финал ниже (self._state = dict(state)) её снимает.
-            self._state["stop_in_progress"] = True
+            self._stop_owner = token
 
         # F2 / C3 (wave-31): only stop recorder when call assist was actually active.
         # The recorder is shared with the main recording workflow; stopping it
@@ -537,7 +547,11 @@ class CallAssistService:
             state["gateway_stop_status"] = "skipped"
 
         with self._lock:
-            self._state = dict(state)
+            # Пишем итог только если владение за нами: иначе стартовала новая
+            # сессия, и её состояние затирать нельзя (F3). Вызывающему итог отдаём.
+            if self._stop_owner is token:
+                self._state = dict(state)
+                self._stop_owner = None
 
         started_at_str = str(state.get("started_at") or "")
         call_duration_sec: float | None = None
