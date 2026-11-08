@@ -93,17 +93,23 @@ def test_claim_revoke_and_seal_preserve_order_and_unknown_debt(lab, first):
     claim = request("claim", "claim", executor="worker", grant_id=grant)
     revoke = request("revoke", "revoke", grant_id=grant)
     seal = request("seal", "seal", expected_revision=1)
-    owner.execute(request("begin", "close", expected_revision=0))
     if first == "claim":
         claimed = owner.execute(claim)
+        owner.execute(request("begin", "close", expected_revision=0))
         revoked = owner.execute(revoke)
         assert revoked["outcome"] == "CLAIMED_UNKNOWN" and classify(revoke, revoked) == "UNKNOWN"
         assert owner.execute(claim) == claimed
         assert len(owner._permits) == 1
     elif first == "revoke":
+        owner.execute(request("begin", "close", expected_revision=0))
         assert classify(revoke, owner.execute(revoke)) == "RECEIPT_ONLY"
         assert owner.execute(claim) is None
     else:
+        owner.execute(request("begin", "close", expected_revision=0))
+        # С незаявленным неотзванным грантом seal отклоняется (дыра 2 закрыта)
+        assert owner.execute(seal) is None
+        # Отзываем незаявленный грант (путь деградации)
+        assert classify(revoke, owner.execute(revoke)) == "RECEIPT_ONLY"
         sealed = owner.execute(seal)
         assert classify(seal, sealed) == "RECEIPT_ONLY"
         assert owner.execute(seal) == sealed
@@ -659,10 +665,13 @@ finally:
     store.close()
 '''
     env_path = str(Path(__file__).parent)
-    process = subprocess.Popen([sys.executable, "-u", "-c", script, str(tmp_path / "child.sqlite3"), mutation],
-                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                               text=True, bufsize=1, env={**os.environ,
-                                                         "PYTHONPATH": env_path + os.pathsep + os.environ["PYTHONPATH"]})
+    child_env = dict(os.environ)
+    child_env["PYTHONPATH"] = env_path + os.pathsep + os.environ.get("PYTHONPATH", "")
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", script, str(tmp_path / "child.sqlite3"), mutation],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True, bufsize=1, env=child_env,
+    )
 
     def receive():
         return json.loads(read_bounded_line(process.stdout.fileno(), timeout=5))

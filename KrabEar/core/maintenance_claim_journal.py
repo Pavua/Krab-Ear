@@ -257,6 +257,8 @@ def _validate(connection, installation, *, allow_test_open, expected_version=Non
             history_admission = "CLOSED"
             history_has_begin = True
         elif operation == "claim":
+            if version == 5 and history_admission in {"CLOSED", "SEALED"}:
+                raise JournalError("Claim после закрытия допуска")
             if set(payload) != {"operation", "controller_epoch", "executor", "grant_id"}:
                 raise JournalError("Неизвестный claim")
             _name(payload["executor"])
@@ -287,7 +289,11 @@ def _validate(connection, installation, *, allow_test_open, expected_version=Non
                     or history_admission != "CLOSED" or not history_has_begin or outcome != "SEALED"
                     or grant_id is not None or claim_id is not None):
                 raise JournalError("Неизвестный seal")
-            revoked.update(reserved - claimed)
+            if version == 5:
+                if reserved - claimed != revoked:
+                    raise JournalError("Seal при незаявленных грантах")
+            else:
+                revoked.update(reserved - claimed)
             history_revision += 1
             history_admission = "SEALED"
         else:
@@ -461,11 +467,20 @@ class ClaimJournal(foundation.MaintenanceStore):
                 ).fetchone() is not None
                 if admission != "CLOSED" or payload["expected_revision"] != revision or not has_begin:
                     raise JournalConflict("Seal недоступен")
-                connection.execute("UPDATE scoped_grants SET revoked=1 WHERE claim_id IS NULL")
+                if self._version == 5:
+                    unclaimed = connection.execute(
+                        "SELECT COUNT(*) FROM scoped_grants WHERE claim_id IS NULL AND revoked=0"
+                    ).fetchone()[0]
+                    if unclaimed > 0:
+                        raise JournalConflict("Seal недоступен: имеются незаявленные гранты")
+                else:
+                    connection.execute("UPDATE scoped_grants SET revoked=1 WHERE claim_id IS NULL")
                 revision += 1
                 connection.execute("UPDATE control SET admission='SEALED', control_revision=?", (revision,))
                 outcome = "SEALED"
             else:
+                if self._version == 5 and admission != "TEST_OPEN":
+                    raise JournalConflict("Claim недоступен при закрытом допуске")
                 grant_id = payload["grant_id"]
                 grant = connection.execute(
                     "SELECT principal, incarnation, executor, kind, claim_id, revoked FROM scoped_grants WHERE grant_id=?",
@@ -518,11 +533,13 @@ def _open(path, installation, epoch, *, create, version=4, owner_epoch=None):
     path, installation = Path(path), _name(installation)
     connections = []
     directory_fd = lock_fd = None
+    created_file = False
     try:
         path, directory_fd, lock_fd = foundation._lock_namespace(path, create=create)
         if create:
             fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
             os.close(fd)
+            created_file = True
         connection = foundation._connect_existing(path, read_only=not create)
         connections.append(connection)
         connection.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 8192)
@@ -547,6 +564,27 @@ def _open(path, installation, epoch, *, create, version=4, owner_epoch=None):
             raise JournalError("Несовместимая версия журнала")
         return ClaimJournal(connection, installation, directory_fd, lock_fd, active=create, version=version)
     except BaseException as exc:
+        for conn in reversed(connections):
+            try:
+                conn.close()
+            except BaseException:
+                pass
+        connections.clear()
+        if create and created_file:
+            try:
+                if directory_fd is not None:
+                    try:
+                        os.unlink(path.name, dir_fd=directory_fd)
+                        os.fsync(directory_fd)
+                    except OSError:
+                        pass
+                else:
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
+            except OSError:
+                pass
         foundation._abort_open(connections, directory_fd, lock_fd)
         if isinstance(exc, RecoveryRequired):
             raise
