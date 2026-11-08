@@ -230,7 +230,7 @@ class CallAssistService:
         with self._lock:
             return self._still_starting_locked(gen)
 
-    def _release_capture(self, gen: object, timeout_sec: float | None = None) -> str:
+    def _release_capture(self, gen: object | None, timeout_sec: float | None = None) -> str:
         """Освобождает физический capture рекордера, если им владеет generation gen.
 
         R8 (2026-11-08): вызывается при штатном останове, компенсации сбоя старта,
@@ -239,7 +239,7 @@ class CallAssistService:
         with self._lock:
             if self._borrowed_capture:
                 return "borrowed"
-            if self._capture_gen is not None and self._capture_gen is not gen:
+            if gen is not None and self._capture_gen is not None and self._capture_gen is not gen:
                 return "not_owner"
 
         core = self._recording_core
@@ -263,7 +263,7 @@ class CallAssistService:
 
         # Снимаем долг при успехе ("stopped", "not_recording") или "owned_by_other"
         with self._lock:
-            if self._capture_gen is gen:
+            if gen is None or self._capture_gen is gen:
                 self._capture_gen = None
         return stopped_status
 
@@ -668,9 +668,8 @@ class CallAssistService:
             state = dict(self._state)
             self._stop_owner = token
 
-        # R8 D2/D3: останавливаем рекордер, только если мы им владеем (_capture_gen)
-        if current_gen is not None:
-            self._release_capture(current_gen)
+        # R8 D2/D3: останавливаем рекордер, если захват принадлежит нам (или legacy-активная сессия)
+        self._release_capture(current_gen)
 
         # R8 D4: если stop пришел в фазе starting, сессия Gateway еще не создана
         if is_starting:
