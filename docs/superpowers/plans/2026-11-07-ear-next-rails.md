@@ -10,12 +10,14 @@
 - Каждая находка сверяется с кодом построчно; «не воспроизвёл» — так и писать.
 - Отчёт: DONE/BLOCKED, headSha, список прогнанных тестов с итогом.
 
-## Статус на 07.11 (вечер)
-- СМЕРЖЕНО и ВЫКАЧЕНО: #2190 (close()→WebhookManager.shutdown; сторож wake-word не путает стопор процесса с зависанием; тест lang-id без гонки patch.dict) и #2191 (R5: adapter.stop() не ставит wedged при стопоре).
-- ПРОД = main `8ebb96ed`: backend+REST из `~/.codex/worktrees/ear-release-8ebb96ed/Krab Ear`. Откат: `ear-release-480e7300` (hotfix) или `ear-release-5a09e630` (старый). Бэкап plist: `~/.local/share/krab-ear/plist-backup-2026-11-07`.
-- CI main зелёный; `KeyError('mlx')` после #2190 не воспроизводится.
-- R2 ВЫПОЛНЕН вживую (temp-стенды, порты 5015/5016): таймаут REST STT не убивает backend ни в двухпроцессном режиме (REST выходит 70, launchd поднимает), ни in-process (#2183 подтверждён). Карантин не вечный.
-- R5, R6 ВЫПОЛНЕНЫ (R6: agy нашёл 3 кандидата, после гейта все LOW, правок нет; отчёт `.remember/tmp/workers/R6_REPORT_2026-11-07.md`).
+## Статус на 08.11 (обновлять первым при любом продолжении)
+Каждый пункт — отдельный статус: ОПУБЛИКОВАНО (в origin) ≠ СМЕРЖЕНО ≠ ВЫКАЧЕНО ≠ ПРОВЕРЕНО ЖИВО.
+- Main = `codex/krab-ear-v2` содержит: #2190, #2191 (R5), #2192 (docs), #2193 (R7), #2194 (R3 шаг 1), #2195 (экспорт, cwd-независимая проверка пути).
+- ПРОД backend+REST = `ear-release-8ebb96ed` (до R7/R3/#2195!). Отстаёт от main: выкатка main — отдельный шаг после мержа #2196 и чистого CI.
+- ПРОД агент (`Krab Ear.app`) = сборка main `c5e94451`, подпись `Krab Ear Dev Local`, `AX trusted: true`, хоткей подтверждён владельцем. Бэкап прежнего бинаря: `~/.local/share/krab-ear/agent-backup-2026-11-08`.
+- #2196 (R3 шаг 2, повторный stop отдаёт итог): F1–F3 из ревью (`krab-handoffs/2026-11-08/EAR_2196_OPEN_FINDINGS_RU.md`) исправлены ТОЧЕЧНО (`6b08b19b`): приватный токен владельца stop, privacy-replay чистит тексты ошибок Gateway. Rev1/rev2 кандидаты (ChatGPT Reviews) НЕ приняты — путь «точечный фикс» выбран владельцем 08.11; R1/R2/R2-01 относятся к дизайну rev2 и к этой ветке не применимы.
+- Откаты: релизы `ear-release-480e7300`, `ear-release-5a09e630`; бэкап plist `~/.local/share/krab-ear/plist-backup-2026-11-07`.
+- R2 (live REST timeout) выполнен 07.11: backend не умирает, карантин не вечный. R5, R6, R7 закрыты.
 
 ## R1. Подтвердить/закрыть KeyError('mlx') (если CI #2190 снова красный)  — модель: Opus
 - Где: `KrabEar/tests/test_audio_lang_id.py::TestAudioLangIDConcurrentMlxLock`, `KrabEar/tests/conftest.py` (purge стабов ~стр. 760–780).
@@ -60,7 +62,14 @@ R1 (если CI красный) → R5 → R2 → R3 → R4 → R6 паралл�
 - Запрет: не трогать путь `_exit_poisoned_rest_process`.
 
 ## Порядок (обновлён 07.11 вечер)
-R7 (малый) → R3 (Call Assist, нужен Opus medium/high) → R4. R1 закрыт, пока CI зелёный.
+R3 шаг 2 (#2196) → выкатка main → R8 (дизайн, Opus high) → R4. R1 закрыт, пока CI зелёный.
+
+## R8. Перекрытие start/stop в фазе `starting` и откат старта (ИЗВЕСТНЫЙ ПРОБЕЛ, до #2196)  — модель: Opus high, дизайн
+Источник: независимое ревью agy (08.11), сверено по коду. Пробел существовал ДО #2196; F1–F3 его не затрагивают.
+- `handle_start` выставляет `active=True, status="starting"`, затем делает I/O (recorder.start, gateway.start_session) и в конце безусловно пишет `_state = state` и запускает `_assist_loop`. Stop, пришедший в этом окне, ставит stopped, но финал старта воскрешает `running`; recorder, запущенный после stop, остаётся без владельца.
+- Сбой I/O старта (исключение) оставляет `active=True/starting` навсегда → все следующие start получают `already_active`.
+- Нужен дизайн с владением capture/recorder (см. rev2-кандидат `ChatGPT Reviews/2026-11-08/ear-2196-candidate-r2-db004d53` и его HOLD R2-01: owner-bound recovery после исключения `recorder.stop`). Не сбрасывать флаги вслепую.
+- DoD: тесты двух фаз (stop во время starting; сбой старта → следующий start допустим); recorder не остаётся запущенным без владельца.
 
 ## Решения владельца (07.11)
 - Выкатка main целиком — только после R2 (живая проверка REST STT). ✅ Выполнено 07.11, прод на 8ebb96ed.
