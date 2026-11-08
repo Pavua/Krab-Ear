@@ -81,8 +81,19 @@ def _is_safe_export_dir(output_dir: str) -> bool:
     - Parent traversal (../../sensitive)
     - Symlinks that escape allowed roots (resolved via Path.resolve())
     """
+    # 2026-11-07: пустой/относительный путь резолвился в cwd процесса — проверка
+    # зависела от того, откуда запущен backend. Принимаем только абсолютный путь.
     try:
-        target = Path(output_dir).expanduser().resolve()
+        raw = os.fspath(output_dir)
+    except TypeError:
+        return False
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            return False
+        target = candidate.resolve()
     except (ValueError, OSError):
         return False
 
@@ -571,7 +582,11 @@ class HistoryService:
         if not output_dir:
             return None
 
-        resolved = Path(output_dir).expanduser().resolve()
+        candidate = Path(output_dir).expanduser()
+        if not candidate.is_absolute():
+            # Относительный путь резолвился бы в cwd процесса (сиблинг _is_safe_export_dir).
+            raise ValueError(f"export output_dir must be an absolute path: {output_dir!r}")
+        resolved = candidate.resolve()
 
         data_dir_root = Path(self.store.data_dir).resolve()
         home = Path.home()
