@@ -109,6 +109,8 @@ def run_diarized_transcription(
     pieces: list[dict[str, Any]] = []
     engines_used: set[str] = set()
     confidences: list[float] = []
+    result_language = language
+    first_text_seen = False
     for seg in merged:
         if seg["end"] - seg["start"] < _MIN_SEGMENT_SEC:
             continue
@@ -123,6 +125,12 @@ def run_diarized_transcription(
             audio_sample_rate=16000,
         )
         text = seg_result.get("text", "") if isinstance(seg_result, dict) else str(seg_result)
+        normalized_text = (text or "").strip()
+        if normalized_text and not first_text_seen:
+            first_text_seen = True
+            # Сохраняем explicit None; fallback только при отсутствии ключа.
+            if isinstance(seg_result, dict) and "language" in seg_result:
+                result_language = seg_result["language"]
         if isinstance(seg_result, dict):
             engines_used.add(str(seg_result.get("engine", "")))
             if seg_result.get("confidence") is not None:
@@ -134,7 +142,7 @@ def run_diarized_transcription(
             "start": seg["start"],
             "end": seg["end"],
             "speaker": seg["speaker"],
-            "text": (text or "").strip(),
+            "text": normalized_text,
         })
 
     transcript = format_diarized_transcript(pieces)
@@ -144,7 +152,7 @@ def run_diarized_transcription(
     # ожидают полный набор ключей; llm_applied=False — rewrite не выполнялся.
     return {
         "text": transcript,
-        "language": language or "ru",
+        "language": result_language,
         "confidence": confidence,
         "engine": "diarized+" + "/".join(sorted(engines_used)) if engines_used else "diarized",
         "model": "diarized_pipeline",

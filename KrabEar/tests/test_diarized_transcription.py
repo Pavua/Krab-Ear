@@ -129,6 +129,75 @@ class TestRunPipeline(unittest.TestCase):
         self.assertEqual(result["engine"], "diarized+gigaam-mlx-rnnt")
         self.assertEqual(len(result["diarization"]), 3)
 
+    def test_language_from_first_segment_detection(self):
+        import soundfile as sf
+        import tempfile
+        import os
+
+        class _LanguageEngine(_FakeEngine):
+            def _transcribe_with_fallback(self, audio, prompt, language=None, audio_sample_rate=None):
+                idx = len(self.calls)
+                self.calls.append(len(audio))
+                if idx == 0:
+                    return {"text": "Hola amigo", "language": "es", "confidence": 0.95}
+                return {"text": "Hello friend", "language": "en", "confidence": 0.85}
+
+        eng = _LanguageEngine()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            path = tmp.name
+        try:
+            sf.write(path, np.zeros(16000 * 10, dtype=np.float32), 16000)
+            result = run_diarized_transcription(eng, path, language="auto")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(result["language"], "es")
+
+    def test_language_skips_leading_empty_segment(self):
+        import soundfile as sf
+        import tempfile
+        import os
+
+        class _LeadingEmptyEngine(_FakeEngine):
+            def _transcribe_with_fallback(self, audio, prompt, language=None, audio_sample_rate=None):
+                idx = len(self.calls)
+                self.calls.append(len(audio))
+                if idx == 0:
+                    return {"text": "   ", "language": "ru", "confidence": 0.5}
+                return {"text": "Bonjour", "language": "fr", "confidence": 0.9}
+
+        eng = _LeadingEmptyEngine()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            path = tmp.name
+        try:
+            sf.write(path, np.zeros(16000 * 10, dtype=np.float32), 16000)
+            result = run_diarized_transcription(eng, path, language="auto")
+        finally:
+            os.unlink(path)
+
+        self.assertEqual(result["language"], "fr")
+
+    def test_language_preserves_explicit_none(self):
+        import soundfile as sf
+        import tempfile
+        import os
+
+        class _NoneEngine(_FakeEngine):
+            def _transcribe_with_fallback(self, audio, prompt, language=None, audio_sample_rate=None):
+                self.calls.append(len(audio))
+                return {"text": "Some text", "language": None, "confidence": 0.7}
+
+        eng = _NoneEngine()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            path = tmp.name
+        try:
+            sf.write(path, np.zeros(16000 * 10, dtype=np.float32), 16000)
+            result = run_diarized_transcription(eng, path, language="ru")
+        finally:
+            os.unlink(path)
+
+        self.assertIsNone(result["language"])
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
