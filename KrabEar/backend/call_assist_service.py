@@ -23,6 +23,10 @@ from backend.ipc_errors import IpcOperationalError
 logger = logging.getLogger("KrabEar.Backend.CallAssist")
 
 
+class _StartAborted(Exception):
+    """Внутренний сигнал: старт был прерван вызовом stop в фазе starting."""
+
+
 class VoiceGatewayClient:
     """HTTP-клиент для взаимодействия с Voice Gateway."""
 
@@ -205,8 +209,63 @@ class CallAssistService:
         # Приватный владелец идущего stop: токен операции, НЕ в публичном state
         # (F2/F3 #2196): исключение/завершение чужого stop не трогает новую сессию.
         self._stop_owner: object | None = None
+        # R8 (2026-11-08): generation текущей сессии старта и generation,
+        # владеющая физическим capture (которая сама запустила recorder).
+        self._gen: object | None = None
+        self._capture_gen: object | None = None
+        self._borrowed_capture: bool = False
         self._pending_post_count: int = 0
         self._max_pending_post_depth_observed: int = 0
+
+    def _still_starting_locked(self, gen: object) -> bool:
+        """Проверяет статус starting под уже захваченным self._lock."""
+        return (
+            self._gen is gen
+            and bool(self._state.get("active"))
+            and self._state.get("status") == "starting"
+        )
+
+    def _still_starting(self, gen: object) -> bool:
+        """Проверяет статус starting снаружи локов."""
+        with self._lock:
+            return self._still_starting_locked(gen)
+
+    def _release_capture(self, gen: object, timeout_sec: float | None = None) -> str:
+        """Освобождает физический capture рекордера, если им владеет generation gen.
+
+        R8 (2026-11-08): вызывается при штатном останове, компенсации сбоя старта,
+        или вытеснении старта пришедшим stop. Не держит self._lock во время I/O.
+        """
+        with self._lock:
+            if self._borrowed_capture:
+                return "borrowed"
+            if self._capture_gen is not None and self._capture_gen is not gen:
+                return "not_owner"
+
+        core = self._recording_core
+        stopped_status = "stopped"
+        try:
+            if core is not None and hasattr(core, "stop_unmanaged_capture"):
+                stopped_status = core.stop_unmanaged_capture(timeout_sec=timeout_sec)
+            else:
+                if getattr(self.recorder, "is_recording", False) and self._may_stop_shared_recorder():
+                    if timeout_sec is not None:
+                        self.recorder.stop(timeout_sec=timeout_sec)
+                    else:
+                        self.recorder.stop()
+                    stopped_status = "stopped"
+                else:
+                    stopped_status = "not_recording"
+        except Exception:
+            logger.exception("call_assist: сбой физического stop рекордера")
+            # Долг остаётся в _capture_gen, не сбрасываем (фаза а R2-01)!
+            return "cleanup_pending"
+
+        # Снимаем долг при успехе ("stopped", "not_recording") или "owned_by_other"
+        with self._lock:
+            if self._capture_gen is gen:
+                self._capture_gen = None
+        return stopped_status
 
     @staticmethod
     def _default_extract_text(payload: Any) -> str:
@@ -257,6 +316,10 @@ class CallAssistService:
 
     def handle_start(self, params: dict[str, Any]) -> dict[str, Any]:
         """Запускает сессию ассистента звонка с интеграцией Voice Gateway."""
+        gen = object()
+        session_id = f"call_{uuid.uuid4().hex[:12]}"
+        old_capture_gen: object | None = None
+
         # F1: guard against double-start race — reject if a session is already active.
         # Mark active=True atomically under the lock *before* doing any I/O so that
         # concurrent callers see the "taken" state immediately.
@@ -274,94 +337,214 @@ class CallAssistService:
                     "status": self._state.get("status", "running"),
                 }
             # Claim the slot immediately so concurrent callers see active=True
+            self._gen = gen
             self._state["active"] = True
             self._state["status"] = "starting"
+            self._state["session_id"] = session_id
+            self._borrowed_capture = False
             # Новая generation забирает владение: идущий stop прошлой сессии
             # больше не вправе писать в общее состояние (F3).
             self._stop_owner = None
+            old_capture_gen = self._capture_gen
 
-        if not self.recorder.is_recording:
-            started = self.recorder.start()
+        # R8 D6: снятие долга очистки предыдущего сбоя (фаза б R2-01), если воркер уже завершился
+        if old_capture_gen is not None:
+            self._release_capture(old_capture_gen)
+
+        started = False
+        recorder_orphaned = False
+        if getattr(self.recorder, "is_recording", False):
+            # Заимствованный capture: рекордер уже писал до старта звонка
+            with self._lock:
+                self._borrowed_capture = True
+        else:
+            with self._lock:
+                self._borrowed_capture = False
+            try:
+                started = bool(self.recorder.start())
+            except Exception as exc:
+                logger.exception("handle_start: сбой recorder.start()")
+                with self._lock:
+                    if self._gen is gen:
+                        self._state["active"] = False
+                        self._state["status"] = "idle"
+                        self._state["session_id"] = None
+                        self._gen = None
+                return {
+                    "ok": False,
+                    "error": "start_failed",
+                    "error_type": exc.__class__.__name__,
+                    "session_id": session_id,
+                    "status": "idle",
+                }
+
+            is_really_busy = (
+                getattr(self.recorder, "worker_alive", False)
+                or getattr(self.recorder, "is_worker_thread_alive", False)
+                or (
+                    getattr(self.recorder, "_thread", None) is not None
+                    and getattr(self.recorder._thread, "is_alive", lambda: False)()
+                )
+            )
+            if not started and (is_really_busy or self._capture_gen is not None):
+                # D7: рекордер занят другим процессом / незавершённым worker потоком (R2-01).
+                # Fail-closed отказ с сохранением чистого idle-состояния.
+                with self._lock:
+                    if self._gen is gen:
+                        self._state["active"] = False
+                        self._state["status"] = "idle"
+                        self._state["session_id"] = None
+                        self._gen = None
+                return {
+                    "ok": False,
+                    "error": "recorder_busy",
+                    "session_id": session_id,
+                    "status": "idle",
+                }
+
+            with self._lock:
+                if started:
+                    self._capture_gen = gen
+                if not self._still_starting_locked(gen):
+                    recorder_orphaned = True
+
+            if recorder_orphaned:
+                self._release_capture(gen)
+                return {
+                    "ok": False,
+                    "error": "stopped_during_start",
+                    "session_id": session_id,
+                    "status": "stopped",
+                }
+
             if started:
                 self._reset_preview()
                 self._start_preview("balanced")
 
-        settings = self.store.load_settings()
-        capture_source_mode = str(
-            params.get("capture_source_mode") or settings.get("capture_source_mode", "mic")
-        ).strip()
-        if capture_source_mode not in {"mic", "system_audio", "mic_plus_system"}:
-            capture_source_mode = "mic"
-
-        translation_mode = str(
-            params.get("translation_mode") or settings.get("translation_mode", "auto_to_ru")
-        ).strip() or "auto_to_ru"
-        tts_mode = str(params.get("tts_mode", "hybrid")).strip().lower() or "hybrid"
-        if tts_mode not in {"local", "cloud", "hybrid"}:
-            tts_mode = "hybrid"
-
-        raw_notify_mode = str(params.get("notify_mode", "")).strip().lower()
-        if raw_notify_mode in {"auto_on", "on", "true", "1"}:
-            notify_mode = "auto_on"
-        elif raw_notify_mode in {"auto_off", "off", "false", "0"}:
-            notify_mode = "auto_off"
-        else:
-            notify_mode = "auto_on" if bool(settings.get("call_notify_default", True)) else "auto_off"
-        raw_auto_summary = params.get("auto_summary")
-        if raw_auto_summary is None:
-            auto_summary = bool(settings.get("call_auto_summary", True))
-        elif isinstance(raw_auto_summary, bool):
-            auto_summary = raw_auto_summary
-        else:
-            auto_summary = str(raw_auto_summary).strip().lower() in {"1", "true", "on", "yes"}
-
-        voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
-        voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
-        session_id = f"call_{uuid.uuid4().hex[:12]}"
-        started_at = datetime.now().isoformat(timespec="seconds")
-
         gateway_session_id = None
         gateway_status = "disabled"
         gateway_error = ""
-        if voice_gateway_url:
-            gateway_result = self.gateway.start_session(
-                voice_gateway_url=voice_gateway_url,
-                api_key=voice_gateway_api_key,
-                payload={
-                    "translation_mode": translation_mode,
-                    "notify_mode": notify_mode,
-                    "tts_mode": tts_mode,
-                    "source": capture_source_mode,
-                    "meta": {
-                        "started_by": "krabear_backend",
-                        "auto_summary": auto_summary,
-                        "session_id": session_id,
-                    },
-                },
-            )
-            if gateway_result.get("ok"):
-                gateway_status = "ok"
-                gateway_session_id = gateway_result.get("session_id")
-            else:
-                gateway_status = "degraded"
-                gateway_error = str(gateway_result.get("error", "gateway_unreachable"))
+        voice_gateway_url = ""
+        voice_gateway_api_key = ""
 
-        state = {
-            "active": True,
-            "status": "running",
-            "session_id": session_id,
-            "gateway_session_id": gateway_session_id,
-            "gateway_status": gateway_status,
-            "gateway_error": gateway_error,
-            "capture_source_mode": capture_source_mode,
-            "translation_mode": translation_mode,
-            "notify_mode": notify_mode,
-            "tts_mode": tts_mode,
-            "auto_summary": auto_summary,
-            "started_at": started_at,
-        }
-        with self._lock:
-            self._state = state
+        try:
+            if not self._still_starting(gen):
+                raise _StartAborted()
+
+            settings = self.store.load_settings()
+            capture_source_mode = str(
+                params.get("capture_source_mode") or settings.get("capture_source_mode", "mic")
+            ).strip()
+            if capture_source_mode not in {"mic", "system_audio", "mic_plus_system"}:
+                capture_source_mode = "mic"
+
+            translation_mode = str(
+                params.get("translation_mode") or settings.get("translation_mode", "auto_to_ru")
+            ).strip() or "auto_to_ru"
+            tts_mode = str(params.get("tts_mode", "hybrid")).strip().lower() or "hybrid"
+            if tts_mode not in {"local", "cloud", "hybrid"}:
+                tts_mode = "hybrid"
+
+            raw_notify_mode = str(params.get("notify_mode", "")).strip().lower()
+            if raw_notify_mode in {"auto_on", "on", "true", "1"}:
+                notify_mode = "auto_on"
+            elif raw_notify_mode in {"auto_off", "off", "false", "0"}:
+                notify_mode = "auto_off"
+            else:
+                notify_mode = "auto_on" if bool(settings.get("call_notify_default", True)) else "auto_off"
+            raw_auto_summary = params.get("auto_summary")
+            if raw_auto_summary is None:
+                auto_summary = bool(settings.get("call_auto_summary", True))
+            elif isinstance(raw_auto_summary, bool):
+                auto_summary = raw_auto_summary
+            else:
+                auto_summary = str(raw_auto_summary).strip().lower() in {"1", "true", "on", "yes"}
+
+            voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
+            voice_gateway_api_key = str(settings.get("voice_gateway_api_key", "")).strip()
+            started_at = datetime.now().isoformat(timespec="seconds")
+
+            if not self._still_starting(gen):
+                raise _StartAborted()
+
+            if voice_gateway_url:
+                gateway_result = self.gateway.start_session(
+                    voice_gateway_url=voice_gateway_url,
+                    api_key=voice_gateway_api_key,
+                    payload={
+                        "translation_mode": translation_mode,
+                        "notify_mode": notify_mode,
+                        "tts_mode": tts_mode,
+                        "source": capture_source_mode,
+                        "meta": {
+                            "started_by": "krabear_backend",
+                            "auto_summary": auto_summary,
+                            "session_id": session_id,
+                        },
+                    },
+                )
+                if gateway_result.get("ok"):
+                    gateway_status = "ok"
+                    gateway_session_id = gateway_result.get("session_id")
+                else:
+                    gateway_status = "degraded"
+                    gateway_error = str(gateway_result.get("error", "gateway_unreachable"))
+
+            state = {
+                "ok": True,
+                "active": True,
+                "status": "running",
+                "session_id": session_id,
+                "gateway_session_id": gateway_session_id,
+                "gateway_status": gateway_status,
+                "gateway_error": gateway_error,
+                "capture_source_mode": capture_source_mode,
+                "translation_mode": translation_mode,
+                "notify_mode": notify_mode,
+                "tts_mode": tts_mode,
+                "auto_summary": auto_summary,
+                "started_at": started_at,
+            }
+
+            with self._lock:
+                if not self._still_starting_locked(gen):
+                    raise _StartAborted()
+                self._state = state
+
+        except _StartAborted:
+            self._release_capture(gen)
+            if gateway_session_id and voice_gateway_url:
+                try:
+                    self.gateway.stop_session(voice_gateway_url, voice_gateway_api_key, gateway_session_id)
+                except Exception:
+                    pass
+            return {
+                "ok": False,
+                "error": "stopped_during_start",
+                "session_id": session_id,
+                "status": "stopped",
+            }
+        except Exception as exc:
+            logger.exception("handle_start: сбой настройки сессии")
+            self._release_capture(gen)
+            if gateway_session_id and voice_gateway_url:
+                try:
+                    self.gateway.stop_session(voice_gateway_url, voice_gateway_api_key, gateway_session_id)
+                except Exception:
+                    pass
+            with self._lock:
+                if self._gen is gen and self._state.get("status") == "starting":
+                    self._state["active"] = False
+                    self._state["status"] = "idle"
+                    self._state["session_id"] = None
+                    self._gen = None
+            return {
+                "ok": False,
+                "error": "start_failed",
+                "error_type": exc.__class__.__name__,
+                "session_id": session_id,
+                "status": "idle",
+            }
 
         phone_raw = str(params.get("phone", "")).strip()
         add_breadcrumb(
@@ -378,7 +561,7 @@ class CallAssistService:
         if gateway_session_id and gateway_status == "ok":
             t = threading.Thread(
                 target=self._assist_loop,
-                args=(gateway_session_id, voice_gateway_url, voice_gateway_api_key),
+                args=(gen, gateway_session_id, voice_gateway_url, voice_gateway_api_key),
                 daemon=True,
             )
             t.start()
@@ -426,6 +609,10 @@ class CallAssistService:
 
     def _handle_stop_impl(self, params: dict[str, Any], token: object) -> dict[str, Any]:
         stopped_at = datetime.now().isoformat(timespec="seconds")
+        old_capture_gen: object | None = None
+        current_gen: object | None = None
+        is_starting = False
+
         with self._lock:
             active = bool(self._state.get("active"))
             state = dict(self._state)
@@ -453,6 +640,7 @@ class CallAssistService:
                     replay["privacy_mode_active"] = True
                 return replay
             if not active:
+                old_capture_gen = self._capture_gen
                 idle_state = {
                     "active": False,
                     "status": "idle",
@@ -461,26 +649,38 @@ class CallAssistService:
                     "stopped_at": stopped_at,
                 }
                 self._state = idle_state
-                return idle_state
+                self._gen = None
+                self._borrowed_capture = False
 
+        if not active:
+            if old_capture_gen is not None:
+                self._release_capture(old_capture_gen)
+            return idle_state
+
+        with self._lock:
+            current_gen = self._gen
+            is_starting = (self._state.get("status") == "starting")
             self._state["active"] = False
             self._state["status"] = "stopped"
             self._state["stopped_at"] = stopped_at
+            if is_starting:
+                self._state["start_aborted"] = True
             state = dict(self._state)
             self._stop_owner = token
 
-        # F2 / C3 (wave-31): only stop recorder when call assist was actually active.
-        # The recorder is shared with the main recording workflow; stopping it
-        # unconditionally would silently abort an unrelated recording that happened
-        # to be running when handle_stop is called on an already-idle session.
-        if active and self.recorder.is_recording and self._may_stop_shared_recorder():
-            try:
-                self.recorder.stop()
-            except Exception:
-                # AudioRecorderStopTimeout и родня: зависший worker не должен
-                # рушить stop-флоу call assist — сессия уже помечена stopped,
-                # дальше идут VG-вызовы. Раньше stop() молча возвращал None.
-                logger.exception("call_assist stop: рекордер не остановился")
+        # R8 D2/D3: останавливаем рекордер, только если мы им владеем (_capture_gen)
+        if current_gen is not None:
+            self._release_capture(current_gen)
+
+        # R8 D4: если stop пришел в фазе starting, сессия Gateway еще не создана
+        if is_starting:
+            state["summary_status"] = "skipped"
+            state["gateway_stop_status"] = "skipped"
+            with self._lock:
+                if self._stop_owner is token:
+                    self._state = dict(state)
+                    self._stop_owner = None
+            return state
 
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
@@ -1201,7 +1401,7 @@ class CallAssistService:
             raise RuntimeError(f"Нет активной gateway_session_id для {label}" if label else "Нет активной gateway_session_id")
         return voice_gateway_url, voice_gateway_api_key, gateway_session_id
 
-    def _assist_loop(self, session_id: str, gateway_url: str, api_key: str) -> None:
+    def _assist_loop(self, gen: object, session_id: str, gateway_url: str, api_key: str) -> None:
         """Фоновый цикл отправки транскрибации в Voice Gateway."""
         last_sent_text = ""
         backoff_delay: float = 0.0
@@ -1210,7 +1410,7 @@ class CallAssistService:
 
         while True:
             with self._lock:
-                if not self._state.get("active"):
+                if self._gen is not gen or not self._state.get("active"):
                     break
 
             if not self.recorder.is_recording:

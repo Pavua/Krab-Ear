@@ -1809,6 +1809,33 @@ class RecordingCoreService:
             generation = getattr(self, "_active_generation", None)
             return generation.get("owner") if generation is not None else None
 
+    def stop_unmanaged_capture(self, timeout_sec: float | None = None) -> str:
+        """Атомарно останавливает AudioRecorder, только если им не владеет активный generation.
+
+        R8 (2026-11-08): закрывает TOCTOU между проверкой current_recording_owner()
+        и физическим вызовом recorder.stop(). Проверка и останов выполняются под
+        единым _recording_lifecycle_lock.
+        Возвращает:
+          - "stopped": рекордер успешно остановлен под локом.
+          - "owned_by_other": захват принадлежит управляемому generation (диктовка/встреча),
+            вызов recorder.stop() пропущен во избежание обрезки чужой записи.
+          - "not_recording": рекордер уже не пишет (idle).
+        Исключения recorder.stop() (AudioRecorderStopTimeout и др.) пробрасываются вызывающей стороне.
+        """
+        lifecycle_lock, _ = self._ensure_recording_lifecycle_state()
+        with lifecycle_lock:
+            generation = getattr(self, "_active_generation", None)
+            owner = generation.get("owner") if generation is not None else None
+            if owner is not None:
+                return "owned_by_other"
+            if not getattr(self.recorder, "is_recording", False):
+                return "not_recording"
+            if timeout_sec is not None:
+                self.recorder.stop(timeout_sec=timeout_sec)
+            else:
+                self.recorder.stop()
+            return "stopped"
+
     def handle_list_audio_inputs(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных входных аудиоустройств."""
         items = self._list_audio_inputs()
