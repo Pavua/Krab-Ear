@@ -1801,8 +1801,9 @@ Returns: `{ok, session_id, state}`
 ### `stop_call_assist`
 *(call_assist_service.py)*  
 Останавливает текущую сессию ассистента звонка.  
-Нет params.  
-Returns: `{ok, session_id, duration_sec}`
+Params: `{auto_summary?, summary_max_items?}`.  
+Returns: итоговое состояние `{active:false, status:"stopped", session_id, gateway_session_id, summary_status, summary?, summary_history_id?, gateway_stop_status, ...}`; на уже idle-сервисе — `{active:false, status:"idle", ...}`.  
+Повтор (R3 шаг 2, 2026-11-07): после завершённого stop возвращается тот же итог с `replayed:true` (без новой записи summary и без повторного POST в Gateway); пока первый stop ещё идёт — `{status:"stopped", stop_in_progress:true}` (повторить позже).
 
 ### `get_call_assist_state`
 *(call_assist_service.py)*  

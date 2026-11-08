@@ -174,7 +174,10 @@ class TestHandleStopIdempotent(unittest.TestCase):
         # Second stop while already stopped.
         result2 = svc.handle_stop({"auto_summary": False})
         self.assertFalse(result2["active"])
-        self.assertEqual(result2["status"], "idle")
+        # R3 шаг 2 (2026-11-07): повтор после завершённого stop отдаёт тот же
+        # итог (replayed), а не idle — иначе клиент теряет summary_history_id.
+        self.assertEqual(result2["status"], "stopped")
+        self.assertTrue(result2.get("replayed"))
 
     def test_stop_when_no_gateway_session_skips_gateway(self) -> None:
         """Stop with no gateway_session_id must set gateway_stop_status=skipped."""
