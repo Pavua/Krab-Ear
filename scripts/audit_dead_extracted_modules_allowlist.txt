@@ -49,3 +49,10 @@ module:KrabEar/backend/call_silence_probe.py
 #     владельцев, sidecar-lock source-контракт, nowait-read). Production-
 #     подключение (IPC-процесс публикует свои резиденты, REST — свои) — задача
 #     последующей волны того же плана (T2+), намеренно НЕ в этой задаче.
+
+# --- Admission Protocol Lab (R4): lab scaffolding для протокола допуска v5;
+#     покрыто тестами offline_tests/admission_lab/, намеренно не интегрировано
+#     в production runtime (изолированный lab harness).
+module:KrabEar/core/maintenance_foundation.py
+module:KrabEar/core/maintenance_leaf_observation.py
+
