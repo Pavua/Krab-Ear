@@ -52,11 +52,10 @@ REST_DRAIN_BUDGET_SEC = 2.0
 # ждёт именно треды-handler'ы, а не запросы.
 _DRAIN_POLL_INTERVAL_SEC = 0.05
 
-# Долгоживущие стримы НЕ считаются в реестре активных запросов — иначе
-# дренаж всегда выгорал бы весь бюджет на один подключённый клиент. Их ТРИ:
-# SSE GET /v1/events, WS /v1/stream и WS /ws/events (rest_server.py:2402,
-# хендлер ws_events на 2125) — последний легко пропустить, он не про STT.
-_STREAMING_PATHS = frozenset({"/v1/events", "/v1/stream", "/ws/events"})
+# Подписки на события не считаются в реестре: они могут простаивать сколь
+# угодно долго. STT WebSocket /v1/stream учитывается до выхода обработчика:
+# он может хранить аудио и выполнять распознавание, пока соединение открыто.
+_STREAMING_PATHS = frozenset({"/v1/events", "/ws/events"})
 
 
 class InProcessRestServer:
@@ -107,6 +106,8 @@ class InProcessRestServer:
         self._shutting_down = threading.Event()
         self._active_requests = 0
         self._active_lock = threading.Lock()
+        self._stops_in_progress = 0
+        self._stop_failed = False
         self._install_drain_hooks()
 
         # R2-фикс 1 (финальное adversarial-ревью волны S3): НЕОБРАТИМАЯ
@@ -143,15 +144,14 @@ class InProcessRestServer:
             return
 
         def _gate_or_count():
-            if self._shutting_down.is_set():
-                return jsonify({"error": "shutting_down"}), 503
-            if request.path not in _STREAMING_PATHS:
-                # Помечаем в g, а не по пути повторно в teardown: флаг
-                # shutting_down мог измениться МЕЖДУ before_request и
-                # teardown_request этого же запроса — decrement обязан
-                # зеркалить именно то, что реально было засчитано.
-                g.rest_inprocess_counted = True
-                with self._active_lock:
+            # Проверка допуска и регистрация — одна операция относительно
+            # закрытия: иначе stop() увидит ноль до регистрации запроса.
+            with self._active_lock:
+                if self._shutting_down.is_set():
+                    return jsonify({"error": "shutting_down"}), 503
+                if request.path not in _STREAMING_PATHS:
+                    # Teardown снимает только действительно учтённый запрос.
+                    g.rest_inprocess_counted = True
                     self._active_requests += 1
             return None
 
@@ -185,8 +185,9 @@ class InProcessRestServer:
         терминальность; сам ``begin_shutdown()`` остаётся идемпотентен и
         безопасен для повторного вызова оттуда же.
         """
-        self._shutting_down.set()
-        self._terminal.set()
+        with self._active_lock:
+            self._shutting_down.set()
+            self._terminal.set()
 
     def _drain_active_requests(self, timeout: float) -> bool:
         """Ждёт опустошения реестра активных (не-стриминговых) запросов.
@@ -224,19 +225,25 @@ class InProcessRestServer:
         # ПОСЛЕ того, как _shutdown_backend/close() продвинулись дальше.
         # Без этой проверки — "зомби"-start() поднимает Flask заново над
         # уже закрывающимся/закрытым backend'ом.
-        if self._terminal.is_set():
-            logger.warning(
-                "InProcessRestServer: start() отклонён — терминальная "
-                "защёлка уже взведена (backend завершает работу)"
-            )
-            return False
-
         # S3/Задача 5: сброс ОБЯЗАТЕЛЕН и БЕЗУСЛОВЕН — start() вызывается
         # повторно из лечения сторожа (restart() = stop() + start(), задача 7).
         # Без сброса REST навсегда отвечает 503 на всё, включая /health, после
         # первого же лечения — а сторож по контракту принимает любой
         # HTTP-ответ за доказательство жизни и больше никогда не лечит.
-        self._shutting_down.clear()
+        with self._active_lock:
+            if self._terminal.is_set():
+                logger.warning(
+                    "InProcessRestServer: start() отклонён — терминальная "
+                    "защёлка уже взведена (backend завершает работу)"
+                )
+                return False
+            if self._stops_in_progress:
+                logger.warning("InProcessRestServer: start() отклонён — stop() ещё выполняется")
+                return False
+            if self._stop_failed:
+                logger.warning("InProcessRestServer: start() отклонён — исход stop() неизвестен")
+                return False
+            self._shutting_down.clear()
         if not self._enabled:
             logger.info("InProcessRestServer: выключен рубильником")
             return False
@@ -248,7 +255,7 @@ class InProcessRestServer:
             try:
                 from werkzeug.serving import make_server
 
-                self._server = make_server(
+                candidate = make_server(
                     "127.0.0.1", self._port, self._app, threaded=True
                 )
             except (OSError, SystemExit) as exc:
@@ -276,14 +283,31 @@ class InProcessRestServer:
                 self._push_error("rest.port_conflict", self._error)
                 return False
 
-            self._serving.clear()
-            self._thread = threading.Thread(
-                target=self._serve,
-                args=(self._server,),
-                name="rest-inprocess",
-                daemon=True,
-            )
-            self._thread.start()
+            # Bind может закончиться после begin_shutdown()/stop(). Проверка
+            # и публикация сервера атомарны относительно закрытия допуска.
+            with self._active_lock:
+                cancelled = (
+                    self._terminal.is_set()
+                    or self._shutting_down.is_set()
+                    or self._stops_in_progress > 0
+                    or self._stop_failed
+                )
+                if not cancelled:
+                    self._server = candidate
+                    self._serving.clear()
+                    self._thread = threading.Thread(
+                        target=self._serve,
+                        args=(candidate,),
+                        name="rest-inprocess",
+                        daemon=True,
+                    )
+                    self._thread.start()
+            if cancelled:
+                try:
+                    candidate.server_close()
+                except Exception:
+                    logger.exception("InProcessRestServer: не удалось закрыть сокет после отмены старта")
+                return False
             # Сбрасываем ошибку прошлой попытки ПОД тем же локом, что и
             # остальные мутации состояния. Вне лока здесь возникало окно, в
             # котором конкурентный status() (поллинг диагностики) видел уже
@@ -364,8 +388,21 @@ class InProcessRestServer:
         shutting_down безусловно (кроме терминальной защёлки), поэтому
         именно вызывающий решает, будет ли за этим stop() ещё один start().
         """
-        self._shutting_down.set()
+        with self._active_lock:
+            self._stops_in_progress += 1
+            self._shutting_down.set()
 
+        try:
+            self._stop_server(timeout)
+        except BaseException:
+            with self._active_lock:
+                self._stop_failed = True
+            raise
+        finally:
+            with self._active_lock:
+                self._stops_in_progress -= 1
+
+    def _stop_server(self, timeout: float) -> None:
         with self._lock:
             server, thread = self._server, self._thread
             self._server, self._thread = None, None
