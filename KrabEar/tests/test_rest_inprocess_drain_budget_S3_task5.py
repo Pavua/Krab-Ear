@@ -63,7 +63,7 @@ def test_rest_drain_budget_fits_remaining_exit_timeout() -> None:
         "RestWatchdog.stop() join": _WATCHDOG_STOP_JOIN_TIMEOUT_SEC,
         "REST drain (REST_DRAIN_BUDGET_SEC)": REST_DRAIN_BUDGET_SEC,
         "REST serve-enter barrier (SERVE_ENTER_TIMEOUT_SEC)": SERVE_ENTER_TIMEOUT_SEC,
-        "REST thread join (SHUTDOWN_JOIN_TIMEOUT_SEC)": SHUTDOWN_JOIN_TIMEOUT_SEC,
+        "REST shutdown and thread join shared budget (SHUTDOWN_JOIN_TIMEOUT_SEC)": SHUTDOWN_JOIN_TIMEOUT_SEC,
         "EventBridge.stop() join": _EVENT_BRIDGE_STOP_JOIN_TIMEOUT_SEC,
     }
     total = sum(components.values())
