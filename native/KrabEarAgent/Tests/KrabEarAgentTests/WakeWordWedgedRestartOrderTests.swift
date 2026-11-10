@@ -23,7 +23,7 @@ final class WakeWordWedgedRestartOrderTests: XCTestCase {
         return ""
     }
 
-    /// Тело колбэка onWedgedEscalation — kickstart обязан идти раньше любого toast.
+    /// Обращение к защитному supervisor до toast, который может зависнуть.
     func test_onWedgedEscalation_forceRestartBeforeBackendToast() throws {
         let src = try mainSwiftSource()
         guard let start = src.range(of: "onWedgedEscalation:") else {
@@ -44,7 +44,7 @@ final class WakeWordWedgedRestartOrderTests: XCTestCase {
         XCTAssertLessThan(
             body.distance(from: body.startIndex, to: restart.lowerBound),
             body.distance(from: body.startIndex, to: toast.lowerBound),
-            "kickstart (forceRestartBackend) должен инициироваться до BackendToast.show — иначе AppHang на toast блокирует рестарт и поллинг"
+            "Защитный supervisor должен отвечать до показа BackendToast"
         )
     }
 
@@ -65,5 +65,7 @@ final class WakeWordWedgedRestartOrderTests: XCTestCase {
             "wake-word wedged эскалация должна писать в agent-recovery.log"
         )
         XCTAssertTrue(body.contains("wake_word_wedged"))
+        XCTAssertTrue(body.contains("deferred: true"))
+        XCTAssertTrue(body.contains("автоматический рестарт отложен"))
     }
 }
