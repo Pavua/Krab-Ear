@@ -391,6 +391,9 @@ class TestBackendServiceCloseWiresLiveSubs(unittest.TestCase):
         store = StateStore(data_dir=tmp)
 
         service = BackendService.__new__(BackendService)
+        service._close_guard = threading.Lock()
+        service._close_state = "OPEN"
+        service._rest_gate_unknown = False
         service.store = store
         service.recorder = MagicMock()
         service.transcriber = MagicMock()
@@ -418,6 +421,7 @@ class TestBackendServiceCloseWiresLiveSubs(unittest.TestCase):
     def test_close_stops_real_live_subs_worker_thread(self) -> None:
         """Не мок, а реальный LiveSubsService: close() реально гасит фоновый поток."""
         service = self._build_service()
+        self.addCleanup(service._live_subs.close)
         service._live_subs.ingest(_pcm_bytes(3.0), 16000, "off", False)
         self.assertIsNotNone(service._live_subs._worker_thread)
 
