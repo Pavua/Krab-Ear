@@ -6,7 +6,7 @@
    чтобы избежать реальных IPC/process/sleep вызовов.
  - overrideSupervisionMode() позволяет форсировать режим без launchctl.
  - Тесты проверяют: initialization, passive/active mode behavior,
-   restart throttle, stopBackend no-op в passive.
+   безопасный отказ active recovery, stopBackend no-op в passive.
 */
 
 import XCTest
@@ -106,20 +106,13 @@ final class BackendSupervisorTests: XCTestCase {
         XCTAssertTrue(result)
     }
 
-    func test_restartIfDead_active_respectsMaxConsecutiveRestarts() {
-        // Ping всегда false → каждый вызов restartIfDead пытается перезапуск.
-        // maxConsecutiveRestarts == 3, 4-й вызов должен вернуть false без ensureBackendRunning.
-        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
+    func test_restartIfDead_active_unresponsive_defers_recovery() {
+        let supervisor = makeSupervisor(mode: .active, pingResult: false)
+        var ensureCalls = 0
+        supervisor._testEnsureOverride = { ensureCalls += 1 }
 
-        let r0 = supervisor.restartIfDead()   // consecutiveRestarts → 1
-        let r1 = supervisor.restartIfDead()   // consecutiveRestarts → 2
-        let r2 = supervisor.restartIfDead()   // consecutiveRestarts → 3
-        let r3 = supervisor.restartIfDead()   // превышает лимит
-
-        XCTAssertTrue(r0, "1-й restart должен быть успешным")
-        XCTAssertTrue(r1, "2-й restart должен быть успешным")
-        XCTAssertTrue(r2, "3-й restart должен быть успешным")
-        XCTAssertFalse(r3, "4-й restart превышает лимит — должен вернуть false")
+        XCTAssertFalse(supervisor.restartIfDead())
+        XCTAssertEqual(ensureCalls, 0)
     }
 
     // MARK: restartIfDeadDetailed — честный сигнал (2026-08-03)
@@ -166,23 +159,9 @@ final class BackendSupervisorTests: XCTestCase {
         XCTAssertEqual(outcome, .failed)
     }
 
-    func test_restartIfDeadDetailed_recovered_active_whenRestartSucceeds() {
-        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
-
-        let outcome = supervisor.restartIfDeadDetailed()
-
-        XCTAssertEqual(outcome, .recovered)
-    }
-
-    func test_restartIfDeadDetailed_failed_active_whenLimitExceeded() {
-        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
-
-        _ = supervisor.restartIfDeadDetailed()  // 1
-        _ = supervisor.restartIfDeadDetailed()  // 2
-        _ = supervisor.restartIfDeadDetailed()  // 3
-        let outcome = supervisor.restartIfDeadDetailed()  // превышает лимит
-
-        XCTAssertEqual(outcome, .failed, "4-й restart превышает лимит")
+    func test_restartIfDeadDetailed_unresponsive_active_returnsFailed() {
+        let supervisor = makeSupervisor(mode: .active, pingResult: false)
+        XCTAssertEqual(supervisor.restartIfDeadDetailed(), .failed)
     }
 
     /// `restartIfDead()` остаётся Bool-контрактом для существующих вызывающих
@@ -209,50 +188,6 @@ final class BackendSupervisorTests: XCTestCase {
         // passive mode: stopBackend() — no-op, не трогает backendProcess
         supervisor.stopBackend()
         XCTAssertNil(supervisor.backendProcess, "passive mode: backendProcess остаётся nil после stopBackend")
-    }
-
-    // MARK: Wave 59 — cooldown reset
-
-    func test_restartIfDead_active_cooldownReset_recoversAfterQuietPeriod() {
-        // Сценарий: 3 restart'а подряд исчерпывают лимит. Затем имитируем
-        // прошествие cooldownSec. 4-й restart должен снова работать,
-        // потому что lastRestartAttemptAt > cooldown назад → счётчик сбросился.
-        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
-        supervisor.restartCooldownSec = 0.0  // мгновенный cooldown для теста
-
-        let r0 = supervisor.restartIfDead()  // 1
-        let r1 = supervisor.restartIfDead()  // 2
-        let r2 = supervisor.restartIfDead()  // 3
-        // 4-й после cooldown=0 → сброс счётчика → снова успех
-        let r3 = supervisor.restartIfDead()  // reset → 1
-
-        XCTAssertTrue(r0)
-        XCTAssertTrue(r1)
-        XCTAssertTrue(r2)
-        XCTAssertTrue(r3, "После cooldown supervisor должен снова разрешать restart")
-    }
-
-    func test_restartIfDead_active_cooldownNotElapsed_stillBlocked() {
-        // Если cooldown не истёк (defaultRestartCooldownSec = 300s),
-        // 4-й вызов всё ещё должен быть заблокирован.
-        let supervisor = makeSupervisor(mode: .active, pingResult: false, ensureError: nil)
-        // cooldown по умолчанию 300s — за длительность теста не истечёт.
-
-        _ = supervisor.restartIfDead()  // 1
-        _ = supervisor.restartIfDead()  // 2
-        _ = supervisor.restartIfDead()  // 3
-        let r3 = supervisor.restartIfDead()
-
-        XCTAssertFalse(r3, "4-й restart до cooldown должен оставаться заблокированным")
-    }
-
-    // MARK: kickstartArguments — чистая функция для forceRestartBackend
-
-    func test_kickstartArguments_shape() {
-        XCTAssertEqual(
-            BackendSupervisor.kickstartArguments(uid: 501),
-            ["kickstart", "-k", "gui/501/ai.krab.ear.backend"]
-        )
     }
 
     // MARK: S3/Р9 — standalone active-режим обязан спавнить main.py

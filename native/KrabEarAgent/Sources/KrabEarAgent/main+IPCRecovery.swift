@@ -18,14 +18,14 @@ extension AgentAppDelegate {
         do {
             return try ipcClient.call(method: method, params: params)
         } catch let error as IPCError where Self.isConnectionError(error) {
-            logger.warn("IPC ошибка соединения (\(error.localizedDescription)), пытаюсь перезапустить backend...")
+            logger.warn("IPC ошибка соединения (\(error.localizedDescription)), проверяю backend...")
             if backendSupervisor.restartIfDead() {
-                logger.info("Backend перезапущен, повторяю вызов \(method)")
+                logger.info("Backend доступен, повторяю вызов \(method)")
                 let result = try ipcClient.call(method: method, params: params)
                 reportReconnect(since: startedAt)
                 return result
             } else {
-                logger.error("Не удалось перезапустить backend (лимит перезапусков)")
+                logger.error("Автоматическое восстановление backend недоступно или не удалось")
                 throw error
             }
         }
@@ -58,11 +58,11 @@ extension AgentAppDelegate {
             }.value
             guard restarted else {
                 logger.error(
-                    "Не удалось перезапустить backend (лимит перезапусков)"
+                    "Автоматическое восстановление backend недоступно или не удалось"
                 )
                 throw error
             }
-            logger.info("Backend перезапущен, повторяю async вызов \(method)")
+            logger.info("Backend доступен, повторяю async вызов \(method)")
             let result = try await client.callAsync(
                 method: method,
                 params: params,
