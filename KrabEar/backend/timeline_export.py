@@ -50,6 +50,7 @@ def timeline_profile_namespace(store: Any) -> uuid.UUID:
                 raise ValueError("calendar namespace must be a regular file")
             return uuid.UUID(stream.read(64).strip())
 
+
 # ---------------------------------------------------------------------------
 # Цветовая палитра для языков и блоков
 # ---------------------------------------------------------------------------
