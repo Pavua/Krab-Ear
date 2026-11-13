@@ -162,6 +162,21 @@ class DirectStorePurgeTestCase(unittest.TestCase):
         for name in ("exports", "auto_exports", "timeline"):
             self.assertFalse((self._dir / name).exists(), f"{name}/ должен быть удалён")
 
+    def test_timeline_removal_failure_is_reported(self) -> None:
+        from unittest.mock import patch
+
+        timeline = self._dir / "timeline"
+        timeline.mkdir()
+        (timeline / "ical-namespace").write_text("synthetic", encoding="ascii")
+        def deny_removal(path, ignore_errors=False):
+            if not ignore_errors:
+                raise PermissionError("synthetic denial")
+
+        with patch("shutil.rmtree", side_effect=deny_removal):
+            result = self._purge()
+        self.assertIn("timeline", result["errors"])
+        self.assertFalse(result["complete"])
+
     def test_export_schedule_removed(self) -> None:
         """export_schedule.json удаляется."""
         f = self._dir / "export_schedule.json"

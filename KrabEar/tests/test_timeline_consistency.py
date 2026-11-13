@@ -1,8 +1,11 @@
 """Синтетические проверки общей шкалы истории и файлов экспорта."""
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
@@ -218,5 +221,97 @@ def test_swift_export_matches_timeline_ipc(entries, swift_harness):  # noqa: F81
                         line for line in content.split(b"\r\n") if not line.startswith(b"DTSTAMP:")
                     ]
             assert journal.read_bytes() == original
+            original_uids = [line for line in repeated.splitlines() if line.startswith(b"UID:")]
+            extra = HistoryItem("synthetic-extra", "2026-10-25T00:45:00Z", "новая запись")
+            with store._lock():
+                with journal.open("a", encoding="utf-8") as stream:
+                    stream.write(json.dumps(extra.to_dict()) + "\n")
+            before = set((profile / "exports/timeline").glob("*.ics"))
+            export("ical")
+            changed, = set((profile / "exports/timeline").glob("*.ics")) - before
+            changed_contents = changed.read_bytes()
+            assert [line for line in changed_contents.splitlines() if line.startswith(b"UID:")] == original_uids
+            assert changed_contents != repeated
         finally:
             backend.close()
+
+
+def test_ical_block_uid_survives_membership_changes_and_separates_intervals():
+    generator = TimelineViewGenerator()
+    exporter = TimelineExporter()
+    first = [{"id": "a", "ts": "2026-10-25T12:10:00Z", "text": "alpha"}]
+    changed = first + [{"id": "b", "ts": "2026-10-25T12:20:00Z", "text": "beta"}]
+
+    def uid(items, grouping="hour"):
+        blocks = [dict(b.to_dict(), item_ids=[item["id"] for item in items])
+                  for b in generator.generate_timeline(items, grouping)]
+        return next(line for line in exporter.export_ical(blocks).splitlines() if line.startswith("UID:"))
+
+    assert uid(first) == uid(changed)
+    assert uid(changed) == uid(changed[1:])
+    assert uid(first) != uid(first, "day")
+    assert uid(first) != uid([{"id": "a", "ts": "2026-10-25T13:10:00Z"}])
+
+
+def test_ical_namespace_persists_per_profile_and_separates_profiles(tmp_path):
+    from backend.timeline_export import timeline_profile_namespace
+
+    first = StateStore(tmp_path / "profile-a")
+    second = StateStore(tmp_path / "profile-b")
+    namespace = timeline_profile_namespace(first)
+    assert namespace == timeline_profile_namespace(StateStore(tmp_path / "profile-a"))
+    assert namespace != timeline_profile_namespace(second)
+    block = {"start_time": "2026-10-25T12:00:00Z", "end_time": "2026-10-25T13:00:00Z"}
+    exporter = TimelineExporter()
+    a = exporter.export_ical([block], namespace=namespace)
+    b = exporter.export_ical([block], namespace=timeline_profile_namespace(second))
+    assert next(x for x in a.splitlines() if x.startswith("UID:")) != next(x for x in b.splitlines() if x.startswith("UID:"))
+
+
+@pytest.mark.parametrize("kind", ["fifo", "directory", "symlink", "corrupt"])
+def test_ical_namespace_rejects_invalid_paths_without_hanging(tmp_path, kind):
+    profile = tmp_path / "synthetic"
+    directory = profile / "timeline"
+    directory.mkdir(parents=True)
+    path = directory / "ical-namespace"
+    target = tmp_path / "target"
+    target.write_text("synthetic sentinel", encoding="ascii")
+    if kind == "fifo":
+        os.mkfifo(path)
+    elif kind == "directory":
+        path.mkdir()
+    elif kind == "symlink":
+        path.symlink_to(target)
+    else:
+        path.write_text("broken", encoding="ascii")
+    script = """
+import sys
+from contextlib import nullcontext
+from pathlib import Path
+from types import SimpleNamespace
+from backend.timeline_export import timeline_profile_namespace
+store = SimpleNamespace(data_dir=Path(sys.argv[1]), _lock=nullcontext)
+try:
+    timeline_profile_namespace(store)
+except (ValueError, OSError):
+    pass
+else:
+    raise AssertionError('invalid namespace was accepted')
+"""
+    result = subprocess.run([sys.executable, "-c", script, str(profile)],
+                            capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert path.is_symlink() if kind == "symlink" else path.exists()
+    assert target.read_text(encoding="ascii") == "synthetic sentinel"
+    if kind == "corrupt":
+        assert path.read_text(encoding="ascii") == "broken"
+
+
+def test_ical_namespace_concurrent_first_export_has_one_identity(tmp_path):
+    from backend.timeline_export import timeline_profile_namespace
+
+    profile = tmp_path / "synthetic"
+    StateStore(profile)
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        namespaces = list(pool.map(lambda _: timeline_profile_namespace(StateStore(profile)), range(48)))
+    assert len(set(namespaces)) == 1

@@ -191,6 +191,7 @@ class PlaintextExportDenied(RuntimeError):
             REASON_PLAINTEXT_SESSION_EXPIRED,
             REASON_PLAINTEXT_POLICY_UNAVAILABLE,
             REASON_PRIVACY_MODE_ACTIVE,
+            "timeline_purge_in_progress",
         )
         self.reason = reason if type(reason) is str and reason in allowed else REASON_PLAINTEXT_POLICY_UNAVAILABLE
         super().__init__(self.reason)

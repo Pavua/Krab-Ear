@@ -224,6 +224,8 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
 
     service = server = claim = server_thread = sentry_client = None
     release = threading.Event()
+    timeline_release = threading.Event()
+    write_release = threading.Event()
     stage = "isolation"
     with (root / "child.log").open("a", encoding="utf-8") as log_file, \
             redirect_stdout(log_file), redirect_stderr(log_file), ExitStack() as stack:
@@ -256,6 +258,9 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                         if memory_key[0] is None:
                             return subprocess.CompletedProcess(args, 44, "", "not found")
                         return subprocess.CompletedProcess(args, 0, base64.b64encode(memory_key[0]).decode("ascii"), "")
+                    if args[0] == "delete-generic-password":
+                        memory_key[0] = None
+                        return subprocess.CompletedProcess(args, 0, "", "")
                     if args[0] == "add-generic-password":
                         key_creates.append(True)
                         if memory_key[0] is not None:
@@ -348,6 +353,32 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             service._settings_svc.invalidate_cache()
             original_dispatch = service.handle_request
             reached = threading.Event()
+            timeline_reached = threading.Event()
+            timeline_armed = [False]
+            write_started = threading.Event()
+            write_armed = [False]
+            purge_requested = threading.Event()
+            original_timeline_write = service._write_timeline_export
+
+            def paused_timeline_write(*args):
+                if timeline_armed[0]:
+                    timeline_reached.set()
+                    if not timeline_release.wait(30):
+                        raise AssertionError("timeline fixture barrier deadline")
+                return original_timeline_write(*args)
+
+            service._write_timeline_export = paused_timeline_write
+            import backend.service as service_module
+            original_atomic_write = service_module.atomic_write_text
+
+            def paused_atomic_write(path, content):
+                if write_armed[0] and Path(path).suffix in {".ics", ".json", ".svg"}:
+                    write_started.set()
+                    if not write_release.wait(30):
+                        raise AssertionError("timeline writer barrier deadline")
+                return original_atomic_write(path, content)
+
+            stack.enter_context(mock.patch.object(service_module, "atomic_write_text", paused_atomic_write))
             state = {"phase": None, "context": None, "writes": 0, "gates": 0,
                      "output": None, "revoke_after_first": False, "raw_error": False,
                      "raw_error_injections": 0, "validations": 0, "run_auth": None,
@@ -459,6 +490,8 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             def dispatcher(request):
                 retain_auth(request)
                 method = request.get("method") if isinstance(request, dict) else None
+                if method == "purge_all_data":
+                    purge_requested.set()
                 params = request.get("params", {}) if isinstance(request, dict) else {}
                 if method == "fixture_socket_failure":
                     raise TypeError(json.dumps({key: sorted(values) for key, values in auth_values.items()}))
@@ -550,7 +583,36 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                 name = command["command"]
                 if name == "stop":
                     break
-                if name == "arm":
+                if name == "timeline_arm":
+                    timeline_reached.clear()
+                    timeline_release.clear()
+                    timeline_armed[0] = True
+                    reply = True
+                elif name == "timeline_barrier":
+                    reply = timeline_reached.wait(15)
+                elif name == "timeline_release":
+                    timeline_armed[0] = False
+                    timeline_release.set()
+                    reply = True
+                elif name == "timeline_write_arm":
+                    write_started.clear()
+                    write_release.clear()
+                    purge_requested.clear()
+                    write_armed[0] = True
+                    reply = True
+                elif name == "timeline_write_barrier":
+                    reply = write_started.wait(15)
+                elif name == "timeline_write_release":
+                    write_armed[0] = False
+                    write_release.set()
+                    reply = True
+                elif name == "purge_requested":
+                    reply = purge_requested.wait(15)
+                elif name == "timeline_plaintext_profile":
+                    store.save_settings({"history_encryption_enabled": False, "privacy_mode_enabled": False})
+                    service._settings_svc.invalidate_cache()
+                    reply = True
+                elif name == "arm":
                     release.clear()
                     reached.clear()
                     state["phase"] = command["phase"]
@@ -632,6 +694,8 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                              "guard_kinds": sorted(set(violations)), "guard_sites": violation_sites, "frames": frames})
         finally:
             release.set()
+            timeline_release.set()
+            write_release.set()
             clean = True
             for cleanup in (
                 (lambda: server.stop(timeout_sec=3)) if server is not None else None,

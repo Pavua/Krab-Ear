@@ -119,6 +119,13 @@ extension HistoryPanelController {
         buttonsRow.alignment = .centerY
         section.contentStackView.addArrangedSubview(buttonsRow)
 
+        let calendarWarning = NSTextField(wrappingLabelWithString:
+            "Thunderbird: повторный импорт в тот же календарь может завершиться ошибкой. Для новой выгрузки выберите отдельный календарь."
+        )
+        calendarWarning.font = KrabEarTheme.Typography.body
+        calendarWarning.textColor = KrabEarTheme.Colors.textSecondary
+        section.contentStackView.addArrangedSubview(calendarWarning)
+
         return section
     }
 

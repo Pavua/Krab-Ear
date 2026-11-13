@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections import Counter, defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import fsum, isfinite
 from typing import Any
@@ -121,10 +121,6 @@ class TimelineBlock:
 
     summary_text: str
     """Краткий текст: топ-5 ключевых слов блока через запятую."""
-
-    # Уже существующие ID участников нужны для воспроизводимого UID события.
-    # В JSON/IPC и в самом календаре эти ID не публикуются.
-    item_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -291,17 +287,12 @@ class TimelineViewGenerator:
     ) -> TimelineBlock:
         """Строит TimelineBlock из списка записей."""
         durations = []
-        item_ids = []
         total_words = 0
         lang_counter: Counter = Counter()
         all_tokens: list[str] = []
 
         for item in block_items:
             durations.append(timeline_audio_duration(self._get_field(item, "audio_duration_sec")))
-            item_id = self._get_field(item, "id")
-            if item_id:
-                item_ids.append(str(item_id))
-
             text = self._get_field(item, "text") or ""
             words = text.split()
             total_words += len(words)
@@ -332,5 +323,4 @@ class TimelineViewGenerator:
             total_words=total_words,
             languages=languages,
             summary_text=summary_text,
-            item_ids=tuple(sorted(item_ids)),
         )

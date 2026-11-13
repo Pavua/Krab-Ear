@@ -9,6 +9,9 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+import tempfile
 import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
@@ -17,6 +20,35 @@ from xml.sax.saxutils import escape as _xml_sax_escape
 from xml.sax.saxutils import quoteattr as _xml_sax_quoteattr
 
 from backend.timeline_view import parse_timeline_timestamp, timeline_audio_duration
+
+
+def timeline_profile_namespace(store: Any) -> uuid.UUID:
+    """Постоянный случайный идентификатор профиля; удаляется вместе с timeline/."""
+    with store._lock():
+        directory = store.data_dir / "timeline"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        if directory.is_symlink():
+            raise ValueError("timeline directory must not be a symlink")
+        path = directory / "ical-namespace"
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            value = uuid.uuid4()
+            fd, temp = tempfile.mkstemp(prefix=".ical-namespace-", dir=directory)
+            try:
+                with os.fdopen(fd, "w", encoding="ascii") as stream:
+                    stream.write(str(value))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp, path)
+            finally:
+                if os.path.exists(temp):
+                    os.unlink(temp)
+            return value
+        with os.fdopen(fd, encoding="ascii") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("calendar namespace must be a regular file")
+            return uuid.UUID(stream.read(64).strip())
 
 # ---------------------------------------------------------------------------
 # Цветовая палитра для языков и блоков
@@ -299,6 +331,7 @@ class TimelineExporter:
         self,
         items: list[dict[str, Any]],
         privacy_mode: bool = False,
+        namespace: uuid.UUID = uuid.NAMESPACE_URL,
     ) -> str:
         """Экспортирует список блоков (или элементов истории) в iCalendar (RFC 5545).
 
@@ -361,11 +394,13 @@ class TimelineExporter:
             else:
                 calendar_end = end_dt
 
-            identity = json.dumps([start_dt.isoformat(), end_dt.isoformat(),
-                                   item.get("item_ids") or item.get("id")])
+            # Блок определяется границами, а не изменяемым составом записей.
+            # У отдельных записей сохраняем их ID для различения совпадающих времён.
+            item_id = None if item.get("start_time") else item.get("id")
+            identity = json.dumps([start_dt.isoformat(), end_dt.isoformat(), item_id])
             occurrences[identity] += 1
             name = f"krabear:timeline:{identity}:{occurrences[identity]}"
-            uid = f"{uuid.uuid5(uuid.NAMESPACE_URL, name)}@krabear"
+            uid = f"{uuid.uuid5(namespace, name)}@krabear"
 
             # SUMMARY — F2: privacy guard
             if privacy_mode:
