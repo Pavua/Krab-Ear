@@ -54,8 +54,11 @@ class TimelinePurgeGuard:
                 self._write_epoch(fd, secrets.token_bytes(self._SIZE))
             os.lseek(fd, 0, os.SEEK_SET)
             epoch = os.read(fd, self._SIZE + 1)
-            if len(epoch) != self._SIZE and not repair:
-                raise PlaintextExportDenied("timeline_purge_in_progress")
+            if len(epoch) != self._SIZE:
+                if not repair:
+                    raise PlaintextExportDenied("timeline_purge_in_progress")
+                epoch = secrets.token_bytes(self._SIZE)
+                self._write_epoch(fd, epoch)
             yield fd, epoch
         finally:
             try:
@@ -74,7 +77,7 @@ class TimelinePurgeGuard:
 
     @contextmanager
     def snapshot(self):
-        with self._locked() as (_, epoch):
+        with self._locked(repair=True) as (_, epoch):
             yield epoch
 
     @contextmanager

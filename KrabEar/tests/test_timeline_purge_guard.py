@@ -85,13 +85,13 @@ def test_refusal_does_not_invalidate_and_exception_releases_purge(tmp_path):
         pass
 
 
-def test_corrupt_marker_denies_export_but_confirmed_purge_recovers(tmp_path):
+def test_corrupt_marker_denies_old_publication_and_purge_recovers(tmp_path):
     gate = timeline_guard(SimpleNamespace(data_dir=tmp_path))
     with gate.snapshot() as before:
         pass
     (tmp_path / ".timeline-purge-guard").write_bytes(b"partial")
     with pytest.raises(PlaintextExportDenied):
-        with gate.snapshot():
+        with gate.publish(before):
             pass
     with gate.purge():
         pass
@@ -99,6 +99,21 @@ def test_corrupt_marker_denies_export_but_confirmed_purge_recovers(tmp_path):
         with gate.publish(before):
             pass
     with gate.snapshot():
+        pass
+
+
+def test_corrupt_marker_recovers_without_purge_and_invalidates_old_snapshot(tmp_path):
+    gate = timeline_guard(SimpleNamespace(data_dir=tmp_path))
+    with gate.snapshot() as before:
+        pass
+    (tmp_path / ".timeline-purge-guard").write_bytes(b"")
+    with gate.snapshot() as recovered:
+        pass
+    assert recovered != before
+    with pytest.raises(PlaintextExportDenied):
+        with gate.publish(before):
+            pass
+    with gate.publish(recovered):
         pass
 
 
