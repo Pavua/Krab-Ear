@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections import Counter, defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from math import fsum, isfinite
 from typing import Any
 
 import logging
@@ -36,11 +38,11 @@ _VALID_GROUP_BY = ("hour", "day", "week")
 
 def _tokenize(text: str) -> list[str]:
     """Разбивает текст на слова (нижний регистр, только буквы)."""
-    return re.findall(r"[^\W\d_]+", text.lower(), re.UNICODE)
+    return re.findall(r"[^\W\d_]+", unicodedata.normalize("NFC", text.lower()), re.UNICODE)
 
 
-def _parse_ts(ts: Any) -> datetime | None:
-    """Парсит временную метку из строки ISO-8601. Возвращает None при ошибке."""
+def parse_timeline_timestamp(ts: Any) -> datetime | None:
+    """Возвращает момент в UTC. Старые ISO-метки без зоны считаются UTC."""
     if not ts:
         return None
     ts_str = str(ts).strip()
@@ -50,9 +52,18 @@ def _parse_ts(ts: Any) -> datetime | None:
         dt = datetime.fromisoformat(ts_str)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except (ValueError, TypeError):
+        return dt.astimezone(timezone.utc)
+    except (ValueError, OverflowError):
         return None
+
+
+def timeline_audio_duration(value: Any) -> float:
+    """Отсутствующая или некорректная длительность даёт нулевой вклад."""
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0.0
+    return seconds if isfinite(seconds) and seconds > 0 else 0.0
 
 
 def _block_start(dt: datetime, group_by: str) -> datetime:
@@ -111,6 +122,10 @@ class TimelineBlock:
     summary_text: str
     """Краткий текст: топ-5 ключевых слов блока через запятую."""
 
+    # Уже существующие ID участников нужны для воспроизводимого UID события.
+    # В JSON/IPC и в самом календаре эти ID не публикуются.
+    item_ids: tuple[str, ...] = field(default=(), repr=False, compare=False)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "start_time": self.start_time,
@@ -157,7 +172,7 @@ class TimelineViewGenerator:
         groups: dict[datetime, list[Any]] = defaultdict(list)
         for item in items:
             ts_val = self._get_field(item, "ts")
-            dt = _parse_ts(ts_val)
+            dt = parse_timeline_timestamp(ts_val)
             if dt is None:
                 continue
             key = _block_start(dt, group_by)
@@ -208,7 +223,7 @@ class TimelineViewGenerator:
 
         for item in items:
             ts_val = self._get_field(item, "ts")
-            dt = _parse_ts(ts_val)
+            dt = parse_timeline_timestamp(ts_val)
             if dt is None:
                 continue
             if dt < cutoff:
@@ -275,18 +290,17 @@ class TimelineViewGenerator:
         block_items: list[Any],
     ) -> TimelineBlock:
         """Строит TimelineBlock из списка записей."""
-        total_duration_sec = 0.0
+        durations = []
+        item_ids = []
         total_words = 0
         lang_counter: Counter = Counter()
         all_tokens: list[str] = []
 
         for item in block_items:
-            dur = self._get_field(item, "audio_duration_sec")
-            if dur is not None:
-                try:
-                    total_duration_sec += float(dur)
-                except (TypeError, ValueError):
-                    pass
+            durations.append(timeline_audio_duration(self._get_field(item, "audio_duration_sec")))
+            item_id = self._get_field(item, "id")
+            if item_id:
+                item_ids.append(str(item_id))
 
             text = self._get_field(item, "text") or ""
             words = text.split()
@@ -314,8 +328,9 @@ class TimelineViewGenerator:
             start_time=start_dt.isoformat(),
             end_time=end_dt.isoformat(),
             items_count=len(block_items),
-            total_duration_sec=round(total_duration_sec, 3),
+            total_duration_sec=round(fsum(durations), 3),
             total_words=total_words,
             languages=languages,
             summary_text=summary_text,
+            item_ids=tuple(sorted(item_ids)),
         )

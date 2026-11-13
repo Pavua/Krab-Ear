@@ -89,7 +89,7 @@ extension HistoryPanelController {
             iconSymbol: "chart.bar.doc.horizontal"
         )
 
-        let groupByLabel = NSTextField(labelWithString: "Группировка:")
+        let groupByLabel = NSTextField(labelWithString: "Группировка (UTC):")
         groupByLabel.font = KrabEarTheme.Typography.body
         groupByLabel.textColor = KrabEarTheme.Colors.textSecondary
 
