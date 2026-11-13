@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from backend.plaintext_export_authorization import POLICY_REVISION_KEY
+from backend.timeline_purge_guard import guard_timeline_purge, timeline_guard
 from backend.plaintext_export_sinks import (
     BackendSink, PlaintextExportDenied, export_context, precheck_export, run_export_write,
 )
@@ -401,6 +402,10 @@ class HistoryService:
         plaintext_export_authorizer: Any | None = None,
     ) -> None:
         self.store = store
+        # Привязываем барьер к исходному профилю без файловых записей. Даже если
+        # data_dir позднее повреждён, частичная очистка держит прежний барьер.
+        if isinstance(getattr(store, "data_dir", None), (str, bytes, os.PathLike)):
+            timeline_guard(store)
         self._plaintext_export_authorizer = plaintext_export_authorizer
         # Разделяемый список clipboard_history из BackendService (передаётся по ссылке).
         # Если не передан — создаём изолированный список (для тестов).
@@ -2513,6 +2518,7 @@ class HistoryService:
         )
         return {"deleted_count": len(to_delete), "remaining": remaining}
 
+    @guard_timeline_purge
     def handle_purge_all_data(self, params: dict[str, Any]) -> dict[str, Any]:
         """Полная очистка всех пользовательских данных (privacy-purge / wipe-all).
 
@@ -3412,9 +3418,10 @@ class HistoryService:
             secondary_errors.append("auto_exports")
         try:
             import shutil as _shutil
-            if (_data_dir / "timeline").is_dir():
-                _shutil.rmtree(_data_dir / "timeline", ignore_errors=True)
-                logger.info("purge_all_data: удалена директория timeline/")
+            with self.store._lock():
+                if (_data_dir / "timeline").is_dir():
+                    _shutil.rmtree(_data_dir / "timeline")
+                    logger.info("purge_all_data: удалена директория timeline/")
         except Exception:
             logger.warning("purge_all_data: удаление timeline/ не удалось", exc_info=True)
             secondary_errors.append("timeline")

@@ -2399,9 +2399,14 @@ Returns: `{report}` (str)
 
 ### `get_timeline_view`
 *(analytics_service.py)*  
-Группирует историю транскрипций по временным блокам (timeline).  
-Params: `{granularity?}` — `"hour"` | `"day"` | `"week"`, default `"day"`  
-Returns: `{timeline: [{period, items: [...], count}]}`
+Группирует историю транскрипций по временным блокам UTC. Метка со смещением
+сначала переводится в UTC. Метка без зоны трактуется как UTC.
+Params: `{group_by="day", limit=500, include_heatmap=false, heatmap_days=30}`.
+`group_by` принимает `"hour"`, `"day"` или `"week"` (с понедельника).
+Returns: `{blocks, total_blocks, group_by}` с опциональным `activity_heatmap` в UTC.
+Блоки отсортированы по возрастанию, пустые интервалы пропущены.
+Поля блока: `start_time`, `end_time` (исключая границу), `items_count`,
+`total_duration_sec` (сумма длительностей аудио), `total_words`, `languages`, `summary_text`.
 
 ### `get_learning_stats`
 *(service.py)*  
@@ -3715,6 +3720,12 @@ Params: `{json: string}` — обязателен.
 Returns: `{preset: {name, description, builtin: false, settings_patch}}`
 
 > **TimelineExporter** — экспорт таймлайна записей истории (группировка по часу/дню/неделе) в файл.
+
+При одинаковых `group_by` и `limit` экспорт использует те же границы UTC,
+что и `get_timeline_view`. Каждый запуск сохраняет отдельный файл. SVG
+показывает пустые интервалы как промежутки по оси времени. В JSON
+`exported_at` отражает время формирования файла. В iCalendar этому служит
+`DTSTAMP`, а `UID` стабилен при одинаковых границах и составе блока.
 
 ### `export_timeline_svg`
 *(service.py)*  

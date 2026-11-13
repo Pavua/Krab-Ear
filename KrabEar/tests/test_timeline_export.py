@@ -9,6 +9,7 @@ from backend.timeline_export import TimelineExporter
 import json
 import sys
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 def _make_block(
     start_time: str = "2026-04-10T14:00:00+00:00",
-    end_time: str = "2026-04-10T15:00:00+00:00",
+    end_time: str | None = None,
     items_count: int = 5,
     total_duration_sec: float = 120.0,
     total_words: int = 80,
@@ -34,6 +35,8 @@ def _make_block(
     summary_text: str = "тест запись аудио",
 ) -> dict[str, Any]:
     """Создаёт минимальный dict, соответствующий TimelineBlock.to_dict()."""
+    if end_time is None:
+        end_time = (datetime.fromisoformat(start_time) + timedelta(hours=1)).isoformat()
     return {
         "start_time": start_time,
         "end_time": end_time,

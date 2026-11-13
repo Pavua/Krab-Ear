@@ -89,7 +89,7 @@ extension HistoryPanelController {
             iconSymbol: "chart.bar.doc.horizontal"
         )
 
-        let groupByLabel = NSTextField(labelWithString: "Группировка:")
+        let groupByLabel = NSTextField(labelWithString: "Группировка (UTC):")
         groupByLabel.font = KrabEarTheme.Typography.body
         groupByLabel.textColor = KrabEarTheme.Colors.textSecondary
 
@@ -118,6 +118,13 @@ extension HistoryPanelController {
         buttonsRow.spacing = KrabEarTheme.Metrics.standard
         buttonsRow.alignment = .centerY
         section.contentStackView.addArrangedSubview(buttonsRow)
+
+        let calendarWarning = NSTextField(wrappingLabelWithString:
+            "Thunderbird: повторный импорт в тот же календарь может завершиться ошибкой. Для новой выгрузки выберите отдельный календарь."
+        )
+        calendarWarning.font = KrabEarTheme.Typography.body
+        calendarWarning.textColor = KrabEarTheme.Colors.textSecondary
+        section.contentStackView.addArrangedSubview(calendarWarning)
 
         return section
     }
