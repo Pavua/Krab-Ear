@@ -39,14 +39,14 @@ Synthetic IPC fixture запрещает внешние sockets/processes, за�
 
 ## Результат локальной квалификации
 
-- Python 3.12.11, MLX отсутствует: 44 файла по одному процессу на файл.
+- Python 3.12.11, MLX отсутствует: 47 файлов по одному процессу на файл.
 - 10 isolated IPC сценариев прошли: три crash-point, повторный crash/partial
   recovery, полный inventory файловых collaborators, новый контент после purge,
   запрет IPC при partial result. Внешних обращений fixture не обнаружил.
 - `make audit-all` и `git diff --check` прошли; независимое Astra High review: GO
   для process-crash/restart scope. Дополнительная гонка разморозки backup закрыта:
   `clear_purged` вызывается после commit внутри того же guard lock.
-- Два legacy fixture приведены к файловому guard; недоступный настроенный vault
+- Три legacy fixture приведены к файловому guard; недоступный настроенный vault
   теперь проверяется как отказ. Timing-only AST fixture получил guard stub.
 - Локальный cold-import выходил за стандартные 30 секунд (системные CA/torch).
   Для полного прогона использованы explicit certifi CA, собственный pycache в
