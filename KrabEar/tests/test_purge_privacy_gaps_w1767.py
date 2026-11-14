@@ -37,6 +37,8 @@ if str(PROJECT_ROOT) not in sys.path:
 from backend.translation_cache import TranslationCache  # noqa: E402
 from backend.vocabulary_store import VocabularyStore    # noqa: E402
 from backend.history_service import HistoryService      # noqa: E402
+from backend.plaintext_export_authorization import PlaintextExportDenied  # noqa: E402
+from backend.timeline_purge_guard import timeline_guard  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +196,11 @@ class MigrationBackupsPurgeTestCase(unittest.TestCase):
         store = FakeStore(data_dir=self._tmpdir)
         store.add_item("item-1")
         svc = HistoryService(store=store)
+        self.assertFalse((Path(self._tmpdir) / ".timeline-purge-guard").exists())
+        self.assertIsNotNone(getattr(store, "_timeline_purge_guard", None))
+        guard = timeline_guard(store)
+        with guard.snapshot() as generation:
+            pass
 
         # Симулируем ошибку — делаем store.data_dir несуществующим типом
         original_data_dir = store.data_dir
@@ -202,9 +209,14 @@ class MigrationBackupsPurgeTestCase(unittest.TestCase):
         result = svc.handle_purge_all_data({"confirm": True})
         store.data_dir = original_data_dir
 
-        # история должна быть удалена (primary step отработал до ошибки),
-        # но complete может быть False — не проверяем строго из-за flaкiness fake store
+        # История удалена, но ошибка backups означает неполную очистку.
         self.assertTrue(result.get("ok"), "purge должен вернуть ok=True даже при ошибке backups")
+        self.assertEqual(result["history_deleted"], 1)
+        self.assertTrue(store._tombstones)
+        self.assertIn("backups", result["errors"])
+        self.assertFalse(result["complete"])
+        with self.assertRaises(PlaintextExportDenied), guard.publish(generation):
+            pass
 
 
 # ---------------------------------------------------------------------------

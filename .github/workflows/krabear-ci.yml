@@ -28,7 +28,9 @@ jobs:
               - '.github/workflows/krabear-ci.yml'
 
   backend-tests:
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04's PortAudio fails initialization without a PulseAudio server.
+    # Revisit after https://github.com/PortAudio/portaudio/pull/1190 is available.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:

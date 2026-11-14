@@ -9,11 +9,47 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
+import tempfile
 import uuid
-from datetime import datetime, timezone
+from collections import Counter
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from xml.sax.saxutils import escape as _xml_sax_escape
 from xml.sax.saxutils import quoteattr as _xml_sax_quoteattr
+
+from backend.timeline_view import parse_timeline_timestamp, timeline_audio_duration
+
+
+def timeline_profile_namespace(store: Any) -> uuid.UUID:
+    """Постоянный случайный идентификатор профиля; удаляется вместе с timeline/."""
+    with store._lock():
+        directory = store.data_dir / "timeline"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        if directory.is_symlink():
+            raise ValueError("timeline directory must not be a symlink")
+        path = directory / "ical-namespace"
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
+            value = uuid.uuid4()
+            fd, temp = tempfile.mkstemp(prefix=".ical-namespace-", dir=directory)
+            try:
+                with os.fdopen(fd, "w", encoding="ascii") as stream:
+                    stream.write(str(value))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temp, path)
+            finally:
+                if os.path.exists(temp):
+                    os.unlink(temp)
+            return value
+        with os.fdopen(fd, encoding="ascii") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError("calendar namespace must be a regular file")
+            return uuid.UUID(stream.read(64).strip())
+
 
 # ---------------------------------------------------------------------------
 # Цветовая палитра для языков и блоков
@@ -54,23 +90,14 @@ def _block_color(block: dict[str, Any], index: int) -> str:
     return _PALETTE[index % len(_PALETTE)]
 
 
-def _parse_ts(ts: Any) -> datetime | None:
-    """Парсит ISO-8601 строку в datetime. None при ошибке."""
-    if not ts:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(ts).strip())
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    except (ValueError, TypeError):
-        return None
-
-
 def _ical_dt(dt: datetime) -> str:
     """Форматирует datetime в строку iCal DTSTART/DTEND (UTC, basic)."""
     utc = dt.astimezone(timezone.utc)
     return utc.strftime("%Y%m%dT%H%M%SZ")
+
+
+def _duration_label(seconds: float) -> str:
+    return f"{seconds:.3f}".rstrip("0").rstrip(".") + "s"
 
 
 def _fold_ics_line(line: str, max_octets: int = 75) -> str:
@@ -123,8 +150,9 @@ class TimelineExporter:
     ) -> str:
         """Генерирует SVG-визуализацию временной шкалы.
 
-        Каждый блок отображается в виде прямоугольника, ширина которого
-        пропорциональна ``items_count``.  Поддерживает пустой список —
+        Ширина блока соответствует интервалу UTC, высота — числу записей.
+        Пропуски видны как пробелы.
+        Поддерживает пустой список —
         возвращает SVG с заглушкой «No data».
 
         Args:
@@ -143,24 +171,44 @@ class TimelineExporter:
 
         # Горизонтальные отступы
         pad_x = 40
-        pad_y = 60
+        pad_y = 40
         bar_area_w = width - 2 * pad_x
         bar_area_h = height - pad_y - 40  # место для оси X и заголовка
 
-        total_items = sum(int(b.get("items_count", 0)) for b in blocks)
-        if total_items == 0:
-            total_items = len(blocks)  # равномерное распределение
+        intervals = []
+        for block in blocks:
+            start = parse_timeline_timestamp(block.get("start_time"))
+            end = parse_timeline_timestamp(block.get("end_time"))
+            intervals.append((start, end) if start is not None and end is not None and start < end else None)
+        valid_intervals = [interval for interval in intervals if interval is not None]
+        counts = [int(block.get("items_count", 0)) for block in blocks]
+        total_items = sum(counts)
+        peak_count = max(1, max(counts))
+        if valid_intervals:
+            axis_start = min(start for start, _ in valid_intervals)
+            axis_end = max(end for _, end in valid_intervals)
+            pixels_per_second = bar_area_w / (axis_end - axis_start).total_seconds()
+            date_format = "%Y/%m/%d" if axis_start.year != axis_end.year else "%m/%d"
+        else:
+            date_format = "%m/%d"
 
         # Строим rect элементы
         rects: list[str] = []
         labels: list[str] = []
-        x_cursor = pad_x
-
-        for idx, block in enumerate(blocks):
-            count = max(1, int(block.get("items_count", 1)))
-            frac = count / total_items
-            bar_w = max(2, bar_area_w * frac)
-            bar_h = bar_area_h
+        last_label_x = -float("inf")
+        for idx, (block, interval, count) in enumerate(zip(blocks, intervals, counts)):
+            include_hour = False
+            if interval is not None:
+                start, end = interval
+                x = pad_x + (start - axis_start).total_seconds() * pixels_per_second
+                bar_w = (end - start).total_seconds() * pixels_per_second
+                include_hour = end - start == timedelta(hours=1)
+            elif valid_intervals:
+                continue
+            else:
+                # Совместимость с прямыми вызовами без дат, где видны лишь подписи.
+                bar_w = bar_area_w / len(blocks)
+                x = pad_x + idx * bar_w
 
             color = _block_color(block, idx)
             start_ts = str(block.get("start_time", ""))
@@ -171,35 +219,39 @@ class TimelineExporter:
                 summary = str(block.get("summary_text", ""))[:40]
             lang_str = ", ".join(block.get("languages") or [])
             duration = block.get("total_duration_sec", 0)
+            bar_h = max(1, round(bar_area_h * count / peak_count))
 
             # Tooltip текст
             tooltip = (
                 f"{start_ts} | {count} items"
                 + (f" | {lang_str}" if lang_str else "")
-                + (f" | {duration:.0f}s" if duration else "")
+                + (f" | {_duration_label(duration)}" if duration else "")
                 + (f" | {summary}" if summary else "")
             )
 
             # Rect с hover opacity
             rect_id = f"b{idx}"
             rects.append(
-                f'  <rect id="{rect_id}" x="{x_cursor:.1f}" y="{pad_y}"'
-                f' width="{bar_w:.1f}" height="{bar_h}" fill="{color}"'
+                f'  <rect id="{rect_id}" x="{x:.6f}" y="{pad_y + bar_area_h - bar_h}"'
+                f' width="{bar_w:.6f}" height="{bar_h}" fill="{color}"'
                 f' rx="3" opacity="0.85">'
                 f"<title>{self._xml_escape(tooltip)}</title></rect>"
             )
 
             # Метка по оси X — короткая дата/час
-            label = self._short_label(start_ts)
-            if len(blocks) <= 30 or idx % max(1, len(blocks) // 10) == 0:
-                lx = x_cursor + bar_w / 2
+            lx = x + bar_w / 2
+            if lx - last_label_x >= 90:
+                dt = interval[0] if interval else parse_timeline_timestamp(start_ts)
+                if dt is None:
+                    label = start_ts[:10]
+                else:
+                    label = dt.strftime(date_format + (" %H:%M" if include_hour else ""))
                 labels.append(
-                    f'  <text x="{lx:.1f}" y="{pad_y + bar_h + 20}"'
+                    f'  <text x="{lx:.1f}" y="{pad_y + bar_area_h + 16}"'
                     f' text-anchor="middle" font-size="10" fill="#555">'
                     f"{self._xml_escape(label)}</text>"
                 )
-
-            x_cursor += bar_w
+                last_label_x = lx
 
         # CSS + defs
         css = """
@@ -213,15 +265,7 @@ class TimelineExporter:
         # Заголовок
         title_elem = (
             f'  <text x="{width // 2}" y="24" text-anchor="middle"'
-            f' font-size="14" fill="#333" class="title">Recording Timeline</text>'
-        )
-
-        # Ось Y — count info
-        y_axis_label = (
-            f'  <text x="{pad_x - 5}" y="{pad_y + bar_area_h // 2}"'
-            f' text-anchor="end" font-size="10" fill="#777"'
-            f' transform="rotate(-90,{pad_x - 5},{pad_y + bar_area_h // 2})">'
-            f"count</text>"
+            f' font-size="14" fill="#333" class="title">Recording Timeline (UTC)</text>'
         )
 
         # Нижняя подпись
@@ -231,7 +275,7 @@ class TimelineExporter:
             f"Total: {total_items} recordings in {len(blocks)} blocks</text>"
         )
 
-        body = "\n".join(rects + labels + [title_elem, y_axis_label, total_label])
+        body = "\n".join(rects + labels + [title_elem, total_label])
 
         svg = (
             f'<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -288,6 +332,7 @@ class TimelineExporter:
         self,
         items: list[dict[str, Any]],
         privacy_mode: bool = False,
+        namespace: uuid.UUID = uuid.NAMESPACE_URL,
     ) -> str:
         """Экспортирует список блоков (или элементов истории) в iCalendar (RFC 5545).
 
@@ -316,28 +361,47 @@ class TimelineExporter:
 
         now_str = _ical_dt(datetime.now(tz=timezone.utc))
 
+        occurrences: Counter[str] = Counter()
         for item in items:
-            uid = str(uuid.uuid4()) + "@krabear"
-
             # Определяем DTSTART / DTEND
             start_ts = item.get("start_time") or item.get("ts")
             end_ts = item.get("end_time")
 
-            start_dt = _parse_ts(start_ts)
+            start_dt = parse_timeline_timestamp(start_ts)
             if start_dt is None:
                 continue  # пропускаем без даты
 
-            if end_ts:
-                end_dt = _parse_ts(end_ts)
+            if end_ts is not None:
+                end_dt = parse_timeline_timestamp(end_ts)
+            elif item.get("start_time"):
+                continue
             else:
                 # Для элементов истории: start + duration
-                duration = float(item.get("audio_duration_sec") or 0)
-                from datetime import timedelta
-                end_dt = start_dt + timedelta(seconds=max(duration, 60))
+                duration = timeline_audio_duration(item.get("audio_duration_sec"))
+                try:
+                    end_dt = start_dt + timedelta(seconds=duration or 60)
+                except OverflowError:
+                    continue
+            if end_dt is None or end_dt <= start_dt:
+                continue
 
-            if end_dt is None:
-                from datetime import timedelta
-                end_dt = start_dt + timedelta(hours=1)
+            # iCalendar хранит целые секунды. Округляем конец вверх,
+            # чтобы короткое событие оставалось положительным и покрывало запись.
+            if end_dt.microsecond:
+                try:
+                    calendar_end = end_dt.replace(microsecond=0) + timedelta(seconds=1)
+                except OverflowError:
+                    continue
+            else:
+                calendar_end = end_dt
+
+            # Блок определяется границами, а не изменяемым составом записей.
+            # У отдельных записей сохраняем их ID для различения совпадающих времён.
+            item_id = None if item.get("start_time") else item.get("id")
+            identity = json.dumps([start_dt.isoformat(), end_dt.isoformat(), item_id])
+            occurrences[identity] += 1
+            name = f"krabear:timeline:{identity}:{occurrences[identity]}"
+            uid = f"{uuid.uuid5(namespace, name)}@krabear"
 
             # SUMMARY — F2: privacy guard
             if privacy_mode:
@@ -361,7 +425,7 @@ class TimelineExporter:
                 desc_parts.append(f"Recordings: {count}")
             duration_s = item.get("total_duration_sec")
             if duration_s:
-                desc_parts.append(f"Duration: {float(duration_s):.0f}s")
+                desc_parts.append(f"Duration: {_duration_label(float(duration_s))}")
             description_escaped = self._ical_escape(" | ".join(desc_parts)) if desc_parts else ""
 
             # F1: RFC 5545 §3.1 — fold all content lines at 75 octets
@@ -370,7 +434,7 @@ class TimelineExporter:
                 _fold_ics_line(f"UID:{uid}"),
                 _fold_ics_line(f"DTSTAMP:{now_str}"),
                 _fold_ics_line(f"DTSTART:{_ical_dt(start_dt)}"),
-                _fold_ics_line(f"DTEND:{_ical_dt(end_dt)}"),
+                _fold_ics_line(f"DTEND:{_ical_dt(calendar_end)}"),
                 _fold_ics_line(f"SUMMARY:{summary_escaped}"),
             ]
             if description_escaped:
@@ -441,15 +505,3 @@ class TimelineExporter:
         escaped = escaped.replace("\r\n", "\n").replace("\r", "\n")
         escaped = escaped.replace("\n", "\\n")
         return escaped
-
-    @staticmethod
-    def _short_label(ts: str) -> str:
-        """Короткая метка для оси X из ISO-строки."""
-        try:
-            dt = datetime.fromisoformat(ts)
-            # Если время != полночь — показываем час
-            if dt.hour != 0 or dt.minute != 0:
-                return dt.strftime("%m/%d %H:%M")
-            return dt.strftime("%m/%d")
-        except (ValueError, TypeError):
-            return ts[:10] if ts else ""

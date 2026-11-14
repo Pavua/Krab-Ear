@@ -21,6 +21,7 @@ from backend.search_history import SearchHistoryManager
 from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
 from backend.timeline_export import TimelineExporter
+from core.atomic_io import atomic_write_text
 from backend.auto_deduplication import AutoDeduplicator
 from backend.metadata_enricher import MetadataEnricher
 from backend.recording_insights import RecordingInsightsGenerator
@@ -157,6 +158,7 @@ import backend.cloud_rewriter as cloud_rewriter
 
 import argparse
 from datetime import datetime, timedelta, timezone
+from uuid import uuid4
 import json
 import logging
 import math
@@ -5598,16 +5600,30 @@ class BackendService:
             )
         return resolved
 
-    def _write_timeline_export(self, context: object, file_path: Path, content: str) -> None:
-        """Одна свежая авторизация включает mkdir и запись выбранного файла."""
-        def write_once() -> None:
-            file_path.parent.mkdir(parents=True, exist_ok=True)
-            file_path.write_text(content, encoding="utf-8")
+    def _timeline_snapshot(self, limit: int, *, include_namespace: bool = False):
+        from backend.timeline_purge_guard import timeline_guard
+        from backend.timeline_export import timeline_profile_namespace
+        with timeline_guard(self.store).snapshot() as generation:
+            with self.store._lock():
+                items = self.store._load_active_items_unlocked()[:limit]
+                namespace = timeline_profile_namespace(self.store) if include_namespace else None
+        return items, namespace, generation
 
-        run_export_write(
-            getattr(self, "_plaintext_export_authorizer", None), context,
-            BackendSink.TIMELINE, write_once,
-        )
+    def _write_timeline_export(self, context: object, directory: Path, ext: str, content: str, generation: int) -> Path:
+        """Публикует целый файл по отдельному пути после проверки разрешения."""
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        file_path = directory / f"timeline_{ts}_{uuid4().hex}.{ext}"
+
+        def write_once() -> None:
+            atomic_write_text(file_path, content)
+
+        from backend.timeline_purge_guard import timeline_guard
+        with timeline_guard(self.store).publish(generation):
+            run_export_write(
+                getattr(self, "_plaintext_export_authorizer", None), context,
+                BackendSink.TIMELINE, write_once,
+            )
+        return file_path
 
     @staticmethod
     def _timeline_export_denied(reason: str) -> dict[str, Any]:
@@ -5739,9 +5755,6 @@ class BackendService:
             return {"ok": False, "reason": "privacy_mode_active",
                     "error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
 
-        from pathlib import Path
-        from datetime import datetime, timezone
-
         output_dir_param = params.get("output_dir")
         try:
             out_dir = self._resolve_timeline_export_dir(output_dir_param)
@@ -5753,8 +5766,10 @@ class BackendService:
         width = max(200, int(params.get("width", 1200)))
         height = max(100, int(params.get("height", 400)))
 
-        with self.store._lock():
-            raw_items = self.store._load_active_items_unlocked()[:limit]
+        try:
+            raw_items, _, generation = self._timeline_snapshot(limit)
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]
@@ -5765,11 +5780,8 @@ class BackendService:
             privacy_mode=bool(settings.get("privacy_mode_enabled"))
         )
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        filename = f"timeline_{ts}.svg"
-        file_path = Path(out_dir) / filename
         try:
-            self._write_timeline_export(context, file_path, svg_content)
+            file_path = self._write_timeline_export(context, out_dir, "svg", svg_content, generation)
         except PlaintextExportDenied as exc:
             return self._timeline_export_denied(exc.reason)
 
@@ -5799,9 +5811,6 @@ class BackendService:
             return {"ok": False, "reason": "privacy_mode_active",
                     "error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
 
-        from pathlib import Path
-        from datetime import datetime, timezone
-
         output_dir_param = params.get("output_dir")
         try:
             out_dir = self._resolve_timeline_export_dir(output_dir_param)
@@ -5811,8 +5820,10 @@ class BackendService:
         group_by = str(params.get("group_by", "day")).strip()
         limit = max(1, min(int(params.get("limit", 500)), 5000))
 
-        with self.store._lock():
-            raw_items = self.store._load_active_items_unlocked()[:limit]
+        try:
+            raw_items, _, generation = self._timeline_snapshot(limit)
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
         block_dicts = [b.to_dict() for b in blocks]
@@ -5822,11 +5833,8 @@ class BackendService:
             privacy_mode=bool(settings.get("privacy_mode_enabled"))
         )
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        filename = f"timeline_{ts}.json"
-        file_path = Path(out_dir) / filename
         try:
-            self._write_timeline_export(context, file_path, json_content)
+            file_path = self._write_timeline_export(context, out_dir, "json", json_content, generation)
         except PlaintextExportDenied as exc:
             return self._timeline_export_denied(exc.reason)
 
@@ -5856,9 +5864,6 @@ class BackendService:
             return {"ok": False, "reason": "privacy_mode_active",
                     "error": {"code": "privacy_mode", "message": "Экспорт отключён в режиме приватности"}}
 
-        from pathlib import Path
-        from datetime import datetime, timezone
-
         output_dir_param = params.get("output_dir")
         try:
             out_dir = self._resolve_timeline_export_dir(output_dir_param)
@@ -5868,22 +5873,21 @@ class BackendService:
         group_by = str(params.get("group_by", "day")).strip()
         limit = max(1, min(int(params.get("limit", 500)), 5000))
 
-        with self.store._lock():
-            raw_items = self.store._load_active_items_unlocked()[:limit]
+        try:
+            raw_items, namespace, generation = self._timeline_snapshot(limit, include_namespace=True)
+        except PlaintextExportDenied as exc:
+            return self._timeline_export_denied(exc.reason)
 
         blocks = self._timeline_view.generate_timeline(raw_items, group_by=group_by)
-        block_dicts = [b.to_dict() for b in blocks]
         # wave-1770 HIGH (defense-in-depth): pass privacy_mode to exporter.
         ical_content = self._timeline_exporter.export_ical(
-            block_dicts,
-            privacy_mode=bool(settings.get("privacy_mode_enabled"))
+            [block.to_dict() for block in blocks],
+            privacy_mode=bool(settings.get("privacy_mode_enabled")),
+            namespace=namespace,
         )
 
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        filename = f"timeline_{ts}.ics"
-        file_path = Path(out_dir) / filename
         try:
-            self._write_timeline_export(context, file_path, ical_content)
+            file_path = self._write_timeline_export(context, out_dir, "ics", ical_content, generation)
         except PlaintextExportDenied as exc:
             return self._timeline_export_denied(exc.reason)
 
