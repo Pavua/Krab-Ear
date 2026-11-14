@@ -164,13 +164,14 @@ def test_actual_ipc_handler_returns_owner_snapshot_without_warmup(monkeypatch):
     assert method({})["owner"] == "backend"
 
 
-def test_actual_dispatch_routes_new_ipc_without_constructing_backend(monkeypatch):
+def test_actual_dispatch_routes_new_ipc_without_constructing_backend(monkeypatch, tmp_path):
     from backend.service import BackendService
     service, _, _, _, _ = owner()
     monkeypatch.setenv("KRAB_EAR_MLX_WHISPER_WORKER", "1")
     # Остальные dispatch collaborators не участвуют. Исполняем настоящий
     # builder/request/handler/engine, без BackendService.__init__/warmup.
     shell = Mock()
+    shell.store = SimpleNamespace(data_dir=tmp_path)
     shell._stt_mgmt_svc = service
     shell._request_signer = None
     shell._ipc_throttle = None

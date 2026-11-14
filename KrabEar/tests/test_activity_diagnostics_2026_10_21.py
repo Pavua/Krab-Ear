@@ -1,8 +1,10 @@
 """Реальные metadata helpers без BackendService init, моделей и аудиоустройств."""
+import tempfile
 import threading
 import time
 import unittest
 from unittest.mock import Mock, patch
+from types import SimpleNamespace
 
 from backend.recorder import AudioRecorder
 from backend.recording_core_service import RecordingCoreService
@@ -145,7 +147,10 @@ class ComponentActivityTests(unittest.TestCase):
 
     def test_actual_dispatch_uses_additive_diagnostic_handler(self):
         from backend.service import BackendService
+        profile = tempfile.TemporaryDirectory()
+        self.addCleanup(profile.cleanup)
         shell = Mock()
+        shell.store = SimpleNamespace(data_dir=profile.name)
         shell._recording_core_svc, shell._meeting_svc = self.recording(), self.meeting()
         shell._memory_ledger.read_all.return_value = {}
         shell._memory_conductor.get_diagnostics.return_value = {}
