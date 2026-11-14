@@ -20,6 +20,7 @@ class TimelinePurgeGuard:
     def __init__(self, directory):
         self.directory = directory
         self.lock = threading.Lock()
+        self._operation_local = threading.local()
 
     @contextmanager
     def _locked(self, *, repair=False):
@@ -75,14 +76,85 @@ class TimelinePurgeGuard:
             raise OSError("short timeline purge epoch write")
         os.fsync(fd)
 
+    _PENDING = ".purge-pending"
+
+    def recovery_pending(self):
+        # lstat видит и повреждённый/висячий marker: неизвестное не значит clean.
+        try:
+            os.lstat(os.path.join(self.directory, self._PENDING))
+        except FileNotFoundError:
+            return False
+        return True
+
+    def _sync_directory(self):
+        fd = os.open(self.directory, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
+    def _begin_pending(self):
+        path = os.path.join(self.directory, self._PENDING)
+        flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise RuntimeError("purge_recovery_required")
+            # Сам факт существования означает intent; содержимое не имеет путей/PII.
+            # Даже пустой файл после прерывания создания остаётся pending.
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        self._sync_directory()
+
+    def run_purge(self, callback, *, only_pending=False, after_complete=None):
+        # Backend wrapper и HistoryService образуют ОДНУ операцию. Только внешний
+        # scope снимает intent, после RAM-cleanup и результата всех шагов.
+        if getattr(self._operation_local, "active", False):
+            return callback()
+        with self._locked(repair=True) as (fd, _):
+            if only_pending and not self.recovery_pending():
+                return None
+            self._begin_pending()
+            self._write_epoch(fd, secrets.token_bytes(self._SIZE))
+            self._operation_local.active = True
+            try:
+                result = callback()
+                if (isinstance(result, dict) and result.get("complete") is True
+                        and result.get("ok") is not False and not result.get("errors")):
+                    self._sync_directory()
+                    os.unlink(os.path.join(self.directory, self._PENDING))
+                    try:
+                        self._sync_directory()
+                    except BaseException:
+                        self._begin_pending()
+                        raise
+                    # Разморозить backup до отпускания lock: следующий purge
+                    # не должен получить запоздалый clear_purged предыдущего.
+                    if after_complete is not None:
+                        after_complete()
+                return result
+            finally:
+                self._operation_local.active = False
+
+    def _deny_pending(self):
+        if self.recovery_pending():
+            raise PlaintextExportDenied("purge_recovery_required")
+
     @contextmanager
     def snapshot(self):
         with self._locked(repair=True) as (_, epoch):
+            self._deny_pending()
             yield epoch
 
     @contextmanager
     def publish(self, generation):
         with self._locked() as (_, epoch):
+            self._deny_pending()
             if epoch != generation:
                 raise PlaintextExportDenied("timeline_purge_in_progress")
             yield
@@ -119,6 +191,5 @@ def guard_timeline_purge(method):
         confirm = params.get("confirm")
         if confirm is not True and confirm != "PURGE_ALL":
             return method(self, params)
-        with timeline_guard(self.store).purge():
-            return method(self, params)
+        return timeline_guard(self.store).run_purge(lambda: method(self, params))
     return wrapped

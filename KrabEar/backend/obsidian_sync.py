@@ -773,8 +773,20 @@ class ObsidianSyncManager:
             folder = self._folder
 
         if vault_path is None:
-            logger.debug("ObsidianSyncManager.purge_all_synced_files: vault не настроен, no-op")
+            # Loader терпим к отсутствующему vault/битому JSON. При wipe это
+            # неизвестное состояние: нельзя забывать оставшиеся внешние копии.
+            if self._state_path is not None:
+                try:
+                    persisted = json.loads(self._state_path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    return 0
+                if (not isinstance(persisted, dict)
+                        or persisted.get("vault_path") not in (None, "")):
+                    raise OSError("obsidian purge: configured vault unavailable")
+                self._state_path.unlink(missing_ok=True)
             return 0
+        if not vault_path.is_dir():
+            raise OSError("obsidian purge: configured vault unavailable")
 
         # W1768 (MED, path-traversal): повторно проверяем тот же инвариант перед
         # удалением — folder перезагружается из state-файла и не является
@@ -811,6 +823,11 @@ class ObsidianSyncManager:
                     )
                     failed_paths.append(str(md_path))
 
+        if not failed_paths and target_dir.is_dir():
+            from backend.encrypted_snapshot import _fsync_dir
+            _fsync_dir(target_dir)
+
+        # При partial failure сохраняем адрес vault для повтора после рестарта.
         # wave-32 LOW (purge-gap): delete obsidian_sync.json so vault_path and
         # last_sync_ts do not survive a privacy-wipe across restarts. The file
         # persists sync metadata (vault location + last-sync timestamp); removing
@@ -820,7 +837,7 @@ class ObsidianSyncManager:
         # not be loaded from disk on next startup (clean slate).
         with self._lock:
             self._last_sync_ts = None
-            if self._state_path is not None:
+            if self._state_path is not None and not failed_paths:
                 try:
                     self._state_path.unlink(missing_ok=True)
                     logger.info(

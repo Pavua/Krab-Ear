@@ -514,7 +514,7 @@ class _StubHistory:
             self.order_ref.append("purge")
         if self.raise_exc:
             raise RuntimeError("boom")
-        return {"ok": True, "purged": True}
+        return {"ok": True, "purged": True, "complete": True}
 
 
 class _ServicePurgeShim:
@@ -539,6 +539,13 @@ class TestServiceWiring(unittest.TestCase):
             from backend.service import BackendService
         except Exception as exc:  # pragma: no cover - defensive (no-mlx edge)
             self.skipTest(f"backend.service import недоступен: {exc!r}")
+        from types import SimpleNamespace
+        self._profile = tempfile.TemporaryDirectory()
+        self.addCleanup(self._profile.cleanup)
+        shim.store = SimpleNamespace(data_dir=Path(self._profile.name))
+        shim._hotword_detector = SimpleNamespace(clear=lambda: None)
+        shim._transcription_queue = SimpleNamespace(clear=lambda: None)
+        shim._usage_tracker = SimpleNamespace(clear_all=lambda: None)
         func = BackendService._handle_purge_all_data
         return lambda params: func(shim, params)
 
@@ -549,25 +556,25 @@ class TestServiceWiring(unittest.TestCase):
         shim = _ServicePurgeShim(hist, ab)
         handler = self._bound_handler(shim)
 
-        out = handler({})
-        self.assertEqual(out, {"ok": True, "purged": True})
+        out = handler({"confirm": True})
+        self.assertEqual(out, {"ok": True, "purged": True, "complete": True})
         self.assertEqual(hist.called, 1)
         self.assertEqual(ab.set_calls, 1)
         self.assertEqual(ab.clear_calls, 1)
         # Порядок: set → purge → clear.
         self.assertEqual(ab.order, ["set", "purge", "clear"])
 
-    def test_clear_purged_called_even_on_exception(self) -> None:
-        """Если purge-тело бросает — clear_purged всё равно вызывается (finally)."""
+    def test_backup_stays_frozen_on_exception(self) -> None:
+        """Незавершённая очистка не разрешает возобновить backup."""
         ab = _StubAutoBackup()
         hist = _StubHistory(raise_exc=True)
         shim = _ServicePurgeShim(hist, ab)
         handler = self._bound_handler(shim)
 
         with self.assertRaises(RuntimeError):
-            handler({})
+            handler({"confirm": True})
         self.assertEqual(ab.set_calls, 1)
-        self.assertEqual(ab.clear_calls, 1)  # снят несмотря на исключение
+        self.assertEqual(ab.clear_calls, 0)  # pending сохраняет запрет backup
 
 
 if __name__ == "__main__":

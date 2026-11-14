@@ -12,6 +12,7 @@ Covers:
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 import tempfile
 import unittest
 from pathlib import Path
@@ -182,7 +183,7 @@ class TestBackendServiceHotwordPurgeWiring(unittest.TestCase):
         # for _handle_purge_all_data, to avoid heavy imports (mlx, sounddevice, etc.)
         class FakeHistoryService:
             def handle_purge_all_data(self, params):
-                return {"ok": True, "history_deleted": 0}
+                return {"ok": True, "history_deleted": 0, "complete": True}
 
         class FakeAutoBackup:
             def set_purged(self):
@@ -198,6 +199,7 @@ class TestBackendServiceHotwordPurgeWiring(unittest.TestCase):
             self.assertEqual(len(detector.get_hotwords()), 1)
 
             fake_svc = MagicMock()
+            fake_svc.store = SimpleNamespace(data_dir=Path(tmpdir))
             fake_svc._auto_backup = FakeAutoBackup()
             fake_svc._history = FakeHistoryService()
             fake_svc._hotword_detector = detector
@@ -241,6 +243,7 @@ class TestBackendServiceHotwordPurgeWiring(unittest.TestCase):
             detector.add_hotword("should_survive")
 
             fake_svc = MagicMock()
+            fake_svc.store = SimpleNamespace(data_dir=Path(tmpdir))
             fake_svc._auto_backup = FakeAutoBackup()
             fake_svc._history = FakeHistoryService()
             fake_svc._hotword_detector = detector
