@@ -2621,6 +2621,7 @@ class HistoryService:
             encryption_key_shredded,
         ) = self._purge_final_barrier(secondary_errors, _data_dir)
         self._purge_temp_uploads(secondary_errors, _data_dir)
+        self._purge_verify_cleanup(secondary_errors, _data_dir)
 
         # --- A5.2c1: пост-фактум флага шифрования (НЕ переключаем его) ---
         # Purge уничтожает данные, но политику не меняет: решение владельца
@@ -3239,7 +3240,7 @@ class HistoryService:
             _backups_dir = Path(self.store.data_dir) / "backups"
             if _backups_dir.is_dir():
                 backups_deleted = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
-                _shutil.rmtree(_backups_dir, ignore_errors=True)
+                _shutil.rmtree(_backups_dir, ignore_errors=False)
                 logger.info(
                     "purge_all_data: удалено %d migration backup директорий из %s",
                     backups_deleted,
@@ -3257,7 +3258,7 @@ class HistoryService:
             import shutil as _shutil
             _shares_dir = Path(self.store.data_dir) / "shares"
             if _shares_dir.is_dir():
-                _shutil.rmtree(_shares_dir, ignore_errors=True)
+                _shutil.rmtree(_shares_dir, ignore_errors=False)
                 logger.info("purge_all_data: удалена директория shares/")
             # wave-33 A1 (HIGH): rmtree удаляет файлы, но SharingManager._index —
             # RAM-копия с полным текстом транскрипций — переживает purge и продолжает
@@ -3276,7 +3277,7 @@ class HistoryService:
             import shutil as _shutil
             _tmp_meeting_dir = Path(self.store.data_dir) / "tmp_meeting"
             if _tmp_meeting_dir.is_dir():
-                _shutil.rmtree(_tmp_meeting_dir, ignore_errors=True)
+                _shutil.rmtree(_tmp_meeting_dir, ignore_errors=False)
                 logger.info("purge_all_data: удалена директория tmp_meeting/")
         except Exception:
             logger.warning("purge_all_data: удаление tmp_meeting/ не удалось", exc_info=True)
@@ -3341,7 +3342,7 @@ class HistoryService:
                 import shutil as _shutil
                 _sb_dir = self._settings_backup.get_backup_dir()
                 if _sb_dir is not None and Path(_sb_dir).is_dir():
-                    _shutil.rmtree(Path(_sb_dir), ignore_errors=True)
+                    _shutil.rmtree(Path(_sb_dir), ignore_errors=False)
                     logger.info("purge_all_data: settings_backups/ удалён: %s", _sb_dir)
             except Exception:
                 logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
@@ -3363,7 +3364,7 @@ class HistoryService:
             import shutil as _shutil
             _audio_dir = _data_dir / "audio"
             if _audio_dir.is_dir():
-                _shutil.rmtree(_audio_dir, ignore_errors=True)
+                _shutil.rmtree(_audio_dir, ignore_errors=False)
                 logger.info("purge_all_data: удалена директория audio/")
         except Exception:
             logger.warning("purge_all_data: удаление audio/ не удалось", exc_info=True)
@@ -3376,7 +3377,7 @@ class HistoryService:
             import shutil as _shutil
             _failed_dir = _data_dir / "failed_recordings"
             if _failed_dir.is_dir():
-                _shutil.rmtree(_failed_dir, ignore_errors=True)
+                _shutil.rmtree(_failed_dir, ignore_errors=False)
                 logger.info("purge_all_data: удалена директория failed_recordings/")
         except Exception:
             logger.warning("purge_all_data: удаление failed_recordings/ не удалось", exc_info=True)
@@ -3389,7 +3390,7 @@ class HistoryService:
             import shutil as _shutil
             _debug_wav_dir = _data_dir / "debug_duration_wav"
             if _debug_wav_dir.is_dir():
-                _shutil.rmtree(_debug_wav_dir, ignore_errors=True)
+                _shutil.rmtree(_debug_wav_dir, ignore_errors=False)
                 logger.info("purge_all_data: удалена директория debug_duration_wav/")
         except Exception:
             logger.warning("purge_all_data: удаление debug_duration_wav/ не удалось", exc_info=True)
@@ -3403,7 +3404,7 @@ class HistoryService:
         try:
             import shutil as _shutil
             if (_data_dir / "exports").is_dir():
-                _shutil.rmtree(_data_dir / "exports", ignore_errors=True)
+                _shutil.rmtree(_data_dir / "exports", ignore_errors=False)
                 logger.info("purge_all_data: удалена директория exports/")
         except Exception:
             logger.warning("purge_all_data: удаление exports/ не удалось", exc_info=True)
@@ -3411,7 +3412,7 @@ class HistoryService:
         try:
             import shutil as _shutil
             if (_data_dir / "auto_exports").is_dir():
-                _shutil.rmtree(_data_dir / "auto_exports", ignore_errors=True)
+                _shutil.rmtree(_data_dir / "auto_exports", ignore_errors=False)
                 logger.info("purge_all_data: удалена директория auto_exports/")
         except Exception:
             logger.warning("purge_all_data: удаление auto_exports/ не удалось", exc_info=True)
@@ -3908,6 +3909,30 @@ class HistoryService:
                     self.store._history_crypto_initialized = False
                     self.store._history_crypto_instance = None
         return deletion_ledger_purged, deletion_ledger_ids_preserved, encryption_key_shredded
+
+    def _purge_verify_cleanup(self, errors, directory):
+        """Legacy clear()-методы могут проглатывать unlink: intent нельзя снять."""
+        if directory is None:
+            _flag_step_error(errors, "purge_verification")
+            return
+        checks = (
+            (self._semantic_searcher, ("embeddings.npy", "embeddings_index.json")),
+            (self._vocabulary_store, ("vocabulary.json",)),
+            (self._webhook_manager, ("webhooks.json",)),
+            (self._translation_cache, ("translation_cache.json",)),
+        )
+        for owner, names in checks:
+            if owner is None:
+                continue
+            for name in names:
+                try:
+                    os.lstat(directory / name)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    _flag_step_error(errors, "purge_verification")
+                else:
+                    _flag_step_error(errors, "purge_verification")
 
     def _purge_temp_uploads(
         self, secondary_errors: list[str], _data_dir: Path | None

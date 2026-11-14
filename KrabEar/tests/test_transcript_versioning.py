@@ -796,3 +796,12 @@ class TestTranscriptVersioningDiffPrivacyGateW1770(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_explicit_purge_truncates_damaged_records(tmp_path):
+    from backend.transcript_versioning import TranscriptVersionManager
+    manager = TranscriptVersionManager(tmp_path)
+    path = tmp_path / 'transcript_versions.ndjson'
+    path.write_text('{"text": "synthetic interrupted record')
+    manager.clear_all()
+    assert path.read_bytes() == b''

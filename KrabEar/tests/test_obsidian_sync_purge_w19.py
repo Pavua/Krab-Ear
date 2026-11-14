@@ -195,3 +195,62 @@ class TestConfigureVaultPathAuditLog(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_failed_purge_keeps_vault_location_for_restart(tmp_path):
+    from backend.obsidian_sync import ObsidianSyncManager
+    vault = tmp_path / 'vault'
+    vault.mkdir()
+    directory = tmp_path / 'profile'
+    directory.mkdir()
+    manager = ObsidianSyncManager(data_dir=directory)
+    manager.configure(str(vault))
+    target = vault / manager._folder / 'synthetic.md'
+    target.parent.mkdir(exist_ok=True)
+    target.write_text('synthetic')
+    original = Path.unlink
+
+    def fail_one(path, *args, **kwargs):
+        if path == target:
+            raise OSError('synthetic')
+        return original(path, *args, **kwargs)
+
+    import pytest
+    with patch.object(Path, 'unlink', fail_one), pytest.raises(OSError):
+        manager.purge_all_synced_files()
+    assert (directory / 'obsidian_sync.json').is_file()
+    reopened = ObsidianSyncManager(data_dir=directory)
+    reopened.purge_all_synced_files()
+    assert not target.exists()
+    assert not (directory / 'obsidian_sync.json').exists()
+
+
+def test_purge_keeps_unavailable_vault_pending(tmp_path):
+    from backend.obsidian_sync import ObsidianSyncManager
+    import pytest
+    vault = tmp_path / 'vault'
+    vault.mkdir()
+    directory = tmp_path / 'profile'
+    directory.mkdir()
+    manager = ObsidianSyncManager(data_dir=directory)
+    manager.configure(str(vault))
+    target = vault / manager._folder / 'synthetic.md'
+    target.parent.mkdir(exist_ok=True)
+    target.write_text('synthetic')
+    unavailable = tmp_path / 'unavailable'
+    vault.rename(unavailable)
+    reopened = ObsidianSyncManager(data_dir=directory)
+    with pytest.raises(OSError):
+        reopened.purge_all_synced_files()
+    assert (directory / 'obsidian_sync.json').is_file()
+    unavailable.rename(vault)
+    ObsidianSyncManager(data_dir=directory).purge_all_synced_files()
+    assert not target.exists()
+
+
+def test_purge_rejects_unreadable_vault_configuration(tmp_path):
+    from backend.obsidian_sync import ObsidianSyncManager
+    import pytest
+    (tmp_path / 'obsidian_sync.json').write_text('{broken')
+    with pytest.raises((OSError, ValueError)):
+        ObsidianSyncManager(data_dir=tmp_path).purge_all_synced_files()

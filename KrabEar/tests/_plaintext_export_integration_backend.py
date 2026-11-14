@@ -329,6 +329,27 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                 store.save_settings({"history_encryption_enabled": True, "privacy_mode_enabled": False})
             # Encrypted reopen: никакого pre-ready чтения journal/seed/reset
             # settings, которое могло бы маскировать ошибку production IPC.
+            recovery_fault = root / "purge-recovery-fault"
+            if recovery_fault.exists():
+                from backend.history_service import HistoryService
+                mode = recovery_fault.read_text().strip()
+                if mode == "crash":
+                    stack.enter_context(mock.patch.object(
+                        HistoryService, "_purge_tombstone_history", lambda *_a: os._exit(89)))
+                elif mode == "partial":
+                    def partial(_self, errors):
+                        errors.append("synthetic_recovery_failure")
+                        return 0, 0
+                    stack.enter_context(mock.patch.object(
+                        HistoryService, "_purge_early_disk_artifacts", partial))
+                else:
+                    raise AssertionError("invalid synthetic recovery fault")
+                original_init_stores = BackendService._init_local_text_stores
+                def observed_init_stores(*args, **kwargs):
+                    (root / "ordinary-runtime-started").touch()
+                    return original_init_stores(*args, **kwargs)
+                stack.enter_context(mock.patch.object(
+                    BackendService, "_init_local_text_stores", observed_init_stores))
             engine = SimpleNamespace(quality_profile="balanced", current_model="fixture-model",
                                      _llm_rewriter=None, _settings_get=None,
                                      _resolve_diarization_device=lambda: "cpu", warmup=lambda: None)
@@ -351,6 +372,23 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                 from _history_crypto_test_helpers import save_settings_with_synthetic_key
                 save_settings_with_synthetic_key(store, {"history_encryption_enabled": True, "privacy_mode_enabled": False})
             service._settings_svc.invalidate_cache()
+            # Только synthetic crash fixture; production не читает этот файл.
+            crash_file = root / "purge-crash-mode"
+            if crash_file.exists():
+                crash_mode = crash_file.read_text().strip()
+                if crash_mode == "before-history":
+                    service._history._purge_tombstone_history = lambda *_a: os._exit(86)
+                elif crash_mode == "after-history":
+                    service._history._purge_early_disk_artifacts = lambda *_a: os._exit(87)
+                elif crash_mode == "after-history-service":
+                    service._hotword_detector.clear = lambda: os._exit(88)
+                elif crash_mode == "partial":
+                    def partial_purge(errors):
+                        errors.append("synthetic_partial_purge")
+                        return 0, 0
+                    service._history._purge_early_disk_artifacts = partial_purge
+                else:
+                    raise AssertionError("invalid synthetic purge crash mode")
             original_dispatch = service.handle_request
             reached = threading.Event()
             timeline_reached = threading.Event()

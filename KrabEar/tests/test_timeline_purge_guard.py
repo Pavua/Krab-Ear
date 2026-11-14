@@ -81,8 +81,9 @@ def test_refusal_does_not_invalidate_and_exception_releases_purge(tmp_path):
     with pytest.raises(PlaintextExportDenied):
         with gate.publish(before):
             pass
-    with gate.snapshot():
-        pass
+    with pytest.raises(PlaintextExportDenied):
+        with gate.snapshot():
+            pass
 
 
 def test_corrupt_marker_denies_old_publication_and_purge_recovers(tmp_path):
@@ -138,3 +139,79 @@ def test_epoch_fsync_failure_prevents_purge_body(tmp_path):
             with gate.purge():
                 entered = True
     assert not entered
+
+
+def test_partial_purge_blocks_snapshot_until_successful_retry(tmp_path):
+    gate = timeline_guard(SimpleNamespace(data_dir=tmp_path))
+    gate.run_purge(lambda: {"complete": False, "errors": ["synthetic"]})
+    assert gate.recovery_pending()
+    with pytest.raises(PlaintextExportDenied):
+        with gate.snapshot():
+            pass
+    gate.run_purge(lambda: {"complete": True, "errors": []})
+    assert not gate.recovery_pending()
+    with gate.snapshot():
+        pass
+
+
+def test_nested_purge_does_not_commit_before_outer_cleanup(tmp_path):
+    gate = timeline_guard(SimpleNamespace(data_dir=tmp_path))
+
+    def outer():
+        gate.run_purge(lambda: {"complete": True})
+        assert gate.recovery_pending()
+        raise RuntimeError("synthetic wrapper failure")
+
+    with pytest.raises(RuntimeError):
+        gate.run_purge(outer)
+    assert gate.recovery_pending()
+
+
+def test_pending_directory_fsync_failure_prevents_any_deletion(tmp_path):
+    gate = timeline_guard(SimpleNamespace(data_dir=tmp_path))
+    from unittest.mock import Mock
+    wipe = Mock()
+    with patch.object(gate, "_sync_directory", side_effect=OSError("synthetic")):
+        with pytest.raises(OSError):
+            gate.run_purge(wipe)
+    wipe.assert_not_called()
+    assert gate.recovery_pending()
+
+
+def test_pending_symlink_fails_closed_without_touching_target(tmp_path):
+    gate = timeline_guard(SimpleNamespace(data_dir=tmp_path))
+    target = tmp_path / "target"
+    target.write_text("synthetic")
+    (tmp_path / ".purge-pending").symlink_to(target)
+    with pytest.raises(OSError):
+        gate.run_purge(lambda: {"complete": True})
+    assert target.read_text() == "synthetic"
+    assert gate.recovery_pending()
+
+
+def test_backup_resume_stays_inside_purge_lock(tmp_path):
+    import threading
+    gate = timeline_guard(SimpleNamespace(data_dir=tmp_path))
+    entered = threading.Event()
+    finished = threading.Event()
+
+    def next_purge():
+        entered.set()
+        gate.run_purge(lambda: {"complete": True})
+        finished.set()
+
+    worker = threading.Thread(target=next_purge)
+
+    def resume_backup():
+        assert not gate.recovery_pending()
+        worker.start()
+        assert entered.wait(2)
+        assert not finished.wait(0.1)
+
+    try:
+        gate.run_purge(lambda: {"complete": True}, after_complete=resume_backup)
+        assert finished.wait(2)
+    finally:
+        if worker.ident is not None:
+            worker.join(2)
+    assert not worker.is_alive()
