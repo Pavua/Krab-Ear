@@ -110,6 +110,7 @@ from backend.audio_reinit import AudioReinitCoordinator
 from backend.wake_word_watchdog import WakeWordWatchdog
 from backend.text_processing_service import TextProcessingService
 from backend.call_session_store import CallSessionStore
+from backend.history_encryption_policy import store_policy_reader
 from backend.live_subs_service import LiveSubsService
 from backend.tts_service import TTSService
 from backend.request_signing import RequestSigner
@@ -1345,7 +1346,19 @@ class BackendService:
         # delete_history_item cascades ghost-ref removal AND purge_all_data
         # calls delete_all_chains() — previously only ArchiveManager had this wire.
         self._history._recording_chain_mgr = self._chains
-        self._call_session_store = CallSessionStore(data_dir=self.store.data_dir)
+        # Журнал звонков шифруется тем же ключом и той же fail-closed политикой,
+        # что история; без этих двух зависимостей он оставался бы открытым
+        # текстом даже при history_encryption_enabled.
+        self._call_session_store = CallSessionStore(
+            data_dir=self.store.data_dir,
+            policy_read=store_policy_reader(self.store),
+            crypto_getter=self._call_sessions_crypto,
+        )
+        try:
+            # Уже включённое шифрование + старый открытый журнал: дошифровать на старте.
+            self._call_session_store.migrate_encryption()
+        except Exception:
+            logger.exception("call_sessions: миграция шифрования не выполнена")
         # W1734: wire archive/bookmarks/call_session_store into HistoryService
         # so handle_purge_all_data can reach them without a BackendService reference.
         # _archive_manager is already constructed above; _bookmarks at line ~376.
@@ -5945,6 +5958,11 @@ class BackendService:
             return result
         return {"ok": True, "enabled": enabled, "available": True}
 
+    def _call_sessions_crypto(self) -> Any:
+        """Ключ истории для журнала звонков (только чтение, без создания)."""
+        getter = getattr(self.store, "_get_history_crypto", None)
+        return getter(allow_create=False) if callable(getter) else None
+
     def _handle_migrate_history_encryption(self, params: dict[str, Any]) -> dict[str, Any]:
         """Encrypt existing plaintext history.ndjson entries (at-rest migration).
 
@@ -5981,6 +5999,11 @@ class BackendService:
 
             try:
                 result = self.store.migrate_history_encryption(progress_cb=_progress)
+                try:
+                    # Журнал звонков — тот же класс данных; best-effort, итог истории не меняет.
+                    self._call_session_store.migrate_encryption()
+                except Exception:
+                    logger.exception("call_sessions: миграция шифрования не выполнена")
                 terminal = "done" if result.get("ok") else result.get("reason", "error")
                 # Итог хранится в памяти процесса ДО эмита события: подписчик SSE может
                 # его пропустить, а статус-IPC переживает любой пропуск.
