@@ -77,6 +77,40 @@ def test_purge_reports_ambiguous_legacy_backups():
             backend.close()
 
 
+def test_purge_clears_profile_backups_even_with_explicit_override():
+    with tempfile.TemporaryDirectory(prefix='ear-backup-override-', dir='/tmp') as directory:
+        root = Path(directory).resolve()
+        backend = IsolatedBackend(root, crypto_key=os.urandom(32)).start()
+        try:
+            old_backup = root / 'profile/settings_backups/old.json'
+            old_backup.parent.mkdir(parents=True, exist_ok=True)
+            old_backup.write_text('{"synthetic":true}')
+            result = backend.call('purge_all_data', confirm=True)['result']
+            assert result['complete'] is True
+            assert not old_backup.exists()
+        finally:
+            backend.close()
+
+
+def test_purge_refuses_symlinked_profile_backup_directory():
+    with tempfile.TemporaryDirectory(prefix='ear-backup-symlink-', dir='/tmp') as directory:
+        root = Path(directory).resolve()
+        backend = IsolatedBackend(root, crypto_key=os.urandom(32)).start()
+        try:
+            foreign = root / 'foreign-backups'
+            foreign.mkdir()
+            sentinel = foreign / 'synthetic.json'
+            sentinel.write_text('{"synthetic":true}')
+            (root / 'profile/settings_backups').symlink_to(foreign, target_is_directory=True)
+            result = backend.call('purge_all_data', confirm=True)['result']
+            assert result['complete'] is False
+            assert 'settings_backups_profile' in result['errors']
+            assert sentinel.exists()
+            assert (root / 'profile/.purge-pending').exists()
+        finally:
+            backend.close()
+
+
 @pytest.mark.parametrize('mode,exitcode', [('before-history', 86), ('after-history', 87), ('after-history-service', 88)])
 @pytest.mark.parametrize('recovery_fault', [None, 'crash', 'partial'])
 def test_crash_and_reopen(mode, exitcode, recovery_fault):

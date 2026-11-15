@@ -3350,6 +3350,16 @@ class HistoryService:
             except Exception:
                 logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
                 secondary_errors.append("settings_backups")
+        # После включения override у профиля могли остаться копии по старому
+        # профильному пути. Он принадлежит этому data_dir независимо от override.
+        try:
+            import shutil as _shutil
+            _profile_settings_backups = Path(self.store.data_dir) / "settings_backups"
+            if _profile_settings_backups.is_dir():
+                _shutil.rmtree(_profile_settings_backups, ignore_errors=False)
+        except Exception:
+            logger.warning("purge_all_data: удаление профильных settings_backups не удалось", exc_info=True)
+            secondary_errors.append("settings_backups_profile")
         return backups_deleted
 
     def _purge_data_dir_stores(
