@@ -97,8 +97,18 @@ final class RestAuthTests: XCTestCase {
         XCTAssertEqual(offenders, [], "SSE /v1/events без RestAuth.apply получит 401: \(offenders)")
     }
 
+    /// Каталог Sources/KrabEarAgent: сначала обход вверх от тестового бандла
+    /// (как в MainErrorsWiringTests), запасной путь через #file.
     private static var sourcesDir: URL {
-        URL(fileURLWithPath: #file)
+        var url = Bundle(for: RestAuthTests.self).bundleURL
+        for _ in 0..<10 {
+            let candidate = url.appendingPathComponent("Sources/KrabEarAgent", isDirectory: true)
+            if FileManager.default.fileExists(atPath: candidate.appendingPathComponent("RestAuth.swift").path) {
+                return candidate
+            }
+            url = url.deletingLastPathComponent()
+        }
+        return URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()  // KrabEarAgentTests
             .deletingLastPathComponent()  // Tests
             .deletingLastPathComponent()  // KrabEarAgent (package root)
