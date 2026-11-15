@@ -294,6 +294,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
 
         // Отдельные делегат+сессия на каждую попытку (не общий lazy var, как
         // раньше) — иначе onComplete не смог бы различить завершение старой,

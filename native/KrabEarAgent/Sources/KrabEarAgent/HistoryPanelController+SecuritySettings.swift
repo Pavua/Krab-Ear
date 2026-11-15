@@ -475,6 +475,7 @@ extension HistoryPanelController {
         let session = URLSession(configuration: .default, delegate: delegate, delegateQueue: nil)
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
         objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatcher, watcher, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatchDelegate, delegate, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         objc_setAssociatedObject(self, &SecurityAssocKeys.migrationWatchSession, session, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)

@@ -95,6 +95,7 @@ extension StreamingPasteTarget {
         let owner = session
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
         sseTransport.start(request: request, onConnectionReset: { [weak self] in
             self?.eventType = ""
         }, onLine: { [weak self, weak owner] line in

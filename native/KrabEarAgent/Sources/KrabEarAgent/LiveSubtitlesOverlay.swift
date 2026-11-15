@@ -535,6 +535,7 @@ final class LiveSubtitlesOverlay: NSObject {
 
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
         let task = session.makeLiveSubtitlesTask(with: request)
         sseConnection = SSEConnection(
             id: connectionID,
