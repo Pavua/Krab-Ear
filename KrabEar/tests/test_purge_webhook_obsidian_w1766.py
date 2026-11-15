@@ -321,14 +321,14 @@ class ObsidianPurgeAllSyncedFilesTestCase(unittest.TestCase):
 
         self.assertEqual(deleted, 0, "Должен вернуть 0 при vault=None")
 
-    def test_purge_noop_vault_path_missing(self) -> None:
-        """purge_all_synced_files() — no-op если директория vault не существует."""
+    def test_purge_refuses_unavailable_vault(self) -> None:
+        """Недоступный настроенный vault не доказывает успешную очистку."""
         mgr = self._make_mgr()
         # Устанавливаем несуществующий vault напрямую
         mgr._vault_path = Path(self._tmpdir) / "nonexistent_vault"
 
-        deleted = mgr.purge_all_synced_files()
-        self.assertEqual(deleted, 0, "Должен вернуть 0 если vault dir не существует")
+        with self.assertRaises(OSError):
+            mgr.purge_all_synced_files()
 
     def test_purge_idempotent(self) -> None:
         """Повторный purge_all_synced_files() не бросает исключений."""

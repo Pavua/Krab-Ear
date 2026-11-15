@@ -2622,6 +2622,7 @@ class HistoryService:
             encryption_key_shredded,
         ) = self._purge_final_barrier(secondary_errors, _data_dir)
         self._purge_temp_uploads(secondary_errors, _data_dir)
+        self._purge_verify_cleanup(secondary_errors, _data_dir)
 
         # --- A5.2c1: пост-фактум флага шифрования (НЕ переключаем его) ---
         # Purge уничтожает данные, но политику не меняет: решение владельца
@@ -3339,6 +3340,9 @@ class HistoryService:
         # Путь читается из SettingsBackup.get_backup_dir() — уважает env override.
         if self._settings_backup is not None:
             try:
+                from backend.settings_backup import SettingsBackup
+                if SettingsBackup.legacy_ownership_ambiguous(self.store):
+                    secondary_errors.append("settings_backups_legacy_ambiguous")
                 _sb_dir = self._settings_backup.get_backup_dir()
                 if _sb_dir is not None and Path(_sb_dir).is_dir():
                     rmtree_strict(Path(_sb_dir))
@@ -3346,6 +3350,15 @@ class HistoryService:
             except Exception:
                 logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
                 secondary_errors.append("settings_backups")
+        # После включения override у профиля могли остаться копии по старому
+        # профильному пути. Он принадлежит этому data_dir независимо от override.
+        try:
+            _profile_settings_backups = Path(self.store.data_dir) / "settings_backups"
+            if _profile_settings_backups.is_dir():
+                rmtree_strict(_profile_settings_backups)
+        except Exception:
+            logger.warning("purge_all_data: удаление профильных settings_backups не удалось", exc_info=True)
+            secondary_errors.append("settings_backups_profile")
         return backups_deleted
 
     def _purge_data_dir_stores(
@@ -3903,6 +3916,30 @@ class HistoryService:
                     self.store._history_crypto_initialized = False
                     self.store._history_crypto_instance = None
         return deletion_ledger_purged, deletion_ledger_ids_preserved, encryption_key_shredded
+
+    def _purge_verify_cleanup(self, errors, directory):
+        """Legacy clear()-методы могут проглатывать unlink: intent нельзя снять."""
+        if directory is None:
+            _flag_step_error(errors, "purge_verification")
+            return
+        checks = (
+            (self._semantic_searcher, ("embeddings.npy", "embeddings_index.json")),
+            (self._vocabulary_store, ("vocabulary.json",)),
+            (self._webhook_manager, ("webhooks.json",)),
+            (self._translation_cache, ("translation_cache.json",)),
+        )
+        for owner, names in checks:
+            if owner is None:
+                continue
+            for name in names:
+                try:
+                    os.lstat(directory / name)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    _flag_step_error(errors, "purge_verification")
+                else:
+                    _flag_step_error(errors, "purge_verification")
 
     def _purge_temp_uploads(
         self, secondary_errors: list[str], _data_dir: Path | None
