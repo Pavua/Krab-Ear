@@ -225,6 +225,11 @@ class Settings(BaseSettings):
     # Когда True, require_api_key использует RestAuth вместо одиночного ключа.
     REST_API_AUTH_ENABLED: bool = False
 
+    # Дополнительные имена Host (через запятую), которым REST отвечает сверх
+    # loopback (127.0.0.1 / localhost / [::1]). Защита от DNS rebinding: чужой
+    # Host получает 403. Пусто = только loopback.
+    REST_ALLOWED_HOSTS: str = ""
+
     # Rate limiting для REST API (flask-limiter).
     # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
     RATE_LIMIT_ENABLED: bool = True

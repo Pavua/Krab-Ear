@@ -1037,6 +1037,44 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 _VOCABULARY_POST_MAX_BYTES = 512 * 1024  # 512 KB
 
 
+_LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
+
+def _host_without_port(raw_host: str) -> str:
+    """Имя хоста из заголовка Host без порта (в нижнем регистре, IPv6 в скобках)."""
+    host = (raw_host or "").strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end != -1 else host
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def _allowed_host_names() -> frozenset[str]:
+    extra = str(getattr(settings, "REST_ALLOWED_HOSTS", "") or "")
+    names = {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return _LOOPBACK_HOST_NAMES | names
+
+
+def _reject_foreign_host():
+    """DNS-rebinding guard: Host обязан быть loopback-именем (или из REST_ALLOWED_HOSTS).
+
+    Сервер слушает только 127.0.0.1, но страница злоумышленника после смены
+    A-записи становится «своей» для браузера (тот же origin, Origin-гейт слеп) и
+    читает /v1/events. Её Host — чужое имя. Пустой Host (HTTP/1.0 без заголовка,
+    редкие локальные утилиты) браузер не шлёт, такой запрос пропускаем.
+    """
+    raw_host = request.headers.get("Host", "")
+    if not raw_host:
+        return None
+    if _host_without_port(raw_host) in _allowed_host_names():
+        return None
+    logger.warning(
+        "Blocked request with foreign Host=%r path=%s from %s",
+        raw_host, request.path, request.remote_addr,
+    )
+    return jsonify({"error": "Forbidden host"}), 403
+
+
 def _check_vocabulary_post_size():
     """Reject oversized POST /v1/vocabulary bodies before JSON parse (H1 MED)."""
     if request.path == "/v1/vocabulary" and request.method == "POST":
@@ -2897,6 +2935,7 @@ def create_app(deps: "RestDeps | None" = None, config_mapping=None) -> Flask:
     limiter.init_app(flask_app)
     flask_app.register_error_handler(429, _rate_limit_exceeded_handler)
     flask_app.register_error_handler(413, _request_entity_too_large_handler)
+    flask_app.before_request(_reject_foreign_host)
     flask_app.before_request(_check_vocabulary_post_size)
     flask_app.before_request(start_timer)
     flask_app.after_request(log_request)
