@@ -1128,6 +1128,11 @@ class BackendService:
                 # Защита принадлежит процессу, а не текущему значению настроек
                 # или времени жизни сервера: ответ может закрыться после stop.
                 _rest_module._mark_backend_process()
+                # Bearer-auth по умолчанию: ключ <data_dir>/rest_api_key
+                # (решение владельца 2026-11-15), до первого запроса.
+                from backend.rest_api_key import ensure_rest_api_key
+
+                ensure_rest_api_key(self.store.data_dir)
                 from backend.rest_inprocess import InProcessRestServer
 
                 _rest_module.adopt_external_singletons(

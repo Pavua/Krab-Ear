@@ -3163,6 +3163,13 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         logger.warning("REST: faulthandler.enable() недоступен — крэш-трейсбека не будет")
 
+    # Bearer-auth по умолчанию (решение владельца 2026-11-15): без явного ключа,
+    # токен-стора и опт-аута REST_API_ALLOW_ANONYMOUS выдаём <data_dir>/rest_api_key.
+    from backend.rest_api_key import ensure_rest_api_key
+    from backend.service import default_data_dir as _default_data_dir
+
+    ensure_rest_api_key(_default_data_dir())
+
     _auth_mode = (
         "token-store" if getattr(settings, "REST_API_AUTH_ENABLED", False)
         else "legacy-key" if settings.REST_API_KEY
@@ -3170,11 +3177,10 @@ if __name__ == "__main__":
     )
     if _auth_mode == "DISABLED":
         logger.warning(
-            "REST server starting on 127.0.0.1:%s with NO auth "
-            "(Wave 47 B2 HIGH-1). Any local process can call /api/*. "
-            "To enable auth: set REST_API_AUTH_ENABLED=true OR populate "
-            "REST_API_KEY in settings.json. Localhost-only bind prevents "
-            "remote attack.",
+            "REST server starting on 127.0.0.1:%s with NO auth: "
+            "REST_API_ALLOW_ANONYMOUS=true (опт-аут от ключа по умолчанию). "
+            "Any local process can call the protected routes. "
+            "Чтобы вернуть auth: REST_API_ALLOW_ANONYMOUS=false.",
             settings.REST_SERVER_PORT,
         )
     else:
