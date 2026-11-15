@@ -18,7 +18,9 @@ from _plaintext_export_test_helpers import off_authorizer
 import json
 import sys
 import tempfile
+import os as _os
 import unittest
+from unittest import mock as _env_patch
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -409,6 +411,11 @@ class TestObsidianSyncPersistence(unittest.TestCase):
         """Состояние (vault_path, folder, last_sync_ts) загружается при новом экземпляре."""
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
+        # Внешнее ревью E3 (6г): vault из state-файла проверяется на $HOME,
+        # поэтому «домом» для теста служит его временный корень.
+        _home = _env_patch.patch.dict(_os.environ, {"HOME": tmp.name})
+        _home.start()
+        self.addCleanup(_home.stop)
         data_dir = Path(tmp.name) / "data"
         data_dir.mkdir(parents=True)
         vault_dir = Path(tmp.name) / "vault"

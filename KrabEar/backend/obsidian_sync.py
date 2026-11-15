@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import re
@@ -134,6 +135,51 @@ _FORBIDDEN_HOME_SUBDIRS: tuple[str, ...] = (
     "Library/Preferences",
     "Library/Saved Application State",
 )
+
+
+def _check_vault_allowed(p: Path) -> None:
+    """Vault обязан лежать под $HOME и не внутри чувствительных подкаталогов.
+
+    wave-32 MED (vault_path confused-deputy): один инвариант для IPC-входа
+    (``handle_configure``) и загрузки state-файла (``_load_state``): файл
+    состояния доступен другим процессам, и подмена ``vault_path`` в нём иначе
+    перенаправляла бы запись транскриптов в произвольный каталог.
+
+    Containment — через ``Path.relative_to`` (не ``str.startswith``): sibling-
+    префикс ``/home/user_evil`` не должен проходить как ``/home/user``.
+
+    Raises:
+        ValueError: путь вне $HOME или в запрещённом подкаталоге.
+    """
+    home = Path.home().resolve()
+    try:
+        p.relative_to(home)
+    except ValueError:
+        raise ValueError(f"vault_path must be under the home directory: {p}") from None
+    for forbidden in _FORBIDDEN_HOME_SUBDIRS:
+        try:
+            p.relative_to(home / forbidden)
+        except ValueError:
+            continue
+        raise ValueError(
+            f"vault_path is inside a restricted directory ({forbidden}): {p}"
+        )
+
+
+def _refuse_symlink(path: Path) -> None:
+    """Отказывает в записи, если конечный файл — symlink.
+
+    Каталог vault проверяется отдельно, но конечный файл мог оказаться ссылкой
+    на чужой файл вне vault: ``write_text`` пошёл бы по ней и перезаписал бы
+    чужое. Синхронизация фиксирует ошибку записи этого элемента.
+
+    Остаточное окно: проверка и запись не атомарны. Заменить файл ссылкой
+    именно между ними может только процесс, уже пишущий в папку vault; запись
+    идёт через ``Path.write_text``, на котором держатся тесты отказов диска.
+    """
+    if path.is_symlink():
+        raise OSError(errno.ELOOP, "отказ записи через symlink", str(path))
+
 
 # W1768 (MED, path-traversal): разрешённый шаблон для имени папки внутри vault.
 # Только буквы/цифры/подчёркивания (\w), дефис, пробел и слэш — чтобы поддержать
@@ -410,6 +456,7 @@ class ObsidianSyncManager:
 
                 def write_note():
                     target_dir.mkdir(parents=True, exist_ok=True)
+                    _refuse_symlink(md_path)
                     md_path.write_text(content, encoding="utf-8")
 
                 run_export_write(
@@ -533,40 +580,7 @@ class ObsidianSyncManager:
 
         # Resolve the path once so symlinks are followed before comparison.
         p = Path(str(vault_path)).expanduser().resolve()
-        home = Path.home().resolve()
-
-        # wave-32 MED (vault_path confused-deputy): path guard.
-        #
-        # Reject paths inside well-known sensitive subdirs of $HOME (e.g.
-        # ~/.ssh/ — writing there can corrupt known_hosts and break SSH auth;
-        # ~/.gnupg/ — leaks GPG key material; Library/Keychains — macOS secrets).
-        # Also reject paths outside $HOME entirely (e.g. /etc, /var) — arbitrary
-        # system-owned directories are never valid Obsidian vault locations.
-        #
-        # We use Path.relative_to() for containment checks (not str.startswith)
-        # because a sibling-prefix path (/home/user_evil) would bypass a naive
-        # string comparison against /home/user.
-        _under_home: bool
-        try:
-            p.relative_to(home)
-            _under_home = True
-        except ValueError:
-            _under_home = False
-
-        if not _under_home:
-            raise ValueError(
-                f"vault_path must be under the home directory: {p}"
-            )
-
-        for _forbidden in _FORBIDDEN_HOME_SUBDIRS:
-            try:
-                p.relative_to(home / _forbidden)
-                raise ValueError(
-                    f"vault_path is inside a restricted directory ({_forbidden}): {p}"
-                )
-            except ValueError as _ve:
-                if "restricted directory" in str(_ve):
-                    raise
+        _check_vault_allowed(p)
 
         folder = str(params.get("folder", _DEFAULT_FOLDER))
         return self.configure(str(vault_path), folder)
@@ -751,7 +765,8 @@ class ObsidianSyncManager:
 
         Алгоритм:
         1. Если vault не настроен (_vault_path is None) — no-op (возвращает 0).
-        2. Удаляет все *.md файлы в vault_path/folder (target_dir).
+        2. Удаляет файлы ``transcript_*.md`` (созданные синхронизацией) в
+           vault_path/folder (target_dir); чужие .md не трогает.
         3. Сбрасывает _last_sync_ts и сохраняет состояние (obsidian_sync.json
            перезаписывается — last_sync_ts=null, vault_path и folder сохраняются
            как конфиг, не как PII).
@@ -794,7 +809,11 @@ class ObsidianSyncManager:
         failed_paths: list[str] = []
 
         if target_dir.is_dir():
-            for md_path in list(target_dir.glob("*.md")):
+            # 6а (внешнее ревью E3): только файлы, названные нашим
+            # ``_make_filename`` (``transcript_*.md``). Папка синхронизации
+            # может совпасть с рабочей папкой владельца — чужие заметки
+            # purge трогать не вправе.
+            for md_path in list(target_dir.glob("transcript_*.md")):
                 try:
                     md_path.unlink(missing_ok=True)
                     deleted += 1
@@ -887,7 +906,16 @@ class ObsidianSyncManager:
             if vault_path_str:
                 p = Path(vault_path_str)
                 if p.exists() and p.is_dir():
-                    self._vault_path = p
+                    # 6г (внешнее ревью E3): state-файл доступен другим процессам,
+                    # поэтому vault из него проходит ту же проверку, что и IPC.
+                    try:
+                        _check_vault_allowed(p.resolve())
+                    except ValueError as exc:
+                        logger.warning(
+                            "ObsidianSync: vault из state-файла отвергнут: %s", exc
+                        )
+                    else:
+                        self._vault_path = p
             # W1768 (MED, path-traversal): folder из state-файла может быть подделан
             # (например внешним процессом). Валидируем при загрузке: если он выходит
             # за пределы vault (или vault ещё не настроен и folder сам по себе

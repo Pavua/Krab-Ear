@@ -26,7 +26,9 @@ from _plaintext_export_test_helpers import off_authorizer
 import json
 import sys
 import tempfile
+import os as _os
 import unittest
+from unittest import mock as _env_patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -183,6 +185,11 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
 
     def test_load_state_sanitizes_tampered_folder(self) -> None:
         """Подделанный folder в obsidian_sync.json откатывается к дефолту."""
+        # Внешнее ревью E3 (6г): vault из state-файла проверяется на $HOME,
+        # поэтому «домом» для теста служит его временный корень.
+        _home = _env_patch.patch.dict(_os.environ, {"HOME": self.tmp.name})
+        _home.start()
+        self.addCleanup(_home.stop)
         state = {
             "vault_path": str(self.vault_dir),
             "folder": "../../../" + self.outside_dir.name,
