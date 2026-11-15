@@ -119,6 +119,34 @@ class VerifyChainKeepsLegacyPrefixValid(_ChainBase):
         self.assertTrue(res["valid"], res)
         self.assertEqual(res["checked"], 4)
 
+    def test_clear_then_new_entries_start_valid_chain(self):
+        """Единственный путь, убирающий начало журнала — ``clear()`` (удаляет
+        файл целиком): новая цепочка начинается с prev_hash=None и валидна.
+        Ротации/обрезки журнала по размеру в коде нет."""
+        self._three_hashed()
+        self.audit.clear()
+        self.audit.log_event("sentry", "blocked")
+        self.audit.log_event("translation", "forced_offline")
+
+        res = self.audit.verify_chain()
+
+        self.assertTrue(res["valid"], res)
+        self.assertEqual(res["checked"], 2)
+        first = json.loads(self._lines()[0])
+        self.assertIsNone(first["prev_hash"])
+
+    def test_second_process_instance_continues_chain_validly(self):
+        """Новый экземпляр (рестарт процесса) продолжает цепочку по хвосту файла."""
+        self._three_hashed()
+        PrivacyAuditLogger.reset_instance()
+        other = PrivacyAuditLogger(log_path=self.log_path)
+        other.log_event("rewriter", "skipped")
+
+        res = other.verify_chain()
+
+        self.assertTrue(res["valid"], res)
+        self.assertEqual(res["checked"], 4)
+
     def test_only_legacy_entries_is_valid(self):
         self._write([_legacy_line("a", "x"), _legacy_line("b", "y")])
 
