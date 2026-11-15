@@ -18,6 +18,7 @@ from backend.plugin_system import PluginManager
 from backend.feature_flags import FeatureFlags
 from backend.template_manager import TemplateManager
 from backend.search_history import SearchHistoryManager
+from backend.timeline_purge_guard import timeline_guard
 from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
 from backend.timeline_export import TimelineExporter
@@ -482,6 +483,8 @@ class BackendService:
         socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
+        from backend.purge_recovery import recover_pending_purge
+        recover_pending_purge(store)
         # Startup LLM wiring reads runtime toggles before the other services are
         # built. Keep the single settings reader available from the first call.
         self._settings_svc = SettingsService(store=self.store)
@@ -3414,6 +3417,15 @@ class BackendService:
                 level="info",
             )
 
+        if method not in {"purge_all_data", "ping"}:
+            try:
+                pending = timeline_guard(self.store).recovery_pending()
+            except OSError:
+                pending = True
+            if pending:
+                return self._error(request_id, "purge_recovery_required",
+                                   "Очистка не завершена. Повторите очистку данных.")
+
         _t0 = time.monotonic()
         ipc_timing.mark("handler_started")
         try:
@@ -3570,7 +3582,7 @@ class BackendService:
         AutoBackupManager на время очистки, чтобы фоновый/оппортунистический
         backup-цикл не пересоздал backups/ с PII сразу после rmtree() в purge-теле
         (TOCTOU). set_purged() взводится ДО очистки (и сам удаляет backups/);
-        clear_purged() снимается в finally ПОСЛЕ завершения всех wipe-шагов, чтобы
+        clear_purged() снимается только ПОСЛЕ durable завершения всех wipe-шагов, чтобы
         будущие бэкапы возобновились. Вся остальная логика purge не тронута.
 
         wave-26 MED: после того как HistoryService удалит hotwords.json с диска,
@@ -3580,45 +3592,57 @@ class BackendService:
         wire сделан здесь, а не в handle_purge_all_data — намеренно (см. комментарий
         в audit_inmemory_purge_coverage.py).
         """
-        self._auto_backup.set_purged()
-        try:
+        confirm = params.get("confirm")
+        if confirm is not True and confirm != "PURGE_ALL":
+            return self._history.handle_purge_all_data(params)
+
+        def perform():
+            self._auto_backup.set_purged()
             result = self._history.handle_purge_all_data(params)
-        finally:
-            self._auto_backup.clear_purged()
-        # wave-26 MED: wipe in-memory hotwords after disk file was deleted by history purge.
-        # Guard: only clear if the purge actually ran (confirm check passed → ok key present
-        # and is not False).  If confirm was missing, handle_purge_all_data returned early
-        # with ok=False and nothing was deleted — do not clear in-memory state.
-        if isinstance(result, dict) and result.get("ok") is not False:
-            try:
-                self._hotword_detector.clear()
-            except Exception:
-                import logging as _logging
-                _logging.getLogger("KrabEar.BackendService").warning(
-                    "purge_all_data: hotword_detector.clear() failed", exc_info=True
-                )
-            # Wave-30 MED: wipe in-memory transcription queue (file_path + result fields)
-            # after history purge.  _transcription_queue lives in BackendService (not
-            # HistoryService), so the clear is wired here — same pattern as _hotword_detector.
-            # Documented in audit_inmemory_purge_coverage.py registry comment.
-            try:
-                self._transcription_queue.clear()
-            except Exception:
-                import logging as _logging
-                _logging.getLogger("KrabEar.BackendService").warning(
-                    "purge_all_data: transcription_queue.clear() failed", exc_info=True
-                )
-            # wave-41 MED: wipe usage_stats.json from disk + reset in-memory counters.
-            # UsageTracker._stats_file survives purge otherwise — daily_history / streak /
-            # peak_day all contain indirect usage-pattern PII.
-            try:
-                self._usage_tracker.clear_all()
-            except Exception:
-                import logging as _logging
-                _logging.getLogger("KrabEar.BackendService").warning(
-                    "purge_all_data: usage_tracker.clear_all() failed", exc_info=True
-                )
-        return result
+            # wave-26 MED: wipe in-memory hotwords after disk file was deleted by history purge.
+            # Guard: only clear if the purge actually ran (confirm check passed → ok key present
+            # and is not False).  If confirm was missing, handle_purge_all_data returned early
+            # with ok=False and nothing was deleted — do not clear in-memory state.
+            if isinstance(result, dict) and result.get("ok") is not False:
+                try:
+                    self._hotword_detector.clear()
+                except Exception:
+                    result["complete"] = False
+                    result.setdefault("errors", []).append("hotwords_memory")
+                    import logging as _logging
+                    _logging.getLogger("KrabEar.BackendService").warning(
+                        "purge_all_data: hotword_detector.clear() failed", exc_info=True
+                    )
+                # Wave-30 MED: wipe in-memory transcription queue (file_path + result fields)
+                # after history purge.  _transcription_queue lives in BackendService (not
+                # HistoryService), so the clear is wired here — same pattern as _hotword_detector.
+                # Documented in audit_inmemory_purge_coverage.py registry comment.
+                try:
+                    self._transcription_queue.clear()
+                except Exception:
+                    result["complete"] = False
+                    result.setdefault("errors", []).append("transcription_queue")
+                    import logging as _logging
+                    _logging.getLogger("KrabEar.BackendService").warning(
+                        "purge_all_data: transcription_queue.clear() failed", exc_info=True
+                    )
+                # wave-41 MED: wipe usage_stats.json from disk + reset in-memory counters.
+                # UsageTracker._stats_file survives purge otherwise — daily_history / streak /
+                # peak_day all contain indirect usage-pattern PII.
+                try:
+                    self._usage_tracker.clear_all()
+                except Exception:
+                    result["complete"] = False
+                    result.setdefault("errors", []).append("usage_stats_memory")
+                    import logging as _logging
+                    _logging.getLogger("KrabEar.BackendService").warning(
+                        "purge_all_data: usage_tracker.clear_all() failed", exc_info=True
+                    )
+            return result
+
+        return timeline_guard(self.store).run_purge(
+            perform, after_complete=self._auto_backup.clear_purged,
+        )
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_ping (W1690)."""
@@ -6351,6 +6375,8 @@ def build_service(
             # Недоступное подтверждение ownership не расширяет inventory.
             pass
     store = StateStore(data_dir=data_dir, startup_owned_lock_path=startup_owned_lock_path)
+    from backend.purge_recovery import recover_pending_purge
+    recover_pending_purge(store)
     if profile_created_by_this_startup is None:
         profile_created_by_this_startup = store._created_data_dir
     # Гарантируем наличие полного набора дефолтных настроек — но только там,

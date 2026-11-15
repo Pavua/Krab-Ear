@@ -124,7 +124,7 @@ def build_harness(directory, settings, *, source=None):
     namespace = {
         "__name__": __name__, "DEFAULT_SETTINGS": defaults,
         "SettingsValidator": validator_ns["SettingsValidator"],
-        "SettingsBackup": lambda: object(), "threading": threading,
+        "SettingsBackup": SimpleNamespace(for_store=lambda store: object()), "threading": threading,
         "time": clock, "math": math, "json": json,
         "logger": logging.getLogger(__name__), "_log": logging.getLogger(__name__),
         "StateStoreLockTimeout": TimeoutError,

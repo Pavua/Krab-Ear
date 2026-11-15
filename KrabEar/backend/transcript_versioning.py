@@ -479,8 +479,10 @@ class TranscriptVersionManager:
         """
         with self._lock:
             removed = len(self._read_all())
+            # Tolerant reader пропускает оборванные строки, но privacy-wipe
+            # обязан стереть и их, даже когда валидных версий не осталось.
+            self._rewrite_all([])
             if removed > 0:
-                self._rewrite_all([])
                 logger.info(
                     "clear_all: transcript_versions.ndjson очищен (privacy-purge), удалено %d версий",
                     removed,

@@ -152,12 +152,14 @@ def service_harness(audit=None, privacy=False):
           "ipc_timing": mod, "_BREADCRUMB_EXCLUDED_METHODS": set(),
           "settings": types.SimpleNamespace(IPC_SIGNING_SECRET="not-a-real-secret"),
           "add_breadcrumb": lambda **kw: None,
+          # Timing-only harness; recovery проверяется настоящим isolated IPC.
+          "timeline_guard": lambda store: types.SimpleNamespace(recovery_pending=lambda: False),
           "IpcOperationalError": type("IpcOperationalError", (Exception,), {})}
     exec(compile(ast.fix_missing_locations(ast.Module(body=[ast.ImportFrom(
         module="__future__", names=[ast.alias(name="annotations")], level=0), fn],
         type_ignores=[])), str(ROOT / "backend/service.py"), "exec"), ns)
     fake = types.SimpleNamespace(
-        _request_signer=None, _ipc_throttle=None,
+        store=object(), _request_signer=None, _ipc_throttle=None,
         _dispatch_table={"get_recording_state": lambda p: {"is_recording": False}},
         _get_runtime_setting=lambda key, default: privacy,
         _audit_logger=types.SimpleNamespace(log_request=audit or (lambda **kw: None)),

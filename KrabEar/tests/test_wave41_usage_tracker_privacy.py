@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -179,6 +180,11 @@ class TestGetUsageStatsPrivacyGate(unittest.TestCase):
 class TestPurgeAllDataCallsUsageTrackerClearAll(unittest.TestCase):
     """Test that handle_purge_all_data triggers usage_tracker.clear_all()."""
 
+    def setUp(self):
+        profile = tempfile.TemporaryDirectory()
+        self.addCleanup(profile.cleanup)
+        self.profile = Path(profile.name)
+
     def test_purge_calls_clear_all_when_purge_succeeds(self) -> None:
         """When the purge confirms (ok not False), clear_all() is called."""
         import importlib
@@ -188,6 +194,7 @@ class TestPurgeAllDataCallsUsageTrackerClearAll(unittest.TestCase):
         mock_usage_tracker = MagicMock(spec=UsageTracker)
 
         stub = MagicMock()
+        stub.store = SimpleNamespace(data_dir=self.profile)
         stub._usage_tracker = mock_usage_tracker
         # auto_backup is called in the handler wrapper
         stub._auto_backup = MagicMock()
@@ -195,7 +202,7 @@ class TestPurgeAllDataCallsUsageTrackerClearAll(unittest.TestCase):
         stub._auto_backup.clear_purged = MagicMock()
         # _history.handle_purge_all_data returns success
         stub._history = MagicMock()
-        stub._history.handle_purge_all_data = MagicMock(return_value={"ok": True, "deleted": 5})
+        stub._history.handle_purge_all_data = MagicMock(return_value={"ok": True, "deleted": 5, "complete": True})
         # other collaborators cleared in the same block
         stub._hotword_detector = MagicMock()
         stub._hotword_detector.clear = MagicMock()
@@ -216,6 +223,7 @@ class TestPurgeAllDataCallsUsageTrackerClearAll(unittest.TestCase):
         mock_usage_tracker = MagicMock(spec=UsageTracker)
 
         stub = MagicMock()
+        stub.store = SimpleNamespace(data_dir=self.profile)
         stub._usage_tracker = mock_usage_tracker
         stub._auto_backup = MagicMock()
         stub._auto_backup.set_purged = MagicMock()
@@ -243,18 +251,24 @@ class TestPurgeAllDataCallsUsageTrackerClearAll(unittest.TestCase):
         mock_usage_tracker.clear_all.side_effect = RuntimeError("disk full")
 
         stub = MagicMock()
+        stub.store = SimpleNamespace(data_dir=self.profile)
         stub._usage_tracker = mock_usage_tracker
         stub._auto_backup = MagicMock()
         stub._auto_backup.set_purged = MagicMock()
         stub._auto_backup.clear_purged = MagicMock()
         stub._history = MagicMock()
-        stub._history.handle_purge_all_data = MagicMock(return_value={"ok": True})
+        stub._history.handle_purge_all_data = MagicMock(return_value={"ok": True, "complete": True})
         stub._hotword_detector = MagicMock()
         stub._transcription_queue = MagicMock()
 
         # Must not raise
         result = handler(stub, {"confirm": True})
         self.assertEqual(result.get("ok"), True)
+        self.assertFalse(result['complete'])
+        self.assertIn('usage_stats_memory', result['errors'])
+        self.assertTrue((self.profile / '.purge-pending').exists())
+        stub._auto_backup.clear_purged.assert_not_called()
+
 
 
 # ---------------------------------------------------------------------------

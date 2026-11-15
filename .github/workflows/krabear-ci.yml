@@ -93,6 +93,12 @@ jobs:
               "$task_scratch/receipt.json" "$task_scenario"
           done
 
+      - name: Check audit cache and per-file fallback orchestration
+        timeout-minutes: 2
+        run: |
+          python -m unittest discover -s offline_tests/audit_cherry_pick_cache -p 'test_*.py' -v
+          python -m unittest discover -s offline_tests/pytest_fallback -p 'test_*.py' -v
+
       - name: Lint (flake8)
         # W784: mirrors flake8 config from ci.yml -- max-line-length=150, relaxed test ignores
         run: |
@@ -130,7 +136,6 @@ jobs:
           fi
           nchunks=16; chunk=$(( (n + nchunks - 1) / nchunks )); rc=0
           echo "Total test files: $n, chunks: $nchunks, chunk size: $chunk"
-          : > /tmp/pf_failed.txt
           export ISOLATED_LOG_DIR="${RUNNER_TEMP}/pytest-isolated"
           mkdir -p "$ISOLATED_LOG_DIR" || exit 1
           for i in $(seq 0 $((nchunks - 1))); do
@@ -143,30 +148,16 @@ jobs:
             crc=$?
             echo "::endgroup::"
             if [ $crc -ne 0 ]; then
-              # W1755/W1760: a chunk exit!=0 is usually a SIGSEGV (139) from cross-file C-ext
-              # contamination (one test poisons a later file's torch/numpy state -> the whole chunk
-              # process dies, masking the culprit). Re-run this chunk one file per FRESH process,
-              # 4 in PARALLEL (xargs -P4): contamination crashes pass in isolation (-> green),
-              # genuine per-file failures are recorded by filename. Each file is wall-clock bounded
-              # (timeout 90, pytest cap 75s) so a hung test cannot stall the job toward the 120-min limit.
-              echo "::warning::chunk $((i+1)) exited $crc -- per-file isolate (parallel -P4)"
-              printf '%s\n' "${sub[@]}" | xargs -P 4 -I {} bash -c '
-                log_file="$ISOLATED_LOG_DIR/${1##*/}.log"
-                if python3 scripts/run_isolated_pytest.py timeout 90 python -m pytest "$1" --tb=short -q -p no:xdist -p no:cacheprovider --timeout=75 >"$log_file" 2>&1; then
-                  :
-                else
-                  fcode=$?
-                  echo "::error::isolated FAIL($fcode): $1"
-                  tail -n 80 "$log_file"
-                  echo "$1" >> /tmp/pf_failed.txt
-                fi
-              ' _ {}
+              # Fresh isolated processes; retry only parallel 124 after the P4 barrier.
+              echo "::warning::chunk $((i+1)) exited $crc -- isolated fallback"
+              python3 scripts/run_pytest_fallback.py --log-dir "$ISOLATED_LOG_DIR" --budget 900 -- "${sub[@]}"
+              frc=$?
+              if [ "$frc" -ne 0 ]; then
+                echo "::error::isolated fallback exited $frc (chunk $((i+1)))"
+                rc=1
+              fi
             fi
           done
-          if [ -s /tmp/pf_failed.txt ]; then
-            rc=1
-            echo "=== genuinely-failing files (per-file isolated) ==="; sort -u /tmp/pf_failed.txt
-          fi
           echo "Aggregate rc=$rc"
           exit $rc
 
