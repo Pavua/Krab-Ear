@@ -810,6 +810,29 @@ def _memory_ledger_tmp_path(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# 2026-11-15: REST по умолчанию с ключом. Старт in-process REST в BackendService
+# зовёт ensure_rest_api_key и ПИШЕТ settings.REST_API_KEY в глобальный синглтон.
+# Без возврата значения защищённые маршруты в следующих тестах процесса
+# отвечали бы 401 (тот же класс загрязнения, что stub-ы sys.modules).
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _restore_rest_api_key_after_test():
+    try:
+        from core.config import settings as _settings
+    except Exception:
+        yield  # конфиг не импортируется — фикстура пассивна
+        return
+    before = getattr(_settings, "REST_API_KEY", "")
+    try:
+        yield
+    finally:
+        try:
+            _settings.REST_API_KEY = before
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Волна 2026-09-01: teardown незакрытых BackendService.
 # 73 из 102 тестовых файлов создают BackendService и не зовут close() — каждый
 # экземпляр оставляет ~11 фоновых потоков (DiskSpaceMonitor, EventBridge,

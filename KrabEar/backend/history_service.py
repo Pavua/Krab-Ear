@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
 from backend.observability import add_breadcrumb
+from backend.purge_fs import rmtree_strict
 from core.fuzzy_search import FuzzySearcher
 from core.parsing_utils import safe_json_loads
 from core.search_highlighter import SearchHighlighter
@@ -3236,11 +3237,10 @@ class HistoryService:
         # backups/ вообще»).
         backups_deleted = 0
         try:
-            import shutil as _shutil
             _backups_dir = Path(self.store.data_dir) / "backups"
             if _backups_dir.is_dir():
                 backups_deleted = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
-                _shutil.rmtree(_backups_dir, ignore_errors=False)
+                rmtree_strict(_backups_dir)
                 logger.info(
                     "purge_all_data: удалено %d migration backup директорий из %s",
                     backups_deleted,
@@ -3255,16 +3255,18 @@ class HistoryService:
         # и индекс в <data_dir>/shares/shares_index.json.  Пакеты содержат STT-текст
         # и переживают purge без этого шага.
         try:
-            import shutil as _shutil
             _shares_dir = Path(self.store.data_dir) / "shares"
-            if _shares_dir.is_dir():
-                _shutil.rmtree(_shares_dir, ignore_errors=False)
-                logger.info("purge_all_data: удалена директория shares/")
-            # wave-33 A1 (HIGH): rmtree удаляет файлы, но SharingManager._index —
-            # RAM-копия с полным текстом транскрипций — переживает purge и продолжает
-            # отдавать данные через get_shared. clear() сбрасывает in-memory индекс.
-            if self._sharing_manager is not None:
-                self._sharing_manager.clear()
+            try:
+                if _shares_dir.is_dir():
+                    rmtree_strict(_shares_dir)
+                    logger.info("purge_all_data: удалена директория shares/")
+            finally:
+                # wave-33 A1 (HIGH): rmtree удаляет файлы, но SharingManager._index —
+                # RAM-копия с полным текстом транскрипций — переживает purge и продолжает
+                # отдавать данные через get_shared. clear() сбрасывает in-memory индекс.
+                # finally: сбой удаления файлов не должен оставлять и RAM-копию.
+                if self._sharing_manager is not None:
+                    self._sharing_manager.clear()
         except Exception:
             logger.warning("purge_all_data: удаление shares/ не удалось", exc_info=True)
             secondary_errors.append("shares")
@@ -3274,10 +3276,9 @@ class HistoryService:
         # <data_dir>/tmp_meeting/ и удаляет его в finally того же тика; после
         # краха backend посреди тика файл пережил бы purge без этого шага.
         try:
-            import shutil as _shutil
             _tmp_meeting_dir = Path(self.store.data_dir) / "tmp_meeting"
             if _tmp_meeting_dir.is_dir():
-                _shutil.rmtree(_tmp_meeting_dir, ignore_errors=False)
+                rmtree_strict(_tmp_meeting_dir)
                 logger.info("purge_all_data: удалена директория tmp_meeting/")
         except Exception:
             logger.warning("purge_all_data: удаление tmp_meeting/ не удалось", exc_info=True)
@@ -3339,13 +3340,12 @@ class HistoryService:
         # Путь читается из SettingsBackup.get_backup_dir() — уважает env override.
         if self._settings_backup is not None:
             try:
-                import shutil as _shutil
                 from backend.settings_backup import SettingsBackup
                 if SettingsBackup.legacy_ownership_ambiguous(self.store):
                     secondary_errors.append("settings_backups_legacy_ambiguous")
                 _sb_dir = self._settings_backup.get_backup_dir()
                 if _sb_dir is not None and Path(_sb_dir).is_dir():
-                    _shutil.rmtree(Path(_sb_dir), ignore_errors=False)
+                    rmtree_strict(Path(_sb_dir))
                     logger.info("purge_all_data: settings_backups/ удалён: %s", _sb_dir)
             except Exception:
                 logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
@@ -3353,10 +3353,9 @@ class HistoryService:
         # После включения override у профиля могли остаться копии по старому
         # профильному пути. Он принадлежит этому data_dir независимо от override.
         try:
-            import shutil as _shutil
             _profile_settings_backups = Path(self.store.data_dir) / "settings_backups"
             if _profile_settings_backups.is_dir():
-                _shutil.rmtree(_profile_settings_backups, ignore_errors=False)
+                rmtree_strict(_profile_settings_backups)
         except Exception:
             logger.warning("purge_all_data: удаление профильных settings_backups не удалось", exc_info=True)
             secondary_errors.append("settings_backups_profile")
@@ -3374,10 +3373,9 @@ class HistoryService:
         # AudioRecorder/конвейер сохраняют сырые WAV/PCM записей под <data_dir>/audio/.
         # Сырое аудио — это голос пользователя (биометрия) и должно исчезать при wipe.
         try:
-            import shutil as _shutil
             _audio_dir = _data_dir / "audio"
             if _audio_dir.is_dir():
-                _shutil.rmtree(_audio_dir, ignore_errors=False)
+                rmtree_strict(_audio_dir)
                 logger.info("purge_all_data: удалена директория audio/")
         except Exception:
             logger.warning("purge_all_data: удаление audio/ не удалось", exc_info=True)
@@ -3387,10 +3385,9 @@ class HistoryService:
         # При сбое транскрибации сырое аудио откладывается в <data_dir>/failed_recordings/.
         # Тот же класс данных, что и audio/ — голос пользователя.
         try:
-            import shutil as _shutil
             _failed_dir = _data_dir / "failed_recordings"
             if _failed_dir.is_dir():
-                _shutil.rmtree(_failed_dir, ignore_errors=False)
+                rmtree_strict(_failed_dir)
                 logger.info("purge_all_data: удалена директория failed_recordings/")
         except Exception:
             logger.warning("purge_all_data: удаление failed_recordings/ не удалось", exc_info=True)
@@ -3400,10 +3397,9 @@ class HistoryService:
         # Тот же класс данных, что failed_recordings/ — сырой голос пользователя.
         # Имя директории литералом, чтобы audit_purge_coverage зачёл покрытие.
         try:
-            import shutil as _shutil
             _debug_wav_dir = _data_dir / "debug_duration_wav"
             if _debug_wav_dir.is_dir():
-                _shutil.rmtree(_debug_wav_dir, ignore_errors=False)
+                rmtree_strict(_debug_wav_dir)
                 logger.info("purge_all_data: удалена директория debug_duration_wav/")
         except Exception:
             logger.warning("purge_all_data: удаление debug_duration_wav/ не удалось", exc_info=True)
@@ -3415,17 +3411,15 @@ class HistoryService:
         # Имена директорий заданы литералами явно (а не циклом по переменной), чтобы
         # статический guard audit_purge_coverage мог их зачесть как покрытые.
         try:
-            import shutil as _shutil
             if (_data_dir / "exports").is_dir():
-                _shutil.rmtree(_data_dir / "exports", ignore_errors=False)
+                rmtree_strict(_data_dir / "exports")
                 logger.info("purge_all_data: удалена директория exports/")
         except Exception:
             logger.warning("purge_all_data: удаление exports/ не удалось", exc_info=True)
             secondary_errors.append("exports")
         try:
-            import shutil as _shutil
             if (_data_dir / "auto_exports").is_dir():
-                _shutil.rmtree(_data_dir / "auto_exports", ignore_errors=False)
+                rmtree_strict(_data_dir / "auto_exports")
                 logger.info("purge_all_data: удалена директория auto_exports/")
         except Exception:
             logger.warning("purge_all_data: удаление auto_exports/ не удалось", exc_info=True)

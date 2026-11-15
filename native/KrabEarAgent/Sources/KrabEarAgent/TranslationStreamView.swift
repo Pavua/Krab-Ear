@@ -324,6 +324,7 @@ final class TranslationStreamView: NSView {
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=live_subs.result") else { return }
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
         let task = sseSession.dataTask(with: request)
         sseStreamTask = task
         task.resume()

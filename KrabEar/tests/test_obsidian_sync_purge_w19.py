@@ -197,7 +197,9 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def test_failed_purge_keeps_vault_location_for_restart(tmp_path):
+def test_failed_purge_keeps_vault_location_for_restart(tmp_path, monkeypatch):
+    # vault обязан лежать под $HOME (внешнее ревью E3): домом считаем tmp_path.
+    monkeypatch.setenv('HOME', str(tmp_path))
     from backend.obsidian_sync import ObsidianSyncManager
     vault = tmp_path / 'vault'
     vault.mkdir()
@@ -205,7 +207,7 @@ def test_failed_purge_keeps_vault_location_for_restart(tmp_path):
     directory.mkdir()
     manager = ObsidianSyncManager(data_dir=directory)
     manager.configure(str(vault))
-    target = vault / manager._folder / 'synthetic.md'
+    target = vault / manager._folder / 'transcript_synthetic.md'
     target.parent.mkdir(exist_ok=True)
     target.write_text('synthetic')
     original = Path.unlink
@@ -225,7 +227,9 @@ def test_failed_purge_keeps_vault_location_for_restart(tmp_path):
     assert not (directory / 'obsidian_sync.json').exists()
 
 
-def test_purge_keeps_unavailable_vault_pending(tmp_path):
+def test_purge_keeps_unavailable_vault_pending(tmp_path, monkeypatch):
+    # vault обязан лежать под $HOME (внешнее ревью E3): домом считаем tmp_path.
+    monkeypatch.setenv('HOME', str(tmp_path))
     from backend.obsidian_sync import ObsidianSyncManager
     import pytest
     vault = tmp_path / 'vault'
@@ -234,7 +238,7 @@ def test_purge_keeps_unavailable_vault_pending(tmp_path):
     directory.mkdir()
     manager = ObsidianSyncManager(data_dir=directory)
     manager.configure(str(vault))
-    target = vault / manager._folder / 'synthetic.md'
+    target = vault / manager._folder / 'transcript_synthetic.md'
     target.parent.mkdir(exist_ok=True)
     target.write_text('synthetic')
     unavailable = tmp_path / 'unavailable'

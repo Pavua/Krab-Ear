@@ -711,6 +711,7 @@ final class MeetingLivePanelController: NSObject, NSWindowDelegate {
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
         let delegate = SSESessionDelegate { [weak self] line in
             Task { @MainActor [weak self] in
                 self?.handleSSELine(line, streamEpoch: streamEpoch)

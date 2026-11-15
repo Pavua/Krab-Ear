@@ -182,8 +182,8 @@ def test_crash_and_reopen(mode, exitcode, recovery_fault):
                     path.parent.mkdir(parents=True, exist_ok=True)
                     path.write_text(content)
                     inventory[name] = path
-                vault = root / 'vault'
-                target = vault / 'Transcriptions/synthetic.md'
+                vault = root / 'home' / 'vault'  # HOME дочернего процесса = root/home
+                target = vault / 'Transcriptions/transcript_synthetic.md'
                 target.parent.mkdir(parents=True)
                 target.write_text('synthetic')
                 (root / 'profile/obsidian_sync.json').write_text(json.dumps({

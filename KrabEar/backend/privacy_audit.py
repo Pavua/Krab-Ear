@@ -95,6 +95,13 @@ def _load_or_create_key(data_dir: Path) -> bytes:
                 "PrivacyAuditLogger: ключ имеет неверную длину %d, пересоздаём",
                 len(key),
             )
+        except OSError:
+            # Временный отказ чтения (EACCES/EIO/...) НЕ повод затирать рабочий
+            # ключ: все прежние записи журнала стали бы невалидными. Ключ на
+            # диске остаётся нетронутым; singleton не создаётся, следующая
+            # попытка прочитает тот же ключ.
+            logger.exception("PrivacyAuditLogger: ошибка чтения ключа, ключ не тронут")
+            raise
         except Exception:
             logger.exception("PrivacyAuditLogger: ошибка чтения ключа, пересоздаём")
 
@@ -333,8 +340,10 @@ class PrivacyAuditLogger:
         """Проверяет целостность HMAC хеш-цепочки лога.
 
         Проходит лог от начала до конца, перевычисляя каждый entry_hash и
-        проверяя соответствие prev_hash. Записи без хеш-полей (legacy) считаются
-        валидными и пропускаются (не ломают цепочку).
+        проверяя соответствие prev_hash. Записи без хеш-полей (legacy) допустимы
+        только ПРЕФИКСОМ журнала (до первой хешированной); после неё такая
+        запись — нарушение. Первая хешированная запись обязана иметь
+        prev_hash=None (иначе снесена голова).
 
         Returns:
             dict с ключами:
@@ -379,19 +388,36 @@ class PrivacyAuditLogger:
         in_chain = False  # True когда мы уже видели хотя бы одну хешированную запись
 
         for idx, entry in enumerate(entries):
-            has_hash_fields = "entry_hash" in entry and "prev_hash" in entry
+            has_hash_fields = isinstance(entry, dict) and "entry_hash" in entry and "prev_hash" in entry
 
             if not has_hash_fields:
-                # Legacy-запись: сбрасываем ожидаемый prev_hash
-                expected_prev = None
-                in_chain = False
+                if in_chain:
+                    # Запись без хеш-полей ПОСЛЕ первой хешированной: писатель
+                    # всегда ставит оба поля, значит это стёртые хеши (подделка
+                    # без ключа) или вставка. Легаси допустим только ПРЕФИКСОМ.
+                    return {
+                        "valid": False,
+                        "first_broken_index": idx,
+                        "checked": checked,
+                    }
+                # Легаси-префикс (журнал до появления хеш-цепочки)
                 continue
 
             # Запись с хеш-полями
             stored_entry_hash: str = entry["entry_hash"]
             stored_prev_hash: str | None = entry["prev_hash"]
 
-            # Проверяем prev_hash только если мы уже были в цепочке
+            # Первая хешированная запись начинает цепочку с prev_hash=None
+            # (писатель так и делает, в т.ч. после легаси-префикса). Иное —
+            # снесена голова журнала.
+            if not in_chain and stored_prev_hash is not None:
+                return {
+                    "valid": False,
+                    "first_broken_index": idx,
+                    "checked": checked,
+                }
+
+            # Дальше prev_hash обязан совпасть с entry_hash предыдущей записи
             if in_chain and stored_prev_hash != expected_prev:
                 return {
                     "valid": False,

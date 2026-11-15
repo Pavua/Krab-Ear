@@ -20,7 +20,7 @@
 | `POST /v1/stt/transcribe` | Краб: голосовые заметки, video studio; VG: STT звонков (`request_profile=voice_gateway_call`) | `text`, `segments` |
 | `POST /v1/tts/synthesize` | VG: локальный TTS | `wav_bytes_b64` |
 
-Аутентификация REST: опциональный Bearer (`REST_API_AUTH_ENABLED`); VG передаёт `KRAB_EAR_REST_API_KEY`.
+Аутентификация REST (с 2026-11-15, по умолчанию ВКЛЮЧЕНА): защищённые маршруты требуют `Authorization: Bearer <ключ>`. Ключ выдаёт backend в `~/Library/Application Support/KrabEar/rest_api_key` (0600) либо задаётся явно (`KRAB_EAR_REST_API_KEY`, `REST_API_AUTH_ENABLED`); VG читает `KRAB_EAR_REST_API_KEY`. Без ключа `401`. Открыты: `GET /health`, `/info`, `/api/docs`. Опт-аут: env `KRAB_EAR_REST_API_ALLOW_ANONYMOUS=true`. Чужой заголовок `Host` (не loopback и не из `REST_ALLOWED_HOSTS`) даёт `403`. Бриф потребителям: `krab-handoffs/2026-11-15/EAR_REST_AUTH_BRIEF_FOR_VG_AND_KRAB.md`.
 
 ## Общие файлы-замки (не API, но стык)
 

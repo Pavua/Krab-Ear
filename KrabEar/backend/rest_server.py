@@ -1037,6 +1037,44 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 _VOCABULARY_POST_MAX_BYTES = 512 * 1024  # 512 KB
 
 
+_LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
+
+def _host_without_port(raw_host: str) -> str:
+    """Имя хоста из заголовка Host без порта (в нижнем регистре, IPv6 в скобках)."""
+    host = (raw_host or "").strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end != -1 else host
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def _allowed_host_names() -> frozenset[str]:
+    extra = str(getattr(settings, "REST_ALLOWED_HOSTS", "") or "")
+    names = {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return _LOOPBACK_HOST_NAMES | names
+
+
+def _reject_foreign_host():
+    """DNS-rebinding guard: Host обязан быть loopback-именем (или из REST_ALLOWED_HOSTS).
+
+    Сервер слушает только 127.0.0.1, но страница злоумышленника после смены
+    A-записи становится «своей» для браузера (тот же origin, Origin-гейт слеп) и
+    читает /v1/events. Её Host — чужое имя. Пустой Host (HTTP/1.0 без заголовка,
+    редкие локальные утилиты) браузер не шлёт, такой запрос пропускаем.
+    """
+    raw_host = request.headers.get("Host", "")
+    if not raw_host:
+        return None
+    if _host_without_port(raw_host) in _allowed_host_names():
+        return None
+    logger.warning(
+        "Blocked request with foreign Host=%r path=%s from %s",
+        raw_host, request.path, request.remote_addr,
+    )
+    return jsonify({"error": "Forbidden host"}), 403
+
+
 def _check_vocabulary_post_size():
     """Reject oversized POST /v1/vocabulary bodies before JSON parse (H1 MED)."""
     if request.path == "/v1/vocabulary" and request.method == "POST":
@@ -2897,6 +2935,7 @@ def create_app(deps: "RestDeps | None" = None, config_mapping=None) -> Flask:
     limiter.init_app(flask_app)
     flask_app.register_error_handler(429, _rate_limit_exceeded_handler)
     flask_app.register_error_handler(413, _request_entity_too_large_handler)
+    flask_app.before_request(_reject_foreign_host)
     flask_app.before_request(_check_vocabulary_post_size)
     flask_app.before_request(start_timer)
     flask_app.after_request(log_request)
@@ -3124,6 +3163,13 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         logger.warning("REST: faulthandler.enable() недоступен — крэш-трейсбека не будет")
 
+    # Bearer-auth по умолчанию (решение владельца 2026-11-15): без явного ключа,
+    # токен-стора и опт-аута REST_API_ALLOW_ANONYMOUS выдаём <data_dir>/rest_api_key.
+    from backend.rest_api_key import ensure_rest_api_key
+    from backend.service import default_data_dir as _default_data_dir
+
+    ensure_rest_api_key(_default_data_dir())
+
     _auth_mode = (
         "token-store" if getattr(settings, "REST_API_AUTH_ENABLED", False)
         else "legacy-key" if settings.REST_API_KEY
@@ -3131,11 +3177,10 @@ if __name__ == "__main__":
     )
     if _auth_mode == "DISABLED":
         logger.warning(
-            "REST server starting on 127.0.0.1:%s with NO auth "
-            "(Wave 47 B2 HIGH-1). Any local process can call /api/*. "
-            "To enable auth: set REST_API_AUTH_ENABLED=true OR populate "
-            "REST_API_KEY in settings.json. Localhost-only bind prevents "
-            "remote attack.",
+            "REST server starting on 127.0.0.1:%s with NO auth: "
+            "REST_API_ALLOW_ANONYMOUS=true (опт-аут от ключа по умолчанию). "
+            "Any local process can call the protected routes. "
+            "Чтобы вернуть auth: REST_API_ALLOW_ANONYMOUS=false.",
             settings.REST_SERVER_PORT,
         )
     else:

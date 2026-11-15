@@ -94,5 +94,8 @@ event_bridge_token/      # HMAC bridge-auth секрет между IPC/REST п�
 # --- Billing / spend counters (no PII) ------------------------------------
 cloud_spend.json         # F2: месячный spend-cap облачного summary — только {"YYYY-MM": usd}; ни текста транскриптов, ни API-ключей. Переживает purge намеренно: сброс обнулил бы учёт лимита трат.
 
+# --- Local service credentials (not user data) ----------------------------
+rest_api_key/            # Bearer-ключ локального REST (0600, KrabEar/backend/rest_api_key.py): секрет доступа процесса, а не пользовательские данные. Снос при purge оставил бы Swift-агент (читает ключ из файла) без доступа до рестарта backend; backend регенерирует ключ при старте.
+
 # --- Model caches (downloaded artefacts, not user data) -------------------
 wake_word_models/        # openWakeWord ML model files downloaded from the hub; not user content

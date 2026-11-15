@@ -31,7 +31,7 @@ _STRIP_HTML_MAX_BYTES = 200_000
 # Минимальный regex для валидации email-адреса получателя (W1764).
 # Отклоняет пустую строку, адреса начинающиеся с «-» (флаги osascript),
 # пробельные символы и addr без «@» + домена с точкой.
-_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
 def _get_smtp_password_from_keychain(account: str) -> str:
@@ -179,7 +179,7 @@ class EmailSender:
         # W1764: валидация получателя перед передачей в osascript/smtplib.
         # Отклоняем любые значения начинающиеся с «-» (osascript FLAG injection),
         # содержащие пробелы или не соответствующие минимальному email-шаблону.
-        if not _EMAIL_RE.match(to):
+        if not _EMAIL_RE.fullmatch(to):
             raise ValueError(
                 f"Невалидный адрес получателя: {to!r}. "
                 "Ожидается формат user@domain.tld (без пробелов и ведущего «-»)."
