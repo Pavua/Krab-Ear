@@ -117,7 +117,7 @@ class SettingsService:
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 5.0
         self._validator = SettingsValidator()
-        self._backup = backup if backup is not None else SettingsBackup()
+        self._backup = backup if backup is not None else SettingsBackup.for_store(store)
         # W1437: RLock serialises all 5 save paths to prevent concurrent race conditions.
         self._save_lock = threading.RLock()
         # Hooks called with (old_settings, new_settings) after a successful save.

@@ -10,6 +10,73 @@ from test_plaintext_export_integration import IsolatedBackend
 pytestmark = pytest.mark.timeout(150)
 
 
+def test_recovery_deletes_only_own_profile_settings_backups():
+    with tempfile.TemporaryDirectory(prefix='ear-backup-profiles-', dir='/tmp') as directory:
+        root = Path(directory).resolve()
+        (root / 'use-profile-settings-backup').touch()
+        profile = root / 'profile'
+        profile.mkdir()
+        (root / 'seed-pending-purge').touch()
+        own = profile / 'settings_backups' / 'own.json'
+        other = root / 'other-profile' / 'settings_backups' / 'other.json'
+        for path in (own, other):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('{"synthetic":true}')
+        backend = IsolatedBackend(root, crypto_key=os.urandom(32)).start()
+        try:
+            assert not own.exists()
+            assert other.exists()
+            assert not (profile / '.purge-pending').exists()
+        finally:
+            backend.close()
+
+
+def test_recovery_refuses_ambiguous_legacy_backups():
+    with tempfile.TemporaryDirectory(prefix='ear-legacy-backups-', dir='/tmp') as directory:
+        root = Path(directory).resolve()
+        (root / 'use-profile-settings-backup').touch()
+        profile = root / 'profile'
+        profile.mkdir()
+        marker = profile / '.purge-pending'
+        (root / 'seed-pending-purge').touch()
+        legacy = root / 'home/Library/Application Support/KrabEar/settings_backups/legacy.json'
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text('{"synthetic":true}')
+        backend = IsolatedBackend(root, crypto_key=os.urandom(32))
+        try:
+            with pytest.raises((AssertionError, EOFError)):
+                backend.start()
+            backend.process.join(15)
+            assert not backend.process.is_alive()
+            assert marker.exists()
+            assert legacy.exists()
+            assert not (root / 'ordinary-runtime-started').exists()
+        finally:
+            backend.connection.close()
+            if backend.process.is_alive():
+                backend.process.terminate()
+                backend.process.join(5)
+
+
+def test_purge_reports_ambiguous_legacy_backups():
+    with tempfile.TemporaryDirectory(prefix='ear-legacy-purge-', dir='/tmp') as directory:
+        root = Path(directory).resolve()
+        (root / 'use-profile-settings-backup').touch()
+        legacy = root / 'home/Library/Application Support/KrabEar/settings_backups/legacy.json'
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text('{"synthetic":true}')
+        backend = IsolatedBackend(root, crypto_key=os.urandom(32)).start()
+        try:
+            response = backend.call('purge_all_data', confirm=True)
+            assert response['result']['complete'] is False
+            assert 'settings_backups_legacy_ambiguous' in response['result']['errors']
+            assert (root / 'profile/.purge-pending').exists()
+            assert legacy.exists()
+            assert backend.call('get_history_page')['error']['code'] == 'purge_recovery_required'
+        finally:
+            backend.close()
+
+
 @pytest.mark.parametrize('mode,exitcode', [('before-history', 86), ('after-history', 87), ('after-history-service', 88)])
 @pytest.mark.parametrize('recovery_fault', [None, 'crash', 'partial'])
 def test_crash_and_reopen(mode, exitcode, recovery_fault):

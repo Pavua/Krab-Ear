@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from functools import wraps
 import fcntl
+import hashlib
 import os
 import secrets
 import stat
@@ -94,18 +95,30 @@ class TimelinePurgeGuard:
             os.close(fd)
 
     def _begin_pending(self):
+        from types import SimpleNamespace
+        from backend.settings_backup import SettingsBackup
+
+        backup = SettingsBackup.for_store(SimpleNamespace(data_dir=self.directory)).get_backup_dir()
+        backup_path = os.path.realpath(os.path.abspath(os.fspath(backup)))
+        identity = b"KEP1:" + hashlib.sha256(os.fsencode(backup_path)).hexdigest().encode("ascii")
         path = os.path.join(self.directory, self._PENDING)
-        flags = os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
         try:
             fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, 0o600)
+            created = True
         except FileExistsError:
             fd = os.open(path, flags)
+            created = False
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
                 raise RuntimeError("purge_recovery_required")
-            # Сам факт существования означает intent; содержимое не имеет путей/PII.
-            # Даже пустой файл после прерывания создания остаётся pending.
+            if created:
+                if os.write(fd, identity) != len(identity):
+                    raise OSError("short purge intent write")
+            elif os.read(fd, len(identity) + 1) != identity:
+                # Пустой/битый или с другим путём: владелец копий неизвестен.
+                raise RuntimeError("purge_recovery_required")
             os.fsync(fd)
         finally:
             os.close(fd)

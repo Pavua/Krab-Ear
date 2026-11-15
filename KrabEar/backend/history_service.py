@@ -3340,6 +3340,9 @@ class HistoryService:
         if self._settings_backup is not None:
             try:
                 import shutil as _shutil
+                from backend.settings_backup import SettingsBackup
+                if SettingsBackup.legacy_ownership_ambiguous(self.store):
+                    secondary_errors.append("settings_backups_legacy_ambiguous")
                 _sb_dir = self._settings_backup.get_backup_dir()
                 if _sb_dir is not None and Path(_sb_dir).is_dir():
                     _shutil.rmtree(Path(_sb_dir), ignore_errors=False)

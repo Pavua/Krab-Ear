@@ -134,6 +134,8 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
         "OMP_NUM_THREADS": "1", "OPENBLAS_NUM_THREADS": "1", "MKL_NUM_THREADS": "1",
         "NUMEXPR_NUM_THREADS": "1",
     })
+    if (root / "use-profile-settings-backup").exists():
+        os.environ.pop("KRAB_EAR_SETTINGS_BACKUP_DIR", None)
     sys.dont_write_bytecode = True
     sys.path.insert(0, source_string)
     os.environ.update(HOME=str(home), TMPDIR=str(root / "tmp"),
@@ -318,6 +320,9 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             stage = "service"
             fresh_profile = not (root / "profile").exists()
             store = StateStore(root / "profile")
+            if (root / 'seed-pending-purge').exists():
+                from backend.timeline_purge_guard import timeline_guard
+                timeline_guard(store).run_purge(lambda: {'complete': False})
             store.initialize_startup_plaintext_policy(new_profile=fresh_profile)
             if crypto_key is None:
                 store.save_settings({"history_encryption_enabled": False, "privacy_mode_enabled": False})

@@ -86,6 +86,27 @@ class SettingsBackup:
     def __init__(self, backup_dir: Path | None = None) -> None:
         self._dir: Path = backup_dir if backup_dir is not None else _default_backup_dir()
 
+    @classmethod
+    def for_store(cls, store: Any) -> "SettingsBackup":
+        """Один путь для записи и purge; override явно разделяется владельцем."""
+        override = os.environ.get("KRAB_EAR_SETTINGS_BACKUP_DIR", "")
+        if override:
+            return cls(Path(override))
+        return cls(Path(store.data_dir) / "settings_backups")
+
+    @staticmethod
+    def legacy_ownership_ambiguous(store: Any) -> bool:
+        """Старый общий каталог не доказывает владельца нестандартного профиля."""
+        legacy = Path.home() / "Library" / "Application Support" / "KrabEar" / "settings_backups"
+        selected = SettingsBackup.for_store(store).get_backup_dir()
+        if legacy.resolve(strict=False) == selected.resolve(strict=False):
+            return False
+        try:
+            os.lstat(legacy)
+        except FileNotFoundError:
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------

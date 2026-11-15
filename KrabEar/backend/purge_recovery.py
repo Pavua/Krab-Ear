@@ -47,7 +47,7 @@ def recover_pending_purge(store):
             history._obsidian_sync = ObsidianSyncManager(directory, event_bus=None)
             history._translation_cache = TranslationCache(str(directory))
             history._vocabulary_store = VocabularyStore(directory)
-            history._settings_backup = SettingsBackup()
+            history._settings_backup = SettingsBackup.for_store(store)
             history._semantic_searcher = SemanticSearcher(directory, enabled=False)
             return history.handle_purge_all_data({"confirm": True})
 

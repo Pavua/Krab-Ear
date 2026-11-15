@@ -215,3 +215,32 @@ def test_backup_resume_stays_inside_purge_lock(tmp_path):
         if worker.ident is not None:
             worker.join(2)
     assert not worker.is_alive()
+@pytest.mark.parametrize('before,after', [('a', 'b'), (None, 'b'), ('a', None)])
+def test_pending_purge_refuses_changed_backup_override(tmp_path, monkeypatch, before, after):
+    from backend.timeline_purge_guard import TimelinePurgeGuard
+    guard = TimelinePurgeGuard(tmp_path)
+    if before is None:
+        monkeypatch.delenv('KRAB_EAR_SETTINGS_BACKUP_DIR', raising=False)
+    else:
+        monkeypatch.setenv('KRAB_EAR_SETTINGS_BACKUP_DIR', str(tmp_path / before))
+    guard.run_purge(lambda: {'complete': False})
+    if after is None:
+        monkeypatch.delenv('KRAB_EAR_SETTINGS_BACKUP_DIR', raising=False)
+    else:
+        monkeypatch.setenv('KRAB_EAR_SETTINGS_BACKUP_DIR', str(tmp_path / after))
+    called = []
+    with pytest.raises(RuntimeError, match='purge_recovery_required'):
+        guard.run_purge(lambda: called.append(True), only_pending=True)
+    assert called == []
+    assert (tmp_path / '.purge-pending').exists()
+
+
+@pytest.mark.parametrize('content', [b'', b'KEP1:truncated'])
+def test_invalid_purge_intent_is_not_assumed_to_belong_to_current_backup(tmp_path, content):
+    from backend.timeline_purge_guard import TimelinePurgeGuard
+    (tmp_path / '.purge-pending').write_bytes(content)
+    called = []
+    with pytest.raises(RuntimeError, match='purge_recovery_required'):
+        TimelinePurgeGuard(tmp_path).run_purge(lambda: called.append(True), only_pending=True)
+    assert called == []
+    assert (tmp_path / '.purge-pending').exists()
