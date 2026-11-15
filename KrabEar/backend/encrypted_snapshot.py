@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from backend.purge_fs import rmtree_strict
 from backend.state_store import (
     HISTORY_JOURNAL_FILENAMES,
     history_flock,
@@ -2814,34 +2815,51 @@ def purge_pending_restore_staging(data_dir: Any) -> list[str]:
     purge. Ничего не делает, если артефактов нет (обычное состояние).
     """
     removed: list[str] = []
+    failed: list[str] = []
     base = Path(data_dir)
     # Приватные каталоги staging (в т.ч. те, где маркер не успел появиться).
     for staging in sorted(base.glob(f"{RESTORE_STAGING_PREFIX}*")):
         if not staging.is_dir() or staging.is_symlink():
             continue
-        shutil.rmtree(staging, ignore_errors=True)
+        try:
+            rmtree_strict(staging)
+        except OSError as exc:  # noqa: BLE001 — purge обязан дойти до конца
+            logger.warning(
+                "encrypted_snapshot: purge не смог убрать staging %s (%s)",
+                staging.name, exc,
+            )
+            failed.append(str(staging))
+            continue
         removed.append(str(staging))
     # Осиротевшие <journal>.a52b2-restore-tmp-<txid> рядом с живыми файлами.
     for tmp in sorted(base.glob(f"*{RESTORE_TMP_SUFFIX}*")):
-        if tmp.is_dir() and not tmp.is_symlink():
-            shutil.rmtree(tmp, ignore_errors=True)
-        else:
-            try:
+        try:
+            if tmp.is_dir() and not tmp.is_symlink():
+                rmtree_strict(tmp)
+            else:
                 tmp.unlink()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:  # noqa: BLE001 — purge обязан дойти до конца
-                logger.warning(
-                    "encrypted_snapshot: purge не смог убрать фрагмент %s (%s)",
-                    tmp.name, exc,
-                )
-                continue
+        except FileNotFoundError:
+            continue
+        except OSError as exc:  # noqa: BLE001 — purge обязан дойти до конца
+            logger.warning(
+                "encrypted_snapshot: purge не смог убрать фрагмент %s (%s)",
+                tmp.name, exc,
+            )
+            failed.append(str(tmp))
+            continue
         removed.append(str(tmp))
     if removed:
         _fsync_dir(base)
         logger.info(
             "encrypted_snapshot: privacy purge убрал артефакты незавершённого restore: %d",
             len(removed),
+        )
+    if failed:
+        # Не врём об успехе: purge прошёл все артефакты, но часть осталась.
+        # Вызывающий шаг (history_service) пишет «restore_staging» в errors.
+        raise OSError(
+            f"purge_pending_restore_staging: не убрано {len(failed)} артефактов: "
+            f"{', '.join(Path(f).name for f in failed)}"
         )
     return removed
 
