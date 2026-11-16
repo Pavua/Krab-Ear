@@ -5,7 +5,8 @@ import Foundation
 ///  1. `SO_RCVTIMEO` действует на каждый `read`, а не на вызов целиком: ответ «по байту раз в
 ///     timeout-1 секунд» держал вызов бесконечно — нужен общий дедлайн;
 ///  2. размер ответа не ограничивался;
-///  3. ответ без булева `ok` или с чужим `id` принимался как успех.
+///  3. ответ без булева `ok` или с чужим `id` принимался как успех (id `null`/отсутствует —
+///     допустимо: backend не всегда может его отразить, см. `parseEnvelope`).
 enum IPCWire {
     /// Верхняя граница одного ответа. Крупнейшие легитимные ответы (история/экспорт) — единицы МБ.
     static let maxResponseBytes = 32 * 1024 * 1024
@@ -37,15 +38,16 @@ enum IPCWire {
                 if errno == EAGAIN || errno == EWOULDBLOCK { throw IPCError.timeout }
                 throw IPCError.readFailed
             }
-            if count == 0 {
-                guard responseData.contains(newline) else { throw IPCError.invalidResponse }
+            // EOF до перевода строки: ответ оборван (найденный перевод строки завершает цикл ниже).
+            if count == 0 { throw IPCError.invalidResponse }
+            // Перевод строки ищем ТОЛЬКО в свежем чанке. Поиск по всему накопленному буферу после
+            // каждого read давал квадратичное время (замер -O: 4 МБ — 18 с, 8 МБ — 45 с) и под
+            // общим дедлайном превращал крупный легитимный ответ в timeout.
+            if let end = chunk[0..<count].firstIndex(of: newline) {
+                responseData.append(contentsOf: chunk[0...end])
                 break
             }
             responseData.append(contentsOf: chunk[0..<count])
-            if let end = responseData.firstIndex(of: newline) {
-                responseData = responseData.prefix(through: end)
-                break
-            }
             // Лимит без перевода строки: читать дальше нет смысла — ответ заведомо невалиден.
             if responseData.count > maxBytes { throw IPCError.invalidResponse }
         }
@@ -70,8 +72,12 @@ enum IPCWire {
             let ok = strictBool(json["ok"])
         else { throw IPCError.invalidResponse }
 
-        if let expectedID {
-            guard (json["id"] as? String) == expectedID else { throw IPCError.invalidResponse }
+        // Backend отражает id через `safe_request_id`: при сбое санитайзера (текст запроса с
+        // незакрытой кавычкой после `receipt:`/`capability:`, больше 20000 узлов JSON) в ответе
+        // `"id": null`, хотя запрос ВЫПОЛНЕН. Соединение одноразовое, поэтому «id не отражён» —
+        // не чужой ответ; отвергаем только явно другой id.
+        if let expectedID, let echoed = json["id"], !(echoed is NSNull) {
+            guard (echoed as? String) == expectedID else { throw IPCError.invalidResponse }
         }
         if !ok {
             let error = (json["error"] as? [String: Any]) ?? [:]

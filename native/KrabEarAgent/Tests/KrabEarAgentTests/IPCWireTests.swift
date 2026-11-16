@@ -54,6 +54,43 @@ final class IPCWireTests: XCTestCase {
         }
     }
 
+    /// Чтение линейно по размеру ответа: 4 МБ обязаны прочитаться за доли секунды.
+    /// Регрессия: поиск перевода строки по всему буферу после каждого read (4 МБ — 18 с).
+    func test_readResponse_largeResponse_isLinear() throws {
+        let (r, w) = try makePair()
+        let size = 4 * 1024 * 1024
+        let writerThread = Thread {
+            var payload = [UInt8](repeating: 0x61, count: size)
+            payload[size - 1] = 0x0A
+            payload.withUnsafeBytes { raw in
+                var offset = 0
+                while offset < size {
+                    let n = Darwin.write(w, raw.baseAddress! + offset, size - offset)
+                    if n <= 0 { break }
+                    offset += n
+                }
+            }
+        }
+        writerThread.start()
+
+        let started = ContinuousClock.now
+        let data = try IPCWire.readResponse(fd: r, timeoutSec: 30)
+        let elapsed = ContinuousClock.now - started
+        XCTAssertEqual(data.count, size)
+        XCTAssertEqual(data.last, 0x0A)
+        XCTAssertLessThan(elapsed, .seconds(3), "чтение 4 МБ заняло \(elapsed): цикл снова квадратичен")
+    }
+
+    /// Перевод строки в середине чанка: хвост чанка отбрасывается, а не дописывается.
+    func test_readResponse_newlineInsideLaterChunk_dropsTail() throws {
+        let (r, w) = try makePair()
+        let head = [UInt8](repeating: 0x61, count: 5000)
+        IPCWireTests.put(w, head + [0x0A] + Array("TAIL".utf8))
+        let data = try IPCWire.readResponse(fd: r, timeoutSec: 2)
+        XCTAssertEqual(data.count, head.count + 1)
+        XCTAssertEqual(data.last, 0x0A)
+    }
+
     /// Дедлайн общий: по байту раз в 0.3с при таймауте 1с обязан оборваться ~за 1с.
     func test_readResponse_trickle_hitsTotalDeadline() throws {
         let (r, w) = try makePair()
@@ -90,11 +127,30 @@ final class IPCWireTests: XCTestCase {
         XCTAssertThrowsError(try IPCWire.parseEnvelope(Data("not json\n".utf8), expectedID: "x"))
     }
 
-    func test_parseEnvelope_rejectsForeignOrMissingID() {
-        XCTAssertThrowsError(try IPCWire.parseEnvelope(Data("{\"id\":\"other\",\"ok\":true}\n".utf8), expectedID: "x")) { error in
-            guard case IPCError.invalidResponse = error else { return XCTFail("\(error)") }
+    func test_parseEnvelope_rejectsForeignID() {
+        // Чужой строковый id, id другого типа и id, искажённый редактором backend.
+        for raw in ["\"other\"", "7", "\"[REDACTED]F9-x\""] {
+            XCTAssertThrowsError(
+                try IPCWire.parseEnvelope(Data("{\"id\":\(raw),\"ok\":true}\n".utf8), expectedID: "x"), raw
+            ) { error in
+                guard case IPCError.invalidResponse = error else { return XCTFail("\(error)") }
+            }
         }
-        XCTAssertThrowsError(try IPCWire.parseEnvelope(Data("{\"ok\":true}\n".utf8), expectedID: "x"))
+    }
+
+    /// Backend отражает id через `safe_request_id`, и при сбое санитайзера отдаёт `null`
+    /// для УЖЕ выполненного запроса (замер: текст `receipt: "незакрытая кавычка`).
+    /// Такой ответ — успех, а не invalidResponse: иначе действие выполнено, а клиент видит отказ.
+    func test_parseEnvelope_nullOrMissingID_isNotForeign() throws {
+        let nullID = try IPCWire.parseEnvelope(Data("{\"id\":null,\"ok\":true,\"result\":{\"v\":1}}\n".utf8), expectedID: "x")
+        XCTAssertEqual((nullID["result"] as? [String: Any])?["v"] as? Int, 1)
+        _ = try IPCWire.parseEnvelope(Data("{\"ok\":true,\"result\":{}}\n".utf8), expectedID: "x")
+        // invalid_json backend шлёт с id=null: сообщение об ошибке должно дойти.
+        let raw = "{\"id\":null,\"ok\":false,\"error\":{\"code\":\"invalid_json\",\"message\":\"bad\"}}\n"
+        XCTAssertThrowsError(try IPCWire.parseEnvelope(Data(raw.utf8), expectedID: "x")) { error in
+            guard case IPCError.backendError(let message) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(message, "bad")
+        }
     }
 
     func test_parseEnvelope_okTrue_returnsEnvelope() throws {
