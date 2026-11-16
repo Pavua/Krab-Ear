@@ -335,6 +335,8 @@ def _shutdown_backend(
 # stt.partial, realtime.partial_transcript) which would flood external endpoints.
 # To forward more events: add the type string here AND scrub any new PII fields
 # in BackendService._webhook_safe_payload().
+_HISTORY_MIGRATION_START_LOCK = threading.Lock()
+
 _WEBHOOK_FORWARDED_EVENTS: frozenset[str] = frozenset({
     "stt.final",                # транскрибация завершена (EventType.STT_FINAL)
     "translation.completed",    # перевод завершён (EventType.TRANSLATION_COMPLETED)
@@ -2045,6 +2047,11 @@ class BackendService:
         _token = _hf or _gigaam
         _token_source = "generic" if _hf else "gigaam"
         if not _token:
+            # E5 V5: очистка токена в GUI убирает ровно те env-ключи, которые выставили
+            # настройки. Явный внешний env (KRAB_EAR_HF_TOKEN / plist) не трогаем.
+            for _k in list(getattr(self, "_hf_env_from_settings", None) or ()):
+                os.environ.pop(_k, None)
+            self._hf_env_from_settings = set()
             return
         _env_keys = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
         _propagated: list[str] = []
@@ -2053,6 +2060,7 @@ class BackendService:
                 if overwrite or not os.environ.get(_k):
                     os.environ[_k] = _token
                     _propagated.append(_k)
+            self._hf_env_from_settings = set(getattr(self, "_hf_env_from_settings", None) or ()) | set(_propagated)
         except Exception as exc:  # noqa: BLE001
             # Например, null-byte в токене вызывает ValueError в os.environ[k]=value.
             # Не логируем сам токен — только тип ошибки.
@@ -3581,7 +3589,7 @@ class BackendService:
         interval_hours = int(params.get("interval_hours", 24))
         output_dir = params.get("output_dir")
         # E5 п.4: bool("false") == True — строка «выключить» включала авто-экспорт.
-        enabled = self._coerce_bool(params.get("enabled", True), True)
+        enabled = BackendService._coerce_bool(params.get("enabled", True), True)
         return self._export_scheduler.configure(
             fmt=fmt,
             interval_hours=interval_hours,
@@ -4104,6 +4112,9 @@ class BackendService:
         Позволяет отлаживать shipped-сборки одним кликом из вкладки «Диагностика».
         Возвращает {"ok": True, "sent_count": N} или {"ok": False, "reason": "..."}.
         """
+        # E5 V3: сестринский get_audit_log гейтится privacy; здесь та же защита в глубину.
+        if self._get_runtime_setting("privacy_mode_enabled", False):
+            return {"ok": False, "reason": "privacy_mode_active"}
         if self._error_bus is None:
             return {"ok": False, "reason": "error_bus_not_initialized"}
         try:
@@ -5995,12 +6006,24 @@ class BackendService:
             {"ok": True, "status": "already_running"}
             {"ok": False, "status": "encryption_unavailable"}
         """
-        if getattr(self, "_history_migration_running", False):
-            return {"ok": True, "status": "already_running"}
+        # E5 V7: проверка-и-выставление флага атомарны. IPC многопоточный, а флаг раньше
+        # выставлялся уже после store._lock(): два вызова могли запустить два воркера.
+        _migration_guard = _HISTORY_MIGRATION_START_LOCK
+        _migration_guard.acquire()
+        try:
+            if getattr(self, "_history_migration_running", False):
+                return {"ok": True, "status": "already_running"}
 
-        with self.store._lock():
-            if not self.store._read_encryption_flag_unlocked() or self.store._acquire_history_crypto_unlocked() is None:
-                return {"ok": False, "status": "encryption_unavailable"}
+            with self.store._lock():
+                if not self.store._read_encryption_flag_unlocked() or self.store._acquire_history_crypto_unlocked() is None:
+                    return {"ok": False, "status": "encryption_unavailable"}
+            self._history_migration_running = True
+            self._history_migration_last_status = None
+        except BaseException:
+            self._history_migration_running = False
+            raise
+        finally:
+            _migration_guard.release()
 
         def _run() -> None:
             from backend.event_bus import bus as _event_bus
@@ -6038,8 +6061,6 @@ class BackendService:
                 self._history_migration_running = False
 
         import threading as _threading
-        self._history_migration_running = True
-        self._history_migration_last_status = None
         t = _threading.Thread(target=_run, daemon=True, name="history-enc-migration")
         t.start()
         return {"ok": True, "status": "started"}

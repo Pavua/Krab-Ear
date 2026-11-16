@@ -461,6 +461,19 @@ class SettingsService:
                     f"remove {env_var} to allow updates"
                 )
 
+    def _check_env_pinned_changes(self, incoming: dict[str, Any], current: dict[str, Any]) -> None:
+        """E5 V2: import/restore не меняют env-пин. Раньше его соблюдал только set_settings.
+
+        Конфликтом считается только ИЗМЕНЕНИЕ значения: повторный импорт собственного
+        экспорта (то же значение) проходит.
+        """
+        for key, env_var in self._ENV_PINNED_SETTINGS.items():
+            if key in incoming and os.environ.get(env_var) is not None and incoming[key] != current.get(key):
+                raise ValueError(
+                    f"{key} is pinned by env; "
+                    f"remove {env_var} to allow updates"
+                )
+
     def _handle_set_settings_locked(
         self, params: dict[str, Any], *, force_history_crypto_preflight: bool = False,
     ) -> dict[str, Any]:
@@ -1088,6 +1101,7 @@ class SettingsService:
             errors: list[str] = []
             skipped = 0
             old_settings = self.cached_settings()
+            self._check_env_pinned_changes(incoming, old_settings)
             merged = dict(old_settings)
 
             for key, value in incoming.items():
@@ -1190,6 +1204,8 @@ class SettingsService:
             # Полный restore требует исходное решение, до migrations/defaults.
             StateStore.validate_raw_policy_flags(restored, require_pair=True)
             raw_policy_input = dict(restored)
+
+            self._check_env_pinned_changes(restored, old_settings)
 
             # W1178: snapshot only after raw input validation.
             try:
