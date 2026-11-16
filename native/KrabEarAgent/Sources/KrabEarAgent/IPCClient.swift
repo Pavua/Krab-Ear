@@ -295,22 +295,8 @@ final class IPCClient: @unchecked Sendable {
         let delimited = payload + Data("\n".utf8)
 
         let responseData = try await provider.send(payload: delimited, timeoutSec: timeoutSec)
-
-        guard
-            let text = String(data: responseData, encoding: .utf8),
-            let line = text.split(separator: "\n").first,
-            let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-        else {
-            throw IPCError.invalidResponse
-        }
-
-        if let ok = json["ok"] as? Bool, ok == false {
-            let errDict = (json["error"] as? [String: Any]) ?? [:]
-            let message = (errDict["message"] as? String) ?? "unknown"
-            throw IPCError.backendError(message)
-        }
-
-        return json
+        // E4 п.7: тот же строгий конверт, что и на реальном сокете (Bool ok + совпадение id).
+        return try IPCWire.parseEnvelope(responseData, expectedID: request["id"] as? String)
     }
 
     /// Variant с explicit timeout. Используй `IPCClient.quickTimeoutSec` (5s) для

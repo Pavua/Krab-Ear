@@ -22,4 +22,12 @@ enum IPCFakeServerSupport {
         else { return response }
         return text
     }
+
+    /// Вариант для провайдеров, возвращающих `Data`: id берётся из `request` (полезная нагрузка запроса).
+    static func echoingRequestID(request: Data, intoData response: Data) -> Data {
+        let text = String(decoding: response, as: UTF8.self)
+        let trimmed = text.hasSuffix("\n") ? String(text.dropLast()) : text
+        let echoed = echoingRequestID(request: Array(request), into: trimmed)
+        return Data((echoed + "\n").utf8)
+    }
 }
