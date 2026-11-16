@@ -57,10 +57,15 @@ _SETTINGS_EXPORT_FORBIDDEN_ROOTS: tuple[str, ...] = (
 )
 
 
-def _validate_settings_export_target(p: Path) -> None:
-    """Raise RuntimeError, если *p* внутри каталога данных Ear (экспорт туда запрещён)."""
-    for root_str in _SETTINGS_EXPORT_FORBIDDEN_ROOTS:
-        forbidden = Path(root_str).expanduser().resolve()
+def _validate_settings_export_target(p: Path, *, data_dir: Path | None = None) -> None:
+    """Raise RuntimeError, если *p* внутри каталога данных Ear (экспорт туда запрещён).
+
+    Помимо стандартных каталогов исключается фактический `data_dir` хранилища (кастомный/тестовый).
+    """
+    roots: list[Path] = [Path(r).expanduser().resolve() for r in _SETTINGS_EXPORT_FORBIDDEN_ROOTS]
+    if data_dir is not None:
+        roots.append(Path(data_dir).expanduser().resolve())
+    for forbidden in roots:
         try:
             p.relative_to(forbidden)
         except ValueError:
@@ -83,11 +88,19 @@ def _write_export_file(out_path: Path, payload: str) -> None:
         raise RuntimeError(
             f"settings export: файл уже существует и не будет перезаписан: {out_path!s}"
         ) from exc
+    created = os.fstat(fd)
     try:
+        os.fchmod(fd, 0o600)  # итоговые права не зависят от umask процесса
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(payload)
     except BaseException:
-        out_path.unlink(missing_ok=True)
+        # Удаляем только СВОЙ файл: имя могло быть подменено другим процессом.
+        try:
+            now = os.stat(out_path, follow_symlinks=False)
+            if (now.st_dev, now.st_ino) == (created.st_dev, created.st_ino):
+                out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         raise
 
 
@@ -467,8 +480,12 @@ class SettingsService:
         Конфликтом считается только ИЗМЕНЕНИЕ значения: повторный импорт собственного
         экспорта (то же значение) проходит.
         """
+        def _norm(value: Any) -> Any:
+            coerced = self._coerce_bool(value, default=None)  # type: ignore[arg-type]
+            return coerced if coerced is not None else value
+
         for key, env_var in self._ENV_PINNED_SETTINGS.items():
-            if key in incoming and os.environ.get(env_var) is not None and incoming[key] != current.get(key):
+            if key in incoming and os.environ.get(env_var) is not None and _norm(incoming[key]) != _norm(current.get(key)):
                 raise ValueError(
                     f"{key} is pinned by env; "
                     f"remove {env_var} to allow updates"
@@ -1035,9 +1052,9 @@ class SettingsService:
             out_path = Path(str(params["file"])).expanduser().resolve()
             # W1736: reject writes to paths outside the settings I/O allowlist.
             _validate_settings_path(out_path, operation="export")
-            _validate_settings_export_target(out_path)
+            _validate_settings_export_target(out_path, data_dir=getattr(self.store, "data_dir", None))
         else:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             out_path = Path.home() / f"krabear_settings_{ts}.json"
 
         out_path.parent.mkdir(parents=True, exist_ok=True)

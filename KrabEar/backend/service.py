@@ -2049,9 +2049,10 @@ class BackendService:
         if not _token:
             # E5 V5: очистка токена в GUI убирает ровно те env-ключи, которые выставили
             # настройки. Явный внешний env (KRAB_EAR_HF_TOKEN / plist) не трогаем.
-            for _k in list(getattr(self, "_hf_env_from_settings", None) or ()):
-                os.environ.pop(_k, None)
-            self._hf_env_from_settings = set()
+            for _k, _v in list((getattr(self, "_hf_env_from_settings", None) or {}).items()):
+                if os.environ.get(_k) == _v:  # чужое значение (подмена после нас) не трогаем
+                    os.environ.pop(_k, None)
+            self._hf_env_from_settings = {}
             return
         _env_keys = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
         _propagated: list[str] = []
@@ -2060,7 +2061,9 @@ class BackendService:
                 if overwrite or not os.environ.get(_k):
                     os.environ[_k] = _token
                     _propagated.append(_k)
-            self._hf_env_from_settings = set(getattr(self, "_hf_env_from_settings", None) or ()) | set(_propagated)
+            _owned = dict(getattr(self, "_hf_env_from_settings", None) or {})
+            _owned.update({_k: _token for _k in _propagated})
+            self._hf_env_from_settings = _owned
         except Exception as exc:  # noqa: BLE001
             # Например, null-byte в токене вызывает ValueError в os.environ[k]=value.
             # Не логируем сам токен — только тип ошибки.
@@ -3589,7 +3592,9 @@ class BackendService:
         interval_hours = int(params.get("interval_hours", 24))
         output_dir = params.get("output_dir")
         # E5 п.4: bool("false") == True — строка «выключить» включала авто-экспорт.
-        enabled = BackendService._coerce_bool(params.get("enabled", True), True)
+        # Отсутствующий ключ = документированное True; явный null / мусор / NaN = fail-closed False
+        # (раньше `bool(None)` давало False, а _coerce_bool(None, True) включал экспорт).
+        enabled = BackendService._coerce_bool(params["enabled"], False) if "enabled" in params else True
         return self._export_scheduler.configure(
             fmt=fmt,
             interval_hours=interval_hours,
@@ -4113,7 +4118,8 @@ class BackendService:
         Возвращает {"ok": True, "sent_count": N} или {"ok": False, "reason": "..."}.
         """
         # E5 V3: сестринский get_audit_log гейтится privacy; здесь та же защита в глубину.
-        if self._get_runtime_setting("privacy_mode_enabled", False):
+        # Отправка разрешена только при ЯВНОМ False: None/нечитаемое/нетипизированное = запрет.
+        if self._get_runtime_setting("privacy_mode_enabled", False) is not False:
             return {"ok": False, "reason": "privacy_mode_active"}
         if self._error_bus is None:
             return {"ok": False, "reason": "error_bus_not_initialized"}
@@ -6062,7 +6068,12 @@ class BackendService:
 
         import threading as _threading
         t = _threading.Thread(target=_run, daemon=True, name="history-enc-migration")
-        t.start()
+        try:
+            t.start()
+        except BaseException:
+            # Воркера нет — флаг не должен навсегда отвечать «already_running».
+            self._history_migration_running = False
+            raise
         return {"ok": True, "status": "started"}
 
     def _handle_get_history_encryption_status(self, params: dict[str, Any]) -> dict[str, Any]:
