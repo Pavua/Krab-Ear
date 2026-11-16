@@ -19,10 +19,24 @@ enum AXSecureField {
         isSecure(role: role, subrole: subrole) ? marker : role
     }
 
-    /// Читает подроль элемента; `nil`, если атрибута нет или чтение не удалось.
+    /// Читает подроль элемента. Отсутствие атрибута = `nil`; ошибка чтения или не-строка = fail-closed
+    /// (возвращается маркер защищённого поля, чтобы текст не извлекался и не вставлялся вслепую).
     static func subrole(of element: AXUIElement) -> String? {
         var ref: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &ref) == .success else { return nil }
-        return ref as? String
+        let error = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &ref)
+        return interpretSubrole(error: error, value: ref)
+    }
+
+    /// Чистая часть чтения подроли (тестируется без живого AX).
+    static func interpretSubrole(error: AXError, value: Any?) -> String? {
+        switch error {
+        case .success:
+            guard let text = value as? String else { return marker }
+            return text
+        case .noValue, .attributeUnsupported:
+            return nil
+        default:
+            return marker
+        }
     }
 }

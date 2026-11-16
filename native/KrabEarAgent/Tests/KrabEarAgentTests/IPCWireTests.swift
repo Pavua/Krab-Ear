@@ -130,6 +130,20 @@ final class IPCWireTests: XCTestCase {
         XCTAssertNil(IPCWire.strictBool(nil))
     }
 
+    /// Ревью ChatGPT (M04/M05): продовый лимит и таймаут проверялись только с подставленными параметрами.
+    func test_productionResponseCap_is32MiB() {
+        XCTAssertEqual(IPCWire.maxResponseBytes, 32 * 1024 * 1024)
+    }
+
+    func test_readResponse_silentPeer_timesOutWithinDeadline() throws {
+        let (r, _) = try makePair()
+        let started = ContinuousClock.now
+        XCTAssertThrowsError(try IPCWire.readResponse(fd: r, timeoutSec: 1)) { error in
+            guard case IPCError.timeout = error else { return XCTFail("\(error)") }
+        }
+        XCTAssertLessThan(ContinuousClock.now - started, .seconds(3))
+    }
+
     func test_parseEnvelope_nilExpectedID_skipsIDCheck() throws {
         // Тестовый seam socketProvider: моки не знают случайный id запроса.
         _ = try IPCWire.parseEnvelope(Data("{\"ok\":true}\n".utf8), expectedID: nil)

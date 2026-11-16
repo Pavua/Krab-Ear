@@ -90,6 +90,24 @@ final class E4Item8RestAuthLoopbackTests: XCTestCase {
         }
     }
 
+    /// Ревью ChatGPT: запрос, перенацеленный на чужой хост, не должен нести ранее поставленный ключ.
+    func test_retargetedRequestLosesPreviouslyAppliedBearer() throws {
+        let file = try keyFile()
+        var req = URLRequest(url: URL(string: "http://localhost:5005/v1/events")!)
+        RestAuth.apply(to: &req, environment: [:], defaultFile: file)
+        XCTAssertNotNil(req.value(forHTTPHeaderField: "Authorization"))
+        req.url = URL(string: "https://external.example/")!
+        RestAuth.apply(to: &req, environment: [:], defaultFile: file)
+        XCTAssertNil(req.value(forHTTPHeaderField: "Authorization"))
+    }
+
+    func test_bearer_isNotSentToHttpsExternalHost() throws {
+        let file = try keyFile()
+        var req = URLRequest(url: URL(string: "https://external.example/v1/events")!)
+        RestAuth.apply(to: &req, environment: [:], defaultFile: file)
+        XCTAssertNil(req.value(forHTTPHeaderField: "Authorization"))
+    }
+
     func test_bearer_isSentToLoopbackHosts() throws {
         let file = try keyFile()
         for raw in ["http://127.0.0.1:5005/v1/events",
@@ -117,6 +135,17 @@ final class E4Item8WakeWordPauseTests: XCTestCase {
 
         XCTAssertTrue(poller.isPaused, "пауза privacy потеряна, пока таймер не был запущен")
         XCTAssertEqual(ipcLookups, 0, "activate() запустил wake_word_start при активной паузе privacy")
+    }
+
+    /// Ревью ChatGPT: deactivate() без таймера не чистил временные паузы, и activate() потом отказывал.
+    func test_transientPauseBeforeActivate_isClearedByDeactivateEvenWithoutTimer() {
+        let poller = WakeWordPoller(ipcProvider: { nil }, isToggleEnabled: { true }, onDetection: {})
+        poller.pause(.recording)
+        poller.deactivate()
+        XCTAssertFalse(poller.isPaused, "пауза recording пережила deactivate() и заблокирует activate()")
+        poller.pause(.privacyMode)
+        poller.deactivate()
+        XCTAssertTrue(poller.isPaused, "privacy-пауза обязана переживать deactivate() и без таймера")
     }
 
     func test_deactivateKeepsPrivacyPause() {

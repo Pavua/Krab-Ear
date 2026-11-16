@@ -52,7 +52,13 @@ enum RestAuth {
     ) {
         // Ключ уходит только на loopback (ревью E4 N3, 2026-11-16): URL базы REST
         // может прийти из настроек, а чужому хосту ключ отдавать нельзя.
-        guard isLoopback(request.url) else { return }
+        guard isLoopback(request.url) else {
+            // Запрос могли перенацелить после первого apply: ранее поставленный ключ снимаем.
+            if request.value(forHTTPHeaderField: "Authorization")?.hasPrefix("Bearer ") == true {
+                request.setValue(nil, forHTTPHeaderField: "Authorization")
+            }
+            return
+        }
         guard let token = bearerToken(environment: environment, defaultFile: defaultFile) else { return }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }

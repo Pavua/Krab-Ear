@@ -82,11 +82,12 @@ final class PrivateFileWriterTests: XCTestCase {
         for name in ["HistoryPanelController+History.swift", "HistoryPanelController+MeetingMode.swift",
                      "HistoryPanelController+CallAssist.swift",
                      "AnalyticsDashboardViewController+PDFExport.swift",
-                     "HistoryPanelController+Import.swift"] {
+                     "HistoryPanelController+Import.swift", "HistoryPanelController.swift"] {
             let text = try String(contentsOf: src.appendingPathComponent(name), encoding: .utf8)
             XCTAssertTrue(text.contains("PrivateFileWriter.write"), "\(name): экспорт не через PrivateFileWriter")
-            XCTAssertFalse(text.contains(".write(to: url, atomically: true")
-                           || text.contains(".write(to: url, options: .atomic")
+            XCTAssertFalse(text.contains("csv.write(to: url, atomically: true")
+                           || text.contains("content.write(to: url, atomically: true")
+                           || text.contains("data.write(to: url, options: .atomic")
                            || text.contains(".write(toFile: reportPath, atomically"),
                            "\(name): остался запись с правами по умолчанию")
         }

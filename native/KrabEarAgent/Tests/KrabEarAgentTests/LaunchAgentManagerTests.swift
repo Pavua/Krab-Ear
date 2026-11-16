@@ -389,6 +389,22 @@ final class LaunchAgentManagerTests: XCTestCase {
         XCTAssertEqual(recorder.calls.first?.arguments.first, "bootout")
     }
 
+    /// Ревью ChatGPT: провал записи нового plist не должен стоить пользователю legacy-автозапуска.
+    func test_install_keepsLegacyPlistWhenNewPlistCannotBeWritten() throws {
+        let fixture = try makeFixture()
+        try FileManager.default.createDirectory(
+            at: fixture.launchAgentsDirectory, withIntermediateDirectories: true)
+        try Data("legacy".utf8).write(to: fixture.legacyPlist)
+        // Каталог на месте целевого plist: запись файла туда провалится.
+        try FileManager.default.createDirectory(
+            at: fixture.canonicalPlist.appendingPathComponent("blocker"), withIntermediateDirectories: true)
+
+        fixture.manager.install()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.legacyPlist.path),
+                      "legacy-автозапуск удалён до успешной записи замены")
+    }
+
     /// E4 п.5: путь с XML-спецсимволами обязан остаться ДАННЫМИ. Раньше путь подставлялся в XML
     /// строкой: `&`/`<` ломали plist, а `</string>…` позволяло дописать чужие ключи.
     func test_plist_hostileBundlePath_staysDataAndParses() throws {

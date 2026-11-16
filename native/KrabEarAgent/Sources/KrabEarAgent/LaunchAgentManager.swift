@@ -131,9 +131,6 @@ final class LaunchAgentManager: AutostartManaging, @unchecked Sendable {
             withIntermediateDirectories: true
         )
 
-        // Phase C.6.2: идемпотентно удаляем старый com.krabear.agent.plist.
-        removeLegacyPlistIfPresent()
-
         let plist = makePlistContent()
         // E4 п.5: при провале записи launchd не трогаем — раньше bootout+bootstrap шли всё равно
         // и снимали рабочий агент ради несуществующего/устаревшего plist.
@@ -143,6 +140,9 @@ final class LaunchAgentManager: AutostartManaging, @unchecked Sendable {
         } catch {
             return
         }
+        // Phase C.6.2: старый com.krabear.agent.plist убираем только ПОСЛЕ успешной записи замены
+        // (иначе провал записи стоил бы автозапуска совсем).
+        removeLegacyPlistIfPresent()
         reloadAgent()
     }
 

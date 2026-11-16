@@ -246,7 +246,12 @@ final class WakeWordPoller {
 
     /// Выключить: остановить поллинг + wake_word_stop в backend.
     func deactivate() {
-        guard timer != nil else { return }
+        guard timer != nil else {
+            // Без таймера временные паузы всё равно сбрасываем (иначе activate() потом отказывает),
+            // privacy-пауза остаётся.
+            pausedReasons = pausedReasons.intersection([.privacyMode])
+            return
+        }
         timer?.invalidate()
         timer = nil
         // Privacy-пауза принадлежит внешнему состоянию, а не таймеру: стереть её
