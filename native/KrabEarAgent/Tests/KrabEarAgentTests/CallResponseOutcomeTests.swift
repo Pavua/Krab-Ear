@@ -90,4 +90,54 @@ final class CallResponseOutcomeTests: XCTestCase {
         XCTAssertEqual(CallEndOutcome.parse(["result": ["session_id": "s", "status": "completed"]]), .ended)
         XCTAssertEqual(CallEndOutcome.parse(["result": ["ok": true]]), .ended)
     }
+
+    /// Ревью ChatGPT (2026-11-16): пустой/неоднозначный ответ не подтверждает завершение.
+    func test_end_malformedOrContradictoryAck_isFailure() {
+        for result in [[String: Any](),
+                       ["ok": "false"],
+                       ["ok": "true"],
+                       ["ok": true, "status": "active"],
+                       ["session_id": "s", "status": "talking"],
+                       ["status": "ending"]] as [[String: Any]] {
+            guard case .failed = CallEndOutcome.parse(["result": result]) else {
+                return XCTFail("\(result) ошибочно принят как подтверждённое завершение")
+            }
+        }
+    }
+
+    func test_end_numericOkOne_isNotAcknowledgement() {
+        guard case .failed = CallEndOutcome.parse(["result": ["ok": NSNumber(value: 1)]]) else {
+            return XCTFail("числовой ok:1 не JSON-boolean и не подтверждает завершение")
+        }
+    }
+
+    func test_end_terminalStatusWithoutOk_isEnded() {
+        XCTAssertEqual(CallEndOutcome.parse(["result": ["session_id": "s", "status": "failed"]]), .ended)
+    }
+
+    /// Повторный end по уже завершённой сессии идемпотентен: звонка больше нет.
+    func test_end_invalidTransitionFromTerminalState_isEnded() {
+        let already: [String: Any] = ["ok": false, "reason": "invalid_state_transition", "current_state": "completed"]
+        XCTAssertEqual(CallEndOutcome.parse(["result": already]), .ended)
+        let live: [String: Any] = ["ok": false, "reason": "invalid_state_transition", "current_state": "talking"]
+        guard case .failed = CallEndOutcome.parse(["result": live]) else {
+            return XCTFail("переход отвергнут из живого состояния: звонок мог остаться живым")
+        }
+    }
+
+    func test_failedEndNeverRestoresAnAlreadyEndedSession() {
+        XCTAssertFalse(CallEndOutcome.shouldRestoreAfterFailedEnd(sessionAlreadyEnded: true))
+        XCTAssertTrue(CallEndOutcome.shouldRestoreAfterFailedEnd(sessionAlreadyEnded: false))
+    }
+
+    func test_controllerGuardsEndCompletionsWithTheRestoreRule() throws {
+        var root = URL(fileURLWithPath: #file)
+        for _ in 0..<6 where !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Sources/KrabEarAgent").path) { root.deleteLastPathComponent() }
+        let text = try String(
+            contentsOf: root.appendingPathComponent("Sources/KrabEarAgent/CallAutomationController.swift"),
+            encoding: .utf8)
+        let uses = text.components(separatedBy: "shouldRestoreAfterFailedEnd").count - 1
+        XCTAssertGreaterThanOrEqual(uses, 2, "оба обработчика (hangup и emergency stop) обязаны сверяться с правилом")
+    }
 }

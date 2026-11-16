@@ -55,12 +55,18 @@ enum IPCWire {
     /// Строгий разбор конверта `{id, ok, result|error}`.
     /// - Parameter expectedID: id запроса; `nil` отключает проверку (тестовый seam с моками,
     ///   которые не знают случайный id).
+    /// Только настоящие JSON `true`/`false`. `as? Bool` на NSNumber принимает и `1`/`0`.
+    static func strictBool(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+
     static func parseEnvelope(_ data: Data, expectedID: String?) throws -> [String: Any] {
         guard
             let text = String(data: data, encoding: .utf8),
             let line = text.split(separator: "\n").first,
             let json = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
-            let ok = json["ok"] as? Bool
+            let ok = strictBool(json["ok"])
         else { throw IPCError.invalidResponse }
 
         if let expectedID {

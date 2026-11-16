@@ -47,9 +47,30 @@ enum CallEndOutcome: Equatable {
             return .failed((error["code"] as? String) ?? "unknown_error")
         }
         guard let result = response["result"] as? [String: Any] else { return .failed("no_result") }
-        if (result["ok"] as? Bool) == false {
-            return .failed((result["error"] as? String) ?? "call_end_refused")
+        let status = (result["status"] as? String)?.lowercased()
+        if IPCWire.strictBool(result["ok"]) == false {
+            // Повторный end по уже завершённой сессии: backend отвечает invalid_state_transition
+            // с терминальным current_state. Звонка больше нет, для UI это «завершён».
+            if (result["reason"] as? String) == "invalid_state_transition",
+               let current = (result["current_state"] as? String)?.lowercased(),
+               terminalStatuses.contains(current) {
+                return .ended
+            }
+            return .failed((result["error"] as? String) ?? (result["reason"] as? String) ?? "call_end_refused")
         }
-        return .ended
+        // Подтверждение должно быть положительным: пустой result, нестроковый ok и нетерминальный
+        // status («active», «talking») завершением не считаются.
+        if let status, !terminalStatuses.contains(status) { return .failed("not_terminal:\(status)") }
+        if IPCWire.strictBool(result["ok"]) == true || status != nil { return .ended }
+        return .failed("no_acknowledgement")
+    }
+
+    /// Терминальные статусы backend (`CallStatus.COMPLETED`/`FAILED`).
+    static let terminalStatuses: Set<String> = ["completed", "failed"]
+
+    /// Отказ завершить звонок не должен «оживлять» сессию, уже помеченную завершённой
+    /// конкурирующим обработчиком (hangup и emergency stop шлют end независимо).
+    static func shouldRestoreAfterFailedEnd(sessionAlreadyEnded: Bool) -> Bool {
+        !sessionAlreadyEnded
     }
 }

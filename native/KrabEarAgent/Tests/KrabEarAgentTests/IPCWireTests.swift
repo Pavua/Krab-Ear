@@ -110,6 +110,26 @@ final class IPCWireTests: XCTestCase {
         }
     }
 
+    /// Ревью ChatGPT (2026-11-16): `as? Bool` на NSNumber принимает 1/0 как true/false.
+    func test_parseEnvelope_numericOK_isNotABoolean() {
+        for raw in ["{\"id\":\"x\",\"ok\":1}\n", "{\"id\":\"x\",\"ok\":0}\n"] {
+            XCTAssertThrowsError(try IPCWire.parseEnvelope(Data(raw.utf8), expectedID: "x"), raw) { error in
+                guard case IPCError.invalidResponse = error else { return XCTFail("\(raw): \(error)") }
+            }
+        }
+    }
+
+    func test_strictBool_acceptsOnlyJSONBooleans() throws {
+        let object = try JSONSerialization.jsonObject(
+            with: Data("{\"t\":true,\"f\":false,\"one\":1,\"zero\":0,\"s\":\"true\"}".utf8)) as! [String: Any]
+        XCTAssertEqual(IPCWire.strictBool(object["t"]), true)
+        XCTAssertEqual(IPCWire.strictBool(object["f"]), false)
+        XCTAssertNil(IPCWire.strictBool(object["one"]))
+        XCTAssertNil(IPCWire.strictBool(object["zero"]))
+        XCTAssertNil(IPCWire.strictBool(object["s"]))
+        XCTAssertNil(IPCWire.strictBool(nil))
+    }
+
     func test_parseEnvelope_nilExpectedID_skipsIDCheck() throws {
         // Тестовый seam socketProvider: моки не знают случайный id запроса.
         _ = try IPCWire.parseEnvelope(Data("{\"ok\":true}\n".utf8), expectedID: nil)

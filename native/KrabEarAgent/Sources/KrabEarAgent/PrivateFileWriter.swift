@@ -13,7 +13,8 @@ enum PrivateFileWriter {
 
     static func write(_ data: Data, to url: URL) throws {
         let directory = url.deletingLastPathComponent()
-        let temp = directory.appendingPathComponent(".\(url.lastPathComponent).tmp-\(UUID().uuidString)")
+        // Короткое имя, не зависящее от целевого: цель у предела 255 байт иначе даёт ENAMETOOLONG.
+        let temp = directory.appendingPathComponent(".krab-export-\(UUID().uuidString)")
         let fd = open(temp.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
         guard fd >= 0 else { throw posixError() }
         var needsCleanup = true

@@ -57,6 +57,16 @@ final class PrivateFileWriterTests: XCTestCase {
         XCTAssertEqual(names, ["d.md"])
     }
 
+    /// Ревью ChatGPT (2026-11-16): имя цели у предела 255 байт не должно ломать запись
+    /// из-за длинного временного имени.
+    func test_nearLimitFileName_writesSuccessfully() throws {
+        let name = String(repeating: "a", count: 210) + ".txt"
+        let url = dir.appendingPathComponent(name)
+        try PrivateFileWriter.write("ok", to: url)
+        XCTAssertEqual(try mode(url), 0o600)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: dir.path), [name])
+    }
+
     func test_missingDirectory_throwsAndLeavesNothing() {
         let url = dir.appendingPathComponent("no/such/dir/e.md")
         XCTAssertThrowsError(try PrivateFileWriter.write("x", to: url))

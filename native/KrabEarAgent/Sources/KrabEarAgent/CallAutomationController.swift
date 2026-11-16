@@ -726,6 +726,9 @@ final class CallAutomationController: NSViewController {
                 // E4 п.2: `.ended` только при подтверждённом ответе. Отказ/таймаут оставляет сессию
                 // живой (polling продолжается), иначе живой звонок выглядел бы завершённым.
                 guard case .ended = CallEndOutcome.parse(response) else {
+                    // Конкурирующая экстренная остановка уже могла завершить сессию.
+                    guard CallEndOutcome.shouldRestoreAfterFailedEnd(
+                        sessionAlreadyEnded: self.currentSession?.status == .ended) else { return }
                     self.hangupButton.isEnabled = true
                     self.showError("Не удалось завершить звонок. Повторите или используйте экстренную остановку.")
                     return
@@ -761,6 +764,12 @@ final class CallAutomationController: NSViewController {
             DispatchQueue.main.async {
                 // E4 п.2: при отказе возвращаем прежний статус и polling — звонок мог остаться живым.
                 guard case .ended = CallEndOutcome.parse(response) else {
+                    // Конкурирующий hangup уже мог завершить сессию: «оживлять» её нельзя.
+                    guard CallEndOutcome.shouldRestoreAfterFailedEnd(
+                        sessionAlreadyEnded: self.currentSession?.status == .ended) else {
+                        self.emergencyStopButton.isEnabled = true
+                        return
+                    }
                     var restored = self.currentSession
                     if let statusBeforeStop { restored?.status = statusBeforeStop }
                     self.currentSession = restored
