@@ -220,6 +220,8 @@ final class WakeWordPoller {
     }
 
     var isActive: Bool { timer != nil }
+    /// Есть ли хоть одна активная причина паузы (для тестов и диагностики).
+    var isPaused: Bool { !pausedReasons.isEmpty }
 
     /// Включить: wake_word_start в backend + периодический поллинг статуса.
     func activate() {
@@ -229,7 +231,11 @@ final class WakeWordPoller {
         gaveUpNotified = false
         consecutiveEngineUnavailable = 0
         failedStartAttempts = 0
-        sendStart(force: true)
+        // Пауза, поставленная ДО activate() (privacy и др.), не теряется: микрофон
+        // не стартуем, поллинг тикает вхолостую до resume() (ревью E4 V10).
+        if pausedReasons.isEmpty {
+            sendStart(force: true)
+        }
         let t = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
@@ -243,16 +249,20 @@ final class WakeWordPoller {
         guard timer != nil else { return }
         timer?.invalidate()
         timer = nil
-        pausedReasons.removeAll()
+        // Privacy-пауза принадлежит внешнему состоянию, а не таймеру: стереть её
+        // здесь значило бы стартовать микрофон при повторном включении тумблера.
+        pausedReasons = pausedReasons.intersection([.privacyMode])
         sendStop()
         AgentLogger.shared.info("[WakeWord] Поллинг остановлен")
     }
 
     /// Пауза по причине (запись/разговор/privacy). Идемпотентна по причине.
     func pause(_ reason: WakeWordPauseReason) {
-        guard timer != nil else { return }
         let wasEmpty = pausedReasons.isEmpty
         pausedReasons.insert(reason)
+        // Причина запоминается и без таймера (V10); wake_word_stop шлём только
+        // когда поллинг запущен: иначе останавливать в backend нечего.
+        guard timer != nil else { return }
         if wasEmpty {
             sendStop()
             AgentLogger.shared.info("[WakeWord] Пауза: \(reason.rawValue)")

@@ -2534,7 +2534,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                 presentPanelSheet(panel, for: self.window) { resp in
                     guard resp == .OK, let url = panel.url else { return }
                     do {
-                        try csv.write(to: url, atomically: true, encoding: .utf8)
+                        try PrivateFileWriter.write(csv, to: url)
                     } catch {
                         self.showInfoAlert(title: "Экспорт глоссария", body: "Ошибка записи файла: \(error.localizedDescription)")
                     }

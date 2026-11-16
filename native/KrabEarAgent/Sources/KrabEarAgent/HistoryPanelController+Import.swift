@@ -639,7 +639,7 @@ extension HistoryPanelController {
         """
 
         do {
-            try body.write(toFile: reportPath, atomically: true, encoding: .utf8)
+            try PrivateFileWriter.write(body, to: URL(fileURLWithPath: reportPath))
             return reportPath
         } catch {
             return nil

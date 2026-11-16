@@ -151,7 +151,7 @@ extension HistoryPanelController {
             guard let self else { return }
             do {
                 try await self.plaintextExportCoordinator.perform(ticket) {
-                    try content.write(to: url, atomically: true, encoding: .utf8)
+                    try PrivateFileWriter.write(content, to: url)
                 }
                 didSave()
             } catch {

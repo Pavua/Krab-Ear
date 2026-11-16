@@ -24,6 +24,8 @@
 	<true/>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Krab Ear uses accessibility to paste transcribed text into the active application.</string>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Krab Ear uses System Events to paste transcribed text into the application you are dictating into.</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>

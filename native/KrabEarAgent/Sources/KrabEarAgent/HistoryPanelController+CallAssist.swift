@@ -479,7 +479,7 @@ extension HistoryPanelController {
                     presentPanelSheet(savePanel, for: self.window) { [weak self] resp in
                         guard let self, resp == .OK, let url = savePanel.url else { return }
                         do {
-                            try content.write(to: url, atomically: true, encoding: .utf8)
+                            try PrivateFileWriter.write(content, to: url)
                             self.appendCallAssistOutput(title: "Timeline export", body: "Сохранено: \(url.path)")
                         } catch {
                             self.appendCallAssistOutput(title: "Timeline export", body: "Ошибка записи файла: \(error.localizedDescription)")
