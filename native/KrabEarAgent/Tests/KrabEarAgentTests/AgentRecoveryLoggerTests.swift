@@ -75,11 +75,12 @@ final class AgentRecoveryLoggerTests: XCTestCase {
     /// с источником и исходом — для ночной диагностики wedge/hang.
     func test_logForceRestartBackend_writesSourceAndSuccess() {
         let logger = AgentRecoveryLogger(dataDirPath: tmpDir.path)
-        logger.logForceRestartBackend(source: "health_wedge", success: true)
+        logger.logForceRestartBackend(source: "health_wedge", success: false, deferred: true)
         waitFor(keyword: "force_restart_backend")
         let text = logContents()
         XCTAssertTrue(text.contains("source=health_wedge"))
-        XCTAssertTrue(text.contains("success=true"))
+        XCTAssertTrue(text.contains("success=false"))
+        XCTAssertTrue(text.contains("deferred=true"))
     }
 
     /// logFatal(_:) записывает строку с меткой [FATAL].
