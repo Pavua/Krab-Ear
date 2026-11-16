@@ -340,10 +340,10 @@ extension AgentAppDelegate {
                     case .alreadyAlive:
                         loggerRef.info("HealthMonitor: backend был жив — ложная тревога (таймаут пинга)")
                     case .recovered:
-                        loggerRef.info("HealthMonitor: backend successfully restarted")
-                        BackendToast.shared.show("Backend перезапущен", duration: 3.0)
+                        loggerRef.info("HealthMonitor: backend снова доступен")
+                        BackendToast.shared.show("Backend снова доступен", duration: 3.0)
                     case .failed:
-                        loggerRef.warn("HealthMonitor: restart failed — лимит перезапусков достигнут")
+                        loggerRef.warn("HealthMonitor: автоматическое восстановление недоступно или не удалось")
                         BackendToast.shared.show("⚠ Backend не запускается — открой логи", duration: 10.0)
                     }
                 }
