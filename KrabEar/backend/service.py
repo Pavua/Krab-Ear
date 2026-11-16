@@ -2033,8 +2033,13 @@ class BackendService:
         (gigaam-специфичный токен может не иметь прав на pyannote gating → spurious 401).
         Значение токена НИКОГДА не логируется.
         """
-        _hf = self._get_runtime_setting("hf_token", "").strip()
-        _gigaam = self._get_runtime_setting("stt_gigaam_hf_token", "").strip()
+        # E5 п.1: `.get(key, "")` отдаёт None, если ключ есть со значением null (settings.json,
+        # записанный до валидации строкового типа). Это старт backend — не роняем его:
+        # не-строка = «токена нет». Запись не-строки теперь отвергает SettingsValidator.
+        _hf_raw = self._get_runtime_setting("hf_token", "")
+        _gigaam_raw = self._get_runtime_setting("stt_gigaam_hf_token", "")
+        _hf = _hf_raw.strip() if isinstance(_hf_raw, str) else ""
+        _gigaam = _gigaam_raw.strip() if isinstance(_gigaam_raw, str) else ""
         # Общий hf_token предпочтителен для generic env-ключей.
         # stt_gigaam_hf_token — фолбэк когда hf_token пустой.
         _token = _hf or _gigaam

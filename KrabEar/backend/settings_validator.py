@@ -32,6 +32,9 @@ _STRING_FIELDS: tuple[str, ...] = (
     "cloud_rewriter_openai_model",
     "cloud_rewriter_anthropic_model",
     "cloud_rewriter_api_key",
+    # E5 п.1: None в этих полях ронял `_propagate_hf_token_to_env` в `BackendService.__init__`.
+    "hf_token",
+    "stt_gigaam_hf_token",
 )
 
 # Конечные float-поля без новой политики диапазона: сохраняем 0/negative TTL.
