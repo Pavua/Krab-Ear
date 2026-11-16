@@ -109,31 +109,20 @@ final class LaunchAgentManager: AutostartManaging, @unchecked Sendable {
     /// Production install и тесты используют единый XML, чтобы изменение одного
     /// пути не оставило второй зелёным только в изоляции.
     func makePlistContent() -> String {
-        let bundlePathValue = bundlePath
-        return """
-        <?xml version="1.0" encoding="UTF-8"?>
-        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-        <plist version="1.0">
-        <dict>
-            <key>Label</key>
-            <string>\(label)</string>
-            <key>ProgramArguments</key>
-            <array>
-                <string>/usr/bin/open</string>
-                <string>-W</string>
-                <string>\(bundlePathValue)</string>
-            </array>
-            <key>RunAtLoad</key>
-            <true/>
-            <key>KeepAlive</key>
-            <true/>
-            <key>StandardOutPath</key>
-            <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.log").expandingTildeInPath)</string>
-            <key>StandardErrorPath</key>
-            <string>\(NSString(string: "~/Library/Logs/KrabEarAgent.error.log").expandingTildeInPath)</string>
-        </dict>
-        </plist>
-        """
+        // E4 п.5: plist собирается через PropertyListSerialization, а не подстановкой строк в XML:
+        // путь с `&`, `<` или `</string>` остаётся данными и не может дописать чужие ключи.
+        let dictionary: [String: Any] = [
+            "Label": label,
+            "ProgramArguments": ["/usr/bin/open", "-W", bundlePath],
+            "RunAtLoad": true,
+            "KeepAlive": true,
+            "StandardOutPath": NSString(string: "~/Library/Logs/KrabEarAgent.log").expandingTildeInPath,
+            "StandardErrorPath": NSString(string: "~/Library/Logs/KrabEarAgent.error.log").expandingTildeInPath,
+        ]
+        guard let data = try? PropertyListSerialization.data(
+            fromPropertyList: dictionary, format: .xml, options: 0
+        ) else { return "" }
+        return String(decoding: data, as: UTF8.self)
     }
 
     func install() {
@@ -146,8 +135,14 @@ final class LaunchAgentManager: AutostartManaging, @unchecked Sendable {
         removeLegacyPlistIfPresent()
 
         let plist = makePlistContent()
-
-        try? plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+        // E4 п.5: при провале записи launchd не трогаем — раньше bootout+bootstrap шли всё равно
+        // и снимали рабочий агент ради несуществующего/устаревшего plist.
+        guard !plist.isEmpty else { return }
+        do {
+            try plist.write(toFile: plistPath, atomically: true, encoding: .utf8)
+        } catch {
+            return
+        }
         reloadAgent()
     }
 
