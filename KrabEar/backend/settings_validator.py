@@ -540,6 +540,9 @@ class SettingsValidator:
         if isinstance(value, bool):
             return value
         if isinstance(value, (int, float)):
+            # E5 п.4: bool(float("nan")) == True — NaN/Inf включал бы булев флаг.
+            if isinstance(value, float) and not math.isfinite(value):
+                return None
             return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()

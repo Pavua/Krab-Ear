@@ -2890,6 +2890,9 @@ class BackendService:
         if value is None:
             return default
         if isinstance(value, (int, float)):
+            # E5 п.4: NaN/Inf не булевы — возвращаем default, а не True.
+            if isinstance(value, float) and not math.isfinite(value):
+                return default
             return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
@@ -3577,7 +3580,8 @@ class BackendService:
         fmt = str(params.get("format", "json")).strip()
         interval_hours = int(params.get("interval_hours", 24))
         output_dir = params.get("output_dir")
-        enabled = bool(params.get("enabled", True))
+        # E5 п.4: bool("false") == True — строка «выключить» включала авто-экспорт.
+        enabled = self._coerce_bool(params.get("enabled", True), True)
         return self._export_scheduler.configure(
             fmt=fmt,
             interval_hours=interval_hours,
