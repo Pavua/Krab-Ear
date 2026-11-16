@@ -30,6 +30,7 @@ enum PrivateFileWriter {
                         if errno == EINTR { continue }
                         throw posixError()
                     }
+                    if n == 0 { throw NSError(domain: NSPOSIXErrorDomain, code: Int(EIO)) }  // без прогресса: не крутимся вечно
                     offset += n
                 }
             }

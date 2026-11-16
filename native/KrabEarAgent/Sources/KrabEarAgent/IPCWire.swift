@@ -33,6 +33,7 @@ enum IPCWire {
 
             let count = Darwin.read(fd, &chunk, chunk.count)
             if count < 0 {
+                if errno == EINTR { continue }  // сигнал прервал read: повторяем в пределах общего дедлайна
                 if errno == EAGAIN || errno == EWOULDBLOCK { throw IPCError.timeout }
                 throw IPCError.readFailed
             }
@@ -52,15 +53,15 @@ enum IPCWire {
         return responseData
     }
 
-    /// Строгий разбор конверта `{id, ok, result|error}`.
-    /// - Parameter expectedID: id запроса; `nil` отключает проверку (тестовый seam с моками,
-    ///   которые не знают случайный id).
     /// Только настоящие JSON `true`/`false`. `as? Bool` на NSNumber принимает и `1`/`0`.
     static func strictBool(_ value: Any?) -> Bool? {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
     }
 
+    /// Строгий разбор конверта `{id, ok, result|error}`.
+    /// - Parameter expectedID: id запроса; `nil` отключает проверку (тестовый seam с моками,
+    ///   которые не знают случайный id).
     static func parseEnvelope(_ data: Data, expectedID: String?) throws -> [String: Any] {
         guard
             let text = String(data: data, encoding: .utf8),

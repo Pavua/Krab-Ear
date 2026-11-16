@@ -159,3 +159,16 @@ final class E4Item8WakeWordPauseTests: XCTestCase {
         XCTAssertFalse(poller.isPaused)
     }
 }
+
+final class E4Item8MainWiringTests: XCTestCase {
+    /// Ревью Gemini: privacy-пауза обязана предшествовать activate(), иначе микрофон на миг стартует.
+    func test_privacyPauseIsAppliedBeforeWakeWordActivate() throws {
+        var root = URL(fileURLWithPath: #file)
+        for _ in 0..<6 where !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Sources/KrabEarAgent/main.swift").path) { root.deleteLastPathComponent() }
+        let text = try String(contentsOf: root.appendingPathComponent("Sources/KrabEarAgent/main.swift"), encoding: .utf8)
+        let pause = try XCTUnwrap(text.range(of: "wakeWordPoller?.pause(.privacyMode)"))
+        let activate = try XCTUnwrap(text.range(of: "wakeWordPoller?.activate()"))
+        XCTAssertLessThan(pause.lowerBound, activate.lowerBound)
+    }
+}

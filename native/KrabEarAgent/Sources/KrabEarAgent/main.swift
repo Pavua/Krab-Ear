@@ -803,13 +803,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         setupWakeWordConversationObservers()
         setupWakeWordTTSPlaybackObservers()
-        wakeWordPoller?.activate()
-        // Тумблер включили, пока privacy mode активен: сразу паузим (backend
-        // всё равно отвергнет старт — гейт живой; агентская пауза убирает
-        // цикл повторных попыток и лог-шум с обеих сторон).
+        // Тумблер включили, пока privacy mode активен: пауза ДО activate(), чтобы поллер вообще не
+        // отправлял wake_word_start (раньше сначала уходил start, и только потом stop).
         if privacyModeEnabled {
             wakeWordPoller?.pause(.privacyMode)
         }
+        wakeWordPoller?.activate()
     }
 
     /// Перезапустить wake word с новым значением enabled.
