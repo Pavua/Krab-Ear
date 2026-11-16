@@ -57,10 +57,11 @@ private func runEchoServer(
 
         // Читаем до \n (или 4096 байт)
         var buf = [UInt8](repeating: 0, count: 4096)
-        Darwin.read(clientFd, &buf, buf.count)
+        let received = Darwin.read(clientFd, &buf, buf.count)
 
         // Отвечаем
-        let bytes = Array((response + "\n").utf8)
+        let echoed = IPCFakeServerSupport.echoingRequestID(request: Array(buf.prefix(max(received, 0))), into: response)
+        let bytes = Array((echoed + "\n").utf8)
         _ = bytes.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress, $0.count) }
     }
 }

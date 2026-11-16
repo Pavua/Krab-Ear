@@ -7,8 +7,6 @@
 
 import Foundation
 
-/// Max IPC response chunk size in bytes. 4 KB covers all current payloads; larger responses stream in multiple reads.
-
 // MARK: - IPCSocketProviding (testability injection point)
 
 /// Abstraction over the low-level "send a JSON payload, get a JSON response" operation.
