@@ -595,14 +595,14 @@ class BackendService:
         _rewriter_ref = self._llm_rewriter
         if _rewriter_ref is not None:
             def _on_settings_saved(old: dict, new: dict) -> None:
-                new_key = str(new.get("lm_studio_api_key", ""))
-                if new_key != str(old.get("lm_studio_api_key", "")):
+                new_key = str(new.get("lm_studio_api_key") or "")
+                if new_key != str(old.get("lm_studio_api_key") or ""):
                     _rewriter_ref.set_api_key(new_key)
                 # Hot-swap model when user changes it via GUI dropdown (llm_model setting).
                 # Previously the rewriter was initialized once from the static config and
                 # never updated — GUI dropdown changes were silently ignored.
-                new_model = str(new.get("llm_model", "")).strip()
-                old_model = str(old.get("llm_model", "")).strip()
+                new_model = str(new.get("llm_model") or "").strip()
+                old_model = str(old.get("llm_model") or "").strip()
                 if new_model and new_model != old_model:
                     logger.info(
                         "LLM rewriter: hot-swap model %r → %r (settings change)",
@@ -622,7 +622,7 @@ class BackendService:
                 # Privacy mode just toggled OFF — re-init Sentry if DSN is configured.
                 from backend.observability import init_sentry, is_sentry_initialized  # noqa: PLC0415
                 if not is_sentry_initialized():
-                    dsn = str(new.get("sentry_dsn", "")).strip()
+                    dsn = str(new.get("sentry_dsn") or "").strip()
                     if dsn:
                         init_sentry(
                             dsn=dsn,

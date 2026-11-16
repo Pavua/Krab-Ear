@@ -569,14 +569,14 @@ class SettingsService:
         if settings.get("ui_last_tab") not in {"dictation", "live_translation", "history", "conversation", "call_automation", "diagnostics", "archive"}:
             settings["ui_last_tab"] = "history"
 
-        settings["auto_start_enabled"] = bool(settings.get("auto_start_enabled", False))
-        settings["show_dock_icon"] = bool(settings.get("show_dock_icon", True))
-        settings["auto_paste"] = bool(settings.get("auto_paste", True))
-        settings["play_start_sound"] = bool(settings.get("play_start_sound", True))
-        settings["realtime_preview_enabled"] = bool(settings.get("realtime_preview_enabled", True))
-        settings["translate_and_paste"] = bool(settings.get("translate_and_paste", False))
-        settings["onboarding_completed"] = bool(settings.get("onboarding_completed", False))
-        settings["audio_ducking_enabled"] = bool(settings.get("audio_ducking_enabled", True))
+        settings["auto_start_enabled"] = self._coerce_bool(settings.get("auto_start_enabled", False), default=False)
+        settings["show_dock_icon"] = self._coerce_bool(settings.get("show_dock_icon", True), default=True)
+        settings["auto_paste"] = self._coerce_bool(settings.get("auto_paste", True), default=True)
+        settings["play_start_sound"] = self._coerce_bool(settings.get("play_start_sound", True), default=True)
+        settings["realtime_preview_enabled"] = self._coerce_bool(settings.get("realtime_preview_enabled", True), default=True)
+        settings["translate_and_paste"] = self._coerce_bool(settings.get("translate_and_paste", False), default=False)
+        settings["onboarding_completed"] = self._coerce_bool(settings.get("onboarding_completed", False), default=False)
+        settings["audio_ducking_enabled"] = self._coerce_bool(settings.get("audio_ducking_enabled", True), default=True)
         settings["silence_guard_enabled"] = self._coerce_bool(settings.get("silence_guard_enabled", True), default=True)
         settings["background_guard_enabled"] = self._coerce_bool(settings.get("background_guard_enabled", True), default=True)
         settings["call_notify_default"] = self._coerce_bool(settings.get("call_notify_default", True), default=True)
@@ -597,7 +597,7 @@ class SettingsService:
         ):
             raise ValueError(f"Voice Gateway URL must be localhost or HTTPS: {_gw_url}")
         settings["voice_gateway_url"] = _gw_url
-        settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key", "")).strip()
+        settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key") or "").strip()  # null -> "", не "None"
 
         # wave-1770 HIGH: validate smtp_host to prevent SSRF to cloud metadata endpoints.
         # An attacker with IPC access can set smtp_host=169.254.169.254 to trigger TCP
@@ -605,7 +605,7 @@ class SettingsService:
         # Allow: empty (SMTP disabled), hostnames, loopback/localhost (local relay),
         # RFC 1918 (internal corporate mail servers).
         # Block: link-local 169.254.0.0/16 (cloud metadata), multicast, ::.
-        _smtp_host_raw = str(settings.get("smtp_host", "")).strip()
+        _smtp_host_raw = str(settings.get("smtp_host") or "").strip()  # null -> "", не "None"
         if _smtp_host_raw:
             try:
                 _smtp_addr = _ipaddress.ip_address(_smtp_host_raw)
@@ -1316,6 +1316,9 @@ class SettingsService:
         if value is None:
             return default
         if isinstance(value, (int, float)):
+            # NaN/Inf не булевы: bool(nan) был бы True.
+            if isinstance(value, float) and value != value or value in (float("inf"), float("-inf")):
+                return default
             return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
