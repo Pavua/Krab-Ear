@@ -351,7 +351,8 @@ final class PasteService {
             &roleRef
         )
         guard roleStatus == .success, let role = roleRef as? String else { return nil }
-        return role
+        // E4 п.3: AXSecureTextField — подроль поля с ролью AXTextField.
+        return AXSecureField.effectiveRole(role: role, subrole: AXSecureField.subrole(of: focusedElement))
     }
 
     /// Преобразует текст для вставки в поле поиска/комбобокс: снимает хвостовой пробел
