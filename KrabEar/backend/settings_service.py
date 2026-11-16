@@ -49,6 +49,48 @@ _SETTINGS_IO_ALLOWED_ROOTS: tuple[str, ...] = (
 )
 
 
+# E5 п.2: каталоги ДАННЫХ Ear из экспорта настроек исключены — они входят в allowlist (чтение/
+# импорт), но писать туда экспорт нельзя: рядом лежат settings.json, history.ndjson и т.д.
+_SETTINGS_EXPORT_FORBIDDEN_ROOTS: tuple[str, ...] = (
+    "~/Library/Application Support/KrabEar",
+    "~/.krab_ear_data",
+)
+
+
+def _validate_settings_export_target(p: Path) -> None:
+    """Raise RuntimeError, если *p* внутри каталога данных Ear (экспорт туда запрещён)."""
+    for root_str in _SETTINGS_EXPORT_FORBIDDEN_ROOTS:
+        forbidden = Path(root_str).expanduser().resolve()
+        try:
+            p.relative_to(forbidden)
+        except ValueError:
+            continue
+        raise RuntimeError(
+            f"settings export: каталог данных Krab Ear недоступен для экспорта: {p!s}"
+        )
+
+
+def _write_export_file(out_path: Path, payload: str) -> None:
+    """Создаёт файл экспорта эксклюзивно: без перезаписи, без симлинков, права 0600.
+
+    Раньше открывался режим "w": существующий файл (в т.ч. из allowlist) затирался, а права
+    получались по umask (0644) для файла с настройками.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(out_path, flags, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            f"settings export: файл уже существует и не будет перезаписан: {out_path!s}"
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+    except BaseException:
+        out_path.unlink(missing_ok=True)
+        raise
+
+
 def _validate_settings_path(p: Path, *, operation: str) -> None:
     """Raise RuntimeError if *p* is outside the settings I/O allowlist.
 
@@ -980,13 +1022,13 @@ class SettingsService:
             out_path = Path(str(params["file"])).expanduser().resolve()
             # W1736: reject writes to paths outside the settings I/O allowlist.
             _validate_settings_path(out_path, operation="export")
+            _validate_settings_export_target(out_path)
         else:
             ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             out_path = Path.home() / f"krabear_settings_{ts}.json"
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w", encoding="utf-8") as fh:
-            json.dump(safe, fh, ensure_ascii=False, indent=2)
+        _write_export_file(out_path, json.dumps(safe, ensure_ascii=False, indent=2))
 
         _log.info("export_settings: %d settings → %s", len(safe), out_path)
         return {"file": str(out_path), "settings_count": len(safe)}
