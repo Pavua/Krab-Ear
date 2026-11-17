@@ -255,7 +255,9 @@ class SettingsService:
         # ошибкой). Но null в HF-токенах, УЖЕ лежащий в settings.json, попадал бы из кэша в
         # слитый словарь каждого set_settings/import/restore и блокировал изменение ЛЮБОЙ
         # настройки. Чтение деградирует к «токена нет»; ближайшее сохранение лечит файл.
-        for _token_key in _HF_TOKEN_FIELDS:
+        # Литерал, а не модульная константа: контрактный harness запуска исполняет исходник
+        # этого метода в изолированном namespace без глобалов модуля.
+        for _token_key in ("hf_token", "stt_gigaam_hf_token"):
             if _token_key in fixed and not isinstance(fixed[_token_key], str):
                 fixed[_token_key] = ""
         self._cache = fixed
