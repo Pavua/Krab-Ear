@@ -49,6 +49,10 @@ _SETTINGS_IO_ALLOWED_ROOTS: tuple[str, ...] = (
 )
 
 
+# Токены HuggingFace: нестроковое значение с диска читается как «токена нет».
+_HF_TOKEN_FIELDS: tuple[str, ...] = ("hf_token", "stt_gigaam_hf_token")
+
+
 # E5 п.2: каталоги ДАННЫХ Ear из экспорта настроек исключены — они входят в allowlist (чтение/
 # импорт), но писать туда экспорт нельзя: рядом лежат settings.json, history.ndjson и т.д.
 _SETTINGS_EXPORT_FORBIDDEN_ROOTS: tuple[str, ...] = (
@@ -246,7 +250,15 @@ class SettingsService:
         if result_v.warnings:
             for w in result_v.warnings:
                 _log.debug("settings load: %s", w)
-        self._cache = result_v.fixed
+        fixed = result_v.fixed
+        # Валидатор намеренно не подменяет текстовые поля неверного типа (запись отвергается
+        # ошибкой). Но null в HF-токенах, УЖЕ лежащий в settings.json, попадал бы из кэша в
+        # слитый словарь каждого set_settings/import/restore и блокировал изменение ЛЮБОЙ
+        # настройки. Чтение деградирует к «токена нет»; ближайшее сохранение лечит файл.
+        for _token_key in _HF_TOKEN_FIELDS:
+            if _token_key in fixed and not isinstance(fixed[_token_key], str):
+                fixed[_token_key] = ""
+        self._cache = fixed
         self._cache_ts = now
         return dict(self._cache)
 

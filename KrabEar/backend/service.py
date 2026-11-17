@@ -3749,7 +3749,8 @@ class BackendService:
             raise ValueError("Параметр 'name' обязателен")
         rules = list(params.get("rules", []))
         description = str(params.get("description", ""))
-        overwrite = bool(params.get("overwrite", False))
+        # bool("false") is True: строка «не перезаписывать» затирала встроенный профиль.
+        overwrite = self._coerce_bool(params.get("overwrite", False), False)
         profile = self._norm_profiles.add_profile(name, rules, description, overwrite=overwrite)
         return {"profile": profile.to_dict()}
 
