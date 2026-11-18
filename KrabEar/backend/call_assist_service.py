@@ -67,6 +67,7 @@ class VoiceGatewayClient:
         voice_gateway_url: str,
         api_key: str,
         path: str,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """GET к Voice Gateway с безопасным JSON-парсингом."""
         try:
@@ -79,7 +80,7 @@ class VoiceGatewayClient:
             request = urllib_request.Request(url=url, method="GET")
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(request, timeout=VoiceGatewayClient.HTTP_TIMEOUT) as response:
+            with urllib_request.urlopen(request, timeout=timeout or VoiceGatewayClient.HTTP_TIMEOUT) as response:
                 raw = response.read().decode("utf-8")
                 payload = json.loads(raw) if raw else {}
                 return {"ok": True, "payload": payload}
@@ -98,6 +99,7 @@ class VoiceGatewayClient:
         api_key: str,
         path: str,
         payload: dict[str, Any],
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """POST к Voice Gateway с безопасным JSON-парсингом."""
         try:
@@ -109,7 +111,7 @@ class VoiceGatewayClient:
             request.add_header("Content-Type", "application/json")
             if api_key:
                 request.add_header("Authorization", f"Bearer {api_key}")
-            with urllib_request.urlopen(request, timeout=VoiceGatewayClient.HTTP_TIMEOUT) as response:
+            with urllib_request.urlopen(request, timeout=timeout or VoiceGatewayClient.HTTP_TIMEOUT) as response:
                 raw = response.read().decode("utf-8")
                 payload = json.loads(raw) if raw else {}
                 return {"ok": True, "payload": payload}

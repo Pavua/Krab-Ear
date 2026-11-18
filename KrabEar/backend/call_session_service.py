@@ -126,7 +126,20 @@ class CallSessionService:
                     "error": str(result.get("error") or "dial_failed"),
                     "message": str(result.get("message") or "")}
 
-        session = self._store.create(phone_number=phone, goal_text=goal)
+        gateway_session_id = str(result.get("call_control_id") or "")
+        try:
+            session = self._store.create(
+                phone_number=phone, goal_text=goal, gateway_session_id=gateway_session_id,
+            )
+            # Линия уже набирается: журнал не должен оставаться в idle («не звонили»).
+            self._store.update_status(session_id=session.id, new_status="dialing")
+        except Exception:
+            # Звонок идёт, а записи о нём нет — завершить его потом будет нечем. Кладём сразу.
+            try:
+                provider.hangup(gateway_session_id)
+            except Exception:  # noqa: BLE001
+                logger.exception("call_start: не удалось положить звонок после сбоя журнала")
+            raise
         add_breadcrumb(
             category="call_session",
             message="call_start",
@@ -318,6 +331,36 @@ class CallSessionService:
         )
         return {"session_id": session.id, "transcript_count": len(session.transcript_history)}
 
+    def _hangup_gateway_call(self, session_id: str) -> dict[str, Any] | None:
+        """Кладёт звонок в шлюзе для сессии, начатой через call_start.
+
+        Возвращает None, если класть нечего (журнальная сессия без линии, неизвестный id или
+        уже терминальное состояние — эти случаи обрабатывает прежний путь), иначе
+        ``{"ok": True}`` либо отказ ``{"ok": False, "error": ..., "reason": ...}``.
+        """
+        try:
+            current = self._store.get(session_id)
+        except Exception:  # noqa: BLE001
+            current = None
+        gateway_session_id = getattr(current, "gateway_session_id", "")
+        # Только настоящая непустая строка: у журнальной сессии без линии поля нет вовсе.
+        if current is None or not isinstance(gateway_session_id, str) or not gateway_session_id:
+            return None
+        if str(current.status) in {"completed", "failed"}:
+            return None
+        provider = self._get_provider_fn(None) if self._get_provider_fn is not None else None
+        if provider is None:
+            return {"ok": False, "error": "call_provider_unavailable",
+                    "reason": "call_provider_unavailable",
+                    "message": "Провайдер звонков не подключён: звонок не завершён"}
+        result = provider.hangup(gateway_session_id) or {}
+        if result.get("ok"):
+            return {"ok": True}
+        code = str(result.get("error") or "hangup_failed")
+        logger.error("call_session_end: шлюз не положил звонок (%s)", code)
+        return {"ok": False, "error": code, "reason": "hangup_failed",
+                "message": "Voice Gateway не подтвердил завершение звонка"}
+
     def handle_call_session_end(self, params: dict[str, Any]) -> dict[str, Any]:
         """Завершает звонковую сессию: переводит в COMPLETED, вычисляет duration/cost.
 
@@ -340,19 +383,19 @@ class CallSessionService:
         cost_usd = _raw_cost if math.isfinite(_raw_cost) and _raw_cost >= 0 else 0.0
         failed = bool(params.get("failed", False))
 
+        # Сессия, начатая через call_start, — это живая линия в Voice Gateway: сначала кладём
+        # её там, и только подтверждённый сброс закрывает журнал. Раньше метод лишь писал в
+        # журнал (и то безуспешно: переход idle→completed запрещён), а звонок продолжался.
+        gateway_end = self._hangup_gateway_call(session_id)
+        if gateway_end is not None and not gateway_end.get("ok"):
+            return gateway_end
+        # Журнальная сессия без линии зовёт хранилище прежней подписью: её двойники в тестах и
+        # сторонние реализации нового аргумента не знают.
+        extra: dict[str, Any] = {"from_any_live_state": True} if gateway_end is not None else {}
+
         try:
-            if failed:
-                session = self._store.mark_failed(
-                    session_id=session_id,
-                    end_reason=reason,
-                    cost_usd=cost_usd,
-                )
-            else:
-                session = self._store.mark_completed(
-                    session_id=session_id,
-                    end_reason=reason,
-                    cost_usd=cost_usd,
-                )
+            mark = self._store.mark_failed if failed else self._store.mark_completed
+            session = mark(session_id=session_id, end_reason=reason, cost_usd=cost_usd, **extra)
             add_breadcrumb(
                 category="call_session",
                 message="call_session_end",

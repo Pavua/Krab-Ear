@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from typing import Any, Dict, Optional
 
 from backend.call_assist_service import VoiceGatewayClient
@@ -43,6 +44,19 @@ _E164_RE = re.compile(r"^\+[1-9]\d{7,14}$")
 _ACTIVE_STATUSES = frozenset({"running", "dialing", "ringing", "connected", "talking"})
 
 ERR_NOT_CONFIGURED = "gateway_not_configured"
+#: Исход набора неизвестен: запрос оборвался, и сессию по ключу повтора найти не удалось.
+#: Это НЕ «звонка нет» — линия могла подняться.
+ERR_DIAL_UNKNOWN = "gateway_dial_unknown"
+
+#: Набор в шлюзе синхронный (сессия, календарь до 3 с, create_call у провайдера): общие
+#: 4 с REST-клиента обрывали его раньше ответа, и живой звонок оставался без идентификатора.
+DIAL_TIMEOUT_SEC = 20.0
+
+#: session_id шлюза подставляется в путь REST: только безопасный алфавит, без `/`, `?`, `..`.
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+
+#: HTTP-коды hangup, означающие «звонка уже нет»: неизвестная сессия и гонка с завершением.
+_HANGUP_GONE_PREFIXES = ("http_404", "http_409")
 
 
 class GatewayCallProvider:
@@ -96,8 +110,19 @@ class GatewayCallProvider:
         # Плоский ответ (двойник в тестах, будущая версия клиента) — как есть.
         return resp
 
-    def _post(self, path: str, payload: Optional[dict] = None) -> Dict[str, Any]:
-        return self._unwrap(self._http.post(self._base_url, self._api_key, path, payload))
+    def _post(
+        self, path: str, payload: Optional[dict] = None, timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        return self._unwrap(
+            self._http.post(self._base_url, self._api_key, path, payload, timeout=timeout)
+        )
+
+    def _adopt_by_request_id(self, client_request_id: str) -> Dict[str, Any]:
+        """Ищет сессию, созданную оборвавшимся запросом набора (контракт шлюза)."""
+        found = self._get(f"/v1/sessions/by-request-id/{client_request_id}") or {}
+        if found.get("error") or found.get("ok") is False:
+            return {}
+        return found if str(found.get("session_id") or found.get("id") or "") else {}
 
     def _get(self, path: str) -> Dict[str, Any]:
         return self._unwrap(self._http.get(self._base_url, self._api_key, path))
@@ -139,14 +164,40 @@ class GatewayCallProvider:
             for key in ("target_lang", "src_lang", "speak_first", "max_duration_sec", "voice_mode"):
                 if key in extra:
                     payload[key] = extra[key]
+            # Ключ повтора: один на нажатие «Позвонить». По нему шлюз отдаёт ту же сессию
+            # при повторе и позволяет найти её после оборванного запроса.
+            client_request_id = uuid.uuid4().hex
+            payload["client_request_id"] = client_request_id
         else:
             path = "/v1/telephony/calls/outbound"
             payload = {"to": number}
             for key in ("translation_mode", "src_lang", "tgt_lang", "voice_mode", "device_id"):
                 if key in extra:
                     payload[key] = extra[key]
+            client_request_id = ""
 
-        resp = self._post(path, payload) or {}
+        raw = self._http.post(self._base_url, self._api_key, path, payload, timeout=DIAL_TIMEOUT_SEC)
+        resp = self._unwrap(raw) or {}
+        # Транспортный сбой виден только на КОНВЕРТЕ клиента: отказ самого шлюза приходит
+        # либо HTTP-кодом (`http_<code>:...`), либо телом внутри `payload`.
+        transport_failed = (
+            isinstance(raw, dict) and raw.get("ok") is False and "payload" not in raw
+            and not str(raw.get("error") or "").startswith("http_")
+        )
+        if transport_failed:
+            # Транспортный сбой (таймаут, обрыв): шлюз мог успеть поднять линию. Отказ с
+            # HTTP-кодом — определённый ответ шлюза, там искать нечего.
+            adopted = self._adopt_by_request_id(client_request_id) if client_request_id else {}
+            if adopted:
+                resp = {"ok": True, **adopted,
+                        "session_id": str(adopted.get("session_id") or adopted.get("id") or "")}
+            else:
+                logger.error("Набор оборвался, исход неизвестен: %s", resp.get("error"))
+                return {
+                    "ok": False,
+                    "error": ERR_DIAL_UNKNOWN,
+                    "message": "Шлюз не ответил вовремя: звонок мог начаться. Проверьте активные звонки.",
+                }
         if not resp.get("ok"):
             # Ошибку шлюза отдаём как есть: подменять её своим кодом значит
             # прятать причину, по которой звонок не состоялся.
@@ -180,16 +231,23 @@ class GatewayCallProvider:
         session_id = (call_control_id or "").strip()
         if not session_id:
             return {"ok": False, "error": ERR_MISSING_CALL_ID}
+        if not _SESSION_ID_RE.match(session_id):
+            return {"ok": False, "error": ERR_MISSING_CALL_ID}
         resp = self._post(f"/v1/telephony/calls/{session_id}/hangup") or {}
-        return {"ok": bool(resp.get("ok", False)), **(
-            {} if resp.get("ok") else {"error": str(resp.get("error") or "hangup_failed")}
-        )}
+        if resp.get("ok"):
+            return {"ok": True}
+        error = str(resp.get("error") or "hangup_failed")
+        if error.startswith(_HANGUP_GONE_PREFIXES):
+            # Сессии в шлюзе нет или она уже завершается: класть нечего, цель достигнута.
+            return {"ok": True, "already_gone": True}
+        # Тело ответа шлюза наружу не отдаём: только код причины.
+        return {"ok": False, "error": error.split(":", 1)[0]}
 
     def get_call_status(self, call_control_id: str) -> Dict[str, Any]:
         if not self.is_configured():
             return self._unconfigured()
         session_id = (call_control_id or "").strip()
-        if not session_id:
+        if not session_id or not _SESSION_ID_RE.match(session_id):
             return {"ok": False, "error": ERR_MISSING_CALL_ID}
         resp = self._get(f"/v1/sessions/{session_id}") or {}
         # 🔴 Формы ответов шлюза разные даже между соседними endpoint'ами:
