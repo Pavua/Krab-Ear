@@ -31,6 +31,37 @@ enum CallDialOutcome: Equatable {
               !sessionID.isEmpty else { return .failed("no_session_id") }
         return .started(sessionID: sessionID, status: (result["status"] as? String) ?? "dialing")
     }
+
+    /// Код backend буква в букву: `GatewayCallProvider.ERR_DIAL_UNKNOWN`.
+    static let dialUnknownCode = "gateway_dial_unknown"
+
+    /// Текст отказа набора. `gateway_dial_unknown` — не отказ, а неизвестность: шлюз не ответил
+    /// вовремя, линия могла подняться, поэтому совет «проверьте настройки» здесь неуместен.
+    static func failureMessage(code: String) -> String {
+        if code == dialUnknownCode {
+            return "Шлюз не ответил вовремя: звонок мог начаться. "
+                + "Проверьте активные звонки в Voice Gateway, прежде чем набирать снова."
+        }
+        return "Не удалось начать звонок (\(code)). Проверьте настройки Voice Gateway."
+    }
+}
+
+/// Перевод статуса журнала backend (`CallStatus`) в статус UI (`CallSession.Status`).
+///
+/// 🔴 Журнал заканчивает звонок словами `completed` / `failed`, UI знает `ended` / `error`.
+/// Сырое значение не совпадало, и опрос не замечал конца звонка, завершённого не кнопкой.
+enum CallBackendStatus {
+    private static let liveStatuses: Set<String> = ["idle", "dialing", "connected", "talking", "ending"]
+
+    /// Возвращает rawValue для `CallSession.Status` или `nil` для неизвестного статуса.
+    static func uiRawValue(_ backendStatus: String) -> String? {
+        let status = backendStatus.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch status {
+        case "completed": return "ended"
+        case "failed": return "error"
+        default: return liveStatuses.contains(status) ? status : nil
+        }
+    }
 }
 
 /// Строгий разбор ответа на `call_session_end`.

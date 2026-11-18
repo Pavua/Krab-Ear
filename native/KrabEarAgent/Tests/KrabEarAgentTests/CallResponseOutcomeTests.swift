@@ -140,4 +140,51 @@ final class CallResponseOutcomeTests: XCTestCase {
         let uses = text.components(separatedBy: "shouldRestoreAfterFailedEnd").count - 1
         XCTAssertGreaterThanOrEqual(uses, 2, "оба обработчика (hangup и emergency stop) обязаны сверяться с правилом")
     }
+
+    // MARK: статусы журнала backend → статусы UI
+
+    /// Журнал backend заканчивает звонок статусами `completed` / `failed`, а UI знает `ended` / `error`.
+    /// Без перевода опрос никогда не видел конца звонка, завершённого не кнопкой.
+    func test_backendTerminalStatuses_mapToUIStatuses() {
+        XCTAssertEqual(CallBackendStatus.uiRawValue("completed"), "ended")
+        XCTAssertEqual(CallBackendStatus.uiRawValue("failed"), "error")
+        XCTAssertEqual(CallBackendStatus.uiRawValue(" Completed "), "ended")
+    }
+
+    func test_backendLiveStatuses_passThrough() {
+        for raw in ["idle", "dialing", "connected", "talking", "ending"] {
+            XCTAssertEqual(CallBackendStatus.uiRawValue(raw), raw)
+        }
+        XCTAssertNil(CallBackendStatus.uiRawValue("ringing"), "неизвестный статус не подменяет текущий")
+        XCTAssertNil(CallBackendStatus.uiRawValue(""))
+    }
+
+    // MARK: текст отказа набора
+
+    /// `gateway_dial_unknown` = шлюз не ответил вовремя, звонок МОГ начаться. Совет «проверьте
+    /// настройки» здесь вреден: владелец должен знать, что линия может быть живой.
+    func test_dialUnknown_messageWarnsCallMayBeLive() {
+        let text = CallDialOutcome.failureMessage(code: "gateway_dial_unknown")
+        XCTAssertTrue(text.contains("мог начаться"))
+        XCTAssertFalse(text.contains("Проверьте настройки"))
+    }
+
+    func test_otherDialFailure_keepsCodeInMessage() {
+        let text = CallDialOutcome.failureMessage(code: "http_403")
+        XCTAssertTrue(text.contains("http_403"))
+        XCTAssertFalse(text.contains("мог начаться"))
+    }
+
+    func test_controllerUsesStatusMappingAndFailureMessage() throws {
+        var root = URL(fileURLWithPath: #filePath)
+        while !FileManager.default.fileExists(
+            atPath: root.appendingPathComponent("Sources/KrabEarAgent").path) { root.deleteLastPathComponent() }
+        let text = try String(
+            contentsOf: root.appendingPathComponent("Sources/KrabEarAgent/CallAutomationController.swift"),
+            encoding: .utf8)
+        XCTAssertGreaterThanOrEqual(
+            text.components(separatedBy: "CallBackendStatus.uiRawValue(").count - 1, 2,
+            "и ответ набора, и опрос обязаны переводить статус журнала")
+        XCTAssertTrue(text.contains("CallDialOutcome.failureMessage(code:"))
+    }
 }

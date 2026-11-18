@@ -897,11 +897,11 @@ final class CallAutomationController: NSViewController {
             // Не настроен провайдер — показать баннер, а не молчать.
             showConfigBanner(true)
         case .failed(let code):
-            showError("Не удалось начать звонок (\(code)). Проверьте настройки Voice Gateway.")
+            showError(CallDialOutcome.failureMessage(code: code))
         case .started(let sessionID, let statusRaw):
             let session = CallSession(
                 sessionID: sessionID,
-                status: CallSession.Status(rawValue: statusRaw) ?? .dialing,
+                status: CallBackendStatus.uiRawValue(statusRaw).flatMap(CallSession.Status.init(rawValue:)) ?? .dialing,
                 phone: phone,
                 goal: goal,
                 startedAt: Date(),
@@ -958,7 +958,9 @@ final class CallAutomationController: NSViewController {
             : entries.map { "\($0["speaker"] as? String ?? "?"): \($0["text"] as? String ?? "")" }.joined(separator: "\n")
         let cost       = (result["cost_usd"] as? Double) ?? session.costUSD
 
-        session.status    = CallSession.Status(rawValue: statusRaw) ?? session.status
+        // Журнал backend говорит completed/failed, UI — ended/error: без перевода конец не виден.
+        session.status    = CallBackendStatus.uiRawValue(statusRaw).flatMap(CallSession.Status.init(rawValue:))
+            ?? session.status
         session.transcript = transcript
         session.costUSD   = cost
 
