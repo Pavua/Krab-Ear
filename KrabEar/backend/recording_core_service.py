@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import re
 import tempfile
 import threading
@@ -4029,9 +4030,13 @@ class RecordingCoreService:
                         transcripts_dir = Path(self.store.data_dir) / "transcripts"
                         transcripts_dir.mkdir(exist_ok=True)
                         source_name = Path(audio_path).stem
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
+                        name_prefix = time.strftime("%Y%m%d_%H%M%S") + "_"
                         suffix = history_markdown_suffix(history_item.id) or ".md"
-                        transcript_filename = f"{timestamp}_{source_name}{suffix}"
+                        stem_budget = os.pathconf(transcripts_dir, "PC_NAME_MAX") - len(name_prefix) - len(suffix)
+                        if stem_budget >= 0:
+                            # Сокращаем только отображаемое имя, сохраняя целые символы.
+                            source_name = source_name.encode("utf-8")[:stem_budget].decode("utf-8", errors="ignore")
+                        transcript_filename = f"{name_prefix}{source_name}{suffix}"
                         transcript_path = transcripts_dir / transcript_filename
                         with open(transcript_path, "w", encoding="utf-8") as f:
                             f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")

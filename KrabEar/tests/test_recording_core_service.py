@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import threading
@@ -521,6 +522,28 @@ class TestTranscribePathsPersistHistory(unittest.TestCase):
         history.handle_delete_history_item({"id": first})
         self.assertFalse(first_md.exists())
         self.assertTrue(second_md.is_file())
+
+    def test_long_batch_source_names_keep_the_full_markdown_id(self):
+        from _plaintext_export_test_helpers import history_service_with_off_policy
+
+        svc = _make_service(self._tmp)
+        history = history_service_with_off_policy(store=svc.store)
+        for stem in ("a" * 200, "b" + "ж" * 100):
+            with self.subTest(ascii=stem.isascii()):
+                source = Path(self._tmp) / f"{stem}.wav"
+                source.write_bytes(b"\x00" * 64)
+                result = svc.handle_transcribe_paths({"paths": [str(source)]})
+
+                self.assertEqual(result["errors"], [])
+                item = result["items"][0]["history_id"]
+                transcript_file = history.handle_get_history_item({"id": item})["transcript_file"]
+                self.assertIsInstance(transcript_file, str)
+                transcript = Path(transcript_file)
+                self.assertTrue(transcript.name.endswith(f".krab-ear-{item}.md"))
+                self.assertLessEqual(
+                    len(os.fsencode(transcript.name)), os.pathconf(transcript.parent, "PC_NAME_MAX"),
+                )
+                self.assertIn(f"# Транскрипт: {source.name}", transcript.read_text(encoding="utf-8"))
 
 
 class TestCurrentRecordingOwner(unittest.TestCase):

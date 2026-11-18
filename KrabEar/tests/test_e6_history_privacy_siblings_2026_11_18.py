@@ -90,6 +90,23 @@ def test_delete_keeps_legacy_import_with_ambiguous_ownership(tmp_path):
     assert export.exists()
 
 
+def test_delete_keeps_legacy_import_across_the_local_date_boundary(tmp_path):
+    store, svc = _history(tmp_path)
+    imported = _add_at(store, "2026-11-15T23:30:00+00:00", "добрый день")
+    unrelated = _add_at(store, "2026-11-17T10:04:00+00:00", imported.text)
+    # В Мадриде 23:30 UTC 15-го — 00:30 16-го, именно эта дата в имени.
+    export = _tdir(store) / "20261116_003001_call.md"
+    export.write_text(
+        "# Транскрипт: call.m4a\n\n## Текст\n\nдобрый день\n", encoding="utf-8",
+    )
+
+    svc.handle_delete_history_item({"id": unrelated.id})
+
+    assert export.exists()
+    svc.handle_delete_history_item({"id": imported.id})
+    assert not export.exists()
+
+
 def test_delete_keeps_an_unrelated_import_file(tmp_path):
     store, svc = _history(tmp_path)
     mine = store.add_history_item(text="текст удаляемой записи", paste_status="ok")

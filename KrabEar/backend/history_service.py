@@ -923,11 +923,11 @@ class HistoryService:
             path for path in transcripts_dir.glob(f"{timed}*.md")
             if re.fullmatch(rf"{timed}(?:-\d{{1,4}})?\.md", path.name)
         ]
-        imports = [
-            path for day in days for path in transcripts_dir.glob(f"{day:%Y%m%d}_*.md")
+        imports = {
+            path: day for day in days for path in transcripts_dir.glob(f"{day:%Y%m%d}_*.md")
             if re.fullmatch(r"\d{8}_\d{6}_.+\.md", path.name)
             and not re.search(r"\.krab-ear-[0-9a-f-]{36}\.md$", path.name)
-        ]
+        }
         first = transcripts_dir / f"{native}.md"
         if not paths and not imports and not first.is_file():
             return []
@@ -949,7 +949,8 @@ class HistoryService:
         candidates: list[Path] = []
         for path in [*paths, first, *imports]:
             content = self._read_legacy_md(path)
-            imported = path in imports
+            import_day = imports.get(path)
+            imported = import_day is not None
             first_of_day = path == first
             if first_of_day and date_header not in content:
                 continue
@@ -964,8 +965,9 @@ class HistoryService:
                     sibling_dt = datetime.fromisoformat(sibling.ts)
                 except (ValueError, TypeError):
                     continue
-                if imported:
-                    same_window = sibling_dt.date() in days
+                if import_day is not None:
+                    # Сосед мог получить эту локальную дату со своей UTC-даты.
+                    same_window = abs((sibling_dt.date() - import_day).days) <= 1
                 elif first_of_day:
                     same_window = TranscriptWriter._format_date_human(sibling.ts) == date_human
                 else:
