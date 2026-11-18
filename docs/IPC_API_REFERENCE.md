@@ -1082,7 +1082,7 @@ Returns: `{preview: true, merged_from, item_count, ...}`
 
 ### `get_settings`
 *(settings_service.py)*  
-Возвращает текущие настройки. Для privacy берётся свежий снимок политики под блокировкой. При неизвестной политике ответ содержит `privacy_mode_enabled=true`. Только явный OFF возвращает строку `live_subs_policy_epoch` для нового захвата системного аудио.
+Возвращает текущие настройки. Для privacy берётся свежий снимок политики под блокировкой. При неизвестной политике ответ содержит `privacy_mode_enabled=true`. Только подтверждённый OFF возвращает строку `live_subs_policy_epoch` для захвата системного аудио. Метка обозначает период непрерывно разрешённого захвата и сохраняется при обычной записи настроек. Политика экспорта получает новую ревизию при каждой записи.
 Нет params.  
 Returns: словарь настроек внутри `result`
 
@@ -2003,7 +2003,7 @@ Returns: `{ok, session_id, gateway_session_id, call_id, status}`
 ### `live_subs_ingest`
 *(live_subs_service.py)*  
 Принимает base64 PCM 16 kHz chunk от ScreenCaptureKit. Аккумулирует ≥3 с, затем Whisper STT → translate → emits `live_subs.result` via EventBus.  
-Перед захватом клиент получает `live_subs_policy_epoch` через `get_settings` и передаёт ту же метку с каждым чанком. При смене ревизии настроек старый захват завершается. Для продолжения нужен новый захват.
+Перед захватом клиент получает `live_subs_policy_epoch` через `get_settings` и передаёт ту же метку с каждым чанком. Смена вкладки сохраняет метку. После включения приватности, восстановления настроек или восстановления известной политики из UNKNOWN требуется новый захват. Если настройки записал старый бэкенд, клиент получает метку его текущей ревизии.
 
 Params: `{audio_chunk, live_subs_policy_epoch, sample_rate?, target_lang?, is_final?}`. Поле `audio_chunk` содержит base64 PCM.
 

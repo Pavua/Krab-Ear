@@ -32,6 +32,7 @@ from .models import DEFAULT_SETTINGS, HistoryItem
 # который НЕ импортирует state_store — циклического импорта нет (authorizer
 # ничего не знает о store). Reader — ниже в этом файле, commit — тоже здесь.
 from .plaintext_export_authorization import (
+    CAPTURE_EPOCH_BINDING_KEY,
     MAX_POLICY_BYTES,
     POLICY_REVISION_KEY,
     REASON_UNKNOWN_DUPLICATE_KEYS,
@@ -1181,7 +1182,7 @@ class StateStore:
             return False
         return True
 
-    def _guard_supported_write_unlocked(self, *, validated_repair: bool) -> None:
+    def _guard_supported_write_unlocked(self, *, validated_repair: bool) -> PolicySnapshot | None:
         """UNKNOWN никогда не исправляется неявным merge с дефолтами."""
         if validated_repair:
             return
@@ -1189,7 +1190,7 @@ class StateStore:
         if snapshot.reason != REASON_UNKNOWN_MISSING_SETTINGS:
             self._fresh_settings_pending = False
         if snapshot.state in (PolicyState.KNOWN_OFF, PolicyState.KNOWN_ON):
-            return
+            return snapshot
         reason = snapshot.reason or REASON_UNKNOWN_PROVIDER_ERROR
         if reason == REASON_UNKNOWN_MISSING_REVISION:
             return
@@ -1228,7 +1229,7 @@ class StateStore:
         self.validate_raw_policy_flags(new_settings)
         if validated_repair and not self.has_explicit_policy_flags(new_settings):
             raise StateStoreSettingsCorruptError("repair requires explicit policy flags")
-        self._guard_supported_write_unlocked(validated_repair=validated_repair)
+        previous = self._guard_supported_write_unlocked(validated_repair=validated_repair)
         settings = dict(DEFAULT_SETTINGS)
         # Частичный direct save не сбрасывает действующую policy через defaults.
         # Чтение и merge находятся под тем же EX-lock, что и commit.
@@ -1250,8 +1251,14 @@ class StateStore:
             raise StateStoreSettingsCorruptError(
                 "cannot disable encryption while ENC1 history remains"
             )
-        settings.pop(POLICY_REVISION_KEY, None)
-        settings[POLICY_REVISION_KEY] = uuid.uuid4().hex
+        revision = uuid.uuid4().hex
+        settings[POLICY_REVISION_KEY] = revision
+        # Старый writer переносит неизвестные поля через merge, но не обновляет
+        # binding вместе с revision. Такой файл не продолжает старый захват.
+        settings.pop(CAPTURE_EPOCH_BINDING_KEY, None)
+        previous_epoch = previous.live_subs_policy_epoch if previous is not None else None
+        if settings["privacy_mode_enabled"] is False and previous_epoch is not None:
+            settings[CAPTURE_EPOCH_BINDING_KEY] = {"revision": revision, "epoch": previous_epoch}
         serialized = json.dumps(settings, ensure_ascii=False, indent=2)
         if len(serialized.encode("utf-8")) > MAX_POLICY_BYTES:
             raise StateStoreSettingsCorruptError("serialized settings too large")
@@ -1593,7 +1600,8 @@ class StateStore:
 
         if POLICY_REVISION_KEY not in payload:
             return unknown_snapshot(REASON_UNKNOWN_MISSING_REVISION)
-        revision = payload[POLICY_REVISION_KEY]
+        policy: dict[str, Any] = payload
+        revision = policy[POLICY_REVISION_KEY]
         if not is_valid_policy_revision(revision):
             return unknown_snapshot(REASON_UNKNOWN_INVALID_REVISION)
 
@@ -1612,7 +1620,16 @@ class StateStore:
             content_sha256=hashlib.sha256(raw).hexdigest(),
             internal_revision=revision,
         )
+        binding = policy.get(CAPTURE_EPOCH_BINDING_KEY)
+        epoch = None
+        if (
+            isinstance(binding, dict)
+            and binding.get("revision") == revision
+            and is_valid_policy_revision(binding.get("epoch"))
+        ):
+            epoch = binding["epoch"]
         return PolicySnapshot(
+            capture_epoch=epoch,
             state=(
                 PolicyState.KNOWN_ON
                 if encryption_enabled is True

@@ -22,27 +22,45 @@ import Sentry
 @MainActor
 final class SentryPrivacyLifecycle {
     private var dsn: String?
-    var isActive: Bool { dsn != nil }
+    private var lease: ConfirmedPrivacyLease?
+    var isActive: Bool { dsn != nil && lease?.isValid == true }
 
-    private let start: (String) -> Void
+    private let cache: SentryPrivacyCache
+    private let start: (String, ConfirmedPrivacyLease, SentryPrivacyCache.Access) -> Void
     private let close: () -> Void
 
-    init(start: @escaping (String) -> Void, close: @escaping () -> Void) {
+    init(cache: SentryPrivacyCache,
+         start: @escaping (String, ConfirmedPrivacyLease, SentryPrivacyCache.Access) -> Void,
+         close: @escaping () -> Void) {
+        self.cache = cache
         self.start = start
         self.close = close
     }
 
-    func reconcile(privacy: Bool?, dsn candidate: String?) {
-        let desired = privacy == false ? candidate : nil
-        guard desired != dsn else { return }
-        if dsn != nil {
-            dsn = nil
-            close()
+    func reconcile(privacy: Bool?, dsn candidate: String?, lease next: ConfirmedPrivacyLease?) {
+        guard privacy == false, let candidate, let next, next.isValid else {
+            suspend()
+            return
         }
-        if let desired {
-            start(desired)
-            dsn = desired
-        }
+        if lease === next && dsn == candidate { return }
+        // Первый подтверждённый OFF после запуска вправе открыть прежний
+        // crash cache: store сам проверяет epoch и получателя. Замена живого
+        // или просроченного lease в этом процессе всегда отзывает старый кэш.
+        if lease != nil { suspend() }
+        guard let access = cache.open(lease: next, dsn: candidate) else { return }
+        guard next.isValid else { cache.discardExpired(access); return }
+        lease = next
+        dsn = candidate
+        start(candidate, next, access)
+    }
+
+    func finishProcess() { cache.finishProcess(lease: lease) }
+
+    func suspend() {
+        let running = dsn != nil
+        dsn = nil
+        lease = nil
+        cache.discard { if running { close() } }
     }
 }
 
@@ -79,7 +97,8 @@ final class SentryPrivacySession: URLSession, @unchecked Sendable {
     private static let rejected = URLSession(configuration: .ephemeral)
     private static let localRejection = URLRequest(url: URL(string: "about:blank")!)
 
-    init(lease: ConfirmedPrivacyLease, ephemeralConfiguration: URLSessionConfiguration = .ephemeral) {
+    init(lease: ConfirmedPrivacyLease, ephemeralConfiguration: URLSessionConfiguration = .ephemeral,
+         onExpiry: @escaping @Sendable () -> Void = {}) {
         self.lease = lease
         let transport = OSAllocatedUnfairLock<URLSession?>(initialState: URLSession(configuration: ephemeralConfiguration))
         self.transport = transport
@@ -91,6 +110,7 @@ final class SentryPrivacySession: URLSession, @unchecked Sendable {
                 catch { return }
             }
             Self.cancelTransport(transport)
+            onExpiry()
         }
         super.init()
     }
@@ -128,28 +148,22 @@ final class SentryPrivacySession: URLSession, @unchecked Sendable {
 
 @MainActor
 enum SentryConfig {
-    private static let cacheEpochKey = "KrabEar_SentryCacheEpoch"
+    private static let cache = SentryPrivacyCache(
+        defaults: .standard, root: URL.cachesDirectory.appendingPathComponent("KrabEarAgentSentry", isDirectory: true)
+    )
     private static var transport: SentryPrivacySession?
-    private static var lease: ConfirmedPrivacyLease?
     private static var environment = "production"
     private static var release: String?
-    private static let lifecycle = SentryPrivacyLifecycle(
-        start: { startSDK(dsn: $0) },
+    static let lifecycle = SentryPrivacyLifecycle(
+        cache: cache, start: { startSDK(dsn: $0, lease: $1, access: $2) },
         close: {
             transport?.revoke()
             transport = nil
             SentrySDK.close()
-            discardCacheEpoch()
         }
     )
 
-    static var isActive: Bool { lifecycle.isActive && lease?.isValid == true }
-
-    static func suspendForPrivacy() {
-        lifecycle.reconcile(privacy: nil, dsn: nil)
-        lease = nil
-        discardCacheEpoch()
-    }
+    static var isActive: Bool { lifecycle.isActive }
 
     /// Инициализирует Sentry SDK.
     /// - Parameters:
@@ -163,44 +177,19 @@ enum SentryConfig {
         environment: String = "production",
         release: String? = nil,
         settings: [String: Any]? = nil,
-        lease: ConfirmedPrivacyLease? = nil
+        lease: ConfirmedPrivacyLease? = nil,
+        owner: SentryPrivacyLifecycle? = nil
     ) {
         Self.environment = environment
         Self.release = release
-        let privacy = confirmedPrivacyFlag(settings?["privacy_mode_enabled"])
-        if privacy == false, let lease, lease.isValid {
-            if Self.lease !== lease {
-                suspendForPrivacy()
-                Self.lease = lease
-            }
-            lifecycle.reconcile(privacy: privacy, dsn: dsn?.nonEmpty)
-        } else {
-            suspendForPrivacy()
-        }
+        (owner ?? lifecycle).reconcile(privacy: confirmedPrivacyFlag(settings?["privacy_mode_enabled"]),
+                                       dsn: dsn?.nonEmpty, lease: lease)
     }
 
-    private static func cacheDirectory(epoch: UUID) -> URL {
-        URL.cachesDirectory
-            .appendingPathComponent("KrabEarAgentSentry", isDirectory: true)
-            .appendingPathComponent(epoch.uuidString, isDirectory: true)
-    }
-
-    private static func discardCacheEpoch() {
-        let defaults = UserDefaults.standard
-        guard let epoch = defaults.string(forKey: cacheEpochKey).flatMap(UUID.init(uuidString:)) else { return }
-        // После отзыва прежний кэш никогда не подхватывается новым экземпляром SDK.
-        defaults.removeObject(forKey: cacheEpochKey)
-        try? FileManager.default.removeItem(at: cacheDirectory(epoch: epoch))
-    }
-
-    private static func startSDK(dsn: String) {
-        guard let lease, lease.isValid else { return }
-        let transport = SentryPrivacySession(lease: lease)
+    private static func startSDK(dsn: String, lease: ConfirmedPrivacyLease, access: SentryPrivacyCache.Access) {
+        let store = cache
+        let transport = SentryPrivacySession(lease: lease, onExpiry: { store.discardExpired(access) })
         Self.transport = transport
-        let defaults = UserDefaults.standard
-        let epoch = defaults.string(forKey: cacheEpochKey).flatMap(UUID.init(uuidString:)) ?? UUID()
-        defaults.set(epoch.uuidString, forKey: cacheEpochKey)
-        let cache = cacheDirectory(epoch: epoch)
 
         // Читаем версию из Bundle один раз: CFBundleShortVersionString → releaseName,
         // CFBundleVersion → dist. Это гарантирует, что Sentry events всегда
@@ -215,7 +204,7 @@ enum SentryConfig {
             options.dsn = dsn
             options.environment = environment
             options.urlSession = transport
-            options.cacheDirectoryPath = cache.path
+            options.cacheDirectoryPath = access.directory.path
             // При отзыве разрешения не ждём отправку очереди.
             options.shutdownTimeInterval = 0
             options.beforeSend = { event in
@@ -251,12 +240,13 @@ enum SentryConfig {
         environment: String = "production",
         release: String? = nil,
         fallbackDSN: String? = nil,
-        lease: ConfirmedPrivacyLease? = nil
+        lease: ConfirmedPrivacyLease? = nil,
+        owner: SentryPrivacyLifecycle? = nil
     ) {
         let dsn = [settings["sentry_dsn_agent"] as? String, settings["sentry_dsn"] as? String, fallbackDSN]
             .compactMap { $0?.nonEmpty }
             .first { $0 != "REDACTED" }
-        initialize(dsn: dsn, environment: environment, release: release, settings: settings, lease: lease)
+        initialize(dsn: dsn, environment: environment, release: release, settings: settings, lease: lease, owner: owner)
     }
 
     // MARK: - Terminate breadcrumb

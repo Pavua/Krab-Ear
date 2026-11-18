@@ -7,25 +7,31 @@ import XCTest
 final class E8PrivacyLifecycleTests: XCTestCase {
     func testTelemetryStartsOnlyAfterConfirmedOptOutOfPrivacy() {
         var calls: [String] = []
-        let lifecycle = SentryPrivacyLifecycle(start: { calls.append($0) }, close: { calls.append("close") })
+        let defaults = IsolatedUserDefaultsDomain(scope: "E8PrivacyLifecycleTests")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { defaults.removePersistentDomain(); try? FileManager.default.removeItem(at: root) }
+        let cache = SentryPrivacyCache(defaults: defaults.defaults, root: root)
+        let lifecycle = SentryPrivacyLifecycle(cache: cache, start: { dsn, _, _ in calls.append(dsn) },
+                                               close: { calls.append("close") })
+        let lease = ConfirmedPrivacyLease(until: .now + .seconds(10), liveSubsEpoch: "test-off")
 
         for flag in [nil, true] as [Bool?] {
-            lifecycle.reconcile(privacy: flag, dsn: "configured")
+            lifecycle.reconcile(privacy: flag, dsn: "configured", lease: lease)
         }
-        lifecycle.reconcile(privacy: false, dsn: nil)
+        lifecycle.reconcile(privacy: false, dsn: nil, lease: nil)
         XCTAssertTrue(calls.isEmpty)
 
-        lifecycle.reconcile(privacy: false, dsn: "configured")
-        lifecycle.reconcile(privacy: false, dsn: "configured")
+        lifecycle.reconcile(privacy: false, dsn: "configured", lease: lease)
+        lifecycle.reconcile(privacy: false, dsn: "configured", lease: lease)
         XCTAssertTrue(lifecycle.isActive)
         XCTAssertEqual(calls, ["configured"])
 
-        lifecycle.reconcile(privacy: true, dsn: "configured")
-        lifecycle.reconcile(privacy: nil, dsn: nil)
+        lifecycle.reconcile(privacy: true, dsn: "configured", lease: lease)
+        lifecycle.reconcile(privacy: nil, dsn: nil, lease: nil)
         XCTAssertFalse(lifecycle.isActive)
         XCTAssertEqual(calls, ["configured", "close"])
 
-        lifecycle.reconcile(privacy: false, dsn: "configured")
+        lifecycle.reconcile(privacy: false, dsn: "configured", lease: lease)
         XCTAssertEqual(calls, ["configured", "close", "configured"])
     }
 

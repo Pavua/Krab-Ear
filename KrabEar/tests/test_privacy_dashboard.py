@@ -185,6 +185,32 @@ class TestPrivacyDashboardFlags(_PrivacyDashboardBase):
         self._set_setting("privacy_mode_enabled", False)
         self.assertEqual(live.buffer_duration_sec(), 0)
 
+    def test_pcm_survives_external_tab_save_but_not_external_privacy_cycle(self):
+        store = self.service.store
+        writer = StateStore(store.data_dir)
+        settings = self.service._settings_svc
+        live = self.service._live_subs
+        before = store.read_plaintext_policy_snapshot()
+        epoch = settings.handle_get_settings({})["live_subs_policy_epoch"]
+        chunk = {"audio_chunk": "AAA=", "live_subs_policy_epoch": epoch}
+        self.assertEqual(live.handle_ingest(chunk)["status"], "accepted")
+
+        writer.save_settings({"ui_last_tab": "diagnostics"})
+        after = store.read_plaintext_policy_snapshot()
+        self.assertNotEqual(before.internal_revision, after.internal_revision)
+        self.assertNotEqual(before.fingerprint, after.fingerprint)
+        self.assertEqual(settings.handle_get_settings({})["live_subs_policy_epoch"], epoch)
+        self.assertEqual(live.handle_ingest(chunk)["status"], "accepted")
+
+        writer.save_settings({"privacy_mode_enabled": True})
+        self.assertIsNone(settings.handle_get_settings({})["live_subs_policy_epoch"])
+        writer.save_settings({"privacy_mode_enabled": False})
+        fresh = settings.handle_get_settings({})["live_subs_policy_epoch"]
+        self.assertNotEqual(fresh, epoch)
+        self.assertEqual(live.handle_ingest(chunk)["reason"], "stale_capture_policy")
+        self.assertEqual(live.handle_ingest({**chunk, "live_subs_policy_epoch": fresh})["status"], "accepted")
+        self.assertEqual(live.buffer_duration_sec(), 1 / 16000)
+
     def test_delayed_pcm_from_before_external_privacy_cycle_is_rejected(self):
         live = self.service._live_subs
         settings = self.service._settings_svc

@@ -154,6 +154,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Хранилище настроек делегата; `.standard` — production-дефолт,
     /// отдельный suite защищает unit-тесты быстрых пресетов от живых настроек.
     let userDefaults: UserDefaults
+    let sentryPrivacy: SentryPrivacyLifecycle
     let backendSupervisor: BackendSupervisor
     let launchAgentManager: LaunchAgentManager
     var ipcClient: IPCClient
@@ -361,6 +362,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     init(
         options: LaunchOptions, userDefaults: UserDefaults = .standard,
+        sentryPrivacy: SentryPrivacyLifecycle? = nil,
         audioDuckingService: SystemAudioDuckingService = SystemAudioDuckingService(),
         notificationService: NotificationService = NotificationService(),
         pasteService: PasteService = PasteService(),
@@ -384,10 +386,13 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         self.notificationService = notificationService
         self.options = options
         self.userDefaults = userDefaults
+        self.sentryPrivacy = sentryPrivacy ?? SentryConfig.lifecycle
         self.backendSupervisor = BackendSupervisor(projectRoot: options.projectRoot)
         self.launchAgentManager = LaunchAgentManager(projectRoot: options.projectRoot)
         self.ipcClient = IPCClient(socketPath: (NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath as NSString).appendingPathComponent("krabear.sock"))
         super.init()
+        // До первого чтения разрешений нет. Сам факт запуска не отзывает
+        // кэш предыдущего процесса: его привязку проверит подтверждённый OFF.
         settings.privacyModeEnabled = true
     }
 
@@ -730,6 +735,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         stopRealtimeOverlayPolling()
         backendSupervisor.stopBackend()
         // Phase C C.6: release file lock so a subsequent launch can acquire it immediately.
+        sentryPrivacy.finishProcess()
         releaseFileLock(logger: logger)
     }
 
@@ -1452,7 +1458,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 payload,
                 environment: userDefaults.string(forKey: "KrabEar_SentryEnvironment") ?? "production",
                 fallbackDSN: userDefaults.string(forKey: "KrabEar_SentryDSN"),
-                lease: privacyLease
+                lease: privacyLease, owner: sentryPrivacy
             )
         }
         if updateUI && !privacyOnly {
@@ -1502,7 +1508,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         privacyLease?.revoke()
         privacyLease = nil
         stopLiveSubsCapture(flush: false)
-        SentryConfig.suspendForPrivacy()
+        sentryPrivacy.suspend()
     }
 
     func invalidatePrivacyConnection() {
