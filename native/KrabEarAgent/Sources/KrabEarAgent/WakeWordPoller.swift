@@ -224,15 +224,17 @@ final class WakeWordPoller {
     var isPaused: Bool { !pausedReasons.isEmpty }
 
     /// Включить: wake_word_start в backend + периодический поллинг статуса.
-    func activate() {
+    func activate(pausedForPrivacy: Bool = false) {
         guard timer == nil else { return }
         tracker.reset()
         wedgedTracker.reset()
         gaveUpNotified = false
         consecutiveEngineUnavailable = 0
         failedStartAttempts = 0
-        // Пауза, поставленная ДО activate() (privacy и др.), не теряется: микрофон
-        // не стартуем, поллинг тикает вхолостую до resume() (ревью E4 V10).
+        if pausedForPrivacy {
+            pausedReasons.insert(.privacyMode)
+        }
+        // Сохраняем любую паузу, установленную до начала поллинга.
         if pausedReasons.isEmpty {
             sendStart(force: true)
         }

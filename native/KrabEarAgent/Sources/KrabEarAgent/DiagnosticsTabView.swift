@@ -532,11 +532,7 @@ final class DiagnosticsTabViewController: NSViewController {
         alert.informativeText = message
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
-        if let window = view.window {
-            alert.beginSheetModal(for: window, completionHandler: nil)
-        } else {
-            alert.runModal()
-        }
+        presentAlertSheet(alert, for: view.window) { _ in }
     }
 
     func refreshMemoryStats() async {

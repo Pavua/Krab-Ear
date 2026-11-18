@@ -18,6 +18,7 @@ extension AgentAppDelegate {
         do {
             return try ipcClient.call(method: method, params: params)
         } catch let error as IPCError where Self.isConnectionError(error) {
+            invalidatePrivacyConnection()
             logger.warn("IPC ошибка соединения (\(error.localizedDescription)), пытаюсь перезапустить backend...")
             if backendSupervisor.restartIfDead() {
                 logger.info("Backend перезапущен, повторяю вызов \(method)")
@@ -48,6 +49,7 @@ extension AgentAppDelegate {
                 timeoutSec: timeoutSec
             )
         } catch let error as IPCError where Self.isConnectionError(error) {
+            invalidatePrivacyConnection()
             logger.warn(
                 "Async IPC ошибка соединения " +
                 "(\(error.localizedDescription)), проверяю backend..."
@@ -81,6 +83,7 @@ extension AgentAppDelegate {
     /// `attempts: 1` — recovery-путь делает ровно один повтор.
     private func reportReconnect(since startedAt: Date) {
         let client = ipcClient
+        tickPrivacyMonitor()
         let durationMs = Int(Date().timeIntervalSince(startedAt) * 1000)
         Task.detached {
             await IPCReconnectTelemetry.report(

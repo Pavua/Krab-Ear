@@ -248,6 +248,14 @@ def test_swift_real_socket_revocation_linearization(backend, swift_harness, phas
             process.communicate(timeout=5)
 
 
+def test_swift_live_subs_rejects_delayed_audio_after_external_toggle(backend, swift_harness):
+    result = subprocess.run(
+        [str(swift_harness), str(backend.root / "ipc.sock"), "live-subs"],
+        capture_output=True, timeout=30, env=synthetic_subprocess_env(backend.root),
+    )
+    assert result.returncode == 0, "delayed PCM crossed a privacy transition or fresh capture failed"
+
+
 def test_real_epoch_session_and_sequence_replay(backend):
     context = backend.grant()
     params = {**context, "operation_seq": 1, "sink_kind": "history-md"}

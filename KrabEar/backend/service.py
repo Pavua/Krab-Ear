@@ -865,7 +865,9 @@ class BackendService:
             transcriber=self.transcriber,
             translator=self.translator,
             settings_get=self._get_runtime_setting,
+            read_capture_epoch=lambda: self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).live_subs_policy_epoch,
         )
+        self._settings_svc.register_after_save_hook(self._live_subs.on_settings_saved)
         self._translation = TranslationService(
             translator=self.translator,
             store=self.store,
@@ -4709,23 +4711,9 @@ class BackendService:
             "purge_available": True,
         }
 
-        # --- privacy_mode ---
-        try:
-            result["privacy_mode"] = bool(
-                self._get_runtime_setting("privacy_mode_enabled", False)
-            )
-        except Exception:
-            logger.exception("get_privacy_dashboard: ошибка чтения privacy_mode_enabled")
-
-        # --- encryption_enabled: read flag directly from settings (no IPC cross-call) ---
-        try:
-            result["encryption_enabled"] = bool(
-                self._get_runtime_setting("history_encryption_enabled", False)
-            )
-        except Exception:
-            logger.exception(
-                "get_privacy_dashboard: ошибка чтения history_encryption_enabled"
-            )
+        policy = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5)
+        result["privacy_mode"] = policy.privacy_mode_enabled
+        result["encryption_enabled"] = policy.encryption_enabled
 
         # --- storage: sizes from HistoryService + item count from StateStore ---
         try:
@@ -5964,9 +5952,9 @@ class BackendService:
         Не создаёт ключ. Нет privacy gate (конфигурация, не данные транскрипций).
         """
         from backend.crypto_keystore import keychain_available
-        enabled = bool(self._settings_svc.cached_settings().get("history_encryption_enabled", False))
-        available = keychain_available()
-        return {"ok": True, "enabled": enabled, "available": available}
+        policy = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5)
+        enabled = policy.encryption_enabled
+        return {"ok": enabled is not None, "enabled": enabled, "available": keychain_available()}
 
     def _handle_set_history_encryption(self, params: dict[str, Any]) -> dict[str, Any]:
         """Включает или выключает AES-256-GCM шифрование NDJSON-истории.
@@ -5982,7 +5970,7 @@ class BackendService:
         Returns:
             {"ok": True, "enabled": bool, "available": True}
             или
-            {"ok": False, "error": "keychain_unavailable", "enabled": bool}
+            {"ok": False, "error": str, "enabled": bool | None}
         """
         enabled = params.get("enabled", False)
         if type(enabled) is not bool:
@@ -5996,11 +5984,14 @@ class BackendService:
         except HistoryEncryptionUnavailable:
             return {
                 "ok": False, "error": "keychain_unavailable",
-                "enabled": bool(self._settings_svc.cached_settings().get("history_encryption_enabled", False)),
+                "enabled": self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).encryption_enabled,
             }
         if not result.get("ok", True):
             return result
-        return {"ok": True, "enabled": enabled, "available": True}
+        confirmed = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).encryption_enabled
+        if confirmed is not enabled:
+            return {"ok": False, "error": "encryption_state_unconfirmed", "enabled": confirmed}
+        return {"ok": True, "enabled": confirmed, "available": True}
 
     def _handle_migrate_history_encryption(self, params: dict[str, Any]) -> dict[str, Any]:
         """Encrypt existing plaintext history.ndjson entries (at-rest migration).

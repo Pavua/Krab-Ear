@@ -482,11 +482,7 @@ extension HistoryPanelController {
     // MARK: - applySettingsPatch
 
     func applySettingsPatch(_ patch: [String: Any]) {
-        var payload = settingsProvider().toPayload()
-        for (key, value) in patch {
-            payload[key] = value
-        }
-        let updated = settingsUpdater(payload)
+        let updated = settingsUpdater(patch)
         syncSettingsControls(using: updated)
     }
 
@@ -580,7 +576,6 @@ extension HistoryPanelController {
         // Статус шифрования получаем из backend напрямую (не из AgentSettings),
         // потому что available зависит от состояния Keychain, а не только от флага.
         loadEncryptionStatus()
-        (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(settings.privacyModeEnabled)
         startSoundButton.state = settings.playStartSound ? .on : .off
         realtimePreviewButton.state = settings.realtimePreviewEnabled ? .on : .off
         overlayFollowCursorButton.state = settings.overlayFollowCursor ? .on : .off
@@ -1719,26 +1714,7 @@ extension HistoryPanelController {
         let presetIds = ["default", "meeting", "translation", "call_recording"]
         guard sender.tag >= 0, sender.tag < presetIds.count else { return }
         let presetId = presetIds[sender.tag]
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            do {
-                let response = try self.ipcClient.call(method: "apply_profile_preset", params: ["profile": presetId])
-                guard let result = response["result"] as? [String: Any] else { return }
-                DispatchQueue.main.async {
-                    let updated = self.settingsUpdater(result)
-                    self.syncSettingsControls(using: updated)
-                    UserDefaults.standard.set(presetId, forKey: "KrabEar_ActivePreset")
-                    if let appDelegate = NSApp.delegate as? AgentAppDelegate {
-                        appDelegate.refreshStatusItemTitle()
-                        appDelegate.rebuildStatusMenu()
-                    }
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    self.showInfoAlert(title: "Ошибка пресета", body: error.localizedDescription)
-                }
-            }
-        }
+        (NSApp.delegate as? AgentAppDelegate)?.applyRecordingPreset(presetId, source: "settings")
     }
 
     // MARK: - STT Engine Indicator

@@ -319,6 +319,17 @@ final class CallObserverCoordinatorTests: XCTestCase {
         XCTAssertEqual(panel.shown, ["s1"], "ручной вход разрешён")
     }
 
+    func test_agent_restriction_hides_hud_and_survives_stale_observer_refresh() {
+        let c = makeCoordinator()
+        c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()
+        XCTAssertTrue(hud.isHUDVisible)
+        c.setAgentPrivacyRestricted(true)
+        XCTAssertFalse(hud.isHUDVisible)
+        settings.privacy = false
+        c.watcherCallAppeared(session("s2"), generation: 2, resurrected: false); drain()
+        XCTAssertFalse(hud.isHUDVisible)
+    }
+
     func test_privacy_flip_midcall_hides_auto_hud_keeps_manual_panel() {
         let c = makeCoordinator()
         c.watcherCallAppeared(session("s1"), generation: 1, resurrected: false); drain()

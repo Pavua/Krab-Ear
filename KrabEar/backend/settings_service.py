@@ -436,6 +436,10 @@ class SettingsService:
         # Non-empty credential fields are replaced with 'REDACTED'; empty/absent fields
         # are left as-is so the UI can distinguish "not configured" from "set".
         settings = self.cached_settings()
+        # UI-дефолты и протухший кэш не подтверждают разрешение захвата.
+        policy = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5)
+        settings["privacy_mode_enabled"] = policy.privacy_mode_enabled is not False
+        settings["live_subs_policy_epoch"] = policy.live_subs_policy_epoch
         for k in self._SENSITIVE_FIELDS:
             if settings.get(k):
                 settings[k] = "REDACTED"
@@ -519,7 +523,7 @@ class SettingsService:
         # Strip any sensitive-field entry whose value is exactly 'REDACTED' before merge.
         params = {
             k: v for k, v in params.items()
-            if not (k in self._SENSITIVE_FIELDS and v == "REDACTED")
+            if k != "live_subs_policy_epoch" and not (k in self._SENSITIVE_FIELDS and v == "REDACTED")
         }
 
         try:

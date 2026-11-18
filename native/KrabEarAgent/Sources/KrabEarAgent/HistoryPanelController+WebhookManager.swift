@@ -153,13 +153,13 @@ extension HistoryPanelController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
-            let webhooks: [[String: Any]]
+            let webhooks: [[String: Any]]?
             do {
                 let resp = try ipc.call(method: "list_webhooks", params: [:])
                 let result = resp["result"] as? [String: Any]
-                webhooks = result?["webhooks"] as? [[String: Any]] ?? []
+                webhooks = result?["webhooks"] as? [[String: Any]]
             } catch {
-                webhooks = []
+                webhooks = nil
             }
 
             DispatchQueue.main.async { [weak self] in
@@ -170,7 +170,7 @@ extension HistoryPanelController {
     }
 
     @MainActor
-    private func rebuildWebhookCard(webhooks: [[String: Any]]) {
+    private func rebuildWebhookCard(webhooks: [[String: Any]]?) {
         guard let card = objc_getAssociatedObject(self, &WebhookManagerAssocKeys.sectionCard) as? NSView else { return }
 
         let isCD = card is CDSettingsCardView
@@ -206,15 +206,16 @@ extension HistoryPanelController {
             contentStack.setCustomSpacing(KrabEarTheme.Metrics.tight, after: subhead)
         }
 
-        if webhooks.isEmpty {
-            let empty = NSTextField(labelWithString: "Нет зарегистрированных вебхуков")
+        if webhooks?.isEmpty != false {
+            let empty = NSTextField(labelWithString: webhooks == nil
+                ? "Список вебхуков недоступен" : "Нет зарегистрированных вебхуков")
             empty.font = KrabEarTheme.Typography.caption
             empty.textColor = KrabEarTheme.Colors.textSecondary
             empty.isEditable = false
             empty.isBordered = false
             empty.drawsBackground = false
             contentStack.addArrangedSubview(empty)
-        } else {
+        } else if let webhooks {
             for (index, webhook) in webhooks.enumerated() {
                 guard let id = webhook["webhook_id"] as? String,
                       let url = webhook["url"] as? String else { continue }
@@ -389,6 +390,14 @@ extension HistoryPanelController {
                     return
                 }
                 
+                guard let id = result["webhook_id"] as? String,
+                      !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    DispatchQueue.main.async {
+                        BackendToast.shared.show("Регистрация вебхука не подтверждена", duration: 4.0)
+                    }
+                    return
+                }
+
                 DispatchQueue.main.async {
                     // Успех, сброс полей
                     urlField.stringValue = ""

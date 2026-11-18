@@ -72,6 +72,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let ipcClient: IPCClient
     let plaintextExportCoordinator: PlaintextExportCoordinator
     let settingsProvider: () -> AgentSettings
+    var encryptionStatusRevision = UUID()
+    var encryptionChangePending = false
     let settingsUpdater: ([String: Any]) -> AgentSettings
     let onToggleRecording: () -> Void
     private let onRestartAgent: () -> Void
@@ -2461,12 +2463,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                     self.showInfoAlert(title: "Глоссарий", body: "Не удалось сохранить термин.")
                     return
                 }
-                var nextPayload = self.settingsProvider().toPayload()
-                var glossary = self.settingsProvider().translationGlossary
-                glossary[source] = target
-                nextPayload["translation_glossary"] = glossary
-                _ = self.settingsUpdater(nextPayload)
-                self.syncSettingsControls()
+                (NSApp.delegate as? AgentAppDelegate)?.enqueueSettingsRefresh()
             }
         }
         }  // закрывает completion presentAlertSheet
@@ -2503,12 +2500,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                     self.showInfoAlert(title: "Глоссарий", body: "Не удалось удалить термин.")
                     return
                 }
-                var nextPayload = self.settingsProvider().toPayload()
-                var glossary = self.settingsProvider().translationGlossary
-                glossary.removeValue(forKey: source)
-                nextPayload["translation_glossary"] = glossary
-                _ = self.settingsUpdater(nextPayload)
-                self.syncSettingsControls()
+                (NSApp.delegate as? AgentAppDelegate)?.enqueueSettingsRefresh()
             }
         }
         }  // закрывает completion presentAlertSheet

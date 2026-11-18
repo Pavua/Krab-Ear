@@ -157,6 +157,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     /// Хранилище настроек делегата; `.standard` — production-дефолт,
     /// отдельный suite защищает unit-тесты быстрых пресетов от живых настроек.
     let userDefaults: UserDefaults
+    let sentryPrivacy: SentryPrivacyLifecycle
     let backendSupervisor: BackendSupervisor
     let launchAgentManager: LaunchAgentManager
     var ipcClient: IPCClient
@@ -166,9 +167,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var plaintextExportCoordinator: PlaintextExportCoordinator {
         if let coordinator = storedPlaintextExportCoordinator { return coordinator }
         let coordinator = PlaintextExportCoordinator(ipc: ipcClient)
+        coordinator.setPrivacyRestricted(privacyModeEnabled)
         storedPlaintextExportCoordinator = coordinator
         return coordinator
     }
+    func updatePlaintextExportPrivacy(_ restricted: Bool) {
+        storedPlaintextExportCoordinator?.setPrivacyRestricted(restricted)
+    }
+
     private var plaintextExportTerminationPending = false
     private var plaintextExportTerminationReplied = false
 
@@ -211,6 +217,20 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var realtimeOverlayTimer: Timer?
 
     var settings: AgentSettings = .default
+    private let settingsOperations = AgentSettingsOperationQueue()
+    private var pendingPrivacyMutations = 0
+    private static let uncertainPrivacyKey = "KrabEar_UnconfirmedPrivacyWrite"
+    var hasUnconfirmedPrivacyWrite: Bool { userDefaults.bool(forKey: Self.uncertainPrivacyKey) }
+    private var privacyRevision = UUID()
+    private(set) var privacyLease: ConfirmedPrivacyLease?
+    private var privacyVerifiedAt: ContinuousClock.Instant?
+    private var nextPrivacyPoll: ContinuousClock.Instant?
+    private var privacyPoll: Task<Bool, Never>?
+    var privacyNow: () -> ContinuousClock.Instant = { .now }
+
+    // Период 5с, плюс 5с на ограниченное чтение. Старый ответ не продлевает срок.
+    private static let privacyPollInterval: Duration = .seconds(5)
+    private static let privacyLifetime: Duration = .seconds(10)
     var isRecording = false
     var isProcessing = false
     // Мини-волна 2026-08-11 (авто-дострел отложенного stop_recording):
@@ -345,6 +365,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     init(
         options: LaunchOptions, userDefaults: UserDefaults = .standard,
+        sentryPrivacy: SentryPrivacyLifecycle? = nil,
         audioDuckingService: SystemAudioDuckingService = SystemAudioDuckingService(),
         notificationService: NotificationService = NotificationService(),
         pasteService: PasteService = PasteService(),
@@ -368,10 +389,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         self.notificationService = notificationService
         self.options = options
         self.userDefaults = userDefaults
+        self.sentryPrivacy = sentryPrivacy ?? SentryConfig.lifecycle
         self.backendSupervisor = BackendSupervisor(projectRoot: options.projectRoot)
         self.launchAgentManager = LaunchAgentManager(projectRoot: options.projectRoot)
         self.ipcClient = IPCClient(socketPath: (NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath as NSString).appendingPathComponent("krabear.sock"))
         super.init()
+        // До первого чтения разрешений нет. Сам факт запуска не отзывает
+        // кэш предыдущего процесса: его привязку проверит подтверждённый OFF.
+        settings.privacyModeEnabled = true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -390,11 +415,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
         // Только LaunchServices cleanup вынесен в фон, чтобы синхронный Process-вызов
         // не блокировал applicationDidFinishLaunching. PID-based cleanup запрещён.
-
-        // Sentry / GlitchTip telemetry — no-op если DSN не задан в settings
-        let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDSN") ?? ""
-        let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
-        SentryConfig.initialize(dsn: sentryDsn.isEmpty ? nil : sentryDsn, environment: sentryEnv)
 
         // AGENT-K fix: pre-warm BackendToast panel здесь, пока startup latency
         // ещё ожидается пользователем. NSVisualEffectView + ColorSync transform
@@ -517,7 +537,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             await handshakeClient.performHandshake(swiftAgentVersion: agentVersion)
         }
 
-        settings = loadSettings()
+        let readStarted = privacyNow()
+        applyConfirmedSettings(loadSettings(), readStarted: readStarted, updateUI: false)
         realtimeOverlay.setOpacityPercent(settings.overlayOpacityPercent)
         logger.info(
             "Настройки загружены: mode=\(settings.mode), autoPaste=\(settings.autoPaste), quality=\(settings.qualityProfile), translation=\(settings.translationMode)"
@@ -717,6 +738,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         stopRealtimeOverlayPolling()
         backendSupervisor.stopBackend()
         // Phase C C.6: release file lock so a subsequent launch can acquire it immediately.
+        sentryPrivacy.finishProcess()
         releaseFileLock(logger: logger)
     }
 
@@ -803,12 +825,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         setupWakeWordConversationObservers()
         setupWakeWordTTSPlaybackObservers()
-        // Тумблер включили, пока privacy mode активен: пауза ДО activate(), чтобы поллер вообще не
-        // отправлял wake_word_start (раньше сначала уходил start, и только потом stop).
-        if privacyModeEnabled {
-            wakeWordPoller?.pause(.privacyMode)
-        }
-        wakeWordPoller?.activate()
+        wakeWordPoller?.activate(pausedForPrivacy: privacyModeEnabled)
     }
 
     /// Перезапустить wake word с новым значением enabled.
@@ -921,86 +938,72 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func onQualityBalanced() {
-        settings.qualityProfile = "balanced"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["quality_profile": "balanced"])
         rebuildStatusMenu()
     }
 
     @objc func onQualityMax() {
-        settings.qualityProfile = "max"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["quality_profile": "max"])
         rebuildStatusMenu()
     }
 
     @objc func onAutoPasteToggle() {
-        settings.autoPaste.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["auto_paste": !settings.autoPaste])
         rebuildStatusMenu()
     }
 
     @objc func onStartSoundToggle() {
-        settings.playStartSound.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["play_start_sound": !settings.playStartSound])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingToggle() {
-        settings.audioDuckingEnabled.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_enabled": !settings.audioDuckingEnabled])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent25() {
-        settings.audioDuckingPercent = 25
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 25])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent50() {
-        settings.audioDuckingPercent = 50
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 50])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent75() {
-        settings.audioDuckingPercent = 75
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 75])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent100() {
-        settings.audioDuckingPercent = 100
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 100])
         rebuildStatusMenu()
     }
 
     @objc func onOverlayOpacity25() {
-        settings.overlayOpacityPercent = 25
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["overlay_opacity_percent": 25])
         rebuildStatusMenu()
     }
 
     @objc func onOverlayOpacity45() {
-        settings.overlayOpacityPercent = 45
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["overlay_opacity_percent": 45])
         rebuildStatusMenu()
     }
 
     @objc func onOverlayOpacity65() {
-        settings.overlayOpacityPercent = 65
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["overlay_opacity_percent": 65])
         rebuildStatusMenu()
     }
 
     @objc func onAutostartToggle() {
-        settings.autoStartEnabled.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["auto_start_enabled": !settings.autoStartEnabled])
         rebuildStatusMenu()
     }
 
     @objc func onDockIconToggle() {
-        settings.showDockIcon.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["show_dock_icon": !settings.showDockIcon])
         rebuildStatusMenu()
     }
 
@@ -1015,77 +1018,63 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func onNetworkOfflineDefault() {
-        settings.networkMode = "offline_default"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["network_mode": "offline_default"])
         rebuildStatusMenu()
     }
 
     @objc func onNetworkOfflineStrict() {
-        settings.networkMode = "offline_strict"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["network_mode": "offline_strict"])
         rebuildStatusMenu()
     }
 
     @objc func onNetworkOnlineOptIn() {
-        settings.networkMode = "online_opt_in"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["network_mode": "online_opt_in"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslateAndPasteToggle() {
-        settings.translateAndPaste.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translate_and_paste": !settings.translateAndPaste])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeOff() {
-        settings.translationMode = "off"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "off"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeRuToEs() {
-        settings.translationMode = "ru_to_es"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "ru_to_es"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeEsToRu() {
-        settings.translationMode = "es_to_ru"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "es_to_ru"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeEnToRu() {
-        settings.translationMode = "en_to_ru"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "en_to_ru"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeAuto() {
-        settings.translationMode = "auto"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "auto"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeBilingualRuEs() {
-        settings.translationMode = "bilingual_ru_es"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "bilingual_ru_es"])
         rebuildStatusMenu()
     }
 
     @objc func onApplyLiveTranslationPreset() {
-        settings.translationMode = "auto"
-        settings.translationStyle = "chat"
-        settings.translateAndPaste = false
-        settings.realtimePreviewEnabled = true
-        settings.networkMode = "offline_default"
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
-        notify(
-            title: "Krab Ear",
-            body: "Live Translation preset включен: auto + chat + realtime."
-        )
+        persistSettingsPayload([
+            "translation_mode": "auto",
+            "translation_style": "chat",
+            "translate_and_paste": false,
+            "realtime_preview_enabled": true,
+            "network_mode": "offline_default",
+        ], successMessage: "Live Translation preset включен: auto + chat + realtime.")
     }
 
     @objc func onSwapRuEsDirection() {
@@ -1104,48 +1093,39 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         default:
             nextMode = "ru_to_es"
         }
-        settings.translationMode = nextMode
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
-        notify(
-            title: "Krab Ear",
-            body: "Направление перевода переключено: \(nextMode == "ru_to_es" ? "RU -> ES" : "ES -> RU")."
+        persistSettingsPayload(
+            ["translation_mode": nextMode],
+            successMessage: "Направление перевода переключено: \(nextMode == "ru_to_es" ? "RU -> ES" : "ES -> RU")."
         )
     }
 
     @objc func onTranslationStyleNeutral() {
-        settings.translationStyle = "neutral"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_style": "neutral"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationStyleChat() {
-        settings.translationStyle = "chat"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_style": "chat"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationStyleFormal() {
-        settings.translationStyle = "formal"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_style": "formal"])
         rebuildStatusMenu()
     }
 
     @objc func onClipboardModeAlways() {
-        settings.clipboardMode = "always_copy"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["clipboard_mode": "always_copy"])
         rebuildStatusMenu()
     }
 
     @objc func onClipboardModeOnFail() {
-        settings.clipboardMode = "copy_on_fail"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["clipboard_mode": "copy_on_fail"])
         rebuildStatusMenu()
     }
 
     @objc func onClipboardModeNever() {
-        settings.clipboardMode = "never_copy"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["clipboard_mode": "never_copy"])
         rebuildStatusMenu()
     }
 
@@ -1162,36 +1142,41 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyHotkeyProfile(_ profile: String) {
+        let patch: [String: Any]
         switch profile {
         case "meeting":
-            settings.hotkeyProfile = "meeting"
-            settings.translationMode = "auto_to_ru"
-            settings.translationStyle = "chat"
-            settings.translateAndPaste = false
-            settings.autoPaste = false
-            settings.realtimePreviewEnabled = true
-            settings.clipboardMode = "copy_on_fail"
+            patch = [
+                "hotkey_profile": "meeting",
+                "translation_mode": "auto_to_ru",
+                "translation_style": "chat",
+                "translate_and_paste": false,
+                "auto_paste": false,
+                "realtime_preview_enabled": true,
+                "clipboard_mode": "copy_on_fail",
+            ]
         case "translation":
-            settings.hotkeyProfile = "translation"
-            settings.translationMode = "auto"
-            settings.translationStyle = "chat"
-            settings.translateAndPaste = true
-            settings.autoPaste = false
-            settings.realtimePreviewEnabled = true
-            settings.clipboardMode = "always_copy"
+            patch = [
+                "hotkey_profile": "translation",
+                "translation_mode": "auto",
+                "translation_style": "chat",
+                "translate_and_paste": true,
+                "auto_paste": false,
+                "realtime_preview_enabled": true,
+                "clipboard_mode": "always_copy",
+            ]
         default:
-            settings.hotkeyProfile = "default"
-            settings.translationMode = "off"
-            settings.translationStyle = "neutral"
-            settings.translateAndPaste = false
-            settings.autoPaste = true
-            settings.realtimePreviewEnabled = true
-            settings.clipboardMode = "always_copy"
+            patch = [
+                "hotkey_profile": "default",
+                "translation_mode": "off",
+                "translation_style": "neutral",
+                "translate_and_paste": false,
+                "auto_paste": true,
+                "realtime_preview_enabled": true,
+                "clipboard_mode": "always_copy",
+            ]
         }
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
         let title: String
-        switch settings.hotkeyProfile {
+        switch profile {
         case "meeting":
             title = "Meeting"
         case "translation":
@@ -1199,7 +1184,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         default:
             title = "Default"
         }
-        notify(title: "Krab Ear", body: "Профиль hotkey переключен: \(title)")
+        persistSettingsPayload(patch, successMessage: "Профиль hotkey переключен: \(title)")
     }
 
     @objc func onCopyLastResult() {
@@ -1442,63 +1427,163 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         historyPanel?.showPanel()
     }
 
-    func loadSettings() -> AgentSettings {
-        do {
-            let response = try callWithRecovery(method: "get_settings", params: [:])
-            guard let result = response["result"] as? [String: Any] else {
-                return .default
-            }
-            // Phase B.2 F10: re-init Sentry with IPC settings so sentry_dsn_agent
-            // (agent-specific project) takes precedence over generic sentry_dsn.
-            let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
-            SentryConfig.initializeFromSettings(result, environment: sentryEnv)
-            return AgentSettings(from: result)
-        } catch {
-            return .default
-        }
+    func loadSettings() -> [String: Any]? {
+        let response = try? callWithRecovery(method: "get_settings", params: [:])
+        guard confirmedPrivacyFlag(response?["ok"]) == true else { return nil }
+        return response?["result"] as? [String: Any]
     }
 
-    /// AGENT-3 / Sentry KRAB-EAR-AGENT-Q (2026-08-05): раньше здесь был синхронный
-    /// `callWithRecovery` прямо в @objc menu-handler'ах (~40 call site) — main thread
-    /// блокировался на `read()` Unix-сокета, а при мёртвом backend ещё и на
-    /// `isBackendAlive()`/`ensureBackendRunning()` (до 60+20с). `callAsyncWithRecovery`
-    /// уже существовал для этого класса багов (см. main+IPCRecovery.swift), но
-    /// persistSettingsPayload никогда не был на него переведён — sibling-gap.
-    ///
-    /// Оптимистичное локальное обновление синхронно (те же значения, что backend
-    /// почти всегда эхо подтвердит) — вызывающие ~40 @objc-хендлеров продолжают
-    /// читать актуальный `settings` сразу после вызова без изменений. Реальный
-    /// round-trip уходит в фоновый Task; авторитетный ответ backend применяется
-    /// повторно ТОЛЬКО если разошёлся с оптимистичным (applySettingsSideEffects
-    /// сравнивает previous/current поле-в-поле и no-op'ает на совпадении).
-    func persistSettingsPayload(_ payload: [String: Any]) {
+    @discardableResult
+    private func applyConfirmedSettings(
+        _ payload: [String: Any]?, readStarted: ContinuousClock.Instant,
+        privacyOnly: Bool = false, updateUI: Bool = true
+    ) -> Bool {
+        guard let payload, let confirmedPrivacy = confirmedPrivacyFlag(payload["privacy_mode_enabled"]),
+              readStarted.duration(to: privacyNow()) < Self.privacyLifetime else {
+            privacyVerifiedAt = nil
+            setPrivacyMode(true)
+            return false
+        }
         let previous = settings
-        let optimistic = AgentSettings(from: payload)
-        settings = optimistic
-        applySettingsSideEffects(previous: previous, current: optimistic)
-        applyMode(optimistic.mode, persist: false)
+        if !privacyOnly { settings = AgentSettings(from: payload) }
+        privacyVerifiedAt = readStarted
+        let restricted = confirmedPrivacy || pendingPrivacyMutations > 0
+            || hasUnconfirmedPrivacyWrite
+        setPrivacyMode(restricted)
+        if !restricted {
+            let deadline = readStarted.advanced(by: Self.privacyLifetime)
+            let epoch = (payload["live_subs_policy_epoch"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            if privacyLease?.liveSubsEpoch != epoch || privacyLease?.renew(until: deadline) != true {
+                if privacyLease != nil { revokePrivacyLease() }
+                privacyLease = ConfirmedPrivacyLease(until: deadline, liveSubsEpoch: epoch)
+            }
+            SentryConfig.initializeFromSettings(
+                payload,
+                environment: userDefaults.string(forKey: "KrabEar_SentryEnvironment") ?? "production",
+                fallbackDSN: userDefaults.string(forKey: "KrabEar_SentryDSN"),
+                lease: privacyLease, owner: sentryPrivacy
+            )
+        }
+        if updateUI && !privacyOnly {
+            applySettingsSideEffects(previous: previous, current: settings)
+            if previous.mode != settings.mode || previous.showDockIcon != settings.showDockIcon {
+                applyMode(settings.mode, persist: false)
+            } else {
+                rebuildStatusMenu()
+            }
+            historyPanel?.syncSettingsControls(using: settings)
+        }
+        return true
+    }
 
+    @discardableResult
+    private func refreshSettings(privacyOnly: Bool = false) async -> Bool {
+        let revision = privacyRevision
+        let started = privacyNow()
+        let response = try? await ipcClient.callAsync(method: "get_settings", timeoutSec: IPCClient.quickTimeoutSec)
+        guard revision == privacyRevision else { return false }
+        let payload = confirmedPrivacyFlag(response?["ok"]) == true ? response?["result"] as? [String: Any] : nil
+        return applyConfirmedSettings(payload, readStarted: started, privacyOnly: privacyOnly)
+    }
+
+    // Не ставим неограниченную очередь чтений за медленной записью. Срок последнего
+    // разрешения проверяется даже пока очередь занята или IPC ещё не вернул ответ.
+    @discardableResult
+    func tickPrivacyMonitor() -> Task<Bool, Never>? {
+        let now = privacyNow()
+        if let verified = privacyVerifiedAt, verified.duration(to: now) >= Self.privacyLifetime {
+            privacyVerifiedAt = nil
+            setPrivacyMode(true)
+        }
+        if let privacyPoll { return privacyPoll }
+        if let nextPrivacyPoll, now < nextPrivacyPoll { return nil }
+        nextPrivacyPoll = now.advanced(by: Self.privacyPollInterval)
+        let poll = settingsOperations.enqueue { [weak self] in
+            guard let self else { return false }
+            defer { self.privacyPoll = nil }
+            return await self.refreshSettings(privacyOnly: true)
+        }
+        privacyPoll = poll
+        return poll
+    }
+
+    func revokePrivacyLease() {
+        privacyLease?.revoke()
+        privacyLease = nil
+        stopLiveSubsCapture(flush: false)
+        sentryPrivacy.suspend()
+    }
+
+    func invalidatePrivacyConnection() {
+        privacyRevision = UUID()
+        privacyVerifiedAt = nil
+        nextPrivacyPoll = nil
+        setPrivacyMode(true)
+    }
+
+    @discardableResult
+    func performSettingsMutation(
+        _ method: String, params: [String: Any], preservesPrivacy: Bool = false
+    ) -> Task<Bool, Never> {
+        let requestedPrivacy = confirmedPrivacyFlag(params["privacy_mode_enabled"])
+        let affectsPrivacy = params["privacy_mode_enabled"] != nil
+            || (method == "apply_config_preset" && !preservesPrivacy)
+            || method == "restore_settings_backup"
+        if affectsPrivacy {
+            pendingPrivacyMutations += 1
+            invalidatePrivacyConnection()
+        }
+        return settingsOperations.enqueue { [weak self] in
+            guard let self else { return false }
+            let alreadyUncertain = self.hasUnconfirmedPrivacyWrite
+            let response: [String: Any]?
+            if affectsPrivacy {
+                // После timeout сервер ещё может применить запрос. Повтор и
+                // произвольный get_settings=false не подтверждают завершение записи.
+                self.userDefaults.set(true, forKey: Self.uncertainPrivacyKey)
+                response = try? await self.ipcClient.callAsync(method: method, params: params)
+                self.pendingPrivacyMutations -= 1
+            } else {
+                response = try? await self.callAsyncWithRecovery(method: method, params: params)
+            }
+            let result = confirmedPrivacyFlag(response?["ok"]) == true ? response?["result"] as? [String: Any] : nil
+            let acknowledged: Bool
+            if method == "apply_config_preset" {
+                acknowledged = confirmedPrivacyFlag(result?["applied"]) == true
+            } else {
+                let payload = method == "restore_settings_backup"
+                    ? result?["restored_settings"] as? [String: Any] : result
+                let saved = confirmedPrivacyFlag(payload?["privacy_mode_enabled"])
+                acknowledged = saved != nil && (requestedPrivacy == nil || saved == requestedPrivacy)
+            }
+            if affectsPrivacy && acknowledged && (!alreadyUncertain || requestedPrivacy == false) {
+                self.userDefaults.removeObject(forKey: Self.uncertainPrivacyKey)
+            }
+            // Только свежий get_settings несёт проверенную backend privacy-проекцию.
+            let refreshed = await self.refreshSettings()
+            return acknowledged && refreshed
+                && (requestedPrivacy == nil || self.settings.privacyModeEnabled == requestedPrivacy)
+        }
+    }
+
+    func persistSettingsPayload(_ patch: [String: Any], successMessage: String? = nil) {
+        guard !patch.isEmpty else { return }
+        let operation = performSettingsMutation("set_settings", params: patch)
         Task { [weak self] in
-            guard let self else { return }
-            do {
-                let response = try await self.callAsyncWithRecovery(method: "set_settings", params: payload)
-                guard let result = response["result"] as? [String: Any] else {
-                    return
-                }
-                let confirmed = AgentSettings(from: result)
-                let priorForEffects = self.settings
-                self.settings = confirmed
-                self.applySettingsSideEffects(previous: priorForEffects, current: confirmed)
-                self.applyMode(confirmed.mode, persist: false)
-            } catch {
-                self.notify(title: "Krab Ear", body: "Не удалось сохранить настройки")
+            if await operation.value {
+                if let successMessage { self?.notify(title: "Krab Ear", body: successMessage) }
+            } else {
+                self?.notify(title: "Krab Ear", body: "Не удалось подтвердить сохранение настроек")
             }
         }
     }
 
-    func updateSettingsFromPanel(_ payload: [String: Any]) -> AgentSettings {
-        persistSettingsPayload(payload)
-        rebuildStatusMenu()
+    func enqueueSettingsRefresh() {
+        settingsOperations.enqueue { [weak self] in await self?.refreshSettings() ?? false }
+    }
+
+    func updateSettingsFromPanel(_ patch: [String: Any]) -> AgentSettings {
+        persistSettingsPayload(patch)
         return settings
     }
 
@@ -1574,8 +1659,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 ipcClient: ipcClient,
                 onComplete: { [weak self] in
                     guard let self = self else { return }
-                    self.settings.onboardingCompleted = true
-                    self.persistSettingsPayload(self.settings.toPayload())
+                    self.persistSettingsPayload(["onboarding_completed": true])
                     self.quickStartController?.close()
                     self.quickStartController = nil
                     self.notify(title: "Krab Ear", body: "Настройка завершена! Нажмите Right Option для записи.")

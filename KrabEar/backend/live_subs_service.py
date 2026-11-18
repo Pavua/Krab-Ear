@@ -79,10 +79,13 @@ class LiveSubsService:
         settings_get: Callable[[str, Any], Any] | None = None,
         stt_acquire: Callable[[float], bool] | None = None,
         stt_release: Callable[[], None] | None = None,
+        read_capture_epoch: Callable[[], str | None] | None = None,
     ) -> None:
         self._transcriber = transcriber
         self._translator = translator
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
+        self._read_capture_epoch = read_capture_epoch
+        self._buffer_epoch: str | None = None
         # P0e: REST /v1/stream делит MLX с POST /v1/stt/transcribe в том же PID.
         # IPC BackendService эти колбэки не передаёт (другой процесс) — default None.
         self._stt_acquire = stt_acquire
@@ -135,6 +138,9 @@ class LiveSubsService:
         sample_rate: int,
         target_lang: str,
         is_final: bool,
+        *,
+        generation: int | None = None,
+        capture_epoch: str | None = None,
     ) -> dict[str, Any] | None:
         """Добавляет чанк в буфер; при необходимости планирует flush.
 
@@ -156,6 +162,14 @@ class LiveSubsService:
         # минуя handle_ingest-санитайзер, поэтому клампим ЗДЕСЬ — в общей точке обоих
         # путей (IPC + WS). Крошечный sample_rate иначе даёт resample_poly ~16000×
         # upsample в _process_window → попытка аллокации десятков GB → OOM/swap-thrash (W1771 HIGH).
+        if generation is None:
+            if self._read_capture_epoch is not None:
+                capture_epoch = self._read_capture_epoch()
+            with self._lock:
+                generation = self._generation
+        if not self._permit_current(capture_epoch):
+            self.reset()
+            return {"text": "", "translation": None} if is_final else None
         sample_rate = self._sanitize_sample_rate(sample_rate)
         # WS /v1/stream вызывает ingest() напрямую, минуя privacy-гейт handle_ingest: без
         # проверки здесь чужое аудио копилось бы в буфере при включённой приватности.
@@ -171,7 +185,11 @@ class LiveSubsService:
         with self._lock:
             if self._closed:
                 raise RuntimeError("LiveSubsService is closed")
-            generation = self._generation
+            if generation != self._generation:
+                return None
+            if self._buffer_epoch != capture_epoch:
+                self._reset()
+            self._buffer_epoch = capture_epoch
             self._buffer.append(audio_array)
             self._buffer_samples += len(audio_array)
             buffer_sec = self._buffer_samples / max(sample_rate, 1)
@@ -224,6 +242,7 @@ class LiveSubsService:
             start_ts=start_ts,
             end_ts=end_ts,
             generation=generation,
+            capture_epoch=capture_epoch,
         )
         if not is_final:
             # Немедленный возврат — обычный путь. Результат (если/когда воркер
@@ -238,7 +257,7 @@ class LiveSubsService:
             )
         return result
 
-    def stop(self) -> dict[str, Any]:
+    def stop(self, *, expected_epoch: str | None = None) -> dict[str, Any]:
         """Flush оставшегося буфера и сброс сессии с reusable worker.
 
         Если privacy_mode_enabled=True — буфер сбрасывается БЕЗ транскрипции
@@ -250,8 +269,11 @@ class LiveSubsService:
         а не виснем на неопределённое время.
         """
         with self._lock:
+            if self._stop_epoch_is_stale(expected_epoch):
+                return {"status": "stopped", "flushed": False, "reason": "stale_capture_policy"}
             generation = self._generation
-            privacy_active = self._settings_get("privacy_mode_enabled", False)
+            capture_epoch = self._buffer_epoch
+            privacy_active = not self._permit_current(capture_epoch)
             if privacy_active:
                 self._reset()
                 has_data = False
@@ -288,6 +310,7 @@ class LiveSubsService:
             audio=audio, sample_rate=16000, target_lang="off",
             start_ts=start_ts, end_ts=end_ts,
             generation=generation,
+            capture_epoch=capture_epoch,
         )
         result = self._await_completion(seq, timeout=_FINAL_FLUSH_TIMEOUT_SEC)
         if result is None:
@@ -321,6 +344,23 @@ class LiveSubsService:
                     return False
                 self._worker_cond.wait(timeout=remaining)
             return True
+
+    def _permit_current(self, capture_epoch: str | None) -> bool:
+        if self._read_capture_epoch is None:  # Локальный WS-владелец проверяет собственные настройки.
+            return self._settings_get("privacy_mode_enabled", False) is False
+        return capture_epoch is not None and self._read_capture_epoch() == capture_epoch
+
+    def _stop_epoch_is_stale(self, epoch: str | None) -> bool:
+        if epoch is None or self._read_capture_epoch is None:
+            return False
+        current = self._read_capture_epoch()
+        # При полном запрете сброс безопасен даже для уже отозванного захвата.
+        return current is not None and current != epoch
+
+    def on_settings_saved(self, old: dict, new: dict) -> None:
+        """Отзыв PCM принадлежит серверу и не зависит от доставки stop по IPC."""
+        if new.get("privacy_mode_enabled") is not False:
+            self.reset()
 
     def reset(self) -> None:
         """Очищает буфер БЕЗ транскрипции и эмиссии событий (под локом).
@@ -365,7 +405,18 @@ class LiveSubsService:
 
     def handle_ingest(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC handler: live_subs_ingest."""
-        if self._settings_get("privacy_mode_enabled", False):
+        with self._lock:
+            generation = self._generation
+        capture_epoch = params.get("live_subs_policy_epoch")
+        if self._read_capture_epoch is not None:
+            current_epoch = self._read_capture_epoch()
+            if current_epoch is None:
+                self.reset()
+                return {"ok": True, "skipped": True, "reason": "privacy_mode_active"}
+            if capture_epoch != current_epoch:
+                return {"ok": True, "skipped": True, "reason": "stale_capture_policy"}
+        elif not self._permit_current(None):
+            self.reset()
             return {"ok": True, "skipped": True, "reason": "privacy_mode_active"}
 
         audio_b64 = params.get("audio_chunk", "")
@@ -383,6 +434,8 @@ class LiveSubsService:
             sample_rate=sample_rate,
             target_lang=target_lang,
             is_final=is_final,
+            generation=generation,
+            capture_epoch=capture_epoch,
         )
 
         buf_sec = self.buffer_duration_sec(sample_rate)
@@ -406,9 +459,16 @@ class LiveSubsService:
             }
         return {"status": "accepted", "buffer_duration_sec": buf_sec}
 
-    def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+    def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC handler: live_subs_stop."""
-        return self.stop()
+        epoch = params.get("live_subs_policy_epoch")
+        if params.get("discard") is True:
+            with self._delivery_lock, self._lock:
+                if self._stop_epoch_is_stale(epoch):
+                    return {"status": "stopped", "flushed": False, "reason": "stale_capture_policy"}
+                self.reset()
+            return {"status": "stopped", "flushed": False, "discarded": True}
+        return self.stop(expected_epoch=epoch)
 
     # ── internals: backpressure worker (F3) ──────────────────────────────────
 
@@ -517,6 +577,7 @@ class LiveSubsService:
         start_ts: float,
         end_ts: float,
         generation: int | None = None,
+        capture_epoch: str | None = None,
     ) -> int:
         """Кладёт снапшот в слот воркера (размер 1, последний выигрывает).
 
@@ -548,6 +609,7 @@ class LiveSubsService:
             self._pending_window = {
                 "seq": seq,
                 "generation": self._generation,
+                "capture_epoch": capture_epoch,
                 "audio": audio,
                 "sample_rate": sample_rate,
                 "target_lang": target_lang,
@@ -595,7 +657,7 @@ class LiveSubsService:
     def _window_is_current(self, window: dict[str, Any]) -> bool:
         with self._worker_cond:
             current = window.get("generation", self._generation) == self._generation
-        return current and not self._settings_get("privacy_mode_enabled", False)
+        return current and self._permit_current(window.get("capture_epoch"))
 
     # ── internals: flush pipeline ─────────────────────────────────────────────
 
@@ -822,6 +884,7 @@ class LiveSubsService:
     def _reset(self) -> None:
         """Сбрасывает буфер и метки времени."""
         self._buffer = []
+        self._buffer_epoch = None
         self._buffer_samples = 0
         self._session_start = time.monotonic()
 
