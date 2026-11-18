@@ -157,6 +157,12 @@ class LiveSubsService:
         # путей (IPC + WS). Крошечный sample_rate иначе даёт resample_poly ~16000×
         # upsample в _process_window → попытка аллокации десятков GB → OOM/swap-thrash (W1771 HIGH).
         sample_rate = self._sanitize_sample_rate(sample_rate)
+        # WS /v1/stream вызывает ingest() напрямую, минуя privacy-гейт handle_ingest: без
+        # проверки здесь чужое аудио копилось бы в буфере при включённой приватности.
+        # Финальный flush (is_final) не отсекаем: его путь сам сбрасывает буфер без STT и
+        # отвечает структурой с reason=privacy_mode_active (контракт вызывающего).
+        if not is_final and self._settings_get("privacy_mode_enabled", False):
+            return None
         audio_array = self._decode_audio(audio_bytes, sample_rate)
         # Под локом — ТОЛЬКО мутация буфера, решение о flush и снапшот+сброс.
         # Сам STT (несколько секунд) НИКОГДА не выполняется под этим локом —

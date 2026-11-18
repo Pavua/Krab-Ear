@@ -310,6 +310,13 @@ class CallAssistService:
         with self._lock:
             return dict(self._state)
 
+    def _privacy_active(self) -> bool:
+        """Включён ли режим приватности СЕЙЧАС (читается заново при каждом вызове)."""
+        return bool(self._settings_get("privacy_mode_enabled", False))
+
+    #: Поля состояния звонка, которые могут нести текст разговора или тело ответа Gateway.
+    _PRIVATE_STATE_KEYS = ("summary", "summary_error", "gateway_stop_error", "gateway_error")
+
     # ------------------------------------------------------------------
     # Handlers (сигнатуры совпадают с BackendService._handle_*)
     # ------------------------------------------------------------------
@@ -698,7 +705,12 @@ class CallAssistService:
         gateway_session_id = str(state.get("gateway_session_id") or "").strip()
         state["auto_summary"] = auto_summary
         state["summary_status"] = "skipped"
-        if auto_summary and gateway_session_id and voice_gateway_url:
+        # Приватность включена: сводка не запрашивается и не пишется в историю (она — пересказ
+        # разговора). Сам stop и сброс сессии Gateway выполняются как обычно.
+        privacy_now = self._privacy_active()
+        if privacy_now:
+            state["privacy_mode_active"] = True
+        if auto_summary and gateway_session_id and voice_gateway_url and not privacy_now:
             summary_result = self.gateway.post(
                 voice_gateway_url=voice_gateway_url,
                 api_key=voice_gateway_api_key,
@@ -778,7 +790,13 @@ class CallAssistService:
         return state
 
     def handle_get_state(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self.state
+        state = self.state
+        if self._privacy_active():
+            # Сводка могла осесть в кэше до включения приватности: наружу не отдаём.
+            for key in self._PRIVATE_STATE_KEYS:
+                state.pop(key, None)
+            state["privacy_mode_active"] = True
+        return state
 
     def handle_diagnostics(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает diagnostics и explain-пакет почему перевод не появился.
@@ -892,6 +910,16 @@ class CallAssistService:
         text = str(params.get("text", "")).strip()
         if not text:
             raise RuntimeError("text обязателен")
+
+        # Приватность: фраза в Gateway не уходит. Структура ответа сохранена для schema-parity.
+        if self._privacy_active():
+            return {
+                "ok": False,
+                "error": "privacy_mode",
+                "privacy_mode_active": True,
+                "gateway_session_id": None,
+                "quick_phrase": {},
+            }
 
         settings = self.store.load_settings()
         voice_gateway_url = str(settings.get("voice_gateway_url", "http://127.0.0.1:8090")).strip()
@@ -1415,6 +1443,11 @@ class CallAssistService:
             if not self.recorder.is_recording:
                 break
 
+            # Приватность включили посреди звонка: STT не гоняем и текст не отправляем.
+            if self._privacy_active():
+                time.sleep(1.0)  # sync context OK: runs in threading.Thread
+                continue
+
             try:
                 audio_data, duration_sec = self.recorder.snapshot_audio(max_duration_sec=25.0)
                 current_size = getattr(audio_data, "size", 0)
@@ -1428,6 +1461,10 @@ class CallAssistService:
                     quality_profile="balanced",
                 )
                 text = self._extract_text(preview_payload)
+                # Распознавание длится секунды: приватность могли включить за это время.
+                # Повторная проверка прямо перед отправкой наружу (в Gateway) обязательна.
+                if text and self._privacy_active():
+                    text = ""
 
                 if text and text != last_sent_text:
                     # wave-1770: do NOT log transcript preview — call text is PII even at
