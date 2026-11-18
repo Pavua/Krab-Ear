@@ -110,3 +110,27 @@ def test_repair_refuses_unverified_ledger(tmp_path, ledger):
 
     assert_refused(profile, original, result["fixed"], result["skipped"], result["details"])
     assert (profile / ledger).is_symlink()
+
+
+def test_integrity_reader_uses_current_state_store_after_import(tmp_path, monkeypatch):
+    import runpy
+    from unittest.mock import MagicMock
+
+    from backend import integrity_checker, state_store
+
+    # Dashboard-тест импортирует REST под временной подменой StateStore.
+    # Загружаем отдельную копию checker, чтобы порядок collection не маскировал ошибку.
+    with monkeypatch.context() as patch:
+        patch.setattr(state_store, "StateStore", MagicMock())
+        checker = runpy.run_path(integrity_checker.__file__)["IntegrityChecker"]()
+
+    settings = tmp_path / "settings.json"
+    settings.write_text("{", encoding="utf-8")
+    history = tmp_path / "history.ndjson"
+    history.write_bytes(HISTORY)
+    report = checker.check_integrity(tmp_path)
+    assert next(c for c in report.checks if c.name == "settings_json").status == "error"
+    assert checker.repair(tmp_path, report).fixed == 0
+
+    settings.write_text(json.dumps(OFF_POLICY), encoding="utf-8")
+    assert checker.handle_repair_data({"data_dir": str(tmp_path)})["fixed"] == 1

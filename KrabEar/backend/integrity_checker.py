@@ -26,13 +26,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from backend import state_store
 from backend.history_encryption_policy import HistoryEncryptionOperationUnavailable
 from backend.plaintext_export_authorization import PolicyState
-from backend.state_store import (
-    StateStore,
-    has_encrypted_history_in,
-    history_journal_paths,
-)
 from core.atomic_io import atomic_write_bytes, atomic_write_text
 
 logger = logging.getLogger("KrabEar.Backend.IntegrityChecker")
@@ -199,7 +195,7 @@ class IntegrityChecker:
         # 6. Settings file valid JSON
         if settings_path.exists():
             try:
-                StateStore.read_settings_import(settings_path)
+                state_store.StateStore.read_settings_import(settings_path)
                 checks.append(CheckResult(
                     name="settings_json",
                     status="ok",
@@ -425,12 +421,14 @@ class IntegrityChecker:
         try:
             # Stale report не разрешает копировать историю. Решение и все
             # последующие записи защищены тем же flock, что и commit настроек.
-            policy = StateStore.read_profile_policy_locked(path.parent / "settings.json")
+            policy = state_store.StateStore.read_profile_policy_locked(path.parent / "settings.json")
             if (
                 policy.state is not PolicyState.KNOWN_OFF
                 or policy.privacy_mode_enabled is not False
-                or has_encrypted_history_in(
-                    history_journal_paths(path.parent), tolerate_invalid_utf8=True, reject_nonregular=True
+                or state_store.has_encrypted_history_in(
+                    state_store.history_journal_paths(path.parent),
+                    tolerate_invalid_utf8=True,
+                    reject_nonregular=True,
                 )
             ):
                 raise HistoryEncryptionOperationUnavailable("valid_ndjson")
