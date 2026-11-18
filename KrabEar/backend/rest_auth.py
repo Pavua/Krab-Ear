@@ -14,6 +14,7 @@ Multi-process coherence (wave-21):
 """
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import hashlib
 import hmac
@@ -37,11 +38,15 @@ class RestAuth:
         # so flock() across processes reliably serialises writes.
         self._lock_path = Path(data_dir) / "api_tokens.lock"
         self._lock = threading.Lock()
+        # Глубина удержания межпроцессного flock в ЭТОМ потоке: `_save` внутри транзакции
+        # не берёт блокировку повторно (flock на новом fd того же файла блокирует сам поток).
+        self._tx = threading.local()
         self._tokens: list[dict] = self._load()
-        # mtime of api_tokens.json at the last successful load (float seconds).
-        # Initialised to 0.0 when the file doesn't exist yet so the first
-        # write/create still gets recorded correctly.
+        # mtime api_tokens.json при последней загрузке (0.0, если файла ещё нет) и подпись
+        # (ctime, mtime, inode, размер). Одного mtime мало: его можно вернуть через utime, а
+        # замена файла другим процессом с тем же mtime оставляла бы в памяти отозванный токен.
         self._file_mtime: float = self._read_mtime()
+        self._file_sig: tuple[int, int, int, int] = self._read_sig()
 
     # ------------------------------------------------------------------
     # Public API
@@ -55,12 +60,16 @@ class RestAuth:
             "id": secrets.token_hex(8),
             "name": name,
             "token_hash": token_hash,
-            "scopes": list(scopes) if scopes else ["*"],
+            # Явный пустой список остаётся пустым: молчаливое расширение до «*» выдавало бы
+            # токену больше прав, чем запросили. «*» — только когда scopes не заданы.
+            "scopes": list(scopes) if scopes is not None else ["*"],
             "created_at": datetime.now(timezone.utc).isoformat(),
             "last_used": None,
         }
-        with self._lock:
-            self._reload_if_stale()
+        with self._lock, self._file_lock():
+            # Чтение-изменение-запись целиком под межпроцессным flock: без этого два
+            # процесса теряли чужой успешно созданный токен (lost update).
+            self._tokens = self._load_strict()
             self._tokens.append(entry)
             self._save(self._tokens)
         return raw, self._public_meta(entry)
@@ -72,13 +81,14 @@ class RestAuth:
 
     def revoke_token(self, token_id: str) -> bool:
         """Remove token by id.  Returns True if found and removed."""
-        with self._lock:
-            self._reload_if_stale()
-            before = len(self._tokens)
-            self._tokens = [t for t in self._tokens if t["id"] != token_id]
-            if len(self._tokens) < before:
-                self._save(self._tokens)
+        with self._lock, self._file_lock():
+            current = self._load_strict()
+            remaining = [t for t in current if t.get("id") != token_id]
+            self._tokens = remaining
+            if len(remaining) < len(current):
+                self._save(remaining)
                 return True
+            self._remember_file_state()
             return False
 
     # How often (in seconds) to flush a last_used timestamp update to disk
@@ -121,7 +131,11 @@ class RestAuth:
                     # more than the deferred-write interval — avoids an
                     # flock(LOCK_EX) round-trip on every single auth request.
                     if abs(now - last_used_ts) > self._LAST_USED_WRITE_INTERVAL_SEC:
-                        self._save(self._tokens)
+                        # Сброс last_used идёт перечитыванием файла под flock и правкой ТОЛЬКО
+                        # этого токена: сохранение списка из памяти возвращало токен,
+                        # отозванный другим процессом. Отозван — отказ.
+                        if not self._flush_last_used(entry.get("id"), entry["last_used"]):
+                            return None
                     return self._public_meta(entry)
         return None
 
@@ -134,33 +148,105 @@ class RestAuth:
         return {k: v for k, v in entry.items() if k != "token_hash"}
 
     def _read_mtime(self) -> float:
-        """Return mtime of the token file, or 0.0 if it does not exist."""
+        """mtime файла токенов или 0.0, если его нет."""
         try:
             return os.stat(self._path).st_mtime
         except OSError:
             return 0.0
 
+    def _read_sig(self) -> tuple[int, int, int, int]:
+        """Подпись файла токенов (ctime_ns, mtime_ns, inode, размер); нули, если файла нет.
+
+        Атомарная замена даёт новый inode, а ctime нельзя вернуть через utime, поэтому
+        подмена файла с тем же mtime не остаётся незамеченной.
+        """
+        try:
+            st = os.stat(self._path)
+        except OSError:
+            return (0, 0, 0, 0)
+        return (st.st_ctime_ns, st.st_mtime_ns, st.st_ino, st.st_size)
+
+    def _remember_file_state(self) -> None:
+        self._file_mtime = self._read_mtime()
+        self._file_sig = self._read_sig()
+
     def _reload_if_stale(self) -> None:
-        """Re-read tokens from disk when the file mtime changed.
+        """Перечитывает токены с диска, если mtime или подпись файла изменились.
 
-        Must be called while self._lock is held.
-
-        Fast path: os.stat is cheap (~1 µs).  If the mtime is unchanged we
-        skip the full JSON parse entirely.
+        Вызывается под ``self._lock``. Быстрый путь — два ``os.stat``.
         """
         current_mtime = self._read_mtime()
-        if current_mtime != self._file_mtime:
+        current_sig = self._read_sig()
+        if current_mtime != self._file_mtime or current_sig != self._file_sig:
             self._tokens = self._load()
             self._file_mtime = current_mtime
+            self._file_sig = current_sig
+
+    @contextlib.contextmanager
+    def _file_lock(self):
+        """Межпроцессная эксклюзивная блокировка на всю транзакцию (re-entrant в потоке)."""
+        depth = getattr(self._tx, "depth", 0)
+        if depth:
+            self._tx.depth = depth + 1
+            try:
+                yield
+            finally:
+                self._tx.depth -= 1
+            return
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_path.touch(exist_ok=True)
+        with open(self._lock_path, "r+", encoding="utf-8") as lock_fh:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            self._tx.depth = 1
+            try:
+                yield
+            finally:
+                self._tx.depth = 0
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+    def _flush_last_used(self, token_id: Optional[str], stamp: str) -> bool:
+        """Сохраняет last_used одного токена. False — токена на диске уже нет (отозван)."""
+        with self._file_lock():
+            try:
+                tokens = self._load_strict()
+            except RuntimeError:
+                # Хранилище повреждено: не перезаписываем, сам факт аутентификации уже решён.
+                return True
+            target = next((t for t in tokens if t.get("id") == token_id), None)
+            self._tokens = tokens
+            if target is None:
+                self._remember_file_state()
+                return False
+            target["last_used"] = stamp
+            self._save(tokens)
+            return True
 
     def _load(self) -> list[dict]:
+        """Терпимое чтение (старт, проверка токена): сбой даёт пустой список, то есть отказ."""
         if self._path.exists():
             try:
                 with open(self._path, encoding="utf-8") as fh:
-                    return json.load(fh)
+                    data = json.load(fh)
+                return data if isinstance(data, list) else []
             except Exception:
                 return []
         return []
+
+    def _load_strict(self) -> list[dict]:
+        """Чтение для изменения: повреждённое хранилище НЕ превращается в пустое.
+
+        Иначе любая запись (создание/отзыв токена) молча стирала бы все токены.
+        """
+        if not self._path.exists():
+            return []
+        try:
+            with open(self._path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError("api_tokens.json повреждён: изменение отклонено") from exc
+        if not isinstance(data, list) or not all(isinstance(t, dict) for t in data):
+            raise RuntimeError("api_tokens.json повреждён: изменение отклонено")
+        return data
 
     def _save(self, tokens: list[dict]) -> None:
         """Atomically write tokens file with 0600 permissions.
@@ -174,34 +260,24 @@ class RestAuth:
         которую давал plain open().
         Если запись или os.replace упали — удаляем tmp, чтобы не оставлять мусор.
         """
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        # Use a dedicated lock file (never renamed/replaced) so flock() always
-        # operates on the same inode — immune to the "os.replace replaces
-        # the locked inode" race that would allow two workers to hold
-        # conflicting exclusive locks on different inodes simultaneously.
-        self._lock_path.touch(exist_ok=True)
-        with open(self._lock_path, "r+", encoding="utf-8") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        with self._file_lock():
+            # Unique tmp name per call: multiple workers (each with their own
+            # threading.Lock) may race to the flock; while one holds
+            # LOCK_EX the others have already opened their own tmp fd.
+            # A shared static name like api_tokens.tmp would be stolen by
+            # os.replace from whichever thread wins, leaving others with a
+            # missing source for their os.replace call.
+            tmp = self._path.with_name(
+                self._path.stem + "." + uuid.uuid4().hex[:8] + ".tmp"
+            )
             try:
-                # Unique tmp name per call: multiple workers (each with their
-                # own threading.Lock) may race to the flock; while one holds
-                # LOCK_EX the others have already opened their own tmp fd.
-                # A shared static name like api_tokens.tmp would be stolen by
-                # os.replace from whichever thread wins, leaving others with a
-                # missing source for their os.replace call.
-                tmp = self._path.with_name(
-                    self._path.stem + "." + uuid.uuid4().hex[:8] + ".tmp"
-                )
-                try:
-                    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                        json.dump(tokens, fh, indent=2, ensure_ascii=False)
-                    os.replace(tmp, self._path)
-                    # Update our cached mtime so the next _reload_if_stale()
-                    # on this instance doesn't trigger a spurious re-read.
-                    self._file_mtime = self._read_mtime()
-                except Exception:
-                    tmp.unlink(missing_ok=True)
-                    raise
-            finally:
-                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+                fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(tokens, fh, indent=2, ensure_ascii=False)
+                os.replace(tmp, self._path)
+                # Update our cached signature so the next _reload_if_stale()
+                # on this instance doesn't trigger a spurious re-read.
+                self._remember_file_state()
+            except Exception:
+                tmp.unlink(missing_ok=True)
+                raise
