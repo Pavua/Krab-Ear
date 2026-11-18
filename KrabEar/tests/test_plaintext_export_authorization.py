@@ -988,7 +988,7 @@ class TestPublicSnapshotReadIsExceptionTotal(_PolicySnapshotFixture):
         self.write_settings(_profile(False, False))
         with mock.patch.object(
             self.store,
-            "_plaintext_policy_snapshot_locked",
+            "read_profile_policy_locked",
             side_effect=RuntimeError("provider blew up"),
         ):
             snapshot = self.store.read_plaintext_policy_snapshot()
@@ -1039,7 +1039,7 @@ class TestPublicSnapshotReadIsExceptionTotal(_PolicySnapshotFixture):
         self.assertIs(good.state, PolicyState.KNOWN_OFF, good)
         with mock.patch.object(
             self.store,
-            "_plaintext_policy_snapshot_locked",
+            "read_profile_policy_locked",
             side_effect=RuntimeError("boom"),
         ):
             after = self.store.read_plaintext_policy_snapshot()

@@ -193,22 +193,23 @@ class CurrentLeaseHolderTest(unittest.TestCase):
 class GracefulDegradationTest(unittest.TestCase):
     """Test 6 — errors → safe values, no exception escapes."""
 
+    def setUp(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        parent = Path(temp_dir.name) / "regular-file"
+        parent.touch()
+        self.bad_lock = parent / "brain.lock"
+
     def test_acquire_bad_parent_path_returns_true(self) -> None:
         """Non-writable path: acquire should return True (graceful degrade)."""
-        # Use a path under a non-existent FS location that will fail
-        lp = Path("/nonexistent_krab_test_dir_xyzzy/brain.lock")
-        result = acquire_brain_lease("krab_ear", ttl_sec=30.0, lock_path=lp)
+        result = acquire_brain_lease("krab_ear", ttl_sec=30.0, lock_path=self.bad_lock)
         self.assertTrue(result)  # Never blocks Ear
 
     def test_current_lease_holder_bad_path_returns_none(self) -> None:
-        lp = Path("/nonexistent_krab_test_dir_xyzzy/brain.lock")
-        result = current_lease_holder(lock_path=lp)
-        self.assertIsNone(result)
+        self.assertIsNone(current_lease_holder(lock_path=self.bad_lock))
 
     def test_release_bad_path_no_raise(self) -> None:
-        lp = Path("/nonexistent_krab_test_dir_xyzzy/brain.lock")
-        # Should not raise
-        release_brain_lease("krab_ear", lock_path=lp)
+        release_brain_lease("krab_ear", lock_path=self.bad_lock)
 
     def test_acquire_simulated_flock_error_returns_true(self) -> None:
         """Simulate flock throwing unexpected OSError → acquire returns True."""

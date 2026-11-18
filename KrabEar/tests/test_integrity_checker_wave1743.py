@@ -24,6 +24,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.state_store import StateStore
 from backend.integrity_checker import IntegrityChecker
 
 
@@ -41,6 +42,7 @@ class TestBackupAndQuarantineOnRepair(unittest.TestCase):
         self.checker = IntegrityChecker()
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
+        StateStore(self.data_dir).initialize_startup_plaintext_policy(new_profile=True)
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
@@ -205,6 +207,7 @@ class TestCyrillicNotCorrupted(unittest.TestCase):
         self.checker = IntegrityChecker()
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
+        StateStore(self.data_dir).initialize_startup_plaintext_policy(new_profile=True)
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
@@ -275,6 +278,7 @@ class TestLockAcquiredDuringRepair(unittest.TestCase):
         self.checker = IntegrityChecker()
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
+        StateStore(self.data_dir).initialize_startup_plaintext_policy(new_profile=True)
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
@@ -347,6 +351,7 @@ class TestIdempotentRepair(unittest.TestCase):
         self.checker = IntegrityChecker()
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
+        StateStore(self.data_dir).initialize_startup_plaintext_policy(new_profile=True)
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
@@ -431,6 +436,7 @@ class TestHandleRepairDataExposesBackupPaths(unittest.TestCase):
         self.checker = IntegrityChecker()
         self._tmpdir = tempfile.TemporaryDirectory()
         self.data_dir = Path(self._tmpdir.name)
+        StateStore(self.data_dir).initialize_startup_plaintext_policy(new_profile=True)
 
     def tearDown(self) -> None:
         self._tmpdir.cleanup()

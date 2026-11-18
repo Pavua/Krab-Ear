@@ -154,28 +154,41 @@ def history_journal_paths(data_dir: Path) -> tuple[Path, ...]:
     return tuple(base / name for name in HISTORY_JOURNAL_FILENAMES)
 
 
-def has_encrypted_history_in(journal_paths, *, unreadable_is_encrypted: bool = True) -> bool:
+def has_encrypted_history_in(
+    journal_paths,
+    *,
+    unreadable_is_encrypted: bool = True,
+    tolerate_invalid_utf8: bool = False,
+    reject_nonregular: bool = False,
+) -> bool:
     """Есть ли ENC1-строки в любом из переданных журналов.
 
     P2: перед open() проверяется регулярность записи (lstat + S_ISREG),
     чтобы FIFO/каталог/сокет не блокировали процесс под эксклюзивным flock.
 
-    Fail-closed: существующий журнал, который не удалось проверить (OSError,
-    кроме ENOENT), считается «возможно зашифрован» — иначе потерянный
+    Fail-closed: существующий журнал, который не удалось проверить (ошибка
+    чтения или UTF-8), считается «возможно зашифрован» — иначе потерянный
     settings.json плюс нечитаемый ENC1-журнал читались бы как шифрование OFF
     и новые записи шли бы открытым текстом.
 
     ``unreadable_is_encrypted=False`` — только для guard'ов, которым нужно ДОКАЗАННОЕ
     наличие ENC1 (блок ON→OFF в save_settings): нечитаемый файл не доказательство и не
     должен блокировать любую запись настроек.
+
+    ``tolerate_invalid_utf8=True`` — для миграции, которая сохраняет повреждённые
+    строки побайтно. Ошибка доступа по-прежнему блокирует миграцию.
+    При ремонте reject_nonregular=True запрещает копии при непроверенном журнале.
     """
     from backend.history_crypto import SENTINEL
 
+    errors = "strict" if unreadable_is_encrypted and not tolerate_invalid_utf8 else "surrogateescape"
     for raw in journal_paths:
         path = Path(raw)
         try:
             st = os.lstat(path)
             if not stat.S_ISREG(st.st_mode):
+                if reject_nonregular:
+                    return True
                 continue
         except FileNotFoundError:
             continue
@@ -184,12 +197,13 @@ def has_encrypted_history_in(journal_paths, *, unreadable_is_encrypted: bool = T
                 return True
             continue
         try:
-            with path.open("r", encoding="utf-8") as fh:
-                if any(line.startswith(SENTINEL) for line in fh):
+            # Universal newline учитывает старые CR-журналы.
+            with path.open("r", encoding="utf-8", errors=errors) as fh:
+                if any(line.lstrip().startswith(SENTINEL) for line in fh):
                     return True
         except FileNotFoundError:
             continue
-        except OSError:
+        except (OSError, UnicodeError):
             if unreadable_is_encrypted:
                 return True
             continue
@@ -1447,7 +1461,7 @@ class StateStore:
         оказалась бы нарушена.
         """
         try:
-            return self._plaintext_policy_snapshot_locked()
+            return self.read_profile_policy_locked(self.settings_path)
         except Exception as exc:  # noqa: BLE001 — fail-closed; payload наружу не идёт
             logger.warning(
                 "_read_plaintext_policy_snapshot_unlocked: непредвиденный сбой "
@@ -1457,12 +1471,14 @@ class StateStore:
             )
             return unknown_snapshot(REASON_UNKNOWN_PROVIDER_ERROR)
 
-    def _plaintext_policy_snapshot_locked(self) -> PolicySnapshot:
-        result = self._read_settings_bytes_unlocked()
+    @classmethod
+    def read_profile_policy_locked(cls, settings_path: Path) -> PolicySnapshot:
+        """Читает политику без создания StateStore. Вызывающий удерживает history.lock."""
+        result = cls._read_settings_file(settings_path)
         if isinstance(result, PolicySnapshot):
             return result
         raw, st_before = result
-        return self._plaintext_policy_snapshot_from_bytes(raw, st_before)
+        return cls._plaintext_policy_snapshot_from_bytes(settings_path.parent, raw, st_before)
 
     def _read_settings_bytes_unlocked(self, path: Path | None = None):
         """Один bounded/no-follow reader для snapshot, legacy и restore source."""
@@ -1564,12 +1580,20 @@ class StateStore:
             raise StateStoreSettingsCorruptError("settings source must be object")
         return payload
 
-    def _plaintext_policy_snapshot_from_bytes(self, raw: bytes, st) -> PolicySnapshot:
-        """Разбор policy ИЗ ОДНИХ тех bytes, что ушли в SHA256 (§7.3).
+    def read_wake_privacy_revision(self) -> str | None:
+        """Свежая ревизия при разрешённом захвате. При ON/UNKNOWN микрофон закрыт."""
+        with self._lock(timeout_sec=0.5, shared=True):
+            result = self._read_settings_bytes_unlocked()
+            if isinstance(result, PolicySnapshot):
+                return None
+            policy = self._parse_plaintext_policy(result[0])
+            if isinstance(policy, PolicySnapshot) or policy["privacy_mode_enabled"]:
+                return None
+            return policy[POLICY_REVISION_KEY]
 
-        Отдельные cached-пути для hash/stat/flags запрещены: расхождение между
-        ними и есть тот класс гонок, который fingerprint обязан ловить.
-        """
+    @staticmethod
+    def _parse_plaintext_policy(raw: bytes) -> dict[str, Any] | PolicySnapshot:
+        """Общий строгий разбор policy для экспорта и микрофона."""
         try:
             payload = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
         except _DuplicateKeyError:
@@ -1580,7 +1604,6 @@ class StateStore:
         if not isinstance(payload, dict):
             return unknown_snapshot(REASON_UNKNOWN_NOT_OBJECT)
 
-        flags: dict[str, bool] = {}
         for key in POLICY_FLAG_KEYS:
             if key not in payload:
                 return unknown_snapshot(REASON_UNKNOWN_MISSING_KEY)
@@ -1589,7 +1612,6 @@ class StateStore:
             # truthy-интерпретации).
             if type(value) is not bool:
                 return unknown_snapshot(REASON_UNKNOWN_NON_BOOL)
-            flags[key] = value
 
         if POLICY_REVISION_KEY not in payload:
             return unknown_snapshot(REASON_UNKNOWN_MISSING_REVISION)
@@ -1597,13 +1619,26 @@ class StateStore:
         if not is_valid_policy_revision(revision):
             return unknown_snapshot(REASON_UNKNOWN_INVALID_REVISION)
 
-        encryption_enabled = flags["history_encryption_enabled"]
+        return payload
+
+    @staticmethod
+    def _plaintext_policy_snapshot_from_bytes(data_dir: Path, raw: bytes, st) -> PolicySnapshot:
+        """Разбор policy ИЗ ОДНИХ тех bytes, что ушли в SHA256 (§7.3).
+
+        Отдельные cached-пути для hash/stat/flags запрещены: расхождение между
+        ними и есть тот класс гонок, который fingerprint обязан ловить.
+        """
+        policy = StateStore._parse_plaintext_policy(raw)
+        if isinstance(policy, PolicySnapshot):
+            return policy
+        revision = policy[POLICY_REVISION_KEY]
+        encryption_enabled = policy["history_encryption_enabled"]
         fingerprint = PolicyFingerprint(
             # Путь профиля, НЕ хеш секрета. ``resolve()`` обязателен: на macOS
             # один и тот же профиль доступен как /var/... и /private/var/... —
             # без resolve() один профиль получил бы ДВА разных identity, и
             # валидный grant отвалился бы только из-за формы пути.
-            profile_identity=str(Path(self.data_dir).resolve()),
+            profile_identity=str(data_dir.resolve()),
             st_dev=st.st_dev,
             st_ino=st.st_ino,
             st_size=st.st_size,
@@ -1618,7 +1653,7 @@ class StateStore:
                 if encryption_enabled is True
                 else PolicyState.KNOWN_OFF
             ),
-            privacy_mode_enabled=flags["privacy_mode_enabled"],
+            privacy_mode_enabled=policy["privacy_mode_enabled"],
             internal_revision=revision,
             fingerprint=fingerprint,
             reason=None,
