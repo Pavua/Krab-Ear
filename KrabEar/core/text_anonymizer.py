@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import re
+
+from core.safe_regex import compile_safe
 from dataclasses import dataclass
 from typing import Optional
 
@@ -509,7 +511,7 @@ class TextAnonymizer:
             pattern     — регулярное выражение Python.
             replacement — строка-заменитель (например "[CUSTOM]").
         """
-        compiled = re.compile(pattern, re.IGNORECASE)
+        compiled = compile_safe(pattern, re.IGNORECASE)
         self._custom_rules.append((name, compiled, replacement))
 
     def list_rules(self) -> list[str]:

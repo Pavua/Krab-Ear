@@ -10,6 +10,7 @@ from backend.data_migrator import (
 )
 
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -840,32 +841,23 @@ class TestWave1767Hardening(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_tmp_file_removed_on_write_exception(self) -> None:
-        """#12: если replace() бросает исключение, history.ndjson.migration_tmp
-        не остаётся на диске."""
+        """Сбой публикации оставляет исходную историю и удаляет временный файл."""
         history_path = self._tmpdir / "history.ndjson"
         _write_ndjson(history_path, [_make_v1_item("id1")])
+        original_history = history_path.read_bytes()
+        original_replace = os.replace
 
-        migrator = DataMigrator()
-
-        # Патчим Path.replace чтобы симулировать сбой после write
-        original_replace = Path.replace
-
-        def _fail_replace(self_path, target):
-            # Заменяем только вызовы для migration_tmp пути
-            if "migration_tmp" in str(self_path):
+        def _fail_replace(source, target):
+            if Path(target) == history_path:
                 raise OSError("симуляция сбоя atomic replace")
-            return original_replace(self_path, target)
+            return original_replace(source, target)
 
-        with patch.object(Path, "replace", _fail_replace):
-            with self.assertRaises(OSError):
-                migrator.migrate(self._tmpdir)
+        with patch("core.atomic_io.os.replace", _fail_replace):
+            with self.assertRaisesRegex(OSError, "симуляция сбоя atomic replace"):
+                DataMigrator().migrate(self._tmpdir)
 
-        # После исключения tmp-файл не должен существовать
-        tmp_path = history_path.with_suffix(".ndjson.migration_tmp")
-        self.assertFalse(
-            tmp_path.exists(),
-            "#12: tmp-файл migration_tmp остался на диске после исключения"
-        )
+        self.assertEqual(history_path.read_bytes(), original_history)
+        self.assertEqual(list(self._tmpdir.glob("history.ndjson-*.tmp")), [])
 
     # ------------------------------------------------------------------
     # #13: rollback_migration удерживает history.lock

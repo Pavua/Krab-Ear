@@ -541,13 +541,13 @@ class OpenWakeWordAdapter:
     def _privacy_blocked(self) -> bool:
         """True если privacy mode включён — держать микрофон wake word нельзя.
 
-        Fail-open к False: сломанный settings-провайдер не должен «ронять»
-        слушатель, за выключение отвечает и агент (setPrivacyMode → stop).
+        Если настройки недоступны, запуск и продолжение захвата запрещены.
         """
         try:
             return bool(self._settings_get("privacy_mode_enabled", False))
         except Exception:
-            return False
+            logger.warning("OpenWakeWordAdapter: privacy settings недоступны — микрофон заблокирован")
+            return True
 
     # ------------------------------------------------------------------
     # IPC-обработчики
@@ -576,7 +576,7 @@ class OpenWakeWordAdapter:
           F5 — возвращает skipped если wake_word_enabled=False (2026-07-29).
         """
         # F2: privacy mode guard — do not open mic tap in privacy mode
-        if self._settings_get("privacy_mode_enabled", False):
+        if self._privacy_blocked():
             logger.info(
                 "OpenWakeWordAdapter.handle_wake_word_start: "
                 "отклонён — privacy_mode_enabled=True"
@@ -912,6 +912,10 @@ class OpenWakeWordAdapter:
                 )
                 self._cleanup_session_after_loop_exit(generation)
                 return
+
+        if self._privacy_blocked():
+            self._cleanup_session_after_loop_exit(generation)
+            return
 
         try:
             with sd.InputStream(

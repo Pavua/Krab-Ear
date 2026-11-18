@@ -111,12 +111,12 @@ class TestPrivacyLoopGuard(unittest.TestCase):
         )
         self.assertFalse(adapter._privacy_blocked())
 
-    def test_settings_exception_fails_open_to_false(self) -> None:
+    def test_settings_exception_blocks_microphone(self) -> None:
         def _boom(k, d):
             raise RuntimeError("settings unavailable")
 
         adapter = OpenWakeWordAdapter(data_dir=self.tmp, settings_get=_boom)
-        self.assertFalse(adapter._privacy_blocked())
+        self.assertTrue(adapter._privacy_blocked())
 
 
 class TestServiceWiringSourceContract(unittest.TestCase):

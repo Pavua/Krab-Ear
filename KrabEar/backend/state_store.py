@@ -184,7 +184,9 @@ def has_encrypted_history_in(journal_paths, *, unreadable_is_encrypted: bool = T
                 return True
             continue
         try:
-            with path.open("r", encoding="utf-8") as fh:
+            # Sentinel ASCII; байты повреждённых строк не мешают проверке.
+            # Universal newline сохраняет поддержку старых CR-журналов.
+            with path.open("r", encoding="ascii", errors="surrogateescape") as fh:
                 if any(line.startswith(SENTINEL) for line in fh):
                     return True
         except FileNotFoundError:

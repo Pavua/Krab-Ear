@@ -18,12 +18,13 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 
 logger = logging.getLogger("KrabEar.Backend.IntegrityChecker")
 
@@ -423,14 +424,14 @@ class IntegrityChecker:
                 return 0, "", ""
 
             # 1. Бэкап оригинала — перед любой записью.
-            backup_path.write_bytes(raw_bytes)
+            atomic_write_bytes(backup_path, raw_bytes)
             logger.info(
                 "integrity_checker: бэкап оригинала сохранён",
                 extra={"backup": str(backup_path), "path": str(path)},
             )
 
             # 2. Карантин для отклонённых строк.
-            quarantine_path.write_bytes(b"\n".join(bad_raw_lines) + b"\n")
+            atomic_write_bytes(quarantine_path, b"\n".join(bad_raw_lines) + b"\n")
             logger.info(
                 "integrity_checker: %d строк помещено в карантин",
                 removed,
@@ -438,13 +439,8 @@ class IntegrityChecker:
             )
 
             # 3. Атомарная замена файла валидными строками.
-            tmp = path.with_suffix(".ndjson.tmp")
             content = "\n".join(good_lines) + ("\n" if good_lines else "")
-            tmp.write_text(content, encoding="utf-8")
-            with tmp.open("r+", encoding="utf-8") as fh:
-                fh.flush()
-                os.fsync(fh.fileno())
-            tmp.replace(path)
+            atomic_write_text(path, content)
 
             return removed, str(backup_path), str(quarantine_path)
         finally:

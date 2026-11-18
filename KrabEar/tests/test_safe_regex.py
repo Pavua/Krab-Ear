@@ -18,6 +18,8 @@ import sys
 import time
 import unittest
 
+import pytest
+
 from tests.timing_budgets import REDOS_BUDGET_SEC  # noqa: E402
 from pathlib import Path
 
@@ -312,3 +314,15 @@ class TestHallucinationManagerSafeRegexIntegration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_repeated_alternation_is_rejected_at_compile_time():
+    # Проверяем политику компиляции, без запуска матчинга на длинном входе.
+    with pytest.raises(ValueError, match="альтернатив"):
+        compile_safe(r"(?:north|south)+")
+
+
+def test_unrepeated_alternation_and_literal_pipe_remain_supported():
+    assert compile_safe(r"(?:north|south)").fullmatch("south")
+    assert compile_safe(r"(?:[|])+").fullmatch("||")
+    assert compile_safe(r"(?:\|)+").fullmatch("||")

@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+from re import _constants as _re_ops, _parser as _re_parser
 from typing import Any
 
 logger = logging.getLogger("KrabEar.Core.SafeRegex")
@@ -260,6 +261,31 @@ def _has_nested_quantifiers(pattern: str) -> bool:
     return False
 
 
+def _has_repeated_alternation(tokens, *, repeating: bool = False) -> bool:
+    """Ищет ветвление внутри повтора в дереве CPython re.
+
+    Парсер уже различает экранирование, классы и verbose-режим. Простые
+    альтернативы из одиночных символов он сворачивает в символьный класс.
+    """
+    for operation, value in tokens:
+        if operation in (_re_ops.MAX_REPEAT, _re_ops.MIN_REPEAT, _re_ops.POSSESSIVE_REPEAT):
+            _, maximum, body = value
+            if _has_repeated_alternation(body, repeating=repeating or maximum > 1):
+                return True
+        elif operation in (_re_ops.BRANCH, _re_ops.GROUPREF_EXISTS):
+            if repeating:
+                return True
+            branches = value[1] if operation == _re_ops.BRANCH else value[1:]
+            if any(_has_repeated_alternation(branch) for branch in branches if branch is not None):
+                return True
+        elif operation in (_re_ops.SUBPATTERN, _re_ops.ASSERT, _re_ops.ASSERT_NOT):
+            if _has_repeated_alternation(value[-1], repeating=repeating):
+                return True
+        elif operation == _re_ops.ATOMIC_GROUP and _has_repeated_alternation(value, repeating=repeating):
+            return True
+    return False
+
+
 # ── Публичный API ──────────────────────────────────────────────────────────────
 
 def compile_safe(
@@ -279,7 +305,7 @@ def compile_safe(
        отклоняются немедленно.
     2. **Структурный сканер** — ищет вложенные квантификаторы (``(a+)+``,
        ``(a*)*``, ``((?:a)+)+`` и аналоги), вызывающие катастрофический откат.
-       Использует обход дерева скобок, устойчивый к NC-группам и inline-флагам.
+       Дополнительно отклоняет ветвление внутри повторяющихся групп.
 
     Эту функцию следует использовать вместо ``re.compile()`` для ЛЮБОГО паттерна,
     поступающего от пользователя или из конфигурации.
@@ -298,7 +324,7 @@ def compile_safe(
 
     Raises:
         ValueError: Если паттерн слишком длинный или содержит вложенные
-            квантификаторы (ReDoS).
+            квантификаторы или повторяющиеся альтернативы (ReDoS).
         re.error: Если паттерн синтаксически некорректен.
 
     Examples:
@@ -330,7 +356,9 @@ def compile_safe(
             "(ReDoS). Use expresiones simples sin estructuras como (a+)+."
         )
 
-    # Компилируем — синтаксические ошибки поднимутся как re.error.
+    if _has_repeated_alternation(_re_parser.parse(pattern, flags)):
+        raise ValueError("Паттерн содержит повторяющиеся альтернативы (ReDoS).")
+
     return re.compile(pattern, flags)
 
 
