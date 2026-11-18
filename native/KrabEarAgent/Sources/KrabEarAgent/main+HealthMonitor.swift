@@ -185,7 +185,13 @@ extension AgentAppDelegate {
     }
 
     func setPrivacyMode(_ on: Bool) {
+        let previous = privacyModeEnabled
         self.privacyModeEnabled = on
+        updatePlaintextExportPrivacy(on)
+        if on {
+            SentryConfig.suspendForPrivacy()
+            stopLiveSubsCapture(flush: false)
+        }
         self.statusIndicatorView.setPrivacyMode(on)
         self.applyHealthStateToStatusItem(self.lastHealthState)
         // Wake word не должен держать микрофон в privacy mode. Backend тоже
@@ -193,7 +199,7 @@ extension AgentAppDelegate {
         // двойная защита, агентская сторона срабатывает первой.
         if on {
             wakeWordPoller?.pause(.privacyMode)
-        } else {
+        } else if previous {
             wakeWordPoller?.resume(.privacyMode)
         }
     }

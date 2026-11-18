@@ -231,18 +231,13 @@ final class IPCCallObserverSettings: CallObserverSettingsProviding {
 
     /// Провал IPC и нечитаемый privacy-флаг трактуются как privacy ON (fail-closed):
     /// иначе таймаут backend посреди звонка открывал HUD и autoplay при включённом
-    /// privacy. Отсутствующий ключ при успешном ответе — новый профиль, privacy OFF.
+    /// privacy. Новый профиль получает явное false из get_settings.
     static func resolveSettings(response: [String: Any]?)
         -> (hud: Bool, autoplay: Bool, privacy: Bool) {
         guard let s = response?["result"] as? [String: Any] else {
             return (hud: true, autoplay: false, privacy: true)
         }
-        let privacy: Bool
-        if let raw = s["privacy_mode_enabled"] {
-            privacy = (raw as? Bool) ?? true
-        } else {
-            privacy = false
-        }
+        let privacy = confirmedPrivacyFlag(s["privacy_mode_enabled"]) ?? true
         return (hud: s["call_observer_hud_enabled"] as? Bool ?? true,
                 autoplay: s["call_observer_autoplay_audio"] as? Bool ?? false,
                 privacy: privacy)

@@ -163,9 +163,14 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var plaintextExportCoordinator: PlaintextExportCoordinator {
         if let coordinator = storedPlaintextExportCoordinator { return coordinator }
         let coordinator = PlaintextExportCoordinator(ipc: ipcClient)
+        coordinator.setPrivacyRestricted(privacyModeEnabled)
         storedPlaintextExportCoordinator = coordinator
         return coordinator
     }
+    func updatePlaintextExportPrivacy(_ restricted: Bool) {
+        storedPlaintextExportCoordinator?.setPrivacyRestricted(restricted)
+    }
+
     private var plaintextExportTerminationPending = false
     private var plaintextExportTerminationReplied = false
 
@@ -208,6 +213,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var realtimeOverlayTimer: Timer?
 
     var settings: AgentSettings = .default
+    private let settingsOperations = AgentSettingsOperationQueue()
+    private var pendingPrivacyMutations = 0
     var isRecording = false
     var isProcessing = false
     // Мини-волна 2026-08-11 (авто-дострел отложенного stop_recording):
@@ -388,11 +395,6 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         // Только LaunchServices cleanup вынесен в фон, чтобы синхронный Process-вызов
         // не блокировал applicationDidFinishLaunching. PID-based cleanup запрещён.
 
-        // Sentry / GlitchTip telemetry — no-op если DSN не задан в settings
-        let sentryDsn = UserDefaults.standard.string(forKey: "KrabEar_SentryDSN") ?? ""
-        let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
-        SentryConfig.initialize(dsn: sentryDsn.isEmpty ? nil : sentryDsn, environment: sentryEnv)
-
         // AGENT-K fix: pre-warm BackendToast panel здесь, пока startup latency
         // ещё ожидается пользователем. NSVisualEffectView + ColorSync transform
         // выполняются один раз сейчас, а не при первом show() в showFatalAndTerminate.
@@ -514,7 +516,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             await handshakeClient.performHandshake(swiftAgentVersion: agentVersion)
         }
 
-        settings = loadSettings()
+        applyConfirmedSettings(loadSettings(), updateUI: false)
         realtimeOverlay.setOpacityPercent(settings.overlayOpacityPercent)
         logger.info(
             "Настройки загружены: mode=\(settings.mode), autoPaste=\(settings.autoPaste), quality=\(settings.qualityProfile), translation=\(settings.translationMode)"
@@ -800,13 +802,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         setupWakeWordConversationObservers()
         setupWakeWordTTSPlaybackObservers()
-        wakeWordPoller?.activate()
-        // Тумблер включили, пока privacy mode активен: сразу паузим (backend
-        // всё равно отвергнет старт — гейт живой; агентская пауза убирает
-        // цикл повторных попыток и лог-шум с обеих сторон).
-        if privacyModeEnabled {
-            wakeWordPoller?.pause(.privacyMode)
-        }
+        wakeWordPoller?.activate(pausedForPrivacy: privacyModeEnabled)
     }
 
     /// Перезапустить wake word с новым значением enabled.
@@ -919,86 +915,72 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func onQualityBalanced() {
-        settings.qualityProfile = "balanced"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["quality_profile": "balanced"])
         rebuildStatusMenu()
     }
 
     @objc func onQualityMax() {
-        settings.qualityProfile = "max"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["quality_profile": "max"])
         rebuildStatusMenu()
     }
 
     @objc func onAutoPasteToggle() {
-        settings.autoPaste.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["auto_paste": !settings.autoPaste])
         rebuildStatusMenu()
     }
 
     @objc func onStartSoundToggle() {
-        settings.playStartSound.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["play_start_sound": !settings.playStartSound])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingToggle() {
-        settings.audioDuckingEnabled.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_enabled": !settings.audioDuckingEnabled])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent25() {
-        settings.audioDuckingPercent = 25
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 25])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent50() {
-        settings.audioDuckingPercent = 50
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 50])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent75() {
-        settings.audioDuckingPercent = 75
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 75])
         rebuildStatusMenu()
     }
 
     @objc func onAudioDuckingPercent100() {
-        settings.audioDuckingPercent = 100
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["audio_ducking_percent": 100])
         rebuildStatusMenu()
     }
 
     @objc func onOverlayOpacity25() {
-        settings.overlayOpacityPercent = 25
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["overlay_opacity_percent": 25])
         rebuildStatusMenu()
     }
 
     @objc func onOverlayOpacity45() {
-        settings.overlayOpacityPercent = 45
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["overlay_opacity_percent": 45])
         rebuildStatusMenu()
     }
 
     @objc func onOverlayOpacity65() {
-        settings.overlayOpacityPercent = 65
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["overlay_opacity_percent": 65])
         rebuildStatusMenu()
     }
 
     @objc func onAutostartToggle() {
-        settings.autoStartEnabled.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["auto_start_enabled": !settings.autoStartEnabled])
         rebuildStatusMenu()
     }
 
     @objc func onDockIconToggle() {
-        settings.showDockIcon.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["show_dock_icon": !settings.showDockIcon])
         rebuildStatusMenu()
     }
 
@@ -1013,77 +995,63 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc func onNetworkOfflineDefault() {
-        settings.networkMode = "offline_default"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["network_mode": "offline_default"])
         rebuildStatusMenu()
     }
 
     @objc func onNetworkOfflineStrict() {
-        settings.networkMode = "offline_strict"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["network_mode": "offline_strict"])
         rebuildStatusMenu()
     }
 
     @objc func onNetworkOnlineOptIn() {
-        settings.networkMode = "online_opt_in"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["network_mode": "online_opt_in"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslateAndPasteToggle() {
-        settings.translateAndPaste.toggle()
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translate_and_paste": !settings.translateAndPaste])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeOff() {
-        settings.translationMode = "off"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "off"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeRuToEs() {
-        settings.translationMode = "ru_to_es"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "ru_to_es"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeEsToRu() {
-        settings.translationMode = "es_to_ru"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "es_to_ru"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeEnToRu() {
-        settings.translationMode = "en_to_ru"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "en_to_ru"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeAuto() {
-        settings.translationMode = "auto"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "auto"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationModeBilingualRuEs() {
-        settings.translationMode = "bilingual_ru_es"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_mode": "bilingual_ru_es"])
         rebuildStatusMenu()
     }
 
     @objc func onApplyLiveTranslationPreset() {
-        settings.translationMode = "auto"
-        settings.translationStyle = "chat"
-        settings.translateAndPaste = false
-        settings.realtimePreviewEnabled = true
-        settings.networkMode = "offline_default"
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
-        notify(
-            title: "Krab Ear",
-            body: "Live Translation preset включен: auto + chat + realtime."
-        )
+        persistSettingsPayload([
+            "translation_mode": "auto",
+            "translation_style": "chat",
+            "translate_and_paste": false,
+            "realtime_preview_enabled": true,
+            "network_mode": "offline_default",
+        ], successMessage: "Live Translation preset включен: auto + chat + realtime.")
     }
 
     @objc func onSwapRuEsDirection() {
@@ -1102,48 +1070,39 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         default:
             nextMode = "ru_to_es"
         }
-        settings.translationMode = nextMode
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
-        notify(
-            title: "Krab Ear",
-            body: "Направление перевода переключено: \(nextMode == "ru_to_es" ? "RU -> ES" : "ES -> RU")."
+        persistSettingsPayload(
+            ["translation_mode": nextMode],
+            successMessage: "Направление перевода переключено: \(nextMode == "ru_to_es" ? "RU -> ES" : "ES -> RU")."
         )
     }
 
     @objc func onTranslationStyleNeutral() {
-        settings.translationStyle = "neutral"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_style": "neutral"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationStyleChat() {
-        settings.translationStyle = "chat"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_style": "chat"])
         rebuildStatusMenu()
     }
 
     @objc func onTranslationStyleFormal() {
-        settings.translationStyle = "formal"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["translation_style": "formal"])
         rebuildStatusMenu()
     }
 
     @objc func onClipboardModeAlways() {
-        settings.clipboardMode = "always_copy"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["clipboard_mode": "always_copy"])
         rebuildStatusMenu()
     }
 
     @objc func onClipboardModeOnFail() {
-        settings.clipboardMode = "copy_on_fail"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["clipboard_mode": "copy_on_fail"])
         rebuildStatusMenu()
     }
 
     @objc func onClipboardModeNever() {
-        settings.clipboardMode = "never_copy"
-        persistSettingsPayload(settings.toPayload())
+        persistSettingsPayload(["clipboard_mode": "never_copy"])
         rebuildStatusMenu()
     }
 
@@ -1160,36 +1119,41 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyHotkeyProfile(_ profile: String) {
+        let patch: [String: Any]
         switch profile {
         case "meeting":
-            settings.hotkeyProfile = "meeting"
-            settings.translationMode = "auto_to_ru"
-            settings.translationStyle = "chat"
-            settings.translateAndPaste = false
-            settings.autoPaste = false
-            settings.realtimePreviewEnabled = true
-            settings.clipboardMode = "copy_on_fail"
+            patch = [
+                "hotkey_profile": "meeting",
+                "translation_mode": "auto_to_ru",
+                "translation_style": "chat",
+                "translate_and_paste": false,
+                "auto_paste": false,
+                "realtime_preview_enabled": true,
+                "clipboard_mode": "copy_on_fail",
+            ]
         case "translation":
-            settings.hotkeyProfile = "translation"
-            settings.translationMode = "auto"
-            settings.translationStyle = "chat"
-            settings.translateAndPaste = true
-            settings.autoPaste = false
-            settings.realtimePreviewEnabled = true
-            settings.clipboardMode = "always_copy"
+            patch = [
+                "hotkey_profile": "translation",
+                "translation_mode": "auto",
+                "translation_style": "chat",
+                "translate_and_paste": true,
+                "auto_paste": false,
+                "realtime_preview_enabled": true,
+                "clipboard_mode": "always_copy",
+            ]
         default:
-            settings.hotkeyProfile = "default"
-            settings.translationMode = "off"
-            settings.translationStyle = "neutral"
-            settings.translateAndPaste = false
-            settings.autoPaste = true
-            settings.realtimePreviewEnabled = true
-            settings.clipboardMode = "always_copy"
+            patch = [
+                "hotkey_profile": "default",
+                "translation_mode": "off",
+                "translation_style": "neutral",
+                "translate_and_paste": false,
+                "auto_paste": true,
+                "realtime_preview_enabled": true,
+                "clipboard_mode": "always_copy",
+            ]
         }
-        persistSettingsPayload(settings.toPayload())
-        rebuildStatusMenu()
         let title: String
-        switch settings.hotkeyProfile {
+        switch profile {
         case "meeting":
             title = "Meeting"
         case "translation":
@@ -1197,7 +1161,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         default:
             title = "Default"
         }
-        notify(title: "Krab Ear", body: "Профиль hotkey переключен: \(title)")
+        persistSettingsPayload(patch, successMessage: "Профиль hotkey переключен: \(title)")
     }
 
     @objc func onCopyLastResult() {
@@ -1440,63 +1404,101 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         historyPanel?.showPanel()
     }
 
-    func loadSettings() -> AgentSettings {
-        do {
-            let response = try callWithRecovery(method: "get_settings", params: [:])
-            guard let result = response["result"] as? [String: Any] else {
-                return .default
-            }
-            // Phase B.2 F10: re-init Sentry with IPC settings so sentry_dsn_agent
-            // (agent-specific project) takes precedence over generic sentry_dsn.
-            let sentryEnv = UserDefaults.standard.string(forKey: "KrabEar_SentryEnvironment") ?? "production"
-            SentryConfig.initializeFromSettings(result, environment: sentryEnv)
-            return AgentSettings(from: result)
-        } catch {
-            return .default
-        }
+    func loadSettings() -> [String: Any]? {
+        let response = try? callWithRecovery(method: "get_settings", params: [:])
+        return response?["result"] as? [String: Any]
     }
 
-    /// AGENT-3 / Sentry KRAB-EAR-AGENT-Q (2026-08-05): раньше здесь был синхронный
-    /// `callWithRecovery` прямо в @objc menu-handler'ах (~40 call site) — main thread
-    /// блокировался на `read()` Unix-сокета, а при мёртвом backend ещё и на
-    /// `isBackendAlive()`/`ensureBackendRunning()` (до 60+20с). `callAsyncWithRecovery`
-    /// уже существовал для этого класса багов (см. main+IPCRecovery.swift), но
-    /// persistSettingsPayload никогда не был на него переведён — sibling-gap.
-    ///
-    /// Оптимистичное локальное обновление синхронно (те же значения, что backend
-    /// почти всегда эхо подтвердит) — вызывающие ~40 @objc-хендлеров продолжают
-    /// читать актуальный `settings` сразу после вызова без изменений. Реальный
-    /// round-trip уходит в фоновый Task; авторитетный ответ backend применяется
-    /// повторно ТОЛЬКО если разошёлся с оптимистичным (applySettingsSideEffects
-    /// сравнивает previous/current поле-в-поле и no-op'ает на совпадении).
-    func persistSettingsPayload(_ payload: [String: Any]) {
+    @discardableResult
+    private func applyConfirmedSettings(_ payload: [String: Any]?, updateUI: Bool = true) -> Bool {
+        guard let payload, let confirmedPrivacy = confirmedPrivacyFlag(payload["privacy_mode_enabled"]) else {
+            setPrivacyMode(true)
+            return false
+        }
         let previous = settings
-        let optimistic = AgentSettings(from: payload)
-        settings = optimistic
-        applySettingsSideEffects(previous: previous, current: optimistic)
-        applyMode(optimistic.mode, persist: false)
+        settings = AgentSettings(from: payload)
+        let restricted = confirmedPrivacy || pendingPrivacyMutations > 0
+        setPrivacyMode(restricted)
+        if !restricted {
+            SentryConfig.initializeFromSettings(
+                payload,
+                environment: userDefaults.string(forKey: "KrabEar_SentryEnvironment") ?? "production",
+                fallbackDSN: userDefaults.string(forKey: "KrabEar_SentryDSN")
+            )
+        }
+        if updateUI {
+            applySettingsSideEffects(previous: previous, current: settings)
+            if previous.mode != settings.mode || previous.showDockIcon != settings.showDockIcon {
+                applyMode(settings.mode, persist: false)
+            } else {
+                rebuildStatusMenu()
+            }
+            historyPanel?.syncSettingsControls(using: settings)
+        }
+        return true
+    }
 
+    @discardableResult
+    private func refreshSettings() async -> Bool {
+        let response = try? await ipcClient.callAsync(method: "get_settings", timeoutSec: IPCClient.quickTimeoutSec)
+        return applyConfirmedSettings(response?["result"] as? [String: Any])
+    }
+
+    @discardableResult
+    func performSettingsMutation(
+        _ method: String, params: [String: Any], preservesPrivacy: Bool = false
+    ) -> Task<Bool, Never> {
+        let requestedPrivacy = confirmedPrivacyFlag(params["privacy_mode_enabled"])
+        let mayRestrictPrivacy = requestedPrivacy == true
+            || (method == "apply_config_preset" && !preservesPrivacy)
+            || method == "restore_settings_backup"
+        if mayRestrictPrivacy {
+            pendingPrivacyMutations += 1
+            setPrivacyMode(true)
+        }
+        return settingsOperations.enqueue { [weak self] in
+            guard let self else { return false }
+            let response = try? await self.callAsyncWithRecovery(method: method, params: params)
+            if mayRestrictPrivacy { self.pendingPrivacyMutations -= 1 }
+            guard let result = response?["result"] as? [String: Any] else {
+                await self.refreshSettings()
+                return false
+            }
+            if method == "apply_config_preset" {
+                let refreshed = await self.refreshSettings()
+                return (result["applied"] as? Bool == true) && refreshed
+            }
+            let payload = method == "restore_settings_backup"
+                ? result["restored_settings"] as? [String: Any] : result
+            guard self.applyConfirmedSettings(payload) else {
+                await self.refreshSettings()
+                return false
+            }
+            if let requestedPrivacy {
+                return confirmedPrivacyFlag(payload?["privacy_mode_enabled"]) == requestedPrivacy
+            }
+            return true
+        }
+    }
+
+    func persistSettingsPayload(_ patch: [String: Any], successMessage: String? = nil) {
+        guard !patch.isEmpty else { return }
+        let operation = performSettingsMutation("set_settings", params: patch)
         Task { [weak self] in
-            guard let self else { return }
-            do {
-                let response = try await self.callAsyncWithRecovery(method: "set_settings", params: payload)
-                guard let result = response["result"] as? [String: Any] else {
-                    return
-                }
-                let confirmed = AgentSettings(from: result)
-                let priorForEffects = self.settings
-                self.settings = confirmed
-                self.applySettingsSideEffects(previous: priorForEffects, current: confirmed)
-                self.applyMode(confirmed.mode, persist: false)
-            } catch {
-                self.notify(title: "Krab Ear", body: "Не удалось сохранить настройки")
+            if await operation.value {
+                if let successMessage { self?.notify(title: "Krab Ear", body: successMessage) }
+            } else {
+                self?.notify(title: "Krab Ear", body: "Не удалось подтвердить сохранение настроек")
             }
         }
     }
 
-    func updateSettingsFromPanel(_ payload: [String: Any]) -> AgentSettings {
-        persistSettingsPayload(payload)
-        rebuildStatusMenu()
+    func enqueueSettingsRefresh() {
+        settingsOperations.enqueue { [weak self] in await self?.refreshSettings() ?? false }
+    }
+
+    func updateSettingsFromPanel(_ patch: [String: Any]) -> AgentSettings {
+        persistSettingsPayload(patch)
         return settings
     }
 
@@ -1572,8 +1574,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 ipcClient: ipcClient,
                 onComplete: { [weak self] in
                     guard let self = self else { return }
-                    self.settings.onboardingCompleted = true
-                    self.persistSettingsPayload(self.settings.toPayload())
+                    self.persistSettingsPayload(["onboarding_completed": true])
                     self.quickStartController?.close()
                     self.quickStartController = nil
                     self.notify(title: "Krab Ear", body: "Настройка завершена! Нажмите Right Option для записи.")

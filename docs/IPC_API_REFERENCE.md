@@ -115,7 +115,7 @@ lock. Изменение во время sheet требует нового яв�
 
 Допустимые локальные `sink_kind`: `history-md`, `history-ndjson`,
 `history-selected`, `history-action-items`, `history-meeting-report`,
-`history-stats-report`, `history-pdf`. Неизвестный sink отклоняется. Backend
+`history-stats-report`, `history-pdf`, `history-html`. Неизвестный sink отклоняется. Backend
 file writers получают отдельный namespace:
 `plaintext_export:{app_session_id,epoch,capability,expected_policy_generation}`;
 `operation_seq` в этот namespace не добавляется. Серверные записи не расходуют
@@ -605,7 +605,7 @@ Returns: `{content}` (str, HTML)
 
 ### `generate_html_report`
 *(history_service.py)*  
-Алиас для `export_html_report` — используется из Analytics Dashboard в Swift UI.  
+Возвращает `{ok, html, path, reason?}` для Analytics Dashboard. Swift запрашивает HTML без записи на стороне backend. Запись выбранного файла проходит через свежую проверку разрешения для `history-html`.
 _(documented in history_service.py)_
 
 ### `batch_export`
@@ -1998,7 +1998,7 @@ Returns: `{ok, session_id, gateway_session_id, call_id, status}`
 | Метод | Описание |
 |---|---|
 | `live_subs_ingest` | Потоковая STT+translate (частый вызов) |
-| `live_subs_stop` | Flush и сброс буфера |
+| `live_subs_stop` | Остановка с финальным flush или сбросом буфера |
 
 ### `live_subs_ingest`
 *(live_subs_service.py)*  
@@ -2008,9 +2008,11 @@ Returns: `{ok, buffered_ms}`
 
 ### `live_subs_stop`
 *(live_subs_service.py)*  
-Flush накопленного буфера и сброс состояния live subtitles.  
-Нет params.  
-Returns: `{ok, flushed_ms}`
+Обычная остановка завершает обработку накопленного буфера с ограниченным ожиданием.
+
+Params: `{discard?}`. Только JSON `true` сбрасывает буфер и инвалидирует поколение без запуска новой транскрипции. Это используется при включении приватности.
+
+Returns: `{status: "stopped", flushed, discarded?, skipped?, reason?}`
 
 ---
 

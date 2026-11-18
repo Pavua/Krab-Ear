@@ -79,6 +79,10 @@ extension AgentAppDelegate {
 
     func applyMode(_ mode: String, persist: Bool) {
         let normalized = mode == "menubar" ? "menubar" : "headless"
+        if persist {
+            persistSettingsPayload(["mode": normalized])
+            return
+        }
         settings.mode = normalized
         applyActivationPolicy()
 
@@ -86,10 +90,6 @@ extension AgentAppDelegate {
             ensureStatusItem()
         } else {
             removeStatusItem()
-        }
-
-        if persist {
-            persistSettingsPayload(settings.toPayload())
         }
 
         refreshStatusItemTitle()

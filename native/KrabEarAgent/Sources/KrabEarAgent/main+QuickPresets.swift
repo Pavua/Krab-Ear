@@ -34,27 +34,18 @@ extension AgentAppDelegate {
     }
 
     func applyRecordingPreset(_ presetId: String, source: String = "menu") {
-        // Offload IPC call off the main thread to prevent >2s AppHang
-        // (AGENT-3 pattern: sync callWithRecovery on main thread blocks runloop).
-        // Wave 188 fix: mirror the Task.detached pattern from main+HotkeyRecording.swift.
-        // UI updates (UserDefaults, refreshStatusItemTitle, rebuildStatusMenu) hop back
-        // to MainActor after the IPC call completes.
-        let ipc = self.ipcClient
-        let log = self.logger
-        Task.detached { [weak self] in
-            do {
-                _ = try await ipc.callAsync(method: "apply_profile_preset", params: ["profile": presetId])
-                // Wave 554: bind `let self` inside MainActor.run to satisfy Swift 6 strict
-                // concurrency — captured `self?` cannot be reused across concurrent contexts.
-                await MainActor.run { [weak self] in
-                    guard let self else { return }
-                    self.userDefaults.set(presetId, forKey: "KrabEar_ActivePreset")
-                    self.refreshStatusItemTitle()
-                    self.rebuildStatusMenu()
-                }
-            } catch {
-                log.error("applyRecordingPreset \(presetId) (\(source)): \(error.localizedDescription)")
+        let operation = performSettingsMutation("apply_profile_preset", params: ["profile": presetId])
+        Task { [weak self] in
+            let applied = await operation.value
+            guard let self else { return }
+            guard applied else {
+                logger.error("applyRecordingPreset \(presetId) (\(source)): настройки не подтверждены")
+                notify(title: "Krab Ear", body: "Не удалось подтвердить применение пресета")
+                return
             }
+            userDefaults.set(presetId, forKey: "KrabEar_ActivePreset")
+            refreshStatusItemTitle()
+            rebuildStatusMenu()
         }
     }
 

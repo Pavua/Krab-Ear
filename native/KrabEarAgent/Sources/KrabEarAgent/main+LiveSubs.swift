@@ -85,9 +85,10 @@ extension AgentAppDelegate {
     }
 
     func startLiveSubsCapture() {
+        guard !privacyModeEnabled else { return }
         // Применить актуальный target lang из settings
         syncLiveSubsSettings()
-        systemAudioCapture.start()
+        guard systemAudioCapture.start() else { return }
         liveSubsOverlay.show()
         liveSubsCapturingLastTrueAt = Date()
         startLiveSubsWatchdog()
@@ -99,9 +100,11 @@ extension AgentAppDelegate {
         toggleLiveSubsCaptureFromMenu()
     }
 
-    func stopLiveSubsCapture() {
-        systemAudioCapture.stop()
-        liveSubsOverlay.hide()
+    func stopLiveSubsCapture(flush: Bool = true) {
+        let capture = objc_getAssociatedObject(self, &Self.captureKey) as? SystemAudioCapture
+        let overlay = objc_getAssociatedObject(self, &Self.overlayKey) as? LiveSubtitlesOverlay
+        capture?.stop(flush: flush)
+        overlay?.hide()
         stopLiveSubsWatchdog()
         logger.info("Live Subs: захват остановлен")
     }
@@ -160,8 +163,7 @@ extension AgentAppDelegate {
             "Live Subs: оверлей закрыт watchdog'ом — isCapturing не " +
             "подтверждался \(Int(since))с (grace \(Int(LiveSubsOverlayWatchdogGate.graceSec))с)"
         )
-        liveSubsOverlay.hide()
-        stopLiveSubsWatchdog()
+        stopLiveSubsCapture(flush: false)
     }
 
     /// Синхронизирует настройки из settings → capture + overlay

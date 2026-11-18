@@ -153,13 +153,14 @@ extension HistoryPanelController {
                 let result = resp["result"] as? [String: Any] ?? [:]
 
                 // Без ok=true карточка бессмысленна — считаем данные отсутствующими.
-                if (result["ok"] as? Bool) == true {
+                if (result["ok"] as? Bool) == true,
+                   let privacy = confirmedPrivacyFlag(result["privacy_mode"]) {
                     let storage = result["storage"] as? [String: Any] ?? [:]
                     let retention = result["retention"] as? [String: Any] ?? [:]
                     let audit = result["audit"] as? [String: Any] ?? [:]
 
                     data = PrivacyDashboardData(
-                        privacyMode: (result["privacy_mode"] as? Bool) ?? false,
+                        privacyMode: privacy,
                         encryptionEnabled: (result["encryption_enabled"] as? Bool) ?? false,
                         itemCount: (storage["item_count"] as? Int) ?? 0,
                         transcriptsCount: (storage["transcripts_count"] as? Int) ?? 0,
@@ -400,12 +401,20 @@ extension HistoryPanelController {
     /// Переключает privacy mode из секции «Приватность и данные».
     @objc func onPrivacyModeToggled(_ sender: NSButton) {
         let enabled = sender.state == .on
-        applySettingsPatch(["privacy_mode_enabled": enabled])
-        (NSApp.delegate as? AgentAppDelegate)?.setPrivacyMode(enabled)
-        // set_settings уходит асинхронно (optimistic local + Task в persistSettingsPayload) —
-        // немедленный fetch прочитал бы с backend ещё старое значение.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+        sender.isEnabled = false
+        guard let delegate = NSApp.delegate as? AgentAppDelegate else {
+            sender.isEnabled = true
+            return
+        }
+        sender.allowsMixedState = true
+        sender.state = .mixed
+        let operation = delegate.performSettingsMutation("set_settings", params: ["privacy_mode_enabled": enabled])
+        Task { @MainActor [weak self] in
+            let saved = await operation.value
             guard let self else { return }
+            if !saved {
+                self.showInfoAlert(title: "Приватность", body: "Не удалось подтвердить изменение настроек.")
+            }
             self.fetchAndRebuildPrivacyDashboardCard(isClaudeDesign: false)
             self.fetchAndRebuildPrivacyDashboardCard(isClaudeDesign: true)
         }

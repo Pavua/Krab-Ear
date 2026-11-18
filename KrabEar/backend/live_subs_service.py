@@ -400,8 +400,11 @@ class LiveSubsService:
             }
         return {"status": "accepted", "buffer_duration_sec": buf_sec}
 
-    def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:  # noqa: ARG002
+    def handle_stop(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC handler: live_subs_stop."""
+        if params.get("discard") is True:
+            self.reset()
+            return {"status": "stopped", "flushed": False, "discarded": True}
         return self.stop()
 
     # ── internals: backpressure worker (F3) ──────────────────────────────────

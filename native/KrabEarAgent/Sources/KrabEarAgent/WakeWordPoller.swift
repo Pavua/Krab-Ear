@@ -222,14 +222,18 @@ final class WakeWordPoller {
     var isActive: Bool { timer != nil }
 
     /// Включить: wake_word_start в backend + периодический поллинг статуса.
-    func activate() {
+    func activate(pausedForPrivacy: Bool = false) {
         guard timer == nil else { return }
         tracker.reset()
         wedgedTracker.reset()
         gaveUpNotified = false
         consecutiveEngineUnavailable = 0
         failedStartAttempts = 0
-        sendStart(force: true)
+        if pausedForPrivacy {
+            pausedReasons.insert(.privacyMode)
+        } else {
+            sendStart(force: true)
+        }
         let t = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }

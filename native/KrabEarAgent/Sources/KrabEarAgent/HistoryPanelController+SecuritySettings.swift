@@ -77,13 +77,13 @@ extension HistoryPanelController {
         let iconView = NSImageView()
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        if let icon = NSImage(systemSymbolName: "lock.open", accessibilityDescription: nil) {
+        if let icon = NSImage(systemSymbolName: "lock", accessibilityDescription: nil) {
             iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
         }
         iconView.contentTintColor = KrabEarTheme.Colors.textSecondary
         objc_setAssociatedObject(self, &SecurityAssocKeys.statusIcon, iconView, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
-        let badgeLabel = NSTextField(labelWithString: "Выключено")
+        let badgeLabel = NSTextField(labelWithString: "Статус шифрования недоступен")
         badgeLabel.font = KrabEarTheme.Typography.caption
         badgeLabel.textColor = KrabEarTheme.Colors.textSecondary
         objc_setAssociatedObject(self, &SecurityAssocKeys.statusBadge, badgeLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
@@ -94,7 +94,9 @@ extension HistoryPanelController {
             target: self,
             action: #selector(onEncryptionToggleChanged)
         )
-        toggle.state = .off
+        toggle.allowsMixedState = true
+        toggle.state = .mixed
+        toggle.isEnabled = false
         objc_setAssociatedObject(
             self, &SecurityAssocKeys.encryptionToggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
@@ -193,13 +195,13 @@ extension HistoryPanelController {
         let iconView = NSImageView()
         iconView.imageScaling = .scaleProportionallyUpOrDown
         iconView.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        if let icon = NSImage(systemSymbolName: "lock.open", accessibilityDescription: nil) {
+        if let icon = NSImage(systemSymbolName: "lock", accessibilityDescription: nil) {
             iconView.image = icon.withSymbolConfiguration(.init(pointSize: 14, weight: .regular))
         }
         iconView.contentTintColor = KrabEarTheme.Colors.textSecondary
         objc_setAssociatedObject(self, &SecurityAssocKeys.cdStatusIcon, iconView, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
 
-        let badgeLabel = NSTextField(labelWithString: "Выключено")
+        let badgeLabel = NSTextField(labelWithString: "Статус шифрования недоступен")
         badgeLabel.font = .systemFont(ofSize: 12, weight: .regular)
         badgeLabel.textColor = KrabEarTheme.Colors.textSecondary
         objc_setAssociatedObject(self, &SecurityAssocKeys.cdStatusBadge, badgeLabel, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
@@ -210,7 +212,9 @@ extension HistoryPanelController {
             target: self,
             action: #selector(onEncryptionToggleChangedCD)
         )
-        toggle.state = .off
+        toggle.allowsMixedState = true
+        toggle.state = .mixed
+        toggle.isEnabled = false
         objc_setAssociatedObject(
             self, &SecurityAssocKeys.cdEncryptionToggle, toggle, .OBJC_ASSOCIATION_RETAIN_NONATOMIC
         )
@@ -246,16 +250,26 @@ extension HistoryPanelController {
     /// IPC строго off-main (AGENT-3).
     @MainActor
     func loadEncryptionStatus() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self else { return }
-            guard let resp = try? self.ipcClient.call(method: "get_encryption_status", params: [:]),
-                  let result = resp["result"] as? [String: Any] else { return }
-            let enabled = result["enabled"] as? Bool ?? false
-            let available = result["available"] as? Bool ?? false
-            DispatchQueue.main.async {
-                self.syncSecuritySettings(enabled: enabled, available: available)
-            }
+        guard !encryptionChangePending else { return }
+        let revision = UUID()
+        encryptionStatusRevision = revision
+        let ipc = ipcClient
+        Task { @MainActor [weak self] in
+            let response = try? await ipc.callAsync(method: "get_encryption_status")
+            guard let self, encryptionStatusRevision == revision else { return }
+            let status = Self.confirmedEncryptionStatus(response)
+            syncSecuritySettings(enabled: status?.enabled, available: status?.available)
         }
+    }
+
+    nonisolated private static func confirmedEncryptionStatus(
+        _ response: [String: Any]?
+    ) -> (enabled: Bool, available: Bool)? {
+        guard let result = response?["result"] as? [String: Any],
+              confirmedPrivacyFlag(result["ok"]) == true,
+              let enabled = confirmedPrivacyFlag(result["enabled"]),
+              let available = confirmedPrivacyFlag(result["available"]) else { return nil }
+        return (enabled, available)
     }
 
     // MARK: - Migration status (existing plaintext entries)
@@ -504,7 +518,7 @@ extension HistoryPanelController {
             self, &SecurityAssocKeys.encryptionToggle
         ) as? NSButton else { return }
         let desired = toggle.state == .on
-        applyEncryptionChange(desired: desired, toggleRef: toggle)
+        applyEncryptionChange(desired: desired)
     }
 
     // MARK: - Toggle actions (Claude Design)
@@ -515,7 +529,7 @@ extension HistoryPanelController {
             self, &SecurityAssocKeys.cdEncryptionToggle
         ) as? NSButton else { return }
         let desired = toggle.state == .on
-        applyEncryptionChange(desired: desired, toggleRef: toggle)
+        applyEncryptionChange(desired: desired)
     }
 
     // MARK: - Shared IPC call
@@ -523,8 +537,11 @@ extension HistoryPanelController {
     /// Отправляет set_history_encryption IPC. При любом отказе (бросок IPC, ok=false,
     /// кривой ответ) возвращает тоггл к РЕАЛЬНОМУ состоянию (свежий get_encryption_status)
     /// и объясняет это листом — тоггл не остаётся «врущим» в выбранной позиции.
-    private func applyEncryptionChange(desired: Bool, toggleRef: NSButton) {
-        // Оптимистично — оставляем тоггл как есть; отменим при ошибке.
+    private func applyEncryptionChange(desired: Bool) {
+        guard !encryptionChangePending else { return }
+        encryptionChangePending = true
+        encryptionStatusRevision = UUID()
+        syncSecuritySettings(enabled: nil, available: nil)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             let resp = try? self.ipcClient.call(
@@ -534,7 +551,7 @@ extension HistoryPanelController {
             let outcome = EncryptionChangeOutcome.resolve(response: resp)
             if outcome == .applied {
                 DispatchQueue.main.async {
-                    // Sync обоих вариантов на случай, если оба видимы.
+                    self.encryptionChangePending = false
                     self.syncSecuritySettings(enabled: desired, available: true)
                     // Пересчитываем видимость migrate-блока: включили шифрование при
                     // наличии plaintext → показать кнопку; выключили → скрыть.
@@ -543,20 +560,14 @@ extension HistoryPanelController {
                 return
             }
             // Отказ: перечитываем реальное состояние (off-main), затем откатываем на main.
-            var reread: Bool?
-            var available: Bool?
-            if let statusResp = try? self.ipcClient.call(method: "get_encryption_status", params: [:]),
-               let status = statusResp["result"] as? [String: Any], (status["ok"] as? Bool) == true {
-                reread = status["enabled"] as? Bool
-                available = status["available"] as? Bool
-            }
+            let rereadResponse = try? self.ipcClient.call(method: "get_encryption_status", params: [:])
+            let status = Self.confirmedEncryptionStatus(rereadResponse)
             DispatchQueue.main.async {
-                let known = outcome.knownEnabled(desired: desired, reread: reread)
-                let actual = known ?? outcome.actualEnabled(desired: desired, reread: reread)
-                var keychainMissing = available == false
+                self.encryptionChangePending = false
+                let known = outcome.knownEnabled(desired: desired, reread: status?.enabled)
+                var keychainMissing = status?.available == false
                 if case .keychainUnavailable = outcome { keychainMissing = true }
-                toggleRef.state = actual ? .on : .off
-                self.syncSecuritySettings(enabled: actual, available: !keychainMissing)
+                self.syncSecuritySettings(enabled: known, available: keychainMissing ? false : status?.available)
                 let alert = NSAlert()
                 if keychainMissing {
                     alert.messageText = "Шифрование недоступно"
@@ -568,7 +579,7 @@ extension HistoryPanelController {
                 } else {
                     alert.messageText = "Не удалось изменить шифрование"
                     alert.informativeText = "Настройка не применена. Сейчас шифрование истории "
-                        + (actual ? "включено." : "выключено.")
+                        + (known == true ? "включено." : "выключено.")
                 }
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "OK")
@@ -582,19 +593,31 @@ extension HistoryPanelController {
     /// Обновляет контролы из свежих настроек (вызывается из syncSettingsControls
     /// или после get_encryption_status/set_history_encryption).
     @MainActor
-    func syncSecuritySettings(enabled: Bool, available: Bool) {
-        let toggleState: NSControl.StateValue = enabled ? .on : .off
-        let iconSymbol = enabled ? "lock.fill" : "lock.open"
-        let statusText = !available ? "Недоступно (Keychain)" : (enabled ? "Зашифровано" : "Выключено")
-        let statusColor = !available ? KrabEarTheme.Colors.warning : (enabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary)
+    func syncSecuritySettings(enabled: Bool?, available: Bool?) {
+        let toggleState: NSControl.StateValue = enabled.map { $0 ? .on : .off } ?? .mixed
+        let canToggle = available == true && enabled != nil
+        let iconSymbol = enabled.map { $0 ? "lock.fill" : "lock.open" } ?? "lock"
+        let statusText: String
+        let statusColor: NSColor
+        if available == false {
+            statusText = "Недоступно (Keychain)"
+            statusColor = KrabEarTheme.Colors.warning
+        } else if let enabled, available == true {
+            statusText = enabled ? "Зашифровано" : "Выключено"
+            statusColor = enabled ? KrabEarTheme.Colors.accent : KrabEarTheme.Colors.textSecondary
+        } else {
+            statusText = "Статус шифрования недоступен"
+            statusColor = KrabEarTheme.Colors.warning
+        }
 
         // Gemini variant
         if let toggle = objc_getAssociatedObject(
             self, &SecurityAssocKeys.encryptionToggle
         ) as? NSButton {
+            toggle.allowsMixedState = enabled == nil
             toggle.state = toggleState
-            toggle.isEnabled = available
-            toggle.alphaValue = available ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
+            toggle.isEnabled = canToggle
+            toggle.alphaValue = canToggle ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
         }
         if let iconView = objc_getAssociatedObject(self, &SecurityAssocKeys.statusIcon) as? NSImageView {
             if let icon = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: nil) {
@@ -611,9 +634,10 @@ extension HistoryPanelController {
         if let toggle = objc_getAssociatedObject(
             self, &SecurityAssocKeys.cdEncryptionToggle
         ) as? NSButton {
+            toggle.allowsMixedState = enabled == nil
             toggle.state = toggleState
-            toggle.isEnabled = available
-            toggle.alphaValue = available ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
+            toggle.isEnabled = canToggle
+            toggle.alphaValue = canToggle ? 1.0 : KrabEarTheme.Interaction.disabledOpacity
         }
         if let iconView = objc_getAssociatedObject(self, &SecurityAssocKeys.cdStatusIcon) as? NSImageView {
             if let icon = NSImage(systemSymbolName: iconSymbol, accessibilityDescription: nil) {
