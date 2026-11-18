@@ -154,23 +154,29 @@ def history_journal_paths(data_dir: Path) -> tuple[Path, ...]:
     return tuple(base / name for name in HISTORY_JOURNAL_FILENAMES)
 
 
-def has_encrypted_history_in(journal_paths, *, unreadable_is_encrypted: bool = True) -> bool:
+def has_encrypted_history_in(
+    journal_paths, *, unreadable_is_encrypted: bool = True, tolerate_invalid_utf8: bool = False
+) -> bool:
     """Есть ли ENC1-строки в любом из переданных журналов.
 
     P2: перед open() проверяется регулярность записи (lstat + S_ISREG),
     чтобы FIFO/каталог/сокет не блокировали процесс под эксклюзивным flock.
 
-    Fail-closed: существующий журнал, который не удалось проверить (OSError,
-    кроме ENOENT), считается «возможно зашифрован» — иначе потерянный
+    Fail-closed: существующий журнал, который не удалось проверить (ошибка
+    чтения или UTF-8), считается «возможно зашифрован» — иначе потерянный
     settings.json плюс нечитаемый ENC1-журнал читались бы как шифрование OFF
     и новые записи шли бы открытым текстом.
 
     ``unreadable_is_encrypted=False`` — только для guard'ов, которым нужно ДОКАЗАННОЕ
     наличие ENC1 (блок ON→OFF в save_settings): нечитаемый файл не доказательство и не
     должен блокировать любую запись настроек.
+
+    ``tolerate_invalid_utf8=True`` — для миграции, которая сохраняет повреждённые
+    строки побайтно. Ошибка доступа по-прежнему блокирует миграцию.
     """
     from backend.history_crypto import SENTINEL
 
+    errors = "strict" if unreadable_is_encrypted and not tolerate_invalid_utf8 else "surrogateescape"
     for raw in journal_paths:
         path = Path(raw)
         try:
@@ -184,14 +190,13 @@ def has_encrypted_history_in(journal_paths, *, unreadable_is_encrypted: bool = T
                 return True
             continue
         try:
-            # Sentinel ASCII; байты повреждённых строк не мешают проверке.
-            # Universal newline сохраняет поддержку старых CR-журналов.
-            with path.open("r", encoding="ascii", errors="surrogateescape") as fh:
+            # Universal newline учитывает старые CR-журналы.
+            with path.open("r", encoding="utf-8", errors=errors) as fh:
                 if any(line.startswith(SENTINEL) for line in fh):
                     return True
         except FileNotFoundError:
             continue
-        except OSError:
+        except (OSError, UnicodeError):
             if unreadable_is_encrypted:
                 return True
             continue

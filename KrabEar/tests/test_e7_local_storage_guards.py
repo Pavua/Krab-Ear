@@ -198,6 +198,12 @@ def test_encrypted_history_probe_accepts_legacy_line_endings(tmp_path, separator
     from backend.state_store import has_encrypted_history_in
 
     history = tmp_path / "history.ndjson"
-    history.write_bytes(separator.join([b"incomplete record \xe2\x82", SENTINEL.encode("ascii"), b""]))
+    original = separator.join(
+        [b'{"id":"one","text":"sample"}', b"incomplete record \xe2\x82", SENTINEL.encode("ascii"), b""]
+    )
+    history.write_bytes(original)
+    (tmp_path / "settings.json").write_text('{"history_encryption_enabled":false}', encoding="utf-8")
 
-    assert has_encrypted_history_in([history])
+    assert has_encrypted_history_in([history], unreadable_is_encrypted=False)
+    assert DataMigrator().migrate(tmp_path).reason == "history_encryption_operation_unavailable"
+    assert history.read_bytes() == original

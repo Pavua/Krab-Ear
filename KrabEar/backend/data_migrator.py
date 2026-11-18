@@ -110,7 +110,9 @@ def _enc_blocked(reader, data_dir: Path) -> bool:
     """
     from backend.state_store import has_encrypted_history_in, history_journal_paths
 
-    return policy_blocks(reader) or has_encrypted_history_in(history_journal_paths(data_dir))
+    return policy_blocks(reader) or has_encrypted_history_in(
+        history_journal_paths(data_dir), tolerate_invalid_utf8=True
+    )
 
 
 def _parse_ndjson_object(line: bytes) -> dict[str, Any] | None:
