@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import tempfile
 import threading
@@ -497,6 +498,52 @@ class TestTranscribePathsPersistHistory(unittest.TestCase):
         self.assertEqual(result.get("processed"), 1)
         svc.store.add_history_item.assert_called_once()
         self.assertTrue(result["items"][0]["history_id"])
+
+    def test_same_named_batch_sources_get_distinct_history_markdown(self):
+        from _plaintext_export_test_helpers import history_service_with_off_policy
+
+        svc = _make_service(self._tmp)
+        history = history_service_with_off_policy(store=svc.store)
+        sources = [Path(self._tmp) / name / "sample.wav" for name in ("one", "two")]
+        for source in sources:
+            source.parent.mkdir()
+            source.write_bytes(b"\x00" * 64)
+        with patch("backend.recording_core_service.time.strftime", return_value="20261118_100401"):
+            result = svc.handle_transcribe_paths({"paths": [str(source) for source in sources]})
+
+        self.assertEqual(result["errors"], [])
+        first, second = [item["history_id"] for item in result["items"]]
+        first_md = Path(history.handle_get_history_item({"id": first})["transcript_file"])
+        second_md = Path(history.handle_get_history_item({"id": second})["transcript_file"])
+        self.assertNotEqual(first_md, second_md)
+        self.assertTrue(first_md.is_file())
+        self.assertTrue(second_md.is_file())
+
+        history.handle_delete_history_item({"id": first})
+        self.assertFalse(first_md.exists())
+        self.assertTrue(second_md.is_file())
+
+    def test_long_batch_source_names_keep_the_full_markdown_id(self):
+        from _plaintext_export_test_helpers import history_service_with_off_policy
+
+        svc = _make_service(self._tmp)
+        history = history_service_with_off_policy(store=svc.store)
+        for stem in ("a" * 200, "b" + "ж" * 100):
+            with self.subTest(ascii=stem.isascii()):
+                source = Path(self._tmp) / f"{stem}.wav"
+                source.write_bytes(b"\x00" * 64)
+                result = svc.handle_transcribe_paths({"paths": [str(source)]})
+
+                self.assertEqual(result["errors"], [])
+                item = result["items"][0]["history_id"]
+                transcript_file = history.handle_get_history_item({"id": item})["transcript_file"]
+                self.assertIsInstance(transcript_file, str)
+                transcript = Path(transcript_file)
+                self.assertTrue(transcript.name.endswith(f".krab-ear-{item}.md"))
+                self.assertLessEqual(
+                    len(os.fsencode(transcript.name)), os.pathconf(transcript.parent, "PC_NAME_MAX"),
+                )
+                self.assertIn(f"# Транскрипт: {source.name}", transcript.read_text(encoding="utf-8"))
 
 
 class TestCurrentRecordingOwner(unittest.TestCase):

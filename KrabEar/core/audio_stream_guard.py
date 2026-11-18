@@ -69,13 +69,16 @@ def wait_for_frames(
     poll_sec: float = DEFAULT_POLL_SEC,
     starve_sec: float = DEFAULT_STARVE_SEC,
     is_recording: Callable[[], bool] | None = None,
+    cancel_wait: Callable[[], bool] | None = None,
     clock: Callable[[], float] = time.monotonic,
 ) -> bool:
     """Ждёт ``frames`` доступных кадров, оставаясь прерываемым.
 
     Returns:
         True — кадры есть, ``stream.read(frames)`` не заблокируется.
-        False — попросили остановиться (``stop_event``).
+        False — остановка через ``stop_event`` или запрет дальнейшего ожидания
+        через ``cancel_wait``. После готовности кадров вызывающий повторно
+        проверяет политику перед чтением.
 
     Raises:
         StreamStarved: кадров нет дольше ``starve_sec`` и запись не идёт.
@@ -91,6 +94,8 @@ def wait_for_frames(
         available = _available_frames(stream)
         if available is not None and available >= frames:
             return True
+        if cancel_wait is not None and cancel_wait():
+            return False
 
         # Легитимные источники голодания сбрасывают таймер. Главный —
         # активная запись: meeting НЕ снимает wake-word слушатель, и адаптер

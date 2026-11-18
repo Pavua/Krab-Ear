@@ -70,13 +70,11 @@ final class PrivacyDashboardAuditWiringTests: XCTestCase {
             "Секция должна содержать живой тумблер privacy mode (action)"
         )
         XCTAssertTrue(
-            src.contains("applySettingsPatch([\"privacy_mode_enabled\""),
-            "Тумблер обязан писать privacy_mode_enabled через applySettingsPatch"
+            src.contains("performSettingsMutation(\"set_settings\", params: [\"privacy_mode_enabled\": enabled])"),
+            "Тумблер должен отправить только изменённое поле privacy"
         )
-        XCTAssertTrue(
-            src.contains("setPrivacyMode("),
-            "Тумблер обязан синхронизировать индикатор меню-бара (setPrivacyMode)"
-        )
+        XCTAssertTrue(src.contains("await operation.value"), "Карточка обновляется после подтверждения")
+        XCTAssertFalse(src.contains("setPrivacyMode(enabled)"), "Нажатие не подтверждает отключение privacy")
     }
 
     // MARK: - Из fallback «нет данных» обязан быть выход

@@ -81,6 +81,9 @@ final class TooltipMockSocketProvider: IPCSocketProviding, @unchecked Sendable {
     }
 
     func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
         if alwaysFail {
             throw IPCError.socketConnectFailed("mock: backend offline")
         }

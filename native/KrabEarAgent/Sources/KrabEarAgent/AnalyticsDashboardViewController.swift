@@ -18,6 +18,7 @@
 
 import AppKit
 import Foundation
+import UniformTypeIdentifiers
 
 // MARK: - Data model
 
@@ -618,23 +619,44 @@ final class AnalyticsDashboardViewController: NSViewController {
     }
 
     @objc private func onExportHTML() {
-        statusLabel.stringValue = "Генерируем HTML…"
-        let client = ipcClient
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
-                let response = try client.call(method: "generate_html_report", params: [:])
-                let result = (response["result"] as? [String: Any]) ?? [:]
-                let path = (result["path"] as? String) ?? ""
-                DispatchQueue.main.async {
-                    self?.statusLabel.stringValue = "HTML готов"
-                    if !path.isEmpty, let url = URL(string: "file://\(path)") {
-                        NSWorkspace.shared.open(url)
+                let ticket = try await plaintextExportCoordinator.prepare(sink: .historyHTML, presenting: view.window)
+                statusLabel.stringValue = "Генерируем HTML…"
+                let response = try await ipcClient.callAsync(method: "generate_html_report", params: [:])
+                guard let result = response["result"] as? [String: Any],
+                      confirmedPrivacyFlag(result["ok"]) == true,
+                      let html = result["html"] as? String, !html.isEmpty else {
+                    plaintextExportCoordinator.discard(ticket)
+                    statusLabel.stringValue = "Не удалось получить HTML-отчёт"
+                    return
+                }
+
+                let panel = NSSavePanel()
+                panel.allowedContentTypes = [.html]
+                panel.nameFieldStringValue = "KrabEar_Report.html"
+                presentPanelSheet(panel, for: view.window) { [weak self] reply in
+                    guard let self else { return }
+                    guard reply == .OK, let url = panel.url else {
+                        self.plaintextExportCoordinator.discard(ticket)
+                        self.statusLabel.stringValue = "Экспорт HTML отменён"
+                        return
+                    }
+                    Task { @MainActor in
+                        do {
+                            try await self.plaintextExportCoordinator.perform(ticket) {
+                                try html.write(to: url, atomically: true, encoding: .utf8)
+                            }
+                            self.statusLabel.stringValue = "HTML сохранён"
+                            NSWorkspace.shared.open(url)
+                        } catch {
+                            self.statusLabel.stringValue = PlaintextExportCoordinator.errorMessage(error)
+                        }
                     }
                 }
             } catch {
-                DispatchQueue.main.async {
-                    self?.statusLabel.stringValue = "Ошибка экспорта: \(error.localizedDescription)"
-                }
+                statusLabel.stringValue = PlaintextExportCoordinator.errorMessage(error)
             }
         }
     }

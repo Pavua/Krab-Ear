@@ -47,22 +47,25 @@ def _make_fake_settings_svc(initial_settings: dict | None = None):
 class TestGetEncryptionStatus(unittest.TestCase):
     """Тесты get_encryption_status (без BackendService — inline unit)."""
 
-    def _call_handler(self, enabled: bool, available: bool):
+    def _call_handler(self, enabled: bool | None, available: bool):
         """Вызывает _handle_get_encryption_status изолированно."""
         from backend.service import BackendService  # noqa: F401 — just to locate
 
-        # Создаём минимальный объект, имитирующий нужную часть BackendService.
-        obj = object.__new__(BackendService)
-        settings_svc, _ = _make_fake_settings_svc(
-            {"history_encryption_enabled": enabled}
-        )
-        object.__setattr__(obj, "_settings_svc", settings_svc)
+        import json
+        import tempfile
+        from pathlib import Path
+        from backend.state_store import StateStore
 
-        with patch(
-            "backend.crypto_keystore.keychain_available",
-            return_value=available,
-        ):
-            return obj._handle_get_encryption_status({})
+        obj = object.__new__(BackendService)
+        with tempfile.TemporaryDirectory() as directory:
+            obj.store = StateStore(Path(directory))
+            if enabled is not None:
+                obj.store.settings_path.write_text(json.dumps({
+                    "history_encryption_enabled": enabled, "privacy_mode_enabled": False,
+                }))
+                obj.store.initialize_startup_plaintext_policy(new_profile=False)
+            with patch("backend.crypto_keystore.keychain_available", return_value=available):
+                return obj._handle_get_encryption_status({})
 
     def test_shape_enabled_available(self):
         result = self._call_handler(enabled=True, available=True)
@@ -82,17 +85,10 @@ class TestGetEncryptionStatus(unittest.TestCase):
         self.assertIs(result["enabled"], False)
         self.assertIs(result["available"], True)
 
-    def test_missing_setting_defaults_to_false(self):
-        """Когда history_encryption_enabled отсутствует — должно вернуть False."""
-        from backend.service import BackendService
-
-        obj = object.__new__(BackendService)
-        settings_svc, _ = _make_fake_settings_svc({})
-        object.__setattr__(obj, "_settings_svc", settings_svc)
-
-        with patch("backend.crypto_keystore.keychain_available", return_value=True):
-            result = obj._handle_get_encryption_status({})
-        self.assertIs(result["enabled"], False)
+    def test_missing_settings_are_unknown(self):
+        result = self._call_handler(enabled=None, available=True)
+        self.assertFalse(result["ok"])
+        self.assertIsNone(result["enabled"])
 
 
 class TestSetHistoryEncryption(unittest.TestCase):
@@ -164,6 +160,24 @@ class TestSetHistoryEncryption(unittest.TestCase):
         self.assertIn("enabled", result)
         # Настройка НЕ изменилась
         self.assertFalse(settings.get("history_encryption_enabled"))
+
+    def test_keychain_failure_reports_unknown_for_incomplete_policy(self):
+        from backend.state_store import HistoryEncryptionUnavailable
+
+        obj, _ = self._make_obj()
+        obj.store.settings_path.write_text('{"history_encryption_enabled":false}')
+        with patch.object(obj._settings_svc, "handle_set_settings", side_effect=HistoryEncryptionUnavailable):
+            result = obj._handle_set_history_encryption({"enabled": True})
+
+        self.assertEqual(result, {"ok": False, "error": "keychain_unavailable", "enabled": None})
+
+    def test_toggle_success_requires_matching_persisted_policy(self):
+        obj, _ = self._make_obj({"history_encryption_enabled": False})
+        with patch.object(obj._settings_svc, "handle_set_settings", return_value={"ok": True}):
+            result = obj._handle_set_history_encryption({"enabled": True})
+
+        self.assertIs(result["ok"], False)
+        self.assertIs(result["enabled"], False)
 
     def test_round_trip_enable_then_disable(self):
         """Включить → выключить → статус False."""

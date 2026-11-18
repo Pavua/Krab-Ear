@@ -13,6 +13,7 @@ import inspect
 import json
 import logging
 import math
+import os
 import re
 import tempfile
 import threading
@@ -39,7 +40,7 @@ from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
 from backend.recorder import AudioRecorderStopTimeout
 from backend.realtime_silence_filter import RealtimeSilenceFilter
-from backend.transcript_writer import TranscriptWriter
+from backend.transcript_writer import TranscriptWriter, history_markdown_suffix
 from contracts.registry import EventType
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.translation_events import TranslationCompleted, TranslationFailed
@@ -352,7 +353,12 @@ class RecordingCoreService:
         молча перестанет работать на чистом конфиге.
         """
         try:
-            return bool(self._settings_svc.cached_settings().get("privacy_mode_enabled", False))
+            settings = self._settings_svc.cached_settings()
+            if "privacy_mode_enabled" not in settings:
+                return False
+            value = settings["privacy_mode_enabled"]
+            # Не-bool (None, 0, "") — состояние неизвестно: ON, как в StateStore.load_settings.
+            return value if isinstance(value, bool) else True
         except Exception:
             logger.warning(
                 "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
@@ -363,6 +369,21 @@ class RecordingCoreService:
     # ------------------------------------------------------------------ #
     # Public accessors (BackendService may read these for diagnostics)    #
     # ------------------------------------------------------------------ #
+
+    def _preview_snapshot(self) -> tuple[str, float]:
+        """(превью-текст, длительность) для ответов IPC.
+
+        Текст отдаётся только при выключенной приватности: превью — частичный транскрипт,
+        и ни один ответ (start/stop/state) не должен его выдавать в режиме приватности.
+        Приватность читается ПОСЛЕ отпускания ``_preview_lock``: чтение настроек не
+        вкладывается в лок воркера превью.
+        """
+        with self._preview_lock:
+            text = self._preview_text
+            duration = self._preview_duration_sec
+        if text and self._privacy_mode_enabled():
+            text = ""
+        return text, duration
 
     @property
     def preview_text(self) -> str:
@@ -582,9 +603,7 @@ class RecordingCoreService:
         requested_start_request_id: str | None,
     ) -> dict[str, Any]:
         """Разрешить repeat/promote/conflict без нового physical start."""
-        with self._preview_lock:
-            preview_text = self._preview_text
-            preview_duration = self._preview_duration_sec
+        preview_text, preview_duration = self._preview_snapshot()
 
         current_owner = generation.get("owner")
         active_start_request_id = generation.get("start_request_id")
@@ -1124,9 +1143,7 @@ class RecordingCoreService:
             # После recorder_timeout физический worker уже может успеть
             # завершиться, но G1 всё ещё хранит право на retry/rescue. Новый
             # start G2 не должен перезаписать эту единственную идентичность.
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
+            preview_text, preview_duration = self._preview_snapshot()
             return {
                 "status": "recorder_stopping",
                 "is_recording": False,
@@ -1155,9 +1172,7 @@ class RecordingCoreService:
         if recorder_was_recording:
             # Call Assist пока захватывает AudioRecorder напрямую. Generation
             # отсутствует, поэтому безопасно доказать owner/promotion нельзя.
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
+            preview_text, preview_duration = self._preview_snapshot()
             return {
                 "status": "unmanaged_recording",
                 "is_recording": True,
@@ -1170,9 +1185,7 @@ class RecordingCoreService:
         ):
             # Проверка стоит до device/spill/UUID/recorder.start: отказ из-за
             # backlog не оставляет ложного rescue-файла и не трогает микрофон.
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
+            preview_text, preview_duration = self._preview_snapshot()
             generation = getattr(self, "_active_generation", None)
             return {
                 "status": "recorder_stopping",
@@ -1312,9 +1325,7 @@ class RecordingCoreService:
         if not started:
             if spill is not None:
                 spill.discard()  # запись не началась — файл-пустышка не нужен
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
+            preview_text, preview_duration = self._preview_snapshot()
             recorder_is_recording = bool(
                 getattr(self.recorder, "is_recording", False)
             )
@@ -1763,14 +1774,8 @@ class RecordingCoreService:
             # Phase A освобождает active-slot до STT/history tail. Физический
             # idle не даёт права на lifecycle, пока остаётся finalizing G1.
             finalizing_count = len(self._finalizing_generations_locked())
-        with self._preview_lock:
-            preview_text = self._preview_text
-            preview_duration = self._preview_duration_sec
-        # wave-31 HIGH: gate preview_text behind privacy_mode — the SSE partial-transcript
-        # stream was already gated (W1673), but the IPC poll path was leaking accumulated
-        # partial transcript text even when privacy_mode_enabled=True.
-        if self._privacy_mode_enabled():
-            preview_text = ""
+        preview_text, preview_duration = self._preview_snapshot()
+        # wave-31 HIGH: preview_text закрыт приватностью внутри _preview_snapshot().
         audio_rms = (
             self.recorder.snapshot_rms()
             if hasattr(self.recorder, "snapshot_rms")
@@ -2015,11 +2020,15 @@ class RecordingCoreService:
 
         # Подготовка путей выше может ждать filesystem. Проверяем latch повторно
         # и публикуем handle ДО start под тем же lock, что берёт shutdown.
+        # Приватность на старте задачи: решает, закрывать ли тексты в get_transcribe_progress.
+        # Читается ДО lifecycle_lock — чтение настроек не вкладывается в лок жизненного цикла.
+        _privacy_at_start = self._privacy_mode_enabled()
         with lifecycle_lock:
             if closed_event.is_set():
                 raise RuntimeError("Backend закрывается: batch-транскрибация недоступна")
             workers = self._batch_reap_workers_locked()
             job_id = self._job_tracker.create_job(total_files=total_files)
+            self._job_tracker.update(job_id, privacy_at_start=_privacy_at_start)
             if rejected_errors:
                 self._job_tracker.update(job_id, errors=list(rejected_errors))
             # Сохраняем Event до возможного prune/clear в JobTracker.
@@ -2070,6 +2079,15 @@ class RecordingCoreService:
         status = str(state.get("status") or "queued")
         items_raw = list(state.get("items") or [])
         items_out = items_raw if status in ("done", "failed", "cancelled") else []
+        # Задача, начатая при выключенной приватности, не отдаёт тексты и имена файлов, если
+        # режим включили потом (тот же класс, что replay терминального ответа). Задача, начатая
+        # уже при включённой приватности, отдаёт результат её инициатору: панель импорта
+        # получает тексты только отсюда. Нет отметки (старая задача) — считаем «начата при OFF».
+        privacy_hidden = (
+            state.get("privacy_at_start") is not True and self._privacy_mode_enabled()
+        )
+        if privacy_hidden:
+            items_out = []
 
         elapsed_sec = float(state.get("elapsed_sec") or 0.0)
         eta_sec: float | None = None
@@ -2081,16 +2099,20 @@ class RecordingCoreService:
         if total_audio > 0:
             eta_sec = max(0.0, total_audio * 10.0 - elapsed_sec)
 
+        errors_out = list(state.get("errors") or [])
+        if privacy_hidden:
+            # Число ошибок сохраняем, тексты (имена файлов) — нет.
+            errors_out = ["Скрыто: включён режим приватности"] * len(errors_out)
         return {
             "status": status,
-            "current_file": str(state.get("current_file") or ""),
+            "current_file": "" if privacy_hidden else str(state.get("current_file") or ""),
             "current_stage": str(state.get("current_stage") or "idle"),
             "file_index": int(state.get("file_index") or 0),
             "total_files": int(state.get("total_files") or 0),
             "elapsed_sec": round(elapsed_sec, 3),
             "eta_sec": round(eta_sec, 3) if eta_sec is not None else None,
             "processed": int(state.get("processed") or 0),
-            "errors": list(state.get("errors") or []),
+            "errors": errors_out,
             "items": items_out,
         }
 
@@ -2714,17 +2736,18 @@ class RecordingCoreService:
 
             if display_text is not None:
                 capped = display_text[-900:]
+                # Приватность — до записи: в режиме приватности превью-текст не копится в RAM
+                # (его читают start/stop/state), а SSE-гейт идёт через тот же fail-closed геттер.
+                _privacy_now = self._privacy_mode_enabled()
                 with self._preview_lock:
-                    self._preview_text = capped
+                    self._preview_text = "" if _privacy_now else capped
                     self._preview_updated_at = upto
-                if capped:
+                if capped and not _privacy_now:
                     # W1673 F2: privacy gate — do not leak transcript text via SSE in privacy mode.
-                    _preview_settings = self._settings_svc.cached_settings()
-                    if not bool(_preview_settings.get("privacy_mode_enabled", False)):
-                        event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
-                            text=capped,
-                            duration_sec=upto,
-                        ))
+                    event_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
+                        text=capped,
+                        duration_sec=upto,
+                    ))
 
             worker_stop_event.wait(poll_interval)
 
@@ -2898,9 +2921,7 @@ class RecordingCoreService:
             logger.error(
                 "stop_recording: audio worker завис — отдаю recorder_timeout"
             )
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
+            preview_text, preview_duration = self._preview_snapshot()
             return {
                 "early_return": {
                     "status": "recorder_timeout",
@@ -2918,9 +2939,7 @@ class RecordingCoreService:
             )
             spill = getattr(self, "_active_spill", None)
             self._active_spill = None
-            with self._preview_lock:
-                preview_text = self._preview_text
-                preview_duration = self._preview_duration_sec
+            preview_text, preview_duration = self._preview_snapshot()
             return {
                 "spill": spill,
                 "generation": generation,
@@ -3733,6 +3752,7 @@ class RecordingCoreService:
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
                 item_dict = {
+                    "id": item.id,
                     "text": display_text,
                     "ts": item.ts,
                     "audio_duration_sec": duration_sec,
@@ -4010,8 +4030,13 @@ class RecordingCoreService:
                         transcripts_dir = Path(self.store.data_dir) / "transcripts"
                         transcripts_dir.mkdir(exist_ok=True)
                         source_name = Path(audio_path).stem
-                        timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        transcript_filename = f"{timestamp}_{source_name}.md"
+                        name_prefix = time.strftime("%Y%m%d_%H%M%S") + "_"
+                        suffix = history_markdown_suffix(history_item.id) or ".md"
+                        stem_budget = os.pathconf(transcripts_dir, "PC_NAME_MAX") - len(name_prefix) - len(suffix)
+                        if stem_budget >= 0:
+                            # Сокращаем только отображаемое имя, сохраняя целые символы.
+                            source_name = source_name.encode("utf-8")[:stem_budget].decode("utf-8", errors="ignore")
+                        transcript_filename = f"{name_prefix}{source_name}{suffix}"
                         transcript_path = transcripts_dir / transcript_filename
                         with open(transcript_path, "w", encoding="utf-8") as f:
                             f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")

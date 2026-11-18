@@ -10,7 +10,10 @@
 """
 from __future__ import annotations
 
+import atexit
+import runpy
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,18 +22,32 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Патчим тяжёлые зависимости до импорта rest_server (AudioEngine, StateStore, Transcriber).
+# Отдельный экземпляр Flask-приложения: его зависимости и настройки не
+# остаются в кеше backend.rest_server после collection.
 _REST_AVAILABLE = False
 try:
-    import flask  # noqa: F401
+    from core import config
+    from core.engine import AudioEngine
 
-    _mock_engine = MagicMock()
-    _mock_engine.quality_profile = "balanced"
-
-    _mock_store = MagicMock()
-    _mock_store.load_vocabulary.return_value = []
-
-    _mock_transcriber = MagicMock()
+    _temp_profile = tempfile.TemporaryDirectory(prefix="krab-dashboard-")
+    unittest.addModuleCleanup(_temp_profile.cleanup)
+    _data_dir = Path(_temp_profile.name)
+    with (
+        patch.object(config.settings, "DATA_DIR", _data_dir),
+        patch.object(config, "_SETTINGS_JSON_FILE", _data_dir / "settings.json"),
+        patch.object(AudioEngine, "__init__", return_value=None),
+    ):
+        _rest = runpy.run_path(
+            str(PROJECT_ROOT / "backend" / "rest_server.py"),
+            run_name="backend._dashboard_test_rest",
+        )
+    # Тестовый движок не запускал workers; общий MLX shutdown ему не принадлежит.
+    atexit.unregister(_rest["_rest_engine_cleanup"])
+    _rest["engine"].quality_profile = "balanced"
+    app = _rest["app"]
+    _format_uptime = _rest["_format_uptime"]
+    _status_dot_color = _rest["_status_dot_color"]
+    _build_dashboard_html = _rest["_build_dashboard_html"]
 
     _mock_metrics = MagicMock()
     _mock_metrics.get_summary.return_value = {
@@ -44,14 +61,9 @@ try:
         "window_size": 42,
     }
 
-    with patch("core.engine.AudioEngine", return_value=_mock_engine), \
-            patch("backend.state_store.StateStore", return_value=_mock_store), \
-            patch("backend.transcriber.Transcriber", return_value=_mock_transcriber), \
-            patch("backend.metrics_collector.metrics", _mock_metrics):
-        from backend.rest_server import app, _format_uptime, _status_dot_color, _build_dashboard_html
-
+    _rest["_MODULE_DEPS"].metrics = _mock_metrics
     _REST_AVAILABLE = True
-except Exception:
+except ModuleNotFoundError:
     app = None  # type: ignore[assignment]
 
 
@@ -76,6 +88,14 @@ class TestDashboardHttpBasics(unittest.TestCase):
     def setUp(self):
         app.config["TESTING"] = True
         self.client = app.test_client()
+
+    def test_dashboard_import_preserves_service_dependencies(self):
+        from backend import service
+        from backend.state_store import StateStore
+        from backend.transcriber import Transcriber
+
+        self.assertIs(service.StateStore, StateStore)
+        self.assertIs(service.Transcriber, Transcriber)
 
     def test_returns_200(self):
         resp, _ = _get_dashboard(self.client)
@@ -260,12 +280,6 @@ class TestDashboardHealthCheckData(unittest.TestCase):
         app.config["TESTING"] = True
         self.client = app.test_client()
 
-    def _get_with_mock_health(self, health_data: dict) -> str:
-        with patch("backend.rest_server._build_dashboard_html") as mock_build:
-            mock_build.return_value = _build_dashboard_html_with_data(health_data)
-            _, html = _get_dashboard(self.client)
-        return html
-
     def test_check_names_appear_in_html(self):
         """Имена проверок (stt_model, llm и т.д.) должны быть в HTML."""
         _, html = _get_dashboard(self.client)
@@ -367,8 +381,7 @@ class TestDashboardGracefulDegradation(unittest.TestCase):
     def test_dashboard_ok_when_health_checker_raises(self):
         """При ошибке HealthChecker страница всё равно возвращает HTML."""
         # HealthChecker импортируется внутри _build_dashboard_html — патчим в его модуле
-        with patch("backend.health_checker.HealthChecker") as mock_hc:
-            mock_hc.side_effect = Exception("health checker unavailable")
+        with patch("backend.health_checker.HealthChecker.check_all", side_effect=RuntimeError("unavailable")):
             resp, html = _get_dashboard(self.client)
         self.assertEqual(resp.status_code, 200)
         self.assertIn("<html", html.lower())
@@ -440,29 +453,6 @@ class TestBuildDashboardHtml(unittest.TestCase):
         html = _build_dashboard_html()
         self.assertNotIn("cdn.jsdelivr.net", html)
         self.assertNotIn("googleapis.com", html)
-
-
-# ---------------------------------------------------------------------------
-# Utility for patched rendering (used in some tests)
-# ---------------------------------------------------------------------------
-
-def _build_dashboard_html_with_data(health_data: dict) -> str:
-    """Упрощённый рендерер для тестов с инъекцией произвольных данных."""
-    checks_html = ""
-    for name, result in health_data.get("checks", {}).items():
-        st = result.get("status", "unknown")
-        checks_html += f"<tr><td>{name}</td><td>{st}</td></tr>"
-    return f"""<!DOCTYPE html>
-<html><head><meta charset="UTF-8">
-<meta http-equiv="refresh" content="30">
-<title>Krab Ear — Health Dashboard</title>
-</head><body>
-<div class="overall-badge">{health_data.get('status', 'unknown')}</div>
-<h2>Health Checks</h2><table>{checks_html}</table>
-<h2>System Resources</h2>
-<h2>Recent Metrics</h2>
-<span class="dot"></span><span class="badge"></span>
-</body></html>"""
 
 
 if __name__ == "__main__":

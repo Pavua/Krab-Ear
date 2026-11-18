@@ -31,7 +31,7 @@ LEGACY_RUNTIME_REL="native/run""time/KrabEar""Agent"
 LEGACY_PATTERN="start_agent\.command|$LEGACY_RUNTIME_REL"
 echo "Audit before migration:"
 FOUND_REFS=0
-for plist in "$HOME/Library/LaunchAgents/"*.plist 2>/dev/null; do
+for plist in "$HOME/Library/LaunchAgents/"*.plist(N); do
     [ -f "$plist" ] || continue
     if grep -qE "$LEGACY_PATTERN" "$plist" 2>/dev/null; then
         echo "  [FOUND] $plist references legacy launcher (start_agent.command or runtime binary)"

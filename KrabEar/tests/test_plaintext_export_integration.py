@@ -188,6 +188,7 @@ def swift_harness(tmp_path_factory):
         compiler, "-swift-version", "5", "-parse-as-library",
         "-module-cache-path", str(compile_root / "module-cache"),
         str(root / "Sources/KrabEarAgent/IPCClient.swift"),
+        str(root / "Sources/KrabEarAgent/IPCWire.swift"),
         str(root / "Sources/KrabEarAgent/PlaintextExportCoordinator.swift"),
         str(root / "Tests/Integration/PlaintextExportIntegrationHarness.swift"), "-o", str(binary),
     ], capture_output=True, text=True, timeout=120, env=env)
@@ -246,6 +247,14 @@ def test_swift_real_socket_revocation_linearization(backend, swift_harness, phas
         if process.poll() is None:
             process.terminate()
             process.communicate(timeout=5)
+
+
+def test_swift_live_subs_rejects_delayed_audio_after_external_toggle(backend, swift_harness):
+    result = subprocess.run(
+        [str(swift_harness), str(backend.root / "ipc.sock"), "live-subs"],
+        capture_output=True, timeout=30, env=synthetic_subprocess_env(backend.root),
+    )
+    assert result.returncode == 0, "delayed PCM crossed a privacy transition or fresh capture failed"
 
 
 def test_real_epoch_session_and_sequence_replay(backend):

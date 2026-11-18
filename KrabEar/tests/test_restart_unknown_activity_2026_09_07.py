@@ -1,7 +1,7 @@
 """Настоящий IPC/parser и shell gates с частным сокетом и fake launchctl.
 
-HOME не меняется: тестовая копия заменяет только два литерала socket path.
-Установщик исполняется лишь до границы мутации, без чтения credentials.
+Тестовая копия направляет IPC на частный сокет. Установщик выполняет busy-гейт
+и публикует подготовленный файл только внутри tmp_path, без чтения credentials.
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
     """Читаем real shell и IPC-код; все mutation-команды замыкаются на marker."""
     marker = tmp_path / "launchctl.log"
     source = (ROOT / "scripts" / script).read_text()
+    installer_slice = script.startswith("install_") and not function_only
     stopped = threading.Event()
     with tempfile.TemporaryDirectory(prefix="ke-gate-", dir="/tmp") as short:
         sock_path = str(Path(short) / "ipc.sock")
@@ -95,8 +96,15 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         (bindir / "python3").symlink_to(sys.executable)
+        log_launchctl = 'printf "%s\\n" "$*" >> "$GATE_TEST_MARKER"\nexit 0\n'
+        if installer_slice:
+            # Загруженный label отвечает на print до первого bootout.
+            log_launchctl = (
+                'if [ "$1" = print ]; then [ ! -e "$GATE_TEST_MARKER" ]; exit $?; fi\n'
+                + log_launchctl
+            )
         for name, body in {
-            "launchctl": 'printf "%s\\n" "$*" >> "$GATE_TEST_MARKER"\nexit 0\n',
+            "launchctl": log_launchctl,
             "sleep": 'exit 0\n',
         }.items():
             p = bindir / name
@@ -104,9 +112,12 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
             p.chmod(0o700)
         env = dict(os.environ, PATH=str(bindir) + os.pathsep + os.environ["PATH"],
                    GATE_TEST_MARKER=str(marker))
-        if function_only or script.startswith("install_"):
+        if function_only or installer_slice:
             functions = []
-            for name in ("ipc_call", "busy_reason"):
+            names = ("ipc_call", "busy_reason")
+            if installer_slice:
+                names += ("wait_for_bootout",)
+            for name in names:
                 match = re.search(rf"{name}\(\) \{{.*?\n\}}\n", source, re.S)
                 assert match
                 functions.append(match.group())
@@ -115,9 +126,14 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
                         'else launchctl bootout TEST_ONLY; fi\n')
             else:
                 start = source.index('if [ "$FORCE" -eq 1 ]; then')
-                end = min(source.index(mark, start) for mark in
-                          ('# 1. Bootout', '# HF_TOKEN resolution order:') if mark in source[start:])
-                gate = source[start:end] + '\nlaunchctl bootout TEST_ONLY\n'
+                bootstrap = source.index('\nlaunchctl bootstrap ', start)
+                end = source.index('\n', bootstrap + 1)
+                target = tmp_path / "installed.plist"
+                staged = tmp_path / "staged.plist"
+                target.write_bytes(b"original")
+                staged.write_bytes(b"replacement")
+                env.update(TARGET=str(target), STAGED_PLIST=str(staged), UID_NUM="123", LABEL="ai.krab.ear.backend")
+                gate = source[start:end] + "\n"
             source = ("set -e\n" + "\n".join(functions)
                       + '\nlog() { printf "%s\\n" "$*"; }\n'
                       + 'fail() { printf "%s\\n" "$*" >&2; exit 1; }\n'
@@ -135,7 +151,14 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
             server.close()
             thread.join(timeout=2)
             assert not thread.is_alive()
-        return result, marker.read_text() if marker.exists() else ""
+        calls = marker.read_text() if marker.exists() else ""
+        if installer_slice:
+            if result.returncode == 0:
+                assert target.read_bytes() == b"replacement"
+                assert calls.splitlines() == ["bootout gui/123/ai.krab.ear.backend", f"bootstrap gui/123 {target}"]
+            else:
+                assert target.read_bytes() == b"original"
+        return result, calls
 
 
 BAD = [
@@ -189,10 +212,13 @@ def test_missing_socket_does_not_prove_idle(tmp_path, script):
 
 def test_installer_gate_is_after_interactive_token_resolution():
     source = (ROOT / "scripts/install_backend_launchagent.command").read_text()
-    prompt = source.index("read -r HF_TOKEN")
-    gate = source.index("while REASON=$(busy_reason)")
-    stop = source.index('launchctl bootout "gui/$UID_NUM/$LABEL"')
-    assert prompt < gate < stop
+    prompt = source.index("  read -rs HF_TOKEN")
+    lint = source.index('\nif ! plutil -lint "$STAGED_PLIST"')
+    gate = source.index("\n  while REASON=$(busy_reason); do")
+    stop = source.index('\n  launchctl bootout "gui/$UID_NUM/$LABEL"')
+    publish = source.index('\nmv -f -- "$STAGED_PLIST" "$TARGET"')
+    bootstrap = source.index('\nlaunchctl bootstrap "gui/$UID_NUM" "$TARGET"')
+    assert prompt < lint < gate < stop < publish < bootstrap
 
 
 @pytest.mark.parametrize("script", SCRIPTS)

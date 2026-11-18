@@ -12,8 +12,8 @@
  `engine.loaded` и `conv.ready` без `sample_rate` действует fallback 16 кГц.
 
  Tap AVAudioNode вызывается в real-time потоке Core Audio, а контроллер изолирован
- главным актором. Поэтому tap читает только nonisolated-зеркало активности, копирует
- сэмплы и передаёт дальнейшую обработку через Task на главный актор.
+ главным актором. Tap передаёт копию сэмплов и поколение сессии через Task.
+ Главный актор проверяет поколение перед обработкой.
 */
 
 @preconcurrency import AVFoundation
@@ -24,9 +24,6 @@ extension ConversationViewController {
     // MARK: - Хранилище аудиосостояния
 
     nonisolated(unsafe) private static var audioHolderKey: UInt8 = 0
-
-    /// Зеркало `isSessionActive` для real-time tap без обращения к главному актору.
-    nonisolated(unsafe) static var _rtSessionActive: Bool = false
 
     private var audioHolder: AudioHolder {
         if let h = objc_getAssociatedObject(self, &ConversationViewController.audioHolderKey) as? AudioHolder {
@@ -57,7 +54,6 @@ extension ConversationViewController {
 
     /// Сбрасывает состояние предыдущей сессии. До ready сборщик намеренно закрыт.
     func prepareAudioNegotiation() {
-        ConversationViewController._rtSessionActive = false
         audioHolder.negotiationReady = false
         audioHolder.sampleRate = ConversationAudioContract.fallbackSampleRate
         audioHolder.captureSampleRate = nil
@@ -237,12 +233,10 @@ extension ConversationViewController {
             return
         }
 
-        // Состояние публикуется только после успешной подготовки форматов. Иначе
-        // следующий ready получил бы ложный активный RT-гейт без живого engine.
+        // Публикуем конфигурацию только после подготовки форматов.
         audioHolder.captureSampleRate = sampleRate
         audioHolder.echoCancellationActive = echoCancellationActive
         audioHolder.playbackQueueEndsAt = .distantPast
-        ConversationViewController._rtSessionActive = isSessionActive
         let generation = conversationGeneration
 
         // Размер tap задан в аппаратных сэмплах; итоговую точность обеспечивает assembler.
@@ -254,7 +248,7 @@ extension ConversationViewController {
         // Явный @Sendable не даёт замыканию унаследовать @MainActor от этого метода.
         let tapBlock: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { [weak self] buffer, _ in
             // Здесь real-time поток: свойства главного актора читать нельзя.
-            guard self != nil, ConversationViewController._rtSessionActive else { return }
+            guard self != nil else { return }
 
             let ratio = targetFormat.sampleRate / max(inputFormat.sampleRate, 1)
             let estimatedFrames = Int(ceil(Double(buffer.frameLength) * ratio)) + 16
@@ -394,7 +388,6 @@ extension ConversationViewController {
         inputNode: AVAudioInputNode,
         player: AVAudioPlayerNode?
     ) {
-        ConversationViewController._rtSessionActive = false
         inputNode.removeTap(onBus: 0)
         player?.stop()
         engine.stop()
@@ -405,8 +398,6 @@ extension ConversationViewController {
 
     /// Остановить захват микрофона и player node.
     func stopAudioCapture(resetSessionState: Bool = true) {
-        // Сначала закрываем RT-гейт, затем разбираем граф.
-        ConversationViewController._rtSessionActive = false
         audioHolder.engine?.inputNode.removeTap(onBus: 0)
         audioHolder.playerNode?.stop()
         audioHolder.playerNode = nil

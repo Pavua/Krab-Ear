@@ -203,26 +203,30 @@ extension HistoryPanelController {
     }
 
     @objc func onUndoLastRecommendedSetup(_ sender: NSButton) {
-        let ipc = ipcClient
         sender.isEnabled = false
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        Task { @MainActor [weak self] in
             guard let self else { return }
+            defer { sender.isEnabled = true }
             var message = "Нет сохранённого снимка для отмены"
             do {
-                let resp = try ipc.call(method: "list_settings_backups", params: ["limit": 10])
+                let resp = try await ipcClient.callAsync(method: "list_settings_backups", params: ["limit": 10])
                 let backups = (resp["result"] as? [String: Any])?["backups"] as? [[String: Any]] ?? []
                 if let last = backups.first(where: { ($0["reason"] as? String) == "before_recommended_setup" }),
                    let backupId = last["backup_id"] as? String {
-                    _ = try ipc.call(method: "restore_settings_backup", params: ["backup_id": backupId])
-                    message = "Настройки возвращены к состоянию до применения"
+                    if let delegate = NSApp.delegate as? AgentAppDelegate {
+                        let operation = delegate.performSettingsMutation("restore_settings_backup",
+                                                                          params: ["backup_id": backupId])
+                        message = await operation.value
+                            ? "Настройки возвращены к состоянию до применения"
+                            : "Не удалось подтвердить восстановление настроек"
+                    } else {
+                        message = "Не удалось восстановить настройки"
+                    }
                 }
             } catch {
                 message = "Не удалось отменить: \(error.localizedDescription)"
             }
-            DispatchQueue.main.async { [weak self] in
-                sender.isEnabled = true
-                self?.recommendedSetupShowToast(message)
-            }
+            self.recommendedSetupShowToast(message)
             self.fetchAndRebuildRecommendedSetupCard(isClaudeDesign: false)
             self.fetchAndRebuildRecommendedSetupCard(isClaudeDesign: true)
         }

@@ -176,6 +176,79 @@ class TestPrivacyDashboardFlags(_PrivacyDashboardBase):
             "id": "set", "method": "set_settings", "params": {key: value}
         })
 
+    def test_privacy_save_discards_buffer_without_swift_stop(self):
+        live = self.service._live_subs
+        live.ingest(bytes(320), 16000, "off", False)
+        self.assertGreater(live.buffer_duration_sec(), 0)
+        self._set_setting("privacy_mode_enabled", True)
+        self.assertEqual(live.buffer_duration_sec(), 0)
+        self._set_setting("privacy_mode_enabled", False)
+        self.assertEqual(live.buffer_duration_sec(), 0)
+
+    def test_pcm_survives_external_tab_save_but_not_external_privacy_cycle(self):
+        store = self.service.store
+        writer = StateStore(store.data_dir)
+        settings = self.service._settings_svc
+        live = self.service._live_subs
+        before = store.read_plaintext_policy_snapshot()
+        epoch = settings.handle_get_settings({})["live_subs_policy_epoch"]
+        chunk = {"audio_chunk": "AAA=", "live_subs_policy_epoch": epoch}
+        self.assertEqual(live.handle_ingest(chunk)["status"], "accepted")
+
+        writer.save_settings({"ui_last_tab": "diagnostics"})
+        after = store.read_plaintext_policy_snapshot()
+        self.assertNotEqual(before.internal_revision, after.internal_revision)
+        self.assertNotEqual(before.fingerprint, after.fingerprint)
+        self.assertEqual(settings.handle_get_settings({})["live_subs_policy_epoch"], epoch)
+        self.assertEqual(live.handle_ingest(chunk)["status"], "accepted")
+
+        writer.save_settings({"privacy_mode_enabled": True})
+        self.assertIsNone(settings.handle_get_settings({})["live_subs_policy_epoch"])
+        writer.save_settings({"privacy_mode_enabled": False})
+        fresh = settings.handle_get_settings({})["live_subs_policy_epoch"]
+        self.assertNotEqual(fresh, epoch)
+        self.assertEqual(live.handle_ingest(chunk)["reason"], "stale_capture_policy")
+        self.assertEqual(live.handle_ingest({**chunk, "live_subs_policy_epoch": fresh})["status"], "accepted")
+        self.assertEqual(live.buffer_duration_sec(), 1 / 16000)
+
+    def test_delayed_pcm_from_before_external_privacy_cycle_is_rejected(self):
+        live = self.service._live_subs
+        settings = self.service._settings_svc
+        epoch = settings.handle_get_settings({}).get("live_subs_policy_epoch")
+        self.assertIsInstance(epoch, str)
+        chunk = {"audio_chunk": "AAA=", "live_subs_policy_epoch": epoch}
+        self.assertEqual(live.handle_ingest(chunk)["status"], "accepted")
+        self._set_setting("privacy_mode_enabled", True)
+        self.assertIsNone(settings.handle_get_settings({})["live_subs_policy_epoch"])
+        self._set_setting("privacy_mode_enabled", False)
+        self.assertTrue(live.handle_ingest(chunk)["skipped"])
+        self.assertTrue(live.handle_ingest({"audio_chunk": "AAA="})["skipped"])
+        self.assertEqual(live.buffer_duration_sec(), 0)
+        fresh = settings.handle_get_settings({})["live_subs_policy_epoch"]
+        self.assertNotEqual(fresh, epoch)
+        self.assertEqual(live.handle_ingest({**chunk, "live_subs_policy_epoch": fresh})["status"], "accepted")
+        for discard in (True, False):
+            self.assertEqual(live.handle_stop({"discard": discard, "live_subs_policy_epoch": epoch})["reason"],
+                             "stale_capture_policy")
+        self.assertGreater(live.buffer_duration_sec(), 0)
+
+    def test_missing_policy_discards_existing_pcm_on_ingest(self):
+        live = self.service._live_subs
+        live.ingest(bytes(320), 16000, "off", False)
+        self.assertGreater(live.buffer_duration_sec(), 0)
+        self.service.store.settings_path.unlink()
+        response = live.handle_ingest({"audio_chunk": "AAA="})
+        self.assertTrue(response.get("skipped"))
+        self.assertEqual(live.buffer_duration_sec(), 0)
+
+    def test_missing_policy_is_unknown_even_after_cache_warmup(self):
+        with self._patch_audit():
+            self.assertIs(self._call()["result"]["privacy_mode"], False)
+            self.service.store.settings_path.unlink()
+            data = self._call()["result"]
+        self.assertIsNone(data["privacy_mode"])
+        self.assertIsNone(data["encryption_enabled"])
+
     def test_privacy_mode_default_false(self):
         with self._patch_audit():
             data = self._call().get("result", self._call())

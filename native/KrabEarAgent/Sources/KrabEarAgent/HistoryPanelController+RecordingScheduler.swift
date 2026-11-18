@@ -152,13 +152,13 @@ extension HistoryPanelController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
 
-            let schedules: [[String: Any]]
+            let schedules: [[String: Any]]?
             do {
                 let resp = try ipc.call(method: "list_scheduled_recordings", params: [:])
                 let result = resp["result"] as? [String: Any]
-                schedules = result?["schedules"] as? [[String: Any]] ?? []
+                schedules = result?["schedules"] as? [[String: Any]]
             } catch {
-                schedules = []
+                schedules = nil
             }
 
             DispatchQueue.main.async { [weak self] in
@@ -169,7 +169,7 @@ extension HistoryPanelController {
     }
 
     @MainActor
-    private func rebuildSchedulerCard(schedules: [[String: Any]]) {
+    private func rebuildSchedulerCard(schedules: [[String: Any]]?) {
         guard let card = objc_getAssociatedObject(self, &RecordingSchedulerAssocKeys.sectionCard) as? NSView else { return }
 
         let isCD = card is CDSettingsCardView
@@ -205,10 +205,11 @@ extension HistoryPanelController {
             contentStack.setCustomSpacing(KrabEarTheme.Metrics.tight, after: subhead)
         }
 
-        let pendingSchedules = schedules.filter { ($0["status"] as? String) == "pending" }
+        let pendingSchedules = schedules?.filter { ($0["status"] as? String) == "pending" } ?? []
 
         if pendingSchedules.isEmpty {
-            let empty = NSTextField(labelWithString: "Нет запланированных записей")
+            let empty = NSTextField(labelWithString: schedules == nil
+                ? "Список запланированных записей недоступен" : "Нет запланированных записей")
             empty.font = KrabEarTheme.Typography.caption
             empty.textColor = KrabEarTheme.Colors.textSecondary
             empty.isEditable = false
@@ -322,7 +323,11 @@ extension HistoryPanelController {
         let startTimeStr = formatter.string(from: date)
         
         let durationRaw = durationField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let durationMin = Int(durationRaw) ?? 30 // 30 минут по умолчанию
+        guard let durationMin = durationRaw.isEmpty ? 30 : Int(durationRaw),
+              (1...120).contains(durationMin) else {
+            BackendToast.shared.show("Введите длительность от 1 до 120 минут", duration: 4.0)
+            return
+        }
         let durationSec = durationMin * 60
         
         let label = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)

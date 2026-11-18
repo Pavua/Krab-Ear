@@ -5,7 +5,7 @@
 cd "$(dirname "$0")"
 
 # Добавляем путь к модулям
-export PYTHONPATH=$PYTHONPATH:$(pwd)/KrabEar
+export PYTHONPATH="$(pwd)/KrabEar${PYTHONPATH:+:$PYTHONPATH}"
 
 # Проверяем наличие venv
 if [ -d ".venv_krab_ear" ]; then

@@ -19,9 +19,54 @@
 */
 
 import Foundation
+import os
 @preconcurrency import ScreenCaptureKit
 import CoreMedia
 import AppKit
+
+struct SystemAudioStream {
+    let identity: ObjectIdentifier
+    let start: @MainActor () async throws -> Void
+    let stop: @MainActor () async -> Void
+}
+
+/// Привязан к одному Start. Каждый отложенный send хранит тот же epoch.
+private final class LiveSubsCapturePermit: Sendable {
+    let lease: ConfirmedPrivacyLease
+    let epoch: String
+    // В deliveryQueue попадают только ID. Отзыв освобождает PCM сразу, даже
+    // когда предыдущий IPC или сама очередь ещё заблокированы.
+    private let pending = OSAllocatedUnfairLock<[UUID: [Int16]]?>(initialState: [:])
+
+    init?(lease: ConfirmedPrivacyLease?) {
+        guard let lease, lease.isValid, let epoch = lease.liveSubsEpoch else { return nil }
+        self.lease = lease
+        self.epoch = epoch
+    }
+
+    var isValid: Bool {
+        guard lease.isValid else { revoke(); return false }
+        return pending.withLock { $0 != nil }
+    }
+
+    func enqueue(_ samples: [Int16]) -> UUID? {
+        pending.withLock { chunks in
+            guard chunks != nil, lease.isValid else { chunks = nil; return nil }
+            let id = UUID()
+            chunks?[id] = samples
+            return id
+        }
+    }
+
+    func take(_ id: UUID) -> [Int16]? {
+        pending.withLock { chunks in
+            guard lease.isValid else { chunks = nil; return nil }
+            return chunks?.removeValue(forKey: id)
+        }
+    }
+
+    func revoke() { pending.withLock { $0 = nil } }
+}
 
 @MainActor
 final class SystemAudioCapture: NSObject {
@@ -37,9 +82,15 @@ final class SystemAudioCapture: NSObject {
     // MARK: - State
 
     private(set) var isCapturing = false
-    private var stream: SCStream?
-
-    private let ipcClient: IPCClient
+    private var stream: SystemAudioStream?
+    private let makeStream: @MainActor (SystemAudioCapture) async throws -> SystemAudioStream?
+    private var startTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
+    private var captureGeneration: UUID?
+    private var capturePermit: LiveSubsCapturePermit?
+    private nonisolated let intake = OSAllocatedUnfairLock<(ObjectIdentifier, LiveSubsCapturePermit)?>(initialState: nil)
+    private let deliveryQueue: DispatchQueue
+    private let deliver: @Sendable (String, [String: Any]) -> Void
     private let logger = AgentLogger.shared
 
     /// Флаг для однократной отправки breadcrumb при первом аудио-сэмпле.
@@ -59,84 +110,98 @@ final class SystemAudioCapture: NSObject {
 
     // MARK: - Init
 
-    init(ipcClient: IPCClient) {
-        self.ipcClient = ipcClient
+    init(
+        ipcClient: IPCClient,
+        deliveryQueue: DispatchQueue = DispatchQueue(label: "krabear.sysaudio.ipc", qos: .utility),
+        deliver: (@Sendable (String, [String: Any]) -> Void)? = nil,
+        makeStream: (@MainActor (SystemAudioCapture) async throws -> SystemAudioStream?)? = nil
+    ) {
+        self.deliveryQueue = deliveryQueue
+        self.deliver = deliver ?? { method, params in _ = try? ipcClient.call(method: method, params: params) }
+        self.makeStream = makeStream ?? { try await $0.makeScreenCaptureStream() }
         super.init()
     }
 
     // MARK: - Public API
 
     /// Запускает захват системного аудио. Асинхронный — SCStream конфигурируется через async API.
-    func start() {
-        guard !isCapturing else { return }
+    @discardableResult
+    func start(lease: ConfirmedPrivacyLease?) -> Bool {
+        guard startTask == nil, stopTask == nil, !isCapturing,
+              let permit = LiveSubsCapturePermit(lease: lease) else { return false }
+        let generation = UUID()
+        captureGeneration = generation
+        capturePermit = permit
+        didReceiveFirstSample = false
         SentryConfig.recordBreadcrumb(category: "live_subs", message: "capture.start_called")
-        Task { @MainActor in
-            await startCapture()
+        startTask = Task { @MainActor in
+            defer {
+                startTask = nil
+                if !isCapturing && captureGeneration == generation {
+                    captureGeneration = nil
+                }
+            }
+            guard !Task.isCancelled else { return }
+            await startCapture(generation: generation)
         }
+        return true
     }
 
-    /// Останавливает захват и отправляет flush на бэкенд.
-    func stop() {
-        guard isCapturing else { return }
+    /// Stop обычной сессии сохраняет последний чанк. Privacy сбрасывает буфер.
+    func stop(flush: Bool = true) {
+        intake.withLock { $0 = nil }
+        if !flush { capturePermit?.revoke() }
+        guard captureGeneration != nil else { return }
         SentryConfig.recordBreadcrumb(category: "live_subs", message: "capture.stop_called")
+        captureGeneration = nil
+        startTask?.cancel()
+        let wasCapturing = isCapturing
         isCapturing = false
         flushTimer?.invalidate()
         flushTimer = nil
 
-        // flush остатка буфера
-        if !ringBuffer.isEmpty {
+        if flush && wasCapturing {
             sendChunk(isFinal: true)
         }
-        let capturedStream = stream
-        stream = nil
-        Task {
-            try? await capturedStream?.stopCapture()
+        ringBuffer.removeAll()
+
+        if let capturedStream = stream {
+            stream = nil
+            stopTask = Task { @MainActor in
+                defer { stopTask = nil }
+                await capturedStream.stop()
+            }
         }
         logger.info("SystemAudioCapture: остановлен")
 
-        let client = ipcClient
-        DispatchQueue.global(qos: .utility).async {
-            _ = try? client.call(method: "live_subs_stop", params: [:])
+        if wasCapturing, let permit = capturePermit {
+            let deliver = deliver
+            deliveryQueue.async {
+                deliver("live_subs_stop", ["discard": !permit.isValid, "live_subs_policy_epoch": permit.epoch])
+            }
         }
     }
 
     // MARK: - Private: start pipeline
 
-    private func startCapture() async {
+    private func startCapture(generation: UUID) async {
         do {
-            // Получаем список shareable content (нужен для SCStreamConfiguration)
-            let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
-            SentryConfig.recordBreadcrumb(
-                category: "live_subs",
-                message: "screencapture.permission_ok",
-                data: ["displays_count": content.displays.count]
-            )
-
-            let config = SCStreamConfiguration()
-            config.capturesAudio = true
-            config.excludesCurrentProcessAudio = true
-            // minimumFrameInterval = высокое число → видео нам не нужно
-            config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
-            config.queueDepth = 5
-
-            // Берём первый дисплей как источник (аудио от всей системы)
-            guard let display = content.displays.first else {
-                logger.warn("SystemAudioCapture: дисплей не найден, захват аудио невозможен")
-                SentryConfig.recordBreadcrumb(
-                    category: "live_subs",
-                    message: "stream.error",
-                    data: ["error": "no_display_found"]
-                )
+            guard let permit = capturePermit, permit.isValid, let newStream = try await makeStream(self),
+                  captureGeneration == generation, permit.isValid, !Task.isCancelled else { return }
+            do {
+                try await newStream.start()
+            } catch {
+                await Task { @MainActor in await newStream.stop() }.value
+                throw error
+            }
+            guard captureGeneration == generation, permit.isValid, !Task.isCancelled else {
+                // SDK может завершить Start после Stop. Дожидаемся закрытия
+                // позднего потока, прежде чем разрешить следующий Start.
+                await Task { @MainActor in await newStream.stop() }.value
                 return
             }
-            let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
-
-            let newStream = SCStream(filter: filter, configuration: config, delegate: nil)
-            try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "krabear.sysaudio", qos: .userInteractive))
-            SentryConfig.recordBreadcrumb(category: "live_subs", message: "stream.initialized")
-
-            try await newStream.startCapture()
             stream = newStream
+            intake.withLock { $0 = (newStream.identity, permit) }
             isCapturing = true
             logger.info("SystemAudioCapture: захват запущен")
             SentryConfig.recordBreadcrumb(
@@ -149,12 +214,12 @@ final class SystemAudioCapture: NSObject {
             flushTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
                 guard let self else { return }
                 Task { @MainActor in
-                    if !self.ringBuffer.isEmpty {
-                        self.sendChunk(isFinal: false)
-                    }
+                    guard self.isCapturing, self.captureGeneration == generation else { return }
+                    self.sendChunk(isFinal: false)
                 }
             }
         } catch {
+            guard captureGeneration == generation else { return }
             logger.error("SystemAudioCapture: ошибка запуска — \(error.localizedDescription)")
             SentryConfig.recordBreadcrumb(
                 category: "live_subs",
@@ -164,30 +229,68 @@ final class SystemAudioCapture: NSObject {
         }
     }
 
+    private func makeScreenCaptureStream() async throws -> SystemAudioStream? {
+        // Получаем список shareable content (нужен для SCStreamConfiguration)
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        SentryConfig.recordBreadcrumb(
+            category: "live_subs",
+            message: "screencapture.permission_ok",
+            data: ["displays_count": content.displays.count]
+        )
+
+        let config = SCStreamConfiguration()
+        config.capturesAudio = true
+        config.excludesCurrentProcessAudio = true
+        // minimumFrameInterval = высокое число → видео нам не нужно
+        config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
+        config.queueDepth = 5
+
+        // Берём первый дисплей как источник (аудио от всей системы)
+        guard let display = content.displays.first else {
+            logger.warn("SystemAudioCapture: дисплей не найден, захват аудио невозможен")
+            SentryConfig.recordBreadcrumb(
+                category: "live_subs",
+                message: "stream.error",
+                data: ["error": "no_display_found"]
+            )
+            return nil
+        }
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+
+        let newStream = SCStream(filter: filter, configuration: config, delegate: nil)
+        try newStream.addStreamOutput(self, type: .audio, sampleHandlerQueue: DispatchQueue(label: "krabear.sysaudio", qos: .userInteractive))
+        SentryConfig.recordBreadcrumb(category: "live_subs", message: "stream.initialized")
+
+        return SystemAudioStream(
+            identity: ObjectIdentifier(newStream),
+            start: { try await newStream.startCapture() },
+            stop: { try? await newStream.stopCapture() }
+        )
+    }
+
     // MARK: - Private: send IPC chunk
 
     private func sendChunk(isFinal: Bool) {
         guard !ringBuffer.isEmpty else { return }
-        let samples = ringBuffer
+        guard let permit = capturePermit, let id = permit.enqueue(ringBuffer) else {
+            ringBuffer.removeAll()
+            return
+        }
         ringBuffer = []
 
-        let data = samples.withUnsafeBytes { Data($0) }
-        let base64 = data.base64EncodedString()
         let sr = nativeSampleRate
         let lang = targetLang
-        let finalFlag = isFinal
-        let client = ipcClient
-
-        DispatchQueue.global(qos: .utility).async {
-            _ = try? client.call(
-                method: "live_subs_ingest",
-                params: [
-                    "audio_chunk": base64,
-                    "sample_rate": sr,
-                    "target_lang": lang,
-                    "is_final": finalFlag,
-                ]
-            )
+        let deliver = deliver
+        deliveryQueue.async {
+            guard let samples = permit.take(id) else { return }
+            let data = samples.withUnsafeBytes { Data($0) }
+            let params: [String: Any] = [
+                "audio_chunk": data.base64EncodedString(), "sample_rate": sr,
+                "target_lang": lang, "is_final": isFinal,
+                "live_subs_policy_epoch": permit.epoch,
+            ]
+            guard permit.isValid else { return }
+            deliver("live_subs_ingest", params)
         }
     }
 
@@ -251,10 +354,18 @@ final class SystemAudioCapture: NSObject {
 extension SystemAudioCapture: SCStreamOutput {
     nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio else { return }
-        guard let result = extractSamples(from: sampleBuffer) else { return }
-        let samples = result.samples
-        let sr = result.sampleRate
-        Task { @MainActor in
+        receiveSamples(from: ObjectIdentifier(stream)) { extractSamples(from: sampleBuffer) }
+    }
+
+    /// Отсев до копирования PCM на очереди ScreenCaptureKit и после hop на AppKit.
+    @discardableResult
+    nonisolated func receiveSamples(
+        from streamID: ObjectIdentifier, extract: () -> (samples: [Int16], sampleRate: Int)?
+    ) -> Task<Void, Never>? {
+        guard let (id, permit) = intake.withLock({ $0 }), id == streamID, permit.isValid,
+              let (samples, sr) = extract() else { return nil }
+        return Task { @MainActor in
+            guard self.isCapturing, self.capturePermit === permit, permit.isValid else { return }
             self.nativeSampleRate = sr
             self.ringBuffer.append(contentsOf: samples)
             // Первый аудио-сэмпл — однократный breadcrumb для диагностики

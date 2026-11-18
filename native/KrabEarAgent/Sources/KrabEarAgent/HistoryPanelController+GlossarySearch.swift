@@ -248,12 +248,7 @@ private final class GlossaryDeleteTarget: NSObject {
                     controller.showInfoAlert(title: "Глоссарий", body: "Не удалось удалить термин.")
                     return
                 }
-                var nextPayload = controller.settingsProvider().toPayload()
-                var glossary = controller.settingsProvider().translationGlossary
-                glossary.removeValue(forKey: src)
-                nextPayload["translation_glossary"] = glossary
-                _ = controller.settingsUpdater(nextPayload)
-                controller.syncSettingsControls()
+                (NSApp.delegate as? AgentAppDelegate)?.enqueueSettingsRefresh()
             }
         }
     }

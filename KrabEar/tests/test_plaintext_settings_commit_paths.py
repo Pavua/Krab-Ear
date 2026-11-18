@@ -7,7 +7,7 @@ import pytest
 
 from backend.integrity_checker import CheckResult, IntegrityChecker, IntegrityReport
 from backend.models import DEFAULT_SETTINGS
-from backend.plaintext_export_authorization import POLICY_REVISION_KEY, PolicyState
+from backend.plaintext_export_authorization import CAPTURE_EPOCH_BINDING_KEY, POLICY_REVISION_KEY, PolicyState
 from backend.settings_service import SettingsService
 from backend.state_store import StateStore, StateStoreSettingsCorruptError
 
@@ -166,6 +166,71 @@ def test_supported_paths_replace_incoming_revision(store, tmp_path, path):
     snapshot = store.read_plaintext_policy_snapshot()
     assert snapshot.state is PolicyState.KNOWN_OFF
     assert snapshot.internal_revision not in (previous, incoming[POLICY_REVISION_KEY])
+
+
+def test_legacy_commit_adopts_current_revision_without_reviving_an_old_epoch(store):
+    raw = {**FLAGS, POLICY_REVISION_KEY: 'a' * 32}
+    store.settings_path.write_text(json.dumps(raw))
+    assert store.read_plaintext_policy_snapshot().live_subs_policy_epoch == 'a' * 32
+    store.save_settings({"ui_last_tab": "diagnostics"})
+    stable = store.read_plaintext_policy_snapshot().live_subs_policy_epoch
+    assert stable == 'a' * 32
+
+    # Старый writer копирует дополнительные поля и обновляет только export revision.
+    old_writer = store.load_settings()
+    for privacy, revision in ((True, 'b' * 32), (False, 'c' * 32)):
+        old_writer.update(privacy_mode_enabled=privacy)
+        old_writer[POLICY_REVISION_KEY] = revision
+        store.settings_path.write_text(json.dumps(old_writer))
+    assert store.read_plaintext_policy_snapshot().live_subs_policy_epoch == 'c' * 32
+    store.save_settings({"ui_last_tab": "history"})
+    assert store.read_plaintext_policy_snapshot().live_subs_policy_epoch == 'c' * 32
+
+
+@pytest.mark.parametrize('operation', ['set', 'import', 'restore', 'history_restore', 'repair_unknown'])
+def test_epoch_in_saved_settings_cannot_reauthorize_old_capture(store, tmp_path, operation):
+    svc = make_service(store)
+    store.save_settings({"ui_last_tab": "diagnostics"})
+    before = store.read_plaintext_policy_snapshot().live_subs_policy_epoch
+    original = store.load_settings()
+    assert original[CAPTURE_EPOCH_BINDING_KEY]["epoch"] == before
+    store.save_settings({"privacy_mode_enabled": True})
+    store.save_settings({"privacy_mode_enabled": False})
+    current = store.read_plaintext_policy_snapshot().live_subs_policy_epoch
+    if operation == 'set':
+        svc.handle_set_settings(original)
+    elif operation == 'import':
+        source = tmp_path / 'import.json'
+        source.write_text(json.dumps(original))
+        svc.handle_import_settings({'file': str(source)})
+    elif operation == 'history_restore':
+        from backend.history_service import HistoryService
+        source = store.data_dir / 'backups' / 'backup_fixture'
+        source.mkdir(parents=True)
+        (source / 'history.ndjson').write_text('')
+        (source / 'settings.json').write_text(json.dumps(original))
+        HistoryService(store).handle_restore_history({'backup_path': str(source), 'restore_settings': True})
+    elif operation == 'repair_unknown':
+        store.settings_path.write_text('{')
+        assert store.read_plaintext_policy_snapshot().live_subs_policy_epoch is None
+        store.save_settings(original, validated_repair=True)
+    else:
+        svc._backup.restore_backup.return_value = original
+        svc.handle_restore_settings_backup({'backup_id': 'fixture'})
+
+    epoch = store.read_plaintext_policy_snapshot().live_subs_policy_epoch
+    assert epoch and epoch not in (current, before)
+
+
+def test_partial_ipc_cannot_replace_capture_binding(store):
+    original = store.read_plaintext_policy_snapshot()
+    forged_epoch = 'f' * 32
+    make_service(store).handle_set_settings({
+        "ui_last_tab": "diagnostics",
+        CAPTURE_EPOCH_BINDING_KEY: {"revision": original.internal_revision, "epoch": forged_epoch},
+    })
+    after = store.read_plaintext_policy_snapshot()
+    assert after.live_subs_policy_epoch == original.live_subs_policy_epoch != forged_epoch
 
 
 @pytest.mark.parametrize('inherited', ['history.ndjson', 'backups/restored.json', 'vocabulary.txt'])

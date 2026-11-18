@@ -4,6 +4,11 @@ import Foundation
 @main
 struct PlaintextExportIntegrationHarness {
     @MainActor static func main() async {
+        if CommandLine.arguments.count == 3, CommandLine.arguments[2] == "live-subs" {
+            do { try checkDelayedAudio(socket: CommandLine.arguments[1]) }
+            catch { exit(1) }
+            return
+        }
         if CommandLine.arguments.count == 6, CommandLine.arguments[2] == "backend" {
             await runBackend()
             return
@@ -40,6 +45,30 @@ struct PlaintextExportIntegrationHarness {
             print("{\"failed\":true}")
             exit(1)
         }
+    }
+
+    /// Два независимых клиента и PCM без микрофона. Бэкенд работает во временном профиле.
+    static func checkDelayedAudio(socket: String) throws {
+        let capture = IPCClient(socketPath: socket)
+        let control = IPCClient(socketPath: socket)
+        func result(_ client: IPCClient, _ method: String, _ params: [String: Any] = [:]) throws -> [String: Any] {
+            let envelope = try client.call(method: method, params: params)
+            guard envelope["ok"] as? Bool == true, let data = envelope["result"] as? [String: Any] else { exit(1) }
+            return data
+        }
+        guard let original = try result(capture, "get_settings")["live_subs_policy_epoch"] as? String else { exit(1) }
+        let buffered: [String: Any] = ["audio_chunk": "AAA=", "live_subs_policy_epoch": original]
+        guard try result(capture, "live_subs_ingest", buffered)["status"] as? String == "accepted" else { exit(1) }
+        for enabled in [true, false] {
+            let saved = try result(control, "set_settings", ["privacy_mode_enabled": enabled])
+            guard saved["privacy_mode_enabled"] as? Bool == enabled else { exit(1) }
+        }
+        guard try result(capture, "live_subs_ingest", buffered)["reason"] as? String == "stale_capture_policy",
+              let fresh = try result(capture, "get_settings")["live_subs_policy_epoch"] as? String,
+              fresh != original,
+              try result(capture, "live_subs_ingest", ["audio_chunk": "AAA=", "live_subs_policy_epoch": fresh])["status"] as? String == "accepted"
+        else { exit(1) }
+        _ = try result(capture, "live_subs_stop", ["discard": true])
     }
 
     /// BackendTicket/context остаются в RAM Swift. stdin barrier перед perform

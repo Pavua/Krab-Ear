@@ -10,11 +10,20 @@ import math
 import os
 import re
 import threading
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger("KrabEar.Backend.TranscriptWriter")
+
+
+def history_markdown_suffix(item_id: str) -> str:
+    """Суффикс с полным ID истории для файлов обеих веток автосохранения."""
+    try:
+        return f".krab-ear-{uuid.UUID(item_id)}.md"
+    except (AttributeError, TypeError, ValueError):
+        return ""
 
 
 def _sanitize_md_body(text: str) -> str:
@@ -230,23 +239,28 @@ class TranscriptWriter:
 
         ts = item.get("ts")
         try:
-            date_str = datetime.fromisoformat(ts).strftime("%Y-%m-%d") if ts else datetime.now().strftime("%Y-%m-%d")
+            dt = datetime.fromisoformat(ts) if ts else datetime.now()
         except (ValueError, TypeError):
-            date_str = datetime.now().strftime("%Y-%m-%d")
+            dt = datetime.now()
 
         content = cls.build_content(item)
+        suffix = history_markdown_suffix(item.get("id", ""))
 
         with cls._write_lock:
-            file_path = cls._reserve_path(output_dir, date_str, ts)
-            try:
+            if suffix:
+                file_path = output_dir / f"{dt:%Y-%m-%d}-Транскрибация-{dt:%H%M%S}{suffix}"
                 cls._atomic_write(file_path, content)
-            except Exception:
-                # Снимаем резервацию при ошибке записи
+            else:
+                file_path = cls._reserve_path(output_dir, dt.strftime("%Y-%m-%d"), ts)
                 try:
-                    file_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+                    cls._atomic_write(file_path, content)
+                except Exception:
+                    # Снимаем резервацию при ошибке записи
+                    try:
+                        file_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    raise
 
         logger.info("Транскрибация сохранена: %s", file_path)
         return file_path
