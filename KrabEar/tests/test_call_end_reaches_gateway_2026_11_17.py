@@ -225,3 +225,92 @@ def test_hangup_rejects_ids_that_would_change_the_request_path(bad):
     assert provider.hangup(bad)["ok"] is False
     assert provider.get_call_status(bad)["ok"] is False
     assert client.calls == []
+
+
+# --- сверка журнала со шлюзом при опросе -------------------------------------------------------
+#
+# Журнал никто не продвигал: если собеседник клал трубку сам, сессия навсегда оставалась
+# `dialing`, а UI продолжал показывать набор и опрашивать. Шлюз заканчивает сессию статусами
+# `stopped` / `failed` (app/main.py, `status_values`); одна сессия приходит голым SessionState.
+
+def _state(status):
+    return _ok({"id": _GW, "status": status})
+
+
+@pytest.mark.parametrize("gateway_status,journal_status", [("stopped", "completed"), ("failed", "failed")])
+def test_poll_closes_the_journal_when_the_gateway_session_is_over(tmp_path, gateway_status, journal_status):
+    service, client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("GET", f"/v1/sessions/{_GW}"): _state(gateway_status),
+    })
+    sid = _start(service)
+
+    polled = service.handle_call_session_get({"id": sid})
+
+    assert polled["status"] == journal_status
+    assert polled["end_reason"] == f"gateway_{gateway_status}"
+    assert _hangups(client) == [], "сверка только читает шлюз, линию не трогает"
+
+
+def test_poll_keeps_a_live_call_live(tmp_path):
+    service, _client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("GET", f"/v1/sessions/{_GW}"): _state("running"),
+    })
+    sid = _start(service)
+    assert service.handle_call_session_get({"id": sid})["status"] == "dialing"
+
+
+@pytest.mark.parametrize("answer", [
+    {"ok": False, "error": "http_404:{\"detail\":\"session_not_found\"}"},
+    {"ok": False, "error": "http_502:bad gateway"},
+    {"ok": False, "error": "timed out"},
+    _ok({"id": _GW}),
+])
+def test_poll_never_closes_the_journal_on_an_unclear_gateway_answer(tmp_path, answer):
+    """Закрыть журнал при живой линии хуже, чем опоздать: «не знаю» не значит «звонка нет»."""
+    service, _client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("GET", f"/v1/sessions/{_GW}"): answer,
+    })
+    sid = _start(service)
+    assert service.handle_call_session_get({"id": sid})["status"] == "dialing"
+
+
+def test_poll_survives_a_gateway_exception(tmp_path):
+    def boom(_path):
+        raise RuntimeError("шлюз упал")
+
+    service, _client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("GET", f"/v1/sessions/{_GW}"): boom,
+    })
+    sid = _start(service)
+    assert service.handle_call_session_get({"id": sid})["status"] == "dialing"
+
+
+def test_poll_asks_the_gateway_at_most_once_per_interval(tmp_path):
+    service, client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("GET", f"/v1/sessions/{_GW}"): _state("running"),
+    })
+    sid = _start(service)
+    for _ in range(5):
+        service.handle_call_session_get({"id": sid})
+    assert len([c for c in client.calls if c[0] == "GET"]) == 1
+
+
+def test_poll_of_a_finished_or_lineless_session_never_touches_the_gateway(tmp_path):
+    service, client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("POST", f"/v1/telephony/calls/{_GW}/hangup"): _ok({"ok": True}),
+        ("GET", f"/v1/sessions/{_GW}"): _state("stopped"),
+    })
+    sid = _start(service)
+    service.handle_call_session_end({"id": sid, "reason": "completed"})
+    journal_only = service.handle_call_session_create(
+        {"phone": "+10000000001", "goal_text": "тест"})["session_id"]
+
+    assert service.handle_call_session_get({"id": sid})["end_reason"] == "completed"
+    assert service.handle_call_session_get({"id": journal_only})["status"] == "idle"
+    assert [c for c in client.calls if c[0] == "GET"] == []

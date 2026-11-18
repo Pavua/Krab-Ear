@@ -28,6 +28,14 @@ logger = logging.getLogger("KrabEar.Backend.CallSession")
 
 _REDACTED = "REDACTED"
 
+#: Как часто опрос статуса сверяет журнал со шлюзом (на одну сессию). UI опрашивает чаще,
+#: а каждый запрос к шлюзу — синхронный HTTP внутри IPC-обработчика.
+_GATEWAY_RECONCILE_MIN_INTERVAL_SEC = 3.0
+#: Терминальные статусы сессии Voice Gateway → чем закрывать журнал (False = completed).
+_GATEWAY_TERMINAL_STATUSES = {"stopped": False, "failed": True}
+#: Потолок словаря отметок сверки: записи живут только у незакрытых сессий.
+_GATEWAY_RECONCILE_MAX_TRACKED = 256
+
 
 class CallSessionService:
     """Обработчики IPC для управления звонковыми сессиями."""
@@ -56,6 +64,9 @@ class CallSessionService:
         # Not persisted — resets to True (bot active) when the process restarts.
         self._bot_active: dict[str, bool] = {}
         self._bot_active_lock = threading.Lock()
+        # Когда каждую сессию последний раз сверяли со шлюзом (monotonic).
+        self._gateway_checked_at: dict[str, float] = {}
+        self._gateway_checked_lock = threading.Lock()
 
     @staticmethod
     def _scrub_session(raw: dict[str, Any]) -> dict[str, Any]:
@@ -222,6 +233,8 @@ class CallSessionService:
         session = self._store.get(session_id)
         if session is None:
             raise KeyError(f"Сессия не найдена: {session_id!r}")
+        if self._reconcile_with_gateway(session):
+            session = self._store.get(session_id) or session
         raw = session.to_dict()
         if self._settings_get("privacy_mode_enabled", False):
             return self._scrub_session(raw)
@@ -330,6 +343,52 @@ class CallSessionService:
             ts=ts,
         )
         return {"session_id": session.id, "transcript_count": len(session.transcript_history)}
+
+    def _reconcile_with_gateway(self, session: Any) -> bool:
+        """Закрывает журнал, если шлюз уже закончил эту линию. Возвращает True, если закрыл.
+
+        Журнал сам не узнаёт, что собеседник положил трубку: без сверки сессия навсегда
+        оставалась `dialing`. Сверка только читает шлюз и закрывает журнал ИСКЛЮЧИТЕЛЬНО по
+        явному терминальному статусу: 404, таймаут, сбой и ответ без статуса значат «не знаю»,
+        а не «звонка нет» — закрыть журнал при живой линии хуже, чем опоздать.
+        """
+        gateway_session_id = getattr(session, "gateway_session_id", "")
+        if not isinstance(gateway_session_id, str) or not gateway_session_id:
+            return False
+        if str(session.status) in {"completed", "failed"}:
+            with self._gateway_checked_lock:
+                self._gateway_checked_at.pop(session.id, None)
+            return False
+        now = time.monotonic()
+        with self._gateway_checked_lock:
+            last = self._gateway_checked_at.get(session.id)
+            if last is not None and now - last < _GATEWAY_RECONCILE_MIN_INTERVAL_SEC:
+                return False
+            if len(self._gateway_checked_at) >= _GATEWAY_RECONCILE_MAX_TRACKED:
+                self._gateway_checked_at.clear()
+            self._gateway_checked_at[session.id] = now
+        try:
+            provider = self._get_provider_fn(None) if self._get_provider_fn is not None else None
+            if provider is None:
+                return False
+            state = provider.get_call_status(gateway_session_id) or {}
+            if not state.get("ok"):
+                return False
+            gateway_status = str(state.get("status") or "").strip().lower()
+            if gateway_status not in _GATEWAY_TERMINAL_STATUSES:
+                return False
+            mark = (self._store.mark_failed if _GATEWAY_TERMINAL_STATUSES[gateway_status]
+                    else self._store.mark_completed)
+            # Хранилище ПРИСВАИВАЕТ стоимость: передаём уже накопленную, чтобы её не обнулить.
+            mark(session_id=session.id, end_reason=f"gateway_{gateway_status}",
+                 cost_usd=float(getattr(session, "cost_usd", 0.0) or 0.0), from_any_live_state=True)
+        except Exception as exc:  # noqa: BLE001 — сверка не смеет ломать чтение журнала
+            logger.warning("call_session_get: сверка со шлюзом не удалась (%s)", type(exc).__name__)
+            return False
+        logger.info("call_session_get: шлюз закончил линию (%s), журнал закрыт", gateway_status)
+        with self._gateway_checked_lock:
+            self._gateway_checked_at.pop(session.id, None)
+        return True
 
     def _hangup_gateway_call(self, session_id: str) -> dict[str, Any] | None:
         """Кладёт звонок в шлюзе для сессии, начатой через call_start.
