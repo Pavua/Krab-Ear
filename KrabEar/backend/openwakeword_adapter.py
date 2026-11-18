@@ -90,7 +90,7 @@ class OpenWakeWordAdapter:
         settings_get: Optional[Callable[[str, Any], Any]] = None,
         is_recording: Optional[Callable[[], bool]] = None,
         is_start_blocked: Optional[Callable[[], bool]] = None,
-        read_privacy: Optional[Callable[[], bool | None]] = None,
+        read_privacy_revision: Optional[Callable[[], str | None]] = None,
     ) -> None:
         self._data_dir = Path(data_dir)
         # 2026-08-01 (F6): активная диктовка запрещает открывать второй тап.
@@ -99,7 +99,7 @@ class OpenWakeWordAdapter:
         # is_start_blocked (W7): worker рекордера ещё жив после stop().
         self._is_recording = is_recording
         self._is_start_blocked = is_start_blocked
-        self._read_privacy = read_privacy
+        self._read_privacy_revision = read_privacy_revision
         self._custom_dir = self._data_dir / _CUSTOM_MODELS_DIR
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -510,14 +510,21 @@ class OpenWakeWordAdapter:
         self._last_any_chunk_ts = None
         self._wedged = False
 
-    def _record_detection(self, model_name: str, score: float) -> None:
-        """Фиксирует последнюю детекцию для wake_word_status (IPC-поллинг)."""
+    def _record_detection(
+        self, model_name: str, score: float, *, capture_revision: str | None = None,
+    ) -> bool:
+        """Публикует детекцию только для текущей ревизии политики захвата."""
         with self._lock:
+            revision = self._privacy_revision()
+            if revision is None or (capture_revision is not None and revision != capture_revision):
+                return False
             self._last_detection = {
+                "_privacy_revision": revision,
                 "model": model_name,
                 "score": float(score),
                 "ts": time.monotonic(),
             }
+            return True
 
     def _guarded_read_enabled(self) -> bool:
         """Killswitch guarded read (спека §9): False → прежний блокирующий путь."""
@@ -540,18 +547,20 @@ class OpenWakeWordAdapter:
         except Exception:
             return DEFAULT_STARVE_SEC
 
-    def _privacy_blocked(self) -> bool:
-        """True если privacy mode включён — держать микрофон wake word нельзя.
-
-        Если настройки недоступны, запуск и продолжение захвата запрещены.
-        """
+    def _privacy_revision(self) -> str | None:
+        """Ревизия разрешённого захвата. Ошибка чтения закрывает микрофон."""
         try:
-            if self._read_privacy is not None:
-                return self._read_privacy() is not False
-            return bool(self._settings_get("privacy_mode_enabled", False))
+            if self._read_privacy_revision is not None:
+                return self._read_privacy_revision()
+            # Совместимость с адаптерами без версионированного провайдера.
+            allowed = self._settings_get("privacy_mode_enabled", False) is False
+            return "unversioned" if allowed else None
         except Exception:
             logger.warning("OpenWakeWordAdapter: privacy settings недоступны — микрофон заблокирован")
-            return True
+            return None
+
+    def _privacy_blocked(self) -> bool:
+        return self._privacy_revision() is None
 
     # ------------------------------------------------------------------
     # IPC-обработчики
@@ -709,19 +718,22 @@ class OpenWakeWordAdapter:
         ВНИМАНИЕ: self._lock — обычный Lock; is_running()/active_model() сами
         берут его, поэтому вызываются ВНЕ with-блока (иначе deadlock).
         """
-        with self._lock:
-            last = dict(self._last_detection) if self._last_detection else None
         hb = self.heartbeat()
-        return {
+        status = {
             "ok": True,
             "running": self.is_running(),
             "active_model": self.active_model(),
             "engine_available": self._oww_available,
-            "last_detection": last,
             "last_chunk_ts": hb["last_chunk_ts"],
             "listen_started_ts": hb["listen_started_ts"],
             "wedged": self.is_wedged(),
         }
+        with self._lock:
+            last = dict(self._last_detection) if self._last_detection else None
+        if last is not None and last.pop("_privacy_revision") != self._privacy_revision():
+            last = None
+        status["last_detection"] = last
+        return status
 
     # ------------------------------------------------------------------
     # Внутренние
@@ -917,9 +929,15 @@ class OpenWakeWordAdapter:
                 self._cleanup_session_after_loop_exit(generation)
                 return
 
-        if self._privacy_blocked():
+        capture_revision = self._privacy_revision()
+        if capture_revision is None:
             self._cleanup_session_after_loop_exit(generation)
             return
+
+        # Смена ревизии завершает сессию целиком: ring buffer и модель могли
+        # накопить PCM за время краткого ON→OFF. Повторный start создаёт оба заново.
+        def privacy_changed() -> bool:
+            return self._privacy_revision() != capture_revision
 
         try:
             with sd.InputStream(
@@ -943,7 +961,7 @@ class OpenWakeWordAdapter:
                                 poll_sec=self._read_poll_sec(),
                                 starve_sec=self._stream_starve_sec(),
                                 is_recording=self._is_recording,
-                                cancel_wait=self._privacy_blocked,
+                                cancel_wait=privacy_changed,
                             ):
                                 break  # попросили остановиться
                             # Кадры пришли → стрим жив. Лестницу голодания
@@ -970,7 +988,7 @@ class OpenWakeWordAdapter:
                             )
                             break
                     # Политика могла измениться во время ожидания кадров.
-                    if self._privacy_blocked():
+                    if privacy_changed():
                         break
                     with self._lock:
                         if self._generation == generation:
@@ -983,7 +1001,7 @@ class OpenWakeWordAdapter:
                         with self._lock:
                             if self._generation == generation:
                                 self._last_read_completed_ts = time.monotonic()
-                    if self._privacy_blocked():
+                    if privacy_changed():
                         break
                     # openwakeword.Model.predict() требует numpy.ndarray —
                     # НЕ list (см. KRAB-EAR-BACKEND-1C/1D). sounddevice уже
@@ -1003,17 +1021,20 @@ class OpenWakeWordAdapter:
                         if flat.any():
                             self._last_chunk_ts = self._last_any_chunk_ts
 
-                    if oww is None or self._privacy_blocked():
+                    if oww is None or privacy_changed():
                         break
 
                     prediction = oww.predict(flat)
+                    if privacy_changed():
+                        break
                     for mdl_name, score in prediction.items():
                         if score >= threshold:
-                            if self._privacy_blocked():
+                            if not self._record_detection(
+                                mdl_name, float(score), capture_revision=capture_revision,
+                            ):
                                 return
-                            self._record_detection(mdl_name, float(score))
                             if self._on_detected is not None:
-                                if self._privacy_blocked():
+                                if privacy_changed():
                                     return
                                 self._on_detected(mdl_name, float(score))
 

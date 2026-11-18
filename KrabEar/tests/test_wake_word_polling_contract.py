@@ -150,6 +150,10 @@ class TestServiceWiringSourceContract(unittest.TestCase):
         self.assertTrue(found, "конструкция OpenWakeWordAdapter не найдена в service.py")
         for kwargs in found:
             self.assertEqual(
+                kwargs.get("read_privacy_revision"),
+                "lambda: self.store.read_wake_privacy_revision()",
+            )
+            self.assertEqual(
                 kwargs.get("settings_get"), "self._get_runtime_setting",
                 "адаптер сконструирован без settings_get=self._get_runtime_setting "
                 "— privacy-гейт в handle_wake_word_start снова декоративен",
@@ -168,7 +172,7 @@ def test_missing_existing_policy_blocks_wake_even_if_cached_setting_is_off(tmp_p
     store.initialize_startup_plaintext_policy(new_profile=True)
     adapter = OpenWakeWordAdapter(
         data_dir=store.data_dir, settings_get=lambda key, default: False,
-        read_privacy=lambda: store.read_plaintext_policy_snapshot(timeout_sec=0.5).privacy_mode_enabled,
+        read_privacy_revision=store.read_wake_privacy_revision,
     )
     assert adapter._privacy_blocked() is False
     store.settings_path.unlink()

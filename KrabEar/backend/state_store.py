@@ -1580,13 +1580,20 @@ class StateStore:
             raise StateStoreSettingsCorruptError("settings source must be object")
         return payload
 
-    @staticmethod
-    def _plaintext_policy_snapshot_from_bytes(data_dir: Path, raw: bytes, st) -> PolicySnapshot:
-        """Разбор policy ИЗ ОДНИХ тех bytes, что ушли в SHA256 (§7.3).
+    def read_wake_privacy_revision(self) -> str | None:
+        """Свежая ревизия при разрешённом захвате. При ON/UNKNOWN микрофон закрыт."""
+        with self._lock(timeout_sec=0.5, shared=True):
+            result = self._read_settings_bytes_unlocked()
+            if isinstance(result, PolicySnapshot):
+                return None
+            policy = self._parse_plaintext_policy(result[0])
+            if isinstance(policy, PolicySnapshot) or policy["privacy_mode_enabled"]:
+                return None
+            return policy[POLICY_REVISION_KEY]
 
-        Отдельные cached-пути для hash/stat/flags запрещены: расхождение между
-        ними и есть тот класс гонок, который fingerprint обязан ловить.
-        """
+    @staticmethod
+    def _parse_plaintext_policy(raw: bytes) -> dict[str, Any] | PolicySnapshot:
+        """Общий строгий разбор policy для экспорта и микрофона."""
         try:
             payload = json.loads(raw, object_pairs_hook=_reject_duplicate_keys)
         except _DuplicateKeyError:
@@ -1597,7 +1604,6 @@ class StateStore:
         if not isinstance(payload, dict):
             return unknown_snapshot(REASON_UNKNOWN_NOT_OBJECT)
 
-        flags: dict[str, bool] = {}
         for key in POLICY_FLAG_KEYS:
             if key not in payload:
                 return unknown_snapshot(REASON_UNKNOWN_MISSING_KEY)
@@ -1606,7 +1612,6 @@ class StateStore:
             # truthy-интерпретации).
             if type(value) is not bool:
                 return unknown_snapshot(REASON_UNKNOWN_NON_BOOL)
-            flags[key] = value
 
         if POLICY_REVISION_KEY not in payload:
             return unknown_snapshot(REASON_UNKNOWN_MISSING_REVISION)
@@ -1614,7 +1619,20 @@ class StateStore:
         if not is_valid_policy_revision(revision):
             return unknown_snapshot(REASON_UNKNOWN_INVALID_REVISION)
 
-        encryption_enabled = flags["history_encryption_enabled"]
+        return payload
+
+    @staticmethod
+    def _plaintext_policy_snapshot_from_bytes(data_dir: Path, raw: bytes, st) -> PolicySnapshot:
+        """Разбор policy ИЗ ОДНИХ тех bytes, что ушли в SHA256 (§7.3).
+
+        Отдельные cached-пути для hash/stat/flags запрещены: расхождение между
+        ними и есть тот класс гонок, который fingerprint обязан ловить.
+        """
+        policy = StateStore._parse_plaintext_policy(raw)
+        if isinstance(policy, PolicySnapshot):
+            return policy
+        revision = policy[POLICY_REVISION_KEY]
+        encryption_enabled = policy["history_encryption_enabled"]
         fingerprint = PolicyFingerprint(
             # Путь профиля, НЕ хеш секрета. ``resolve()`` обязателен: на macOS
             # один и тот же профиль доступен как /var/... и /private/var/... —
@@ -1635,7 +1653,7 @@ class StateStore:
                 if encryption_enabled is True
                 else PolicyState.KNOWN_OFF
             ),
-            privacy_mode_enabled=flags["privacy_mode_enabled"],
+            privacy_mode_enabled=policy["privacy_mode_enabled"],
             internal_revision=revision,
             fingerprint=fingerprint,
             reason=None,
