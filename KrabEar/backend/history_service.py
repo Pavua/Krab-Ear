@@ -885,7 +885,10 @@ class HistoryService:
     _MD_MATCH_MAX_BYTES = 8 * 1024 * 1024
 
     def _transcript_md_dir(self) -> Path | None:
-        path = Path(self.store.data_dir) / "transcripts"
+        data_dir = self.store.data_dir
+        if data_dir is None:
+            return None
+        path = Path(data_dir) / "transcripts"
         return path if path.is_dir() and not path.is_symlink() else None
 
     @staticmethod
