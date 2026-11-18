@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from _plaintext_export_test_helpers import history_service_with_off_policy
+from backend.models import HistoryItem
 from backend.state_store import StateStore
 from backend.transcript_writer import TranscriptWriter
 
@@ -46,6 +47,49 @@ def test_delete_keeps_a_neighbours_first_of_day_file(tmp_path):
     assert neighbour.exists(), "удаление записи стёрло .md соседней записи"
 
 
+def _add_at(store, ts, text):
+    item = HistoryItem.create(text=text, paste_status="ok")
+    item.ts = ts
+    with store._lock():
+        store._append_ndjson(store.history_path, item.to_dict())
+    return item
+
+
+@pytest.mark.parametrize("identified", [False, True], ids=["legacy", "with-id"])
+def test_delete_keeps_repeated_dictation_markdown(tmp_path, identified):
+    store, svc = _history(tmp_path)
+    ts = "2026-11-18T10:04:00+00:00"
+    first = _add_at(store, ts, "добрый день")
+    second = _add_at(store, ts if identified else "2026-11-18T10:11:03+00:00", first.text)
+    files = []
+    for item in (first, second):
+        data = {"text": item.text, "ts": item.ts}
+        if identified:
+            data["id"] = item.id
+        files.append(TranscriptWriter.write_transcript(data, _tdir(store)))
+    first_md, second_md = files
+
+    svc.handle_delete_history_item({"id": second.id})
+
+    assert not second_md.exists()
+    assert first_md.exists()
+
+
+def test_delete_keeps_legacy_import_with_ambiguous_ownership(tmp_path):
+    store, svc = _history(tmp_path)
+    ts = "2026-11-18T10:04:00+00:00"
+    first = _add_at(store, ts, "добрый день")
+    _add_at(store, ts, first.text)
+    export = _tdir(store) / "20261118_100401_call.md"
+    export.write_text(
+        "# Транскрипт: call.m4a\n\n## Текст\n\nдобрый день\n", encoding="utf-8",
+    )
+
+    svc.handle_delete_history_item({"id": first.id})
+
+    assert export.exists()
+
+
 def test_delete_keeps_an_unrelated_import_file(tmp_path):
     store, svc = _history(tmp_path)
     mine = store.add_history_item(text="текст удаляемой записи", paste_status="ok")
@@ -59,7 +103,7 @@ def test_a_short_text_does_not_erase_files_that_merely_contain_it(tmp_path):
     store, svc = _history(tmp_path)
     mine = store.add_history_item(text="да", paste_status="ok")
     other = _tdir(store) / f"{time.strftime('%Y%m%d_%H%M%S')}_long.md"
-    other.write_text("# Транскрипт\n\n## Текст\n\nон сказал да и ушёл\n", encoding="utf-8")
+    other.write_text("# Транскрипт: long.m4a\n\n## Текст\n\nдлинная запись\n\nда\n\nещё текст\n", encoding="utf-8")
     svc.handle_delete_history_item({"id": mine.id})
     assert other.exists(), "короткий текст опознал файл по подстроке"
 

@@ -39,7 +39,7 @@ from backend.observability import add_breadcrumb
 from backend.realtime_partial import RealtimePartialTranscriber
 from backend.recorder import AudioRecorderStopTimeout
 from backend.realtime_silence_filter import RealtimeSilenceFilter
-from backend.transcript_writer import TranscriptWriter
+from backend.transcript_writer import TranscriptWriter, history_markdown_suffix
 from contracts.registry import EventType
 from contracts.stt_events import SttFailed, SttFinal, SttPartial
 from contracts.translation_events import TranslationCompleted, TranslationFailed
@@ -3751,6 +3751,7 @@ class RecordingCoreService:
             try:
                 transcripts_dir = Path(self.store.data_dir) / "transcripts"
                 item_dict = {
+                    "id": item.id,
                     "text": display_text,
                     "ts": item.ts,
                     "audio_duration_sec": duration_sec,
@@ -4029,7 +4030,8 @@ class RecordingCoreService:
                         transcripts_dir.mkdir(exist_ok=True)
                         source_name = Path(audio_path).stem
                         timestamp = time.strftime("%Y%m%d_%H%M%S")
-                        transcript_filename = f"{timestamp}_{source_name}.md"
+                        suffix = history_markdown_suffix(history_item.id) or ".md"
+                        transcript_filename = f"{timestamp}_{source_name}{suffix}"
                         transcript_path = transcripts_dir / transcript_filename
                         with open(transcript_path, "w", encoding="utf-8") as f:
                             f.write(f"# Транскрипт: {Path(audio_path).name}\n\n")

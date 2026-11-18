@@ -498,6 +498,30 @@ class TestTranscribePathsPersistHistory(unittest.TestCase):
         svc.store.add_history_item.assert_called_once()
         self.assertTrue(result["items"][0]["history_id"])
 
+    def test_same_named_batch_sources_get_distinct_history_markdown(self):
+        from _plaintext_export_test_helpers import history_service_with_off_policy
+
+        svc = _make_service(self._tmp)
+        history = history_service_with_off_policy(store=svc.store)
+        sources = [Path(self._tmp) / name / "sample.wav" for name in ("one", "two")]
+        for source in sources:
+            source.parent.mkdir()
+            source.write_bytes(b"\x00" * 64)
+        with patch("backend.recording_core_service.time.strftime", return_value="20261118_100401"):
+            result = svc.handle_transcribe_paths({"paths": [str(source) for source in sources]})
+
+        self.assertEqual(result["errors"], [])
+        first, second = [item["history_id"] for item in result["items"]]
+        first_md = Path(history.handle_get_history_item({"id": first})["transcript_file"])
+        second_md = Path(history.handle_get_history_item({"id": second})["transcript_file"])
+        self.assertNotEqual(first_md, second_md)
+        self.assertTrue(first_md.is_file())
+        self.assertTrue(second_md.is_file())
+
+        history.handle_delete_history_item({"id": first})
+        self.assertFalse(first_md.exists())
+        self.assertTrue(second_md.is_file())
+
 
 class TestCurrentRecordingOwner(unittest.TestCase):
     """2026-08-05: лёгкий геттер для RecordingDurationWatchdog (MEDIUM-2)."""
