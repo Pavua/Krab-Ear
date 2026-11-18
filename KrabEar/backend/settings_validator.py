@@ -54,6 +54,8 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "history_policy": ("unlimited",),
     "history_text_density": ("normal", "compact"),
     "capture_source_mode": ("mic", "system_audio", "mic_plus_system"),
+    # Голос исходящего звонка (Voice Gateway `PromptCallRequest.voice_mode`): мусор дал бы 422 и сорвал звонок.
+    "call_voice_mode": ("clone", "system", "gemini"),
     # Must mirror every PanelTab rawValue the Swift agent can persist
     # (native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController.swift
     # enum PanelTab, written back in HistoryPanelController+LiveTranslation.swift
@@ -143,6 +145,8 @@ _RANGE_FIELDS: dict[str, tuple[Any, Any, Any, type]] = {
     # wave-1770 MED: rt_silence_max_sec was missing from _RANGE_FIELDS — NaN/Inf
     # caused silence detection to permanently suppress or behave unpredictably.
     "rt_silence_max_sec": (0.5, 60.0, 8.0, float),
+    # Лимит исходящего звонка: низ — чтобы звонок не обрывался на приветствии, верх — потолок расходов шлюза.
+    "call_max_duration_sec": (30, 3600, 300, int),
     # wave-1770 MED: llm_probe_interval_sec missing from _RANGE_FIELDS — setting it
     # to 999999 via IPC would delay LM Studio crash detection for days.
     "llm_probe_interval_sec": (1.0, 300.0, 30.0, float),
@@ -207,6 +211,7 @@ _RANGE_FIELDS.update({
 
 # Bool-поля с дефолтными значениями
 _BOOL_FIELDS: dict[str, bool] = {
+    "call_speak_first": False,
     "auto_start_enabled": False,
     "show_dock_icon": True,
     "auto_paste": True,

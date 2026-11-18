@@ -37,6 +37,41 @@ _GATEWAY_TERMINAL_STATUSES = {"stopped": False, "failed": True}
 _GATEWAY_RECONCILE_MAX_TRACKED = 256
 
 
+#: Допустимые голоса шлюза (`PromptCallRequest.voice_mode`); клон — голос владельца по умолчанию.
+_DIAL_VOICE_MODES = frozenset({"clone", "system", "gemini"})
+_DIAL_MIN_DURATION_SEC = 30
+_DIAL_MAX_DURATION_SEC = 3600
+
+
+def _dial_duration(value: Any) -> Optional[int]:
+    """Лимит звонка в секундах в пределах 30..3600 или None, если значение непригодно."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        number = float(value)
+    except ValueError:
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(max(_DIAL_MIN_DURATION_SEC, min(number, _DIAL_MAX_DURATION_SEC)))
+
+
+def _dial_voice_mode(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value in _DIAL_VOICE_MODES else None
+
+
+def _dial_speak_first(value: Any) -> Optional[bool]:
+    return value if isinstance(value, bool) else None
+
+
+#: (ключ dial(), ключ настройки, нормализатор: непригодное значение → None).
+_DIAL_TUNABLES = (
+    ("max_duration_sec", "call_max_duration_sec", _dial_duration),
+    ("voice_mode", "call_voice_mode", _dial_voice_mode),
+    ("speak_first", "call_speak_first", _dial_speak_first),
+)
+
+
 class CallSessionService:
     """Обработчики IPC для управления звонковыми сессиями."""
 
@@ -127,9 +162,17 @@ class CallSessionService:
         prompt = str(params.get("prompt") or "").strip()
         if prompt:
             dial_kwargs["prompt"] = prompt
-        for key in ("target_lang", "src_lang", "transport", "max_duration_sec"):
+        for key in ("target_lang", "src_lang", "transport"):
             if params.get(key) is not None:
                 dial_kwargs[key] = params[key]
+        # Лимит, голос и «говорить первым»: явный параметр сильнее настройки; непригодное
+        # значение не уходит шлюзу (его валидация ответила бы 422 и сорвала звонок).
+        for dial_key, setting_key, normalize in _DIAL_TUNABLES:
+            for candidate in (params.get(dial_key), self._settings_get(setting_key, None)):
+                value = normalize(candidate)
+                if value is not None:
+                    dial_kwargs[dial_key] = value
+                    break
 
         result = provider.dial(phone, **dial_kwargs) or {}
         if not result.get("ok"):
