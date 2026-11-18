@@ -101,9 +101,14 @@ final class SecuritySettingsWiringContractTests: XCTestCase {
     func test_encryption_toggle_failure_rereads_state_and_does_not_return_silently() throws {
         let fn = try body(of: "private func applyEncryptionChange(", in: try source())
         XCTAssertTrue(fn.contains("EncryptionChangeOutcome.resolve(response: resp)"))
-        XCTAssertTrue(fn.contains("method: \"get_encryption_status\""))
-        XCTAssertTrue(fn.contains("outcome.actualEnabled(desired: desired, reread: reread)"))
-        XCTAssertTrue(fn.contains("toggleRef.state = actual ? .on : .off"))
+        let reread = try XCTUnwrap(fn.range(of: "method: \"get_encryption_status\""))
+        let parsed = try XCTUnwrap(fn.range(of: "confirmedEncryptionStatus(rereadResponse)"))
+        let resolved = try XCTUnwrap(fn.range(of: "outcome.knownEnabled(desired: desired, reread: status?.enabled)"))
+        let rendered = try XCTUnwrap(fn.range(of: "syncSecuritySettings(enabled: known,"))
+        XCTAssertLessThan(reread.lowerBound, parsed.lowerBound)
+        XCTAssertLessThan(parsed.lowerBound, resolved.lowerBound)
+        XCTAssertLessThan(resolved.lowerBound, rendered.lowerBound)
+        XCTAssertTrue(fn.contains("presentAlertSheet(alert, for: self.window)"))
         XCTAssertFalse(fn.contains(") else { return }"),"IPC-сбой не должен молча оставлять тоггл в выбранной позиции")
         XCTAssertFalse(fn.contains("runModal"))
     }
@@ -187,8 +192,17 @@ final class EncryptionToggleUnknownStateTests: XCTestCase {
 
     func test_toggle_failure_uses_known_state_and_honest_unknown_message() throws {
         let src = try source("HistoryPanelController+SecuritySettings.swift")
-        XCTAssertTrue(src.contains("outcome.knownEnabled(desired: desired, reread: reread)"))
+        XCTAssertTrue(src.contains("else if known == nil"))
         XCTAssertTrue(src.contains("Не удалось подтвердить состояние шифрования"))
+        let marker = try XCTUnwrap(src.range(of: "func syncSecuritySettings("))
+        let render = String(src[marker.lowerBound...])
+        XCTAssertTrue(render.contains("enabled.map { $0 ? .on : .off } ?? .mixed"))
+        XCTAssertTrue(render.contains("let canToggle = available == true && enabled != nil"))
+        XCTAssertTrue(render.contains("Статус шифрования недоступен"))
+        XCTAssertTrue(render.contains("SecurityAssocKeys.encryptionToggle"))
+        XCTAssertTrue(render.contains("SecurityAssocKeys.cdEncryptionToggle"))
+        XCTAssertEqual(render.components(separatedBy: "toggle.state = toggleState").count - 1, 2)
+        XCTAssertEqual(render.components(separatedBy: "toggle.isEnabled = canToggle").count - 1, 2)
     }
 
 
