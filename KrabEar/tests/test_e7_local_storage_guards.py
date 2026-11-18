@@ -20,6 +20,9 @@ def test_rollback_requires_boolean_confirmation(tmp_path, confirm):
 
 
 def test_repair_creates_private_history_and_artifacts(tmp_path):
+    from backend.state_store import StateStore
+
+    StateStore(tmp_path).initialize_startup_plaintext_policy(new_profile=True)
     history = tmp_path / "history.ndjson"
     history.write_bytes(b'{"id":"one","text":"sample"}\ninvalid record\n')
     history.chmod(0o600)

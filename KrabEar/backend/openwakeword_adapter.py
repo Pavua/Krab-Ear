@@ -90,6 +90,7 @@ class OpenWakeWordAdapter:
         settings_get: Optional[Callable[[str, Any], Any]] = None,
         is_recording: Optional[Callable[[], bool]] = None,
         is_start_blocked: Optional[Callable[[], bool]] = None,
+        read_privacy: Optional[Callable[[], bool | None]] = None,
     ) -> None:
         self._data_dir = Path(data_dir)
         # 2026-08-01 (F6): активная диктовка запрещает открывать второй тап.
@@ -98,6 +99,7 @@ class OpenWakeWordAdapter:
         # is_start_blocked (W7): worker рекордера ещё жив после stop().
         self._is_recording = is_recording
         self._is_start_blocked = is_start_blocked
+        self._read_privacy = read_privacy
         self._custom_dir = self._data_dir / _CUSTOM_MODELS_DIR
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -544,6 +546,8 @@ class OpenWakeWordAdapter:
         Если настройки недоступны, запуск и продолжение захвата запрещены.
         """
         try:
+            if self._read_privacy is not None:
+                return self._read_privacy() is not False
             return bool(self._settings_get("privacy_mode_enabled", False))
         except Exception:
             logger.warning("OpenWakeWordAdapter: privacy settings недоступны — микрофон заблокирован")

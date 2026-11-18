@@ -1545,6 +1545,7 @@ class BackendService:
         # гейт активной записи декоративен, и self-heal агента открывает второй
         # входной тап посреди диктовки (recorder_timeout, запись теряется).
         self._oww_adapter = OpenWakeWordAdapter(
+            read_privacy=lambda: self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).privacy_mode_enabled,
             data_dir=self.store.data_dir,
             settings_get=self._get_runtime_setting,
             is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),

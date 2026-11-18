@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -25,6 +26,7 @@ from backend.history_encryption_policy import (
     data_dir_policy_reader,
     policy_blocks,
 )
+from backend.history_crypto import SENTINEL
 from backend.state_store import history_flock
 from core.atomic_io import atomic_binary_writer, atomic_write_text
 
@@ -125,7 +127,10 @@ def _parse_ndjson_object(line: bytes) -> dict[str, Any] | None:
 
 def _raw_ndjson_lines(path: Path) -> Iterator[bytes]:
     """Читает LF/CRLF/CR, сохраняя исходные байты и окончания строк."""
-    with path.open("r", encoding="utf-8", errors="surrogateescape", newline="") as source:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="surrogateescape", newline="") as source:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError(f"Ожидался обычный журнал: {path.name}")
         for line in source:
             yield line.encode("utf-8", errors="surrogateescape")
 
@@ -165,6 +170,81 @@ def _read_tombstones(tombstones_path: Path) -> set[str]:
         if item_id:
             deleted.add(item_id)
     return deleted
+
+
+def _rollback_deleted_ids(data_dir: Path, backup_dir: Path) -> set[str]:
+    """Учитываем оба реестра удаления до и после compact, в том числе в старой копии."""
+    deleted = set()
+    for directory in (data_dir, backup_dir):
+        for name in ("history_tombstones.ndjson", "history_purged_ids.ndjson"):
+            try:
+                for line in _raw_ndjson_lines(directory / name):
+                    if not line.strip():
+                        continue
+                    record = _parse_ndjson_object(line)
+                    item_id = str(record.get("id") or "").strip() if record else ""
+                    if not item_id:
+                        raise ValueError(f"rollback_migration: повреждён журнал удаления {name}")
+                    deleted.add(item_id)
+            except FileNotFoundError:
+                continue
+    return deleted
+
+
+def _rollback_rows(path: Path, deleted: set[str]) -> Iterator[tuple[bytes, dict[str, Any] | None]]:
+    for line in _raw_ndjson_lines(path):
+        if line.lstrip().startswith(SENTINEL.encode("ascii")):
+            raise ValueError("rollback_migration: резервная копия содержит зашифрованную историю")
+        row = _parse_ndjson_object(line)
+        if row is not None and str(row.get("id", "")).strip() in deleted:
+            continue
+        yield line, row
+
+
+def _history_fingerprint_update(digest, row, line):
+    # Сравниваем типы и значения JSON, сохраняя порядок строк и opaque-байты.
+    data = line if row is None else json.dumps(row, sort_keys=True).encode("ascii")
+    digest.update(len(data).to_bytes(8, "big"))
+    digest.update(data)
+
+
+class _RollbackHistoryChanged(Exception):
+    """В журнале есть данные, которые заменил бы откат схемы."""
+
+
+def _restore_migrated_history(data_dir: Path, backup_dir: Path) -> None:
+    history = data_dir / "history.ndjson"
+    deleted = _rollback_deleted_ids(data_dir, backup_dir)
+    live = hashlib.sha256()
+    has_live_transcript = False
+    has_damaged_rows = False
+    try:
+        for line, row in _rollback_rows(history, deleted):
+            _history_fingerprint_update(live, row, line)
+            if row is not None and "text" in row:
+                has_live_transcript = True
+            elif line.strip():
+                has_damaged_rows = True
+    except FileNotFoundError:
+        pass
+
+    original = hashlib.sha256()
+    migrated = hashlib.sha256()
+    legacy = hashlib.sha256()
+    with atomic_binary_writer(history) as output:
+        for line, row in _rollback_rows(backup_dir / history.name, deleted):
+            output.write(line)
+            _history_fingerprint_update(original, row, line)
+            updated = {**_V2_DEFAULTS, **row} if row is not None and "text" in row else row
+            _history_fingerprint_update(migrated, updated, line)
+            # Старый мигратор опускал все не-объекты при переписывании NDJSON.
+            if row is not None:
+                _history_fingerprint_update(legacy, updated, line)
+        # Полностью повреждённая история восстанавливается из копии. Если
+        # записи читаемы, новая диктовка/правка не должна исчезнуть при откате.
+        damaged_only = has_damaged_rows and not has_live_transcript
+        if not damaged_only and live.digest() not in (original.digest(), migrated.digest(), legacy.digest()):
+            raise _RollbackHistoryChanged
 
 
 def _load_active_items(data_dir: Path) -> list[dict[str, Any]]:
@@ -477,7 +557,7 @@ class DataMigrator:
         return {**result, "backup_path": backup_path}
 
     def rollback_migration(self, data_dir: Path, backup_path: str) -> dict[str, Any]:
-        """Откатывает последнюю миграцию, восстанавливая файлы из резервной копии.
+        """Откатывает изменение схемы history.ndjson, сохраняя текущие настройки и дельты.
 
         Удерживает POSIX flock(LOCK_EX) на history.lock на всё время восстановления,
         чтобы исключить гонку с параллельными append-операциями StateStore (тот же
@@ -514,8 +594,6 @@ class DataMigrator:
 
         if not backup_dir.is_dir():
             raise ValueError(f"Директория резервной копии не найдена: {backup_path!r}")
-
-        restored: list[str] = []
 
         # CRITICAL-1: copy под тем же history.lock flock, что и save_settings, с
         # повторной проверкой политики ПОСЛЕ захвата (OFF→ON вторым StateStore).
@@ -558,13 +636,20 @@ class DataMigrator:
                     raise ValueError(f"rollback_migration: недопустимый файл: {src.name}")
                 if (data_dir / src.name).is_symlink():
                     raise ValueError(f"rollback_migration: назначение является символической ссылкой: {src.name}")
-            for src in sources:
-                _copy_private_file(src, data_dir / src.name)
-                restored.append(src.name)
-                logger.info("Откат: восстановлен файл %s", src.name)
+            # v1 → v2 меняла только основной журнал. Его единственная
+            # атомарная публикация оставляет настройки и живые дельты на месте.
+            try:
+                _restore_migrated_history(data_dir, backup_dir)
+            except _RollbackHistoryChanged:
+                return {
+                    "ok": False,
+                    "reason": "migration_rollback_history_changed",
+                    "restored_files": [],
+                    "backup_path": str(backup_dir),
+                }
 
-        logger.info("Откат миграции завершён: восстановлено %d файлов из %s", len(restored), backup_dir)
-        return {"restored_files": restored, "backup_path": str(backup_dir)}
+        logger.info("Откат миграции: восстановлен history.ndjson из %s", backup_dir)
+        return {"restored_files": ["history.ndjson"], "backup_path": str(backup_dir)}
 
     # ------------------------------------------------------------------
     # Вспомогательные методы

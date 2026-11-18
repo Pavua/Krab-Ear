@@ -158,3 +158,18 @@ class TestServiceWiringSourceContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_missing_existing_policy_blocks_wake_even_if_cached_setting_is_off(tmp_path):
+    from backend.openwakeword_adapter import OpenWakeWordAdapter
+    from backend.state_store import StateStore
+
+    store = StateStore(tmp_path / "profile")
+    store.initialize_startup_plaintext_policy(new_profile=True)
+    adapter = OpenWakeWordAdapter(
+        data_dir=store.data_dir, settings_get=lambda key, default: False,
+        read_privacy=lambda: store.read_plaintext_policy_snapshot(timeout_sec=0.5).privacy_mode_enabled,
+    )
+    assert adapter._privacy_blocked() is False
+    store.settings_path.unlink()
+    assert adapter._privacy_blocked() is True

@@ -23,6 +23,7 @@ class IntegrityCheckerTestCase(unittest.TestCase):
         self.data_dir.mkdir(parents=True)
         self.checker = IntegrityChecker()
         self.store = StateStore(self.data_dir)
+        self.store.initialize_startup_plaintext_policy(new_profile=True)
 
     def test_check_integrity_empty_dir_returns_report(self) -> None:
         """Пустая директория → отчёт с нулевыми счётчиками."""
@@ -248,6 +249,7 @@ class IntegrityCheckerIPCTestCase(unittest.TestCase):
             transcriber=MagicMock(),
             translator=MagicMock(),
         )
+        self.addCleanup(self.svc.close)
 
     def test_check_integrity_handler(self) -> None:
         resp = self.svc.handle_request(
@@ -260,14 +262,20 @@ class IntegrityCheckerIPCTestCase(unittest.TestCase):
         self.assertIn("total_items", result)
 
     def test_repair_integrity_handler(self) -> None:
+        profile = self.svc.store.data_dir
+        original = b'ENC1:sample\n'
+        (profile / "history.ndjson").write_bytes(original)
         resp = self.svc.handle_request(
             {"id": "2", "method": "repair_integrity", "params": {}}
         )
         self.assertTrue(resp["ok"])
         result = resp["result"]
-        self.assertIn("fixed", result)
-        self.assertIn("skipped", result)
-        self.assertIn("details", result)
+        self.assertEqual(result["fixed"], 0)
+        self.assertGreaterEqual(result["skipped"], 1)
+        self.assertTrue(result["details"])
+        self.assertEqual((profile / "history.ndjson").read_bytes(), original)
+        self.assertFalse(list(profile.glob("*.corrupt-backup-*")))
+        self.assertFalse(list(profile.glob("*.quarantine-*")))
 
 
 class IntegrityCheckerEdgeCasesTestCase(unittest.TestCase):
@@ -279,6 +287,7 @@ class IntegrityCheckerEdgeCasesTestCase(unittest.TestCase):
         self.data_dir = Path(self.tmp.name) / "data"
         self.data_dir.mkdir(parents=True)
         self.checker = IntegrityChecker()
+        StateStore(self.data_dir).initialize_startup_plaintext_policy(new_profile=True)
 
     def test_empty_history_file_valid(self) -> None:
         """Пустой history.ndjson не вызывает ошибок JSON."""

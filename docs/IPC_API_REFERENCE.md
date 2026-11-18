@@ -1046,7 +1046,7 @@ Returns: `{ok, issues: [...], checked_files}`
 *(service.py)*  
 Исправляет автоматически устраняемые проблемы целостности данных.  
 Нет params.  
-Returns: `{ok, repaired, issues_remaining}`
+Returns: `{fixed, skipped, details}`. Ремонт NDJSON пропускается при неизвестной политике, включённой приватности или шифровании, а также при наличии записей ENC1.
 
 
 ### `merge_recordings`
@@ -3239,7 +3239,7 @@ Returns: `{ok, migrated_records, from_version, to_version}`
 *(service.py → data_migrator.py)*  
 Восстанавливает данные из резервной копии миграции; `backup_path` обязан лежать внутри `<data_dir>/backups/`.  
 Params: `{backup_path, confirm}` — без `confirm=True` откат не выполняется  
-Returns: `{restored_files, backup_path}`
+При успехе `restored_files` содержит только `history.ndjson`. Сохраняются текущие настройки, правки и журналы удалений. При конфликте с новой диктовкой или правкой возвращает `ok=false`, `reason=migration_rollback_history_changed` и пустой `restored_files`.
 
 ---
 

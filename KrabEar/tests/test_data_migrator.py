@@ -489,6 +489,135 @@ class TestRollbackMigration(unittest.TestCase):
         self.assertIn("history.ndjson", rollback["restored_files"])
         self.assertEqual(history_path.read_text(encoding="utf-8"), original_content)
 
+    def test_rollback_keeps_live_settings_sidecars_and_deletions(self) -> None:
+        from backend.state_store import StateStore
+
+        store = StateStore(self._tmpdir)
+        history = self._tmpdir / "history.ndjson"
+        keep = _make_v1_item("keep")
+        _write_ndjson(history, [keep, _make_v1_item("gone", "deleted sample")])
+        settings = self._tmpdir / "settings.json"
+        settings.write_text('{"history_encryption_enabled":false,"privacy_mode_enabled":false}')
+        backup = self._migrator.migrate(self._tmpdir).backup_path
+        self.assertTrue(store.delete_history_item("gone"))
+        store.update_history_item_tags("keep", ["current tag"])
+        settings.write_text('{"history_encryption_enabled":false,"privacy_mode_enabled":true}')
+        sidecars = {p: p.read_bytes() for p in self._tmpdir.glob("history_*.ndjson")}
+        policy = settings.read_bytes()
+
+        result = DataMigrator(self._tmpdir).handle_rollback_migration(
+            {"confirm": True, "backup_path": backup}
+        )
+
+        self.assertEqual(settings.read_bytes(), policy)
+        self.assertEqual({p: p.read_bytes() for p in sidecars}, sidecars)
+        self.assertEqual(result["restored_files"], ["history.ndjson"])
+        self.assertEqual(_read_ndjson(history), [keep])
+        self.assertEqual(store.get_history_page(None, 10)[0][0]["tags"], ["current tag"])
+
+    def test_rollback_after_compaction_respects_permanent_deletions(self) -> None:
+        from backend.state_store import StateStore
+
+        store = StateStore(self._tmpdir)
+        history = self._tmpdir / "history.ndjson"
+        _write_ndjson(history, [_make_v1_item("gone", "deleted sample")])
+        backup = self._migrator.migrate(self._tmpdir).backup_path
+        self.assertTrue(store.delete_history_item("gone"))
+        store.compact()
+        ledger = store.purged_ids_path.read_bytes()
+        self.assertIn(b"gone", ledger)
+
+        result = self._migrator.rollback_migration(self._tmpdir, backup)
+
+        self.assertEqual(store.purged_ids_path.read_bytes(), ledger)
+        self.assertEqual(history.read_bytes(), b"")
+        self.assertEqual(result["restored_files"], ["history.ndjson"])
+
+    def test_rollback_declines_changed_history(self) -> None:
+        history = self._tmpdir / "history.ndjson"
+        _write_ndjson(history, [_make_v1_item("keep")])
+        backup = self._migrator.migrate(self._tmpdir).backup_path
+        with history.open("a") as output:
+            output.write(json.dumps(_make_v2_item("after-snapshot")) + "\n")
+        current = history.read_bytes()
+
+        result = self._migrator.rollback_migration(self._tmpdir, backup)
+
+        self.assertEqual(result["reason"], "migration_rollback_history_changed")
+        self.assertFalse(result["ok"])
+        self.assertEqual(history.read_bytes(), current)
+
+    def test_rollback_declines_empty_history_without_deletion_evidence(self) -> None:
+        history = self._tmpdir / "history.ndjson"
+        _write_ndjson(history, [_make_v1_item("old")])
+        backup = self._migrator.migrate(self._tmpdir).backup_path
+        history.write_bytes(b"")
+
+        result = self._migrator.rollback_migration(self._tmpdir, backup)
+
+        self.assertEqual(result["reason"], "migration_rollback_history_changed")
+        self.assertEqual(history.read_bytes(), b"")
+
+    def test_rollback_never_publishes_a_second_file(self) -> None:
+        history = self._tmpdir / "history.ndjson"
+        _write_ndjson(history, [_make_v1_item("keep")])
+        original_history = history.read_bytes()
+        settings = self._tmpdir / "settings.json"
+        settings.write_text('{"privacy_mode_enabled":false}')
+        backup = self._migrator.migrate(self._tmpdir).backup_path
+        settings.write_text('{"privacy_mode_enabled":true}')
+        live_settings = settings.read_bytes()
+        replace = os.replace
+        publications = []
+
+        def replace_history_only(source, destination):
+            publications.append(Path(destination))
+            if Path(destination) != history:
+                raise OSError("sidecar publication failed")
+            replace(source, destination)
+
+        with patch("core.atomic_io.os.replace", side_effect=replace_history_only):
+            result = self._migrator.rollback_migration(self._tmpdir, backup)
+
+        self.assertEqual(result["restored_files"], [history.name])
+        self.assertEqual(publications, [history])
+        self.assertEqual(history.read_bytes(), original_history)
+        self.assertEqual(settings.read_bytes(), live_settings)
+
+    def test_rollback_accepts_legacy_manifest_and_old_ndjson_writer(self) -> None:
+        backup = self._tmpdir / "backups" / "migration_backup_20260910_121000"
+        backup.mkdir(parents=True)
+        (backup / "migration_meta.json").write_text(json.dumps({
+            "migration_backup_ts": "20260910_121000", "files": ["history.ndjson"]
+        }))
+        original = b'{"id":"keep","text":"sample"}\rincomplete\r'
+        (backup / "history.ndjson").write_bytes(original)
+        history = self._tmpdir / "history.ndjson"
+        _write_ndjson(history, [{
+            "id": "keep", "text": "sample", "tags": [], "favorite": False, "annotation": ""
+        }])
+
+        result = DataMigrator(self._tmpdir).handle_rollback_migration({
+            "confirm": True, "backup_path": str(backup)
+        })
+
+        self.assertEqual(result["restored_files"], [history.name])
+        self.assertEqual(history.read_bytes(), original)
+
+    def test_rollback_failure_publishing_history_preserves_all_live_files(self) -> None:
+        history = self._tmpdir / "history.ndjson"
+        _write_ndjson(history, [_make_v1_item("keep")])
+        settings = self._tmpdir / "settings.json"
+        settings.write_text('{"privacy_mode_enabled":false}')
+        backup = self._migrator.migrate(self._tmpdir).backup_path
+        settings.write_text('{"privacy_mode_enabled":true}')
+        current = {p: p.read_bytes() for p in (history, settings)}
+        with patch("core.atomic_io.os.replace", side_effect=OSError("publish failed")):
+            with self.assertRaisesRegex(OSError, "publish failed"):
+                self._migrator.rollback_migration(self._tmpdir, backup)
+        self.assertEqual({p: p.read_bytes() for p in current}, current)
+        self.assertFalse(list(self._tmpdir.glob("*.tmp")))
+
     def test_rollback_invalid_backup_raises(self) -> None:
         """rollback_migration с несуществующим backup_path → ValueError."""
         with self.assertRaises(ValueError):
@@ -731,7 +860,7 @@ class DataMigratorRollbackIPCTestCase(unittest.TestCase):
         backup_path = result.backup_path
 
         # Симулируем повреждённую историю после миграции
-        corrupt_line = json.dumps({"id": "bad", "text": "corrupted"})
+        corrupt_line = '{"id":"bad","text":'
         (self._tmpdir / "history.ndjson").write_text(corrupt_line + "\n", encoding="utf-8")
 
         # data_dir в params игнорируется (W1761); backup_path должен быть внутри backups/
