@@ -113,6 +113,20 @@ def test_call_already_gone_at_gateway_still_closes_the_journal(tmp_path, code):
     assert service.handle_call_session_get({"id": sid})["status"] == "completed"
 
 
+@pytest.mark.parametrize("failure", ['http_404:{"detail":"Not Found"}', 'http_404:{}', 'http_409:{"detail":"other"}'])
+def test_bare_404_or_unknown_409_is_a_refusal_not_a_gone_line(tmp_path, failure):
+    """Голый 404 = неверный адрес/старый шлюз: звонок мог остаться живым, журнал не закрываем."""
+    service, _client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("POST", f"/v1/telephony/calls/{_GW}/hangup"): {"ok": False, "error": failure},
+    })
+    sid = _start(service)
+    result = service.handle_call_session_end({"id": sid, "reason": "completed"})
+    assert result["ok"] is False
+    assert result["reason"] == "hangup_failed"
+    assert service.handle_call_session_get({"id": sid})["status"] == "dialing"
+
+
 @pytest.mark.parametrize("failure", ["http_502:{\"detail\":\"provider down, secret body\"}", "timed out"])
 def test_failed_hangup_keeps_the_session_live_and_hides_gateway_body(tmp_path, failure):
     service, _client = _service(tmp_path, {

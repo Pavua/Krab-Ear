@@ -55,8 +55,10 @@ DIAL_TIMEOUT_SEC = 20.0
 #: session_id шлюза подставляется в путь REST: только безопасный алфавит, без `/`, `?`, `..`.
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
-#: HTTP-коды hangup, означающие «звонка уже нет»: неизвестная сессия и гонка с завершением.
-_HANGUP_GONE_PREFIXES = ("http_404", "http_409")
+#: Ответы hangup, означающие «звонка уже нет»: неизвестная сессия и гонка с завершением.
+#: Узнаются по ТЕЛУ (`detail` шлюза), а не только по коду: голый 404 (`Not Found`) — это
+#: неверный адрес или старый шлюз без маршрута, и звонок при этом мог остаться живым.
+_HANGUP_GONE_MARKERS = (("http_404", "session_not_found"), ("http_409", "session_terminal"))
 
 
 class GatewayCallProvider:
@@ -237,7 +239,7 @@ class GatewayCallProvider:
         if resp.get("ok"):
             return {"ok": True}
         error = str(resp.get("error") or "hangup_failed")
-        if error.startswith(_HANGUP_GONE_PREFIXES):
+        if any(error.startswith(code) and marker in error for code, marker in _HANGUP_GONE_MARKERS):
             # Сессии в шлюзе нет или она уже завершается: класть нечего, цель достигнута.
             return {"ok": True, "already_gone": True}
         # Тело ответа шлюза наружу не отдаём: только код причины.
