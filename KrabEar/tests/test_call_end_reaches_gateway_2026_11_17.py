@@ -314,3 +314,68 @@ def test_poll_of_a_finished_or_lineless_session_never_touches_the_gateway(tmp_pa
     assert service.handle_call_session_get({"id": sid})["end_reason"] == "completed"
     assert service.handle_call_session_get({"id": journal_only})["status"] == "idle"
     assert [c for c in client.calls if c[0] == "GET"] == []
+
+
+# --- живой звонок 18.11.2026: набор дольше 20 с, первый поиск по ключу тоже не ответил ----------
+#
+# Реальный prompt-call на перегруженной машине не уложился в 20 с, а единственный поиск сессии по
+# ключу (общие 4 с) оборвался, пока шлюз был занят набором. Ear ответил «исход неизвестен», хотя
+# линия поднялась и говорила: положить её из UI было нечем. Поиск обязан повторяться.
+
+import backend.gateway_call_provider as _gcp  # noqa: E402
+
+_REAL_ADOPT_BUDGET_SEC = _gcp.ADOPT_BUDGET_SEC  # до подмены фикстурой
+
+
+@pytest.fixture(autouse=True)
+def _fast_adoption(monkeypatch):
+    gcp = _gcp
+    monkeypatch.setattr(gcp, "ADOPT_RETRY_PAUSE_SEC", 0.0)
+    monkeypatch.setattr(gcp, "ADOPT_BUDGET_SEC", 0.2)
+
+
+def test_adoption_retries_until_the_busy_gateway_answers(tmp_path):
+    answers = iter([
+        {"ok": False, "error": "timed out"},
+        {"ok": False, "error": "http_404:{\"detail\":\"session_not_found\"}"},
+        _ok({"ok": True, "session_id": _GW, "status": "running"}),
+    ])
+    service, client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): {"ok": False, "error": "timed out"},
+        ("GET", "/v1/sessions/by-request-id/"): lambda _path: next(answers),
+    })
+    sid = _start(service)
+    assert CallSessionStore(tmp_path).get(sid).gateway_session_id == _GW
+    lookups = [c for c in client.calls if c[0] == "GET"]
+    assert len(lookups) == 3
+
+
+def test_adoption_lookup_uses_its_own_longer_timeout(tmp_path):
+    from backend.gateway_call_provider import ADOPT_TIMEOUT_SEC
+    service, client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): {"ok": False, "error": "timed out"},
+        ("GET", "/v1/sessions/by-request-id/"): _ok({"session_id": _GW, "status": "running"}),
+    })
+    _start(service)
+    assert client.calls[1][3] == ADOPT_TIMEOUT_SEC and ADOPT_TIMEOUT_SEC > 4
+
+
+def test_dial_and_adoption_fit_the_agent_ipc_timeout():
+    """Агент ждёт ответ IPC 60 с (`IPCClient.defaultTimeoutSec`): набор и поиск обязаны уложиться."""
+    import backend.gateway_call_provider as gcp
+    worst = gcp.DIAL_TIMEOUT_SEC + _REAL_ADOPT_BUDGET_SEC + gcp.ADOPT_TIMEOUT_SEC
+    assert gcp.DIAL_TIMEOUT_SEC >= 30, "20 с не хватило живому набору"
+    assert worst <= 55, worst
+
+
+def test_hangup_waits_longer_than_the_general_timeout(tmp_path):
+    """Живой замер 18.11.2026: сброс у провайдера занял 1,4 с и 20,5 с — общих 4 с мало."""
+    from backend.gateway_call_provider import HANGUP_TIMEOUT_SEC
+    service, client = _service(tmp_path, {
+        ("POST", "/v1/telephony/calls/prompt-call"): _DIAL_OK,
+        ("POST", f"/v1/telephony/calls/{_GW}/hangup"): _ok({"ok": True, "status": "completed"}),
+    })
+    sid = _start(service)
+    service.handle_call_session_end({"id": sid, "reason": "completed"})
+    hangup = [c for c in client.calls if c[1].endswith("/hangup")][0]
+    assert hangup[3] == HANGUP_TIMEOUT_SEC and 20 <= HANGUP_TIMEOUT_SEC <= 45

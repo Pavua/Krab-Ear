@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 import uuid
 from typing import Any, Dict, Optional
 
@@ -50,7 +51,17 @@ ERR_DIAL_UNKNOWN = "gateway_dial_unknown"
 
 #: Набор в шлюзе синхронный (сессия, календарь до 3 с, create_call у провайдера): общие
 #: 4 с REST-клиента обрывали его раньше ответа, и живой звонок оставался без идентификатора.
-DIAL_TIMEOUT_SEC = 20.0
+DIAL_TIMEOUT_SEC = 30.0
+#: Поиск сессии оборвавшегося набора. Живой замер 18.11.2026: набор не уложился в 20 с, а
+#: единственный поиск с общими 4 с оборвался, пока шлюз был занят, — Ear ответил «исход
+#: неизвестен» при живой линии. Поэтому поиск повторяется в пределах бюджета.
+#: Набор + бюджет + последний запрос обязаны уложиться в 60 с ожидания IPC у агента.
+ADOPT_TIMEOUT_SEC = 8.0
+#: Сброс: шлюз синхронно ждёт провайдера. Живой замер 18.11.2026 — 1,4 с и 20,5 с; с общими
+#: 4 с Ear сообщал «не удалось завершить», пока сброс на самом деле шёл.
+HANGUP_TIMEOUT_SEC = 30.0
+ADOPT_BUDGET_SEC = 12.0
+ADOPT_RETRY_PAUSE_SEC = 1.0
 
 #: session_id шлюза подставляется в путь REST: только безопасный алфавит, без `/`, `?`, `..`.
 _SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
@@ -120,11 +131,23 @@ class GatewayCallProvider:
         )
 
     def _adopt_by_request_id(self, client_request_id: str) -> Dict[str, Any]:
-        """Ищет сессию, созданную оборвавшимся запросом набора (контракт шлюза)."""
-        found = self._get(f"/v1/sessions/by-request-id/{client_request_id}") or {}
-        if found.get("error") or found.get("ok") is False:
-            return {}
-        return found if str(found.get("session_id") or found.get("id") or "") else {}
+        """Ищет сессию, созданную оборвавшимся запросом набора (контракт шлюза).
+
+        Повторяет поиск в пределах `ADOPT_BUDGET_SEC`: сразу после обрыва шлюз ещё занят набором
+        и может не ответить или ещё не знать ключ (404).
+        """
+        deadline = time.monotonic() + ADOPT_BUDGET_SEC
+        while True:
+            found = self._unwrap(self._http.get(
+                self._base_url, self._api_key,
+                f"/v1/sessions/by-request-id/{client_request_id}", timeout=ADOPT_TIMEOUT_SEC,
+            )) or {}
+            if not (found.get("error") or found.get("ok") is False):
+                if str(found.get("session_id") or found.get("id") or ""):
+                    return found
+            if time.monotonic() >= deadline:
+                return {}
+            time.sleep(ADOPT_RETRY_PAUSE_SEC)
 
     def _get(self, path: str) -> Dict[str, Any]:
         return self._unwrap(self._http.get(self._base_url, self._api_key, path))
@@ -235,7 +258,7 @@ class GatewayCallProvider:
             return {"ok": False, "error": ERR_MISSING_CALL_ID}
         if not _SESSION_ID_RE.match(session_id):
             return {"ok": False, "error": ERR_MISSING_CALL_ID}
-        resp = self._post(f"/v1/telephony/calls/{session_id}/hangup") or {}
+        resp = self._post(f"/v1/telephony/calls/{session_id}/hangup", timeout=HANGUP_TIMEOUT_SEC) or {}
         if resp.get("ok"):
             return {"ok": True}
         error = str(resp.get("error") or "hangup_failed")
