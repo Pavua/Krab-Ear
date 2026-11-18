@@ -188,6 +188,7 @@ def swift_harness(tmp_path_factory):
         compiler, "-swift-version", "5", "-parse-as-library",
         "-module-cache-path", str(compile_root / "module-cache"),
         str(root / "Sources/KrabEarAgent/IPCClient.swift"),
+        str(root / "Sources/KrabEarAgent/IPCWire.swift"),
         str(root / "Sources/KrabEarAgent/PlaintextExportCoordinator.swift"),
         str(root / "Tests/Integration/PlaintextExportIntegrationHarness.swift"), "-o", str(binary),
     ], capture_output=True, text=True, timeout=120, env=env)

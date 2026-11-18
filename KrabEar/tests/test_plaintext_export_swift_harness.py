@@ -19,6 +19,7 @@ def test_plaintext_export_coordinator_behavior(tmp_path):
     compilation = subprocess.run(
         [swiftc, "-swift-version", "5", "-parse-as-library", "-DPLAINTEXT_EXPORT_STANDALONE",
          str(native / "Sources/KrabEarAgent/IPCClient.swift"),
+         str(native / "Sources/KrabEarAgent/IPCWire.swift"),
          str(native / "Sources/KrabEarAgent/PlaintextExportCoordinator.swift"),
          str(native / "Tests/KrabEarAgentTests/PlaintextExportCoordinatorTests.swift"),
          "-o", str(binary)],

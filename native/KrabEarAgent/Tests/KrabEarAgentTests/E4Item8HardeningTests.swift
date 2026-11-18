@@ -148,6 +148,29 @@ final class E4Item8WakeWordPauseTests: XCTestCase {
         XCTAssertTrue(poller.isPaused, "privacy-пауза обязана переживать deactivate() и без таймера")
     }
 
+    func test_activatePausedForPrivacy_preservesExistingRecordingPause() {
+        let resumeOrders: [(WakeWordPauseReason, WakeWordPauseReason)] = [
+            (.recording, .privacyMode), (.privacyMode, .recording)
+        ]
+        for (first, last) in resumeOrders {
+            var ipcLookups = 0
+            let poller = WakeWordPoller(
+                ipcProvider: { ipcLookups += 1; return nil },
+                isToggleEnabled: { true }, onDetection: {})
+            defer { poller.deactivate() }
+
+            poller.pause(.recording)
+            poller.activate(pausedForPrivacy: true)
+            poller.resume(first)
+            XCTAssertTrue(poller.isPaused)
+            XCTAssertEqual(ipcLookups, 0)
+
+            poller.resume(last)
+            XCTAssertFalse(poller.isPaused)
+            XCTAssertEqual(ipcLookups, 1)
+        }
+    }
+
     func test_deactivateKeepsPrivacyPause() {
         let poller = WakeWordPoller(
             ipcProvider: { nil }, isToggleEnabled: { true }, onDetection: {})
@@ -161,14 +184,12 @@ final class E4Item8WakeWordPauseTests: XCTestCase {
 }
 
 final class E4Item8MainWiringTests: XCTestCase {
-    /// Ревью Gemini: privacy-пауза обязана предшествовать activate(), иначе микрофон на миг стартует.
-    func test_privacyPauseIsAppliedBeforeWakeWordActivate() throws {
+    /// Агент передаёт текущий режим до первой попытки запуска микрофона.
+    func test_wakeWordActivateReceivesCurrentPrivacyState() throws {
         var root = URL(fileURLWithPath: #file)
         for _ in 0..<6 where !FileManager.default.fileExists(
             atPath: root.appendingPathComponent("Sources/KrabEarAgent/main.swift").path) { root.deleteLastPathComponent() }
         let text = try String(contentsOf: root.appendingPathComponent("Sources/KrabEarAgent/main.swift"), encoding: .utf8)
-        let pause = try XCTUnwrap(text.range(of: "wakeWordPoller?.pause(.privacyMode)"))
-        let activate = try XCTUnwrap(text.range(of: "wakeWordPoller?.activate()"))
-        XCTAssertLessThan(pause.lowerBound, activate.lowerBound)
+        XCTAssertTrue(text.contains("wakeWordPoller?.activate(pausedForPrivacy: privacyModeEnabled)"))
     }
 }

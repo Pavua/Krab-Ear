@@ -27,6 +27,7 @@ def test_poller_rearms_after_ordinary_settings_commit(tmp_path, monkeypatch):
     binary = tmp_path / "poller"
     subprocess.run(
         ["swiftc", "-swift-version", "5", "-parse-as-library", swift / "IPCClient.swift",
+         swift / "IPCWire.swift",
          swift / "WakeWordPoller.swift", Path(__file__).parent / "fixtures/WakeWordRearmHarness.swift",
          "-o", binary], check=True, timeout=150,
     )
