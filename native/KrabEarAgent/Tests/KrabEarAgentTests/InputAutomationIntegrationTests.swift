@@ -20,7 +20,7 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
 @MainActor private final class InputFixture {
     let board: NSPasteboard, defaults: UserDefaults, queue: InputAutomationQueue, name: String
     var held = false, alive = true, pid: pid_t = 101
-    var role: String? = "AXTextArea", editable: Bool? = true
+    var role: String? = "AXTextArea", subrole: String? = nil, editable: Bool? = true
     var collapses = 0
     var trustedOverride: Bool?
     var events: [String] = []
@@ -41,7 +41,7 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
                 return PasteKeyEventPair(down: { self.events.append("d\(key)"); self.onDown?(key) },
                                          up: { self.events.append("u\(key)"); if key == 51 { self.deletePairs += 1 }; self.onUp?(key) })
             }, inputQueue: queue, frontmostPID: { self.pid }, targetIsAlive: { _ in self.alive },
-            focusRole: { _ in self.role }, focusEditable: { _ in self.editable }, collapseSelection: { _ in self.collapses += 1 },
+            focusRole: { _ in AXSecureField.effectiveRole(role: self.role, subrole: self.subrole) }, focusEditable: { _ in self.editable }, collapseSelection: { _ in self.collapses += 1 },
             runner: runner, operationBudget: budget)
     }
     func close() { board.clearContents(); board.releaseGlobally(); defaults.removePersistentDomain(forName: name) }
@@ -137,7 +137,7 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
                 switch drift {
                 case "copy": f.board.clearContents(); f.board.setString("user copy", forType: .string)
                 case "target": f.pid = 202
-                case "secure": f.role = "AXSecureTextField"
+                case "secure": f.role = "AXTextField"; f.subrole = "AXSecureTextField" // реальная форма: подроль, не роль
                 case "cancel": operation?.cancel()
                 default:
                     // Только fake OS leaf: bounded latency пересекает общий deadline
@@ -365,7 +365,7 @@ private final class InputRunner: AudioDuckingCommandRunning, @unchecked Sendable
             case "copy": f.board.clearContents(); f.board.setString("user copy", forType: .string)
             case "target": f.pid = 202
             case "cancel": operation.cancel()
-            case "secure": f.trustedOverride = true; f.role = "AXSecureTextField"
+            case "secure": f.trustedOverride = true; f.role = "AXTextField"; f.subrole = "AXSecureTextField"
             default:
                 guard let deadline = runner.deadlineOnEntry() else {
                     runner.finish.signal(); _ = await operation.value; return XCTFail("Runner не захватил deadline")
@@ -618,7 +618,7 @@ private struct NoInputNotifications: NotificationProcessRunning {
 
 private final class InputNotificationSpy: NotificationProcessRunning, @unchecked Sendable {
     var scripts: [String] = []
-    func run(executableURL: URL, arguments: [String]) throws { scripts.append(arguments.last ?? "") }
+    func run(executableURL: URL, arguments: [String]) throws { scripts.append(arguments.joined(separator: "\n")) }
 }
 
 @MainActor private final class CapturedQuickEdit: QuickEditPresenting {

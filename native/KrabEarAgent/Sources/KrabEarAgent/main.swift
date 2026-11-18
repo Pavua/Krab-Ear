@@ -99,11 +99,11 @@ struct LaunchOptions {
             }
         }
 
-        let cwd = fileManager.currentDirectoryPath
-        if isProjectRoot(cwd) {
-            return cwd
-        }
-
+        // Текущий каталог процесса НАМЕРЕННО не кандидат (ревью E4 N2, 2026-11-16):
+        // в active-режиме supervisor запускает `<projectRoot>/.venv_krab_ear/bin/python`,
+        // и «корень» из чужого cwd означал бы исполнение чужого интерпретатора.
+        // Dev-запуск из репозитория покрывают --project-root, KRAB_EAR_PROJECT_ROOT и
+        // walk-up от исполняемого файла (native/runtime/KrabEarAgent лежит внутри репо).
         if let executablePath {
             let execURL = URL(fileURLWithPath: executablePath).standardizedFileURL
             var probe = execURL.deletingLastPathComponent()
@@ -134,7 +134,10 @@ struct LaunchOptions {
             }
         }
 
-        return cwd
+        // Корень не найден. Раньше возвращался cwd, то есть недоверенный каталог;
+        // теперь заведомо пустой корень: там нет ни backend, ни .venv_krab_ear
+        // (под launchd cwd и так был «/»).
+        return "/"
     }
 }
 
@@ -800,13 +803,12 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         setupWakeWordConversationObservers()
         setupWakeWordTTSPlaybackObservers()
-        wakeWordPoller?.activate()
-        // Тумблер включили, пока privacy mode активен: сразу паузим (backend
-        // всё равно отвергнет старт — гейт живой; агентская пауза убирает
-        // цикл повторных попыток и лог-шум с обеих сторон).
+        // Тумблер включили, пока privacy mode активен: пауза ДО activate(), чтобы поллер вообще не
+        // отправлял wake_word_start (раньше сначала уходил start, и только потом stop).
         if privacyModeEnabled {
             wakeWordPoller?.pause(.privacyMode)
         }
+        wakeWordPoller?.activate()
     }
 
     /// Перезапустить wake word с новым значением enabled.

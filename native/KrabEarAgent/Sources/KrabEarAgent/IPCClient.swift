@@ -7,9 +7,6 @@
 
 import Foundation
 
-/// Max IPC response chunk size in bytes. 4 KB covers all current payloads; larger responses stream in multiple reads.
-private let ipcReadBufferSize: Int = 4096
-
 // MARK: - IPCSocketProviding (testability injection point)
 
 /// Abstraction over the low-level "send a JSON payload, get a JSON response" operation.
@@ -76,23 +73,7 @@ final class IPCRealSocketProvider: IPCSocketProviding, @unchecked Sendable {
         }
         guard written == bytes.count else { throw IPCError.writeFailed }
 
-        var responseData = Data()
-        var chunk = [UInt8](repeating: 0, count: ipcReadBufferSize)
-        while true {
-            let count = Darwin.read(fd, &chunk, chunk.count)
-            if count < 0 {
-                if errno == EAGAIN || errno == EWOULDBLOCK { throw IPCError.timeout }
-                throw IPCError.readFailed
-            }
-            if count == 0 {
-                if responseData.isEmpty || !responseData.contains(UInt8(ascii: "\n")) {
-                    throw IPCError.invalidResponse
-                }
-                break
-            }
-            responseData.append(contentsOf: chunk[0..<count])
-            if chunk[0..<count].contains(UInt8(ascii: "\n")) { break }
-        }
+        let responseData = try IPCWire.readResponse(fd: fd, timeoutSec: timeoutSec)
         return responseData
     }
 
@@ -314,22 +295,8 @@ final class IPCClient: @unchecked Sendable {
         let delimited = payload + Data("\n".utf8)
 
         let responseData = try await provider.send(payload: delimited, timeoutSec: timeoutSec)
-
-        guard
-            let text = String(data: responseData, encoding: .utf8),
-            let line = text.split(separator: "\n").first,
-            let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-        else {
-            throw IPCError.invalidResponse
-        }
-
-        if let ok = json["ok"] as? Bool, ok == false {
-            let errDict = (json["error"] as? [String: Any]) ?? [:]
-            let message = (errDict["message"] as? String) ?? "unknown"
-            throw IPCError.backendError(message)
-        }
-
-        return json
+        // E4 п.7: тот же строгий конверт, что и на реальном сокете (Bool ok + совпадение id).
+        return try IPCWire.parseEnvelope(responseData, expectedID: request["id"] as? String)
     }
 
     /// Variant с explicit timeout. Используй `IPCClient.quickTimeoutSec` (5s) для
@@ -376,45 +343,9 @@ final class IPCClient: @unchecked Sendable {
             throw IPCError.writeFailed
         }
 
-        var responseData = Data()
-        // IPC reads in a loop until EOF, so this is just the per-read buffer size
-        var chunk = [UInt8](repeating: 0, count: ipcReadBufferSize)
-
-        while true {
-            let count = Darwin.read(fd, &chunk, chunk.count)
-            if count < 0 {
-                if errno == EAGAIN || errno == EWOULDBLOCK {
-                    throw IPCError.timeout
-                }
-                throw IPCError.readFailed
-            }
-            if count == 0 {
-                if responseData.isEmpty || !responseData.contains(UInt8(ascii: "\n")) {
-                    throw IPCError.invalidResponse
-                }
-                break
-            }
-            responseData.append(contentsOf: chunk[0..<count])
-            if chunk[0..<count].contains(UInt8(ascii: "\n")) {
-                break
-            }
-        }
-
-        guard
-            let text = String(data: responseData, encoding: .utf8),
-            let line = text.split(separator: "\n").first,
-            let json = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any]
-        else {
-            throw IPCError.invalidResponse
-        }
-
-        if let ok = json["ok"] as? Bool, ok == false {
-            let error = (json["error"] as? [String: Any]) ?? [:]
-            let message = (error["message"] as? String) ?? "unknown"
-            throw IPCError.backendError(message)
-        }
-
-        return json
+        // E4 п.7: общий дедлайн, лимит размера и строгий конверт (IPCWire).
+        let responseData = try IPCWire.readResponse(fd: fd, timeoutSec: timeoutSec)
+        return try IPCWire.parseEnvelope(responseData, expectedID: request["id"] as? String)
     }
 
     private func connectSocket(fd: Int32) throws {

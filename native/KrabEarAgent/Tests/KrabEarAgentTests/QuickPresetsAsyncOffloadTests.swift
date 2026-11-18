@@ -55,6 +55,9 @@ final class QuickPresetsCycleTests: XCTestCase {
     private func makeDelegate() -> AgentAppDelegate {
         final class NoOpProvider: IPCSocketProviding, @unchecked Sendable {
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
                 return Data(#"{"id":"x","ok":true,"result":{}}"#.utf8)
             }
         }
@@ -136,6 +139,9 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
             init(recorder: ProfileRecorder) { self.recorder = recorder }
 
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
                 if
                     let dict = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                     let method = dict["method"] as? String,
@@ -168,6 +174,9 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
     func test_applyRecordingPreset_updatesUserDefaults_afterIPCSuccess() async throws {
         final class SuccessProvider: IPCSocketProviding, @unchecked Sendable {
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
                 return Data(#"{"id":"x","ok":true,"result":{}}"#.utf8)
             }
         }

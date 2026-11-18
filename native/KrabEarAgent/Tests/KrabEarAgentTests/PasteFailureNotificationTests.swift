@@ -5,7 +5,7 @@ import XCTest
 private final class PasteFailureNotifications: NotificationProcessRunning, @unchecked Sendable {
     var scripts: [String] = []
     func run(executableURL: URL, arguments: [String]) throws {
-        scripts.append(arguments.last ?? "")
+        scripts.append(arguments.joined(separator: "\n"))
     }
 }
 

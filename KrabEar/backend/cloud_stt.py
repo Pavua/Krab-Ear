@@ -186,7 +186,7 @@ class OpenAISTTProvider:
         pass
 
     def transcribe(self, pcm_bytes: bytes, sample_rate: int, source_lang: str) -> Dict[str, Any]:
-        api_key = _load_settings().get("openai_api_key", "").strip()
+        api_key = str(_load_settings().get("openai_api_key") or "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -273,7 +273,7 @@ class DeepgramSTTProvider:
         pass
 
     def transcribe(self, pcm_bytes: bytes, sample_rate: int, source_lang: str) -> Dict[str, Any]:
-        api_key = _load_settings().get("deepgram_api_key", "").strip()
+        api_key = str(_load_settings().get("deepgram_api_key") or "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -333,7 +333,7 @@ class AssemblyAISTTProvider:
         pass
 
     def transcribe(self, pcm_bytes: bytes, sample_rate: int, source_lang: str) -> Dict[str, Any]:
-        api_key = _load_settings().get("assemblyai_api_key", "").strip()
+        api_key = str(_load_settings().get("assemblyai_api_key") or "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",

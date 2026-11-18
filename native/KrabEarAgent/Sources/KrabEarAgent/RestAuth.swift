@@ -50,7 +50,22 @@ enum RestAuth {
         environment: [String: String] = ProcessInfo.processInfo.environment,
         defaultFile: URL = RestAuth.defaultKeyFileURL
     ) {
+        // Ключ уходит только на loopback (ревью E4 N3, 2026-11-16): URL базы REST
+        // может прийти из настроек, а чужому хосту ключ отдавать нельзя.
+        guard isLoopback(request.url) else {
+            // Запрос могли перенацелить после первого apply: ранее поставленный ключ снимаем.
+            if request.value(forHTTPHeaderField: "Authorization")?.hasPrefix("Bearer ") == true {
+                request.setValue(nil, forHTTPHeaderField: "Authorization")
+            }
+            return
+        }
         guard let token = bearerToken(environment: environment, defaultFile: defaultFile) else { return }
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+
+    /// Только точные loopback-имена: `127.0.0.1.evil.example.com` не проходит.
+    static func isLoopback(_ url: URL?) -> Bool {
+        guard let host = url?.host?.lowercased() else { return false }
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
     }
 }

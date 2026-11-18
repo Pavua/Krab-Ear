@@ -631,17 +631,14 @@ class TestExportSettingsRedactsAllSensitiveFields(unittest.TestCase):
         svc = SettingsService(store=base)
         svc.invalidate_cache()  # ensure fresh load picks up updated mock
 
-        with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".json", delete=False, encoding="utf-8"
-        ) as fh:
-            tmp_path = fh.name
+        # E5 п.2: экспорт создаёт файл эксклюзивно — путь должен быть свежим (не NamedTemporaryFile).
+        export_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(export_dir.cleanup)
+        tmp_path = os.path.join(export_dir.name, "export.json")
 
-        try:
-            result = svc.handle_export_settings({"file": tmp_path})
-            with open(tmp_path, encoding="utf-8") as f:
-                exported = json.load(f)
-        finally:
-            os.unlink(tmp_path)
+        result = svc.handle_export_settings({"file": tmp_path})
+        with open(tmp_path, encoding="utf-8") as f:
+            exported = json.load(f)
 
         # None of the 9 sensitive keys should appear in the export.
         leaked = [k for k in SENSITIVE_FIELDS if k in exported]

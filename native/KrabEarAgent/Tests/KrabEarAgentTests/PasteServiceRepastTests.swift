@@ -46,25 +46,40 @@ final class PasteServiceRepastTests: XCTestCase {
 
     // MARK: - recordLastPaste
 
-    func testRecordLastPasteSavesToInjectedDefaults() {
+    /// E4 п.4: продиктованный текст не пишется на диск (UserDefaults = открытый plist).
+    func testRecordLastPasteKeepsTextInMemoryOnly() {
         service.recordLastPaste("Hello world")
 
-        XCTAssertEqual(defaults.string(forKey: testKey), "Hello world")
+        XCTAssertEqual(service.lastPastedText, "Hello world")
+        XCTAssertNil(defaults.string(forKey: testKey), "последняя вставка не должна попадать в UserDefaults")
+    }
+
+    /// E4 п.4: прежние версии оставили текст в UserDefaults открытым текстом — init стирает его.
+    func testInitRemovesLegacyPlaintextKey() {
+        defaults.set("legacy dictated secret", forKey: testKey)
+        let fresh = PasteService(
+            pasteboard: pasteboard,
+            defaults: defaults,
+            repastePerformer: { _ in PasteAttemptResult(ok: true, reason: "fake_repaste") }
+        )
+
+        XCTAssertNil(defaults.string(forKey: testKey))
+        XCTAssertNil(fresh.lastPastedText)
     }
 
     func testLastPastedTextReturnsNilWhenEmpty() {
         XCTAssertNil(service.lastPastedText)
     }
 
-    func testLastPastedTextPersistsAcrossInstancesWithSameDefaults() {
-        service.recordLastPaste("Persistent text")
+    func testLastPastedTextDoesNotSurviveANewInstance() {
+        service.recordLastPaste("Transient text")
         let service2 = PasteService(
             pasteboard: pasteboard,
             defaults: defaults,
             repastePerformer: { _ in PasteAttemptResult(ok: true, reason: "fake_repaste") }
         )
 
-        XCTAssertEqual(service2.lastPastedText, "Persistent text")
+        XCTAssertNil(service2.lastPastedText)
     }
 
     // MARK: - repastLast
@@ -88,7 +103,7 @@ final class PasteServiceRepastTests: XCTestCase {
     }
 
     @MainActor func testRepastLastAllowedAfterCooldownUsesInjectedPerformer() async {
-        // Отсутствие in-memory timestamp имитирует восстановление текста из прошлой сессии.
+        // Текст без in-memory timestamp: кулдаун не применяется (первый repaste после установки текста).
         service.lastPastedText = "Old text"
 
         let result = await service.repastLast()

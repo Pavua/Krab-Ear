@@ -718,11 +718,21 @@ final class CallAutomationController: NSViewController {
         hangupButton.isEnabled = false
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
-            let _ = try? self.ipcClient.call(
+            let response = try? self.ipcClient.call(
                 method: "call_session_end",
                 params: ["id": sessionID, "reason": "completed"]
             )
             DispatchQueue.main.async {
+                // E4 п.2: `.ended` только при подтверждённом ответе. Отказ/таймаут оставляет сессию
+                // живой (polling продолжается), иначе живой звонок выглядел бы завершённым.
+                guard case .ended = CallEndOutcome.parse(response) else {
+                    // Конкурирующая экстренная остановка уже могла завершить сессию.
+                    guard CallEndOutcome.shouldRestoreAfterFailedEnd(
+                        sessionAlreadyEnded: self.currentSession?.status == .ended) else { return }
+                    self.hangupButton.isEnabled = true
+                    self.showError("Не удалось завершить звонок. Повторите или используйте экстренную остановку.")
+                    return
+                }
                 self.stopSessionPolling()
                 var s = self.currentSession
                 s?.status = .ended
@@ -739,6 +749,7 @@ final class CallAutomationController: NSViewController {
         guard let sessionID = currentSession?.sessionID else { return }
         emergencyStopButton.isEnabled = false
         stopSessionPolling()
+        let statusBeforeStop = currentSession?.status
         var s = currentSession
         s?.status = .ending
         currentSession = s
@@ -746,11 +757,28 @@ final class CallAutomationController: NSViewController {
 
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self else { return }
-            let _ = try? self.ipcClient.call(
+            let response = try? self.ipcClient.call(
                 method: "call_session_end",
                 params: ["id": sessionID, "reason": "completed"]
             )
             DispatchQueue.main.async {
+                // E4 п.2: при отказе возвращаем прежний статус и polling — звонок мог остаться живым.
+                guard case .ended = CallEndOutcome.parse(response) else {
+                    // Конкурирующий hangup уже мог завершить сессию: «оживлять» её нельзя.
+                    guard CallEndOutcome.shouldRestoreAfterFailedEnd(
+                        sessionAlreadyEnded: self.currentSession?.status == .ended) else {
+                        self.emergencyStopButton.isEnabled = true
+                        return
+                    }
+                    var restored = self.currentSession
+                    if let statusBeforeStop { restored?.status = statusBeforeStop }
+                    self.currentSession = restored
+                    self.updateSessionUI(session: self.currentSession)
+                    self.startSessionPolling(sessionID: sessionID)
+                    self.emergencyStopButton.isEnabled = true
+                    self.showError("Не удалось остановить звонок. Повторите попытку.")
+                    return
+                }
                 var s2 = self.currentSession
                 s2?.status = .ended
                 s2?.endedAt = Date()
@@ -861,38 +889,19 @@ final class CallAutomationController: NSViewController {
         startButton.isEnabled = true
         startButton.title = "Начать звонок"
 
-        guard let response else {
+        // E4 п.2: строгий разбор (CallDialOutcome): успех = непустой session_id и ok != false.
+        switch CallDialOutcome.parse(response) {
+        case .missingResponse:
             showError("Нет ответа от backend. Убедитесь, что сервис запущен.")
-            return
-        }
-
-        // Не настроен провайдер — показать баннер, а не молчать.
-        // 🔴 Коды сверены с backend буква в букву: gateway_not_configured
-        // возвращает GatewayCallProvider, call_provider_unavailable —
-        // CallSessionService, когда фабрика не отдала провайдера вовсе.
-        // Коды удалённых адаптеров (telnyx_/twilio_/sip_local_not_configured)
-        // больше не приходят.
-        let notConfigured: Set<String> = ["gateway_not_configured", "call_provider_unavailable"]
-        if let error = response["error"] as? [String: Any],
-           let code = error["code"] as? String, notConfigured.contains(code) {
+        case .needsConfiguration:
+            // Не настроен провайдер — показать баннер, а не молчать.
             showConfigBanner(true)
-            return
-        }
-        if let result = response["result"] as? [String: Any],
-           (result["ok"] as? Bool) == false,
-           let code = result["error"] as? String, notConfigured.contains(code) {
-            // call_start отвечает отказом В PAYLOAD, а не конвертом ошибки:
-            // проверять только error-конверт значило бы пропустить этот случай.
-            showConfigBanner(true)
-            return
-        }
-
-        if let result = response["result"] as? [String: Any] {
-            let sessionID = (result["session_id"] as? String) ?? UUID().uuidString
-            let statusRaw  = (result["status"] as? String) ?? "dialing"
+        case .failed(let code):
+            showError(CallDialOutcome.failureMessage(code: code))
+        case .started(let sessionID, let statusRaw):
             let session = CallSession(
                 sessionID: sessionID,
-                status: CallSession.Status(rawValue: statusRaw) ?? .dialing,
+                status: CallBackendStatus.uiRawValue(statusRaw).flatMap(CallSession.Status.init(rawValue:)) ?? .dialing,
                 phone: phone,
                 goal: goal,
                 startedAt: Date(),
@@ -904,8 +913,6 @@ final class CallAutomationController: NSViewController {
             currentSession = session
             updateSessionUI(session: session)
             startSessionPolling(sessionID: sessionID)
-        } else {
-            showError("Не удалось начать звонок. Проверьте настройки Voice Gateway.")
         }
     }
 
@@ -951,7 +958,9 @@ final class CallAutomationController: NSViewController {
             : entries.map { "\($0["speaker"] as? String ?? "?"): \($0["text"] as? String ?? "")" }.joined(separator: "\n")
         let cost       = (result["cost_usd"] as? Double) ?? session.costUSD
 
-        session.status    = CallSession.Status(rawValue: statusRaw) ?? session.status
+        // Журнал backend говорит completed/failed, UI — ended/error: без перевода конец не виден.
+        session.status    = CallBackendStatus.uiRawValue(statusRaw).flatMap(CallSession.Status.init(rawValue:))
+            ?? session.status
         session.transcript = transcript
         session.costUSD   = cost
 
