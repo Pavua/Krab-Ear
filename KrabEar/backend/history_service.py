@@ -17,6 +17,7 @@ import os
 import stat
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
@@ -517,7 +518,14 @@ class HistoryService:
                 settings = self._cached_settings()
             else:
                 settings = self.store.load_settings()
-            return bool(settings.get("privacy_mode_enabled", False))
+            # Настройки не словарь (битый источник) — состояние приватности неизвестно: ON.
+            if not isinstance(settings, Mapping):
+                return True
+            if "privacy_mode_enabled" not in settings:
+                return False
+            value = settings["privacy_mode_enabled"]
+            # Не-bool (None, 0, "") — тоже «неизвестно»: ON (как StateStore.load_settings).
+            return value if isinstance(value, bool) else True
         except AttributeError:
             # Частично сконструированный инстанс (__new__ без __init__ в unit-тестах).
             return False
@@ -870,7 +878,10 @@ class HistoryService:
     # Вспомогательные методы: работа с .md файлами транскриптов
     # ------------------------------------------------------------------
 
-    def _transcript_md_candidates(self, item_ts: str) -> list[Path]:
+    #: Верхняя граница размера .md, который читаем ради опознания по тексту.
+    _MD_MATCH_MAX_BYTES = 8 * 1024 * 1024
+
+    def _transcript_md_candidates(self, item_ts: str, item: Any = None) -> list[Path]:
         """Возвращает список кандидатов .md файлов для записи с заданным ts.
 
         TranscriptWriter формирует имена файлов по схеме:
@@ -879,10 +890,13 @@ class HistoryService:
           {date_str}-Транскрибация-{time_str}-N.md
 
         Где date_str = YYYY-MM-DD, time_str = HHMMSS из item.ts.
-        Метод возвращает только файлы, в имени которых содержится time_str —
-        это минимизирует риск стереть соседний файл того же дня при нескольких
-        записях.  Если time_str недоступен (невалидный ts) — возвращает пустой
-        список (безопасный fallback: лучше не удалить, чем удалить лишнее).
+        По времени в имени находятся только файлы, где оно есть — это минимизирует риск
+        стереть соседний файл того же дня. Два вида файлов времени в имени НЕ несут:
+        первый файл дня (`{date}-Транскрибация.md`) и пакетный импорт
+        (`{YYYYMMDD}_{HHMMSS}_{имя}.md`, время записи файла, а не ``item.ts``). Их опознаём
+        по тексту записи: файл берём, только если полный текст стоит в нём отдельным
+        блоком (`\n\n{текст}\n`), поэтому соседний файл с другим текстом не задевается.
+        Если ts невалиден — пустой список (лучше не удалить, чем удалить лишнее).
         """
         if not item_ts:
             return []
@@ -897,16 +911,64 @@ class HistoryService:
             return []
         # Glob по date_str + time_str — не задевает соседние записи того же дня
         pattern = f"{date_str}-*{time_str}*.md"
-        return list(transcripts_dir.glob(pattern))
+        found = list(transcripts_dir.glob(pattern))
+        if item is not None:
+            for extra in self._content_matched_md_files(transcripts_dir, dt, item):
+                if extra not in found:
+                    found.append(extra)
+        return found
 
-    def _erase_transcript_md(self, item_ts: str, item_id: str) -> None:
+    def _content_matched_md_files(self, transcripts_dir: Path, dt: datetime, item: Any) -> list[Path]:
+        """Файлы без времени в имени, в которых стоит полный текст этой записи."""
+        from backend.transcript_writer import TranscriptWriter, _sanitize_md_body
+
+        def field(name: str) -> str:
+            value = item.get(name) if isinstance(item, dict) else getattr(item, name, "")
+            return value.strip() if isinstance(value, str) else ""
+
+        bodies: set[str] = set()
+        for text in (field("text"), field("source_text")):
+            if text:
+                bodies.add(text)
+                bodies.add(_sanitize_md_body(text).strip())
+        try:
+            item_dict = item if isinstance(item, dict) else item.to_dict()
+            writer_body = _sanitize_md_body(TranscriptWriter._build_text_section(item_dict)).strip()
+            if writer_body:
+                bodies.add(writer_body)
+        except Exception:  # noqa: BLE001 — тело по формату writer'а лишь дополняет поиск
+            logger.debug("W1762: тело .md по формату writer'а не построено", exc_info=True)
+        bodies.discard("")
+        if not bodies:
+            return []
+
+        matched: list[Path] = []
+        for day in (dt.date(), dt.date() + timedelta(days=1)):
+            patterns = (f"{day:%Y-%m-%d}-Транскрибация*.md", f"{day:%Y%m%d}_*.md")
+            for pattern in patterns:
+                for path in transcripts_dir.glob(pattern):
+                    try:
+                        if path.is_symlink() or not path.is_file():
+                            continue
+                        if path.stat().st_size > self._MD_MATCH_MAX_BYTES:
+                            continue
+                        content = path.read_text(encoding="utf-8", errors="ignore")
+                    except OSError:
+                        continue
+                    if any(("\n\n" + body + "\n") in content or content.endswith("\n\n" + body)
+                           for body in bodies):
+                        if path not in matched:
+                            matched.append(path)
+        return matched
+
+    def _erase_transcript_md(self, item_ts: str, item_id: str, item: Any = None) -> None:
         """Стирает .md файлы транскрипта, связанные с записью.
 
         W1762: приватная операция — ошибка стирания выводится как WARNING,
         но не прерывает удаление записи (tombstone уже записан).
         В лог попадает только имя файла (без содержимого/PII).
         """
-        candidates = self._transcript_md_candidates(item_ts)
+        candidates = self._transcript_md_candidates(item_ts, item)
         for md_path in candidates:
             try:
                 md_path.unlink(missing_ok=True)
@@ -930,11 +992,13 @@ class HistoryService:
         # W1762: получаем ts записи ДО tombstone — нужен для поиска .md файла.
         # Загружаем только под коротким lock'ом, чтобы не держать его при удалении.
         item_ts: str = ""
+        deleted_item: Any = None
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
         for _item in active:
             if _item.id == item_id:
                 item_ts = _item.ts
+                deleted_item = _item
                 break
 
         ok = self.store.delete_history_item(item_id)
@@ -945,7 +1009,7 @@ class HistoryService:
         # versions).  Вынесено в cascade_delete_artifacts, чтобы RecordingMerger мог
         # переиспользовать тот же путь после собственного атомарного tombstone'а
         # (wave1776 HIGH 1) — DRY: один источник истины для каскадного удаления.
-        self.cascade_delete_artifacts(item_id, item_ts)
+        self.cascade_delete_artifacts(item_id, item_ts, item=deleted_item)
 
         add_breadcrumb(
             category="history",
@@ -954,7 +1018,7 @@ class HistoryService:
         )
         return {"deleted": True}
 
-    def cascade_delete_artifacts(self, item_id: str, item_ts: str) -> None:
+    def cascade_delete_artifacts(self, item_id: str, item_ts: str, item: Any = None) -> None:
         """Выполняет ВСЕ каскады удаления, КРОМE tombstone'а самой записи.
 
         Tombstone должен быть записан вызывающей стороной ДО этого вызова
@@ -968,7 +1032,7 @@ class HistoryService:
         (W1343), версии транскрипта (W1045 F2).  Каждый шаг отказоустойчив.
         """
         # W1762: стираем .md файл транскрипта (privacy gap — файл пережил tombstone).
-        self._erase_transcript_md(item_ts, item_id)
+        self._erase_transcript_md(item_ts, item_id, item)
 
         # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
         if self._semantic_searcher is not None:
@@ -1149,6 +1213,9 @@ class HistoryService:
             current_tags.append(tag)
             self.store.update_history_item_tags(item_id, current_tags)
 
+        # Имена тегов могут быть чувствительны: ответ закрыт так же, как у get_tags.
+        if self._is_privacy_mode():
+            return {"id": item_id, "tags": [], "reason": "privacy_mode_active"}
         return {"id": item_id, "tags": current_tags}
 
     def handle_remove_tag(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1171,6 +1238,8 @@ class HistoryService:
         current_tags: list[str] = [t for t in (item.tags or []) if t != tag]
         self.store.update_history_item_tags(item_id, current_tags)
 
+        if self._is_privacy_mode():
+            return {"id": item_id, "tags": [], "reason": "privacy_mode_active"}
         return {"id": item_id, "tags": current_tags}
 
     def handle_get_tags(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2509,7 +2578,7 @@ class HistoryService:
         # W1762: стираем .md файлы транскриптов для каждой удалённой записи.
         # Зеркалирует логику single-delete (handle_delete_history_item).
         for item in to_delete:
-            self._erase_transcript_md(item.ts, item.id)
+            self._erase_transcript_md(item.ts, item.id, item)
 
         add_breadcrumb(
             category="history",
