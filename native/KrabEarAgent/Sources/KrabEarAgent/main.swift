@@ -215,6 +215,17 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     var settings: AgentSettings = .default
     private let settingsOperations = AgentSettingsOperationQueue()
     private var pendingPrivacyMutations = 0
+    private static let uncertainPrivacyKey = "KrabEar_UnconfirmedPrivacyWrite"
+    var hasUnconfirmedPrivacyWrite: Bool { userDefaults.bool(forKey: Self.uncertainPrivacyKey) }
+    private var privacyRevision = UUID()
+    private var privacyVerifiedAt: ContinuousClock.Instant?
+    private var nextPrivacyPoll: ContinuousClock.Instant?
+    private var privacyPoll: Task<Bool, Never>?
+    var privacyNow: () -> ContinuousClock.Instant = { .now }
+
+    // Период 5с, плюс 5с на ограниченное чтение. Старый ответ не продлевает срок.
+    private static let privacyPollInterval: Duration = .seconds(5)
+    private static let privacyLifetime: Duration = .seconds(10)
     var isRecording = false
     var isProcessing = false
     // Мини-волна 2026-08-11 (авто-дострел отложенного stop_recording):
@@ -376,6 +387,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         self.launchAgentManager = LaunchAgentManager(projectRoot: options.projectRoot)
         self.ipcClient = IPCClient(socketPath: (NSString(string: "~/Library/Application Support/KrabEar").expandingTildeInPath as NSString).appendingPathComponent("krabear.sock"))
         super.init()
+        settings.privacyModeEnabled = true
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -516,7 +528,8 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             await handshakeClient.performHandshake(swiftAgentVersion: agentVersion)
         }
 
-        applyConfirmedSettings(loadSettings(), updateUI: false)
+        let readStarted = privacyNow()
+        applyConfirmedSettings(loadSettings(), readStarted: readStarted, updateUI: false)
         realtimeOverlay.setOpacityPercent(settings.overlayOpacityPercent)
         logger.info(
             "Настройки загружены: mode=\(settings.mode), autoPaste=\(settings.autoPaste), quality=\(settings.qualityProfile), translation=\(settings.translationMode)"
@@ -1406,18 +1419,26 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
 
     func loadSettings() -> [String: Any]? {
         let response = try? callWithRecovery(method: "get_settings", params: [:])
+        guard confirmedPrivacyFlag(response?["ok"]) == true else { return nil }
         return response?["result"] as? [String: Any]
     }
 
     @discardableResult
-    private func applyConfirmedSettings(_ payload: [String: Any]?, updateUI: Bool = true) -> Bool {
-        guard let payload, let confirmedPrivacy = confirmedPrivacyFlag(payload["privacy_mode_enabled"]) else {
+    private func applyConfirmedSettings(
+        _ payload: [String: Any]?, readStarted: ContinuousClock.Instant,
+        privacyOnly: Bool = false, updateUI: Bool = true
+    ) -> Bool {
+        guard let payload, let confirmedPrivacy = confirmedPrivacyFlag(payload["privacy_mode_enabled"]),
+              readStarted.duration(to: privacyNow()) < Self.privacyLifetime else {
+            privacyVerifiedAt = nil
             setPrivacyMode(true)
             return false
         }
         let previous = settings
-        settings = AgentSettings(from: payload)
+        if !privacyOnly { settings = AgentSettings(from: payload) }
+        privacyVerifiedAt = readStarted
         let restricted = confirmedPrivacy || pendingPrivacyMutations > 0
+            || hasUnconfirmedPrivacyWrite
         setPrivacyMode(restricted)
         if !restricted {
             SentryConfig.initializeFromSettings(
@@ -1426,7 +1447,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 fallbackDSN: userDefaults.string(forKey: "KrabEar_SentryDSN")
             )
         }
-        if updateUI {
+        if updateUI && !privacyOnly {
             applySettingsSideEffects(previous: previous, current: settings)
             if previous.mode != settings.mode || previous.showDockIcon != settings.showDockIcon {
                 applyMode(settings.mode, persist: false)
@@ -1439,9 +1460,41 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @discardableResult
-    private func refreshSettings() async -> Bool {
+    private func refreshSettings(privacyOnly: Bool = false) async -> Bool {
+        let revision = privacyRevision
+        let started = privacyNow()
         let response = try? await ipcClient.callAsync(method: "get_settings", timeoutSec: IPCClient.quickTimeoutSec)
-        return applyConfirmedSettings(response?["result"] as? [String: Any])
+        guard revision == privacyRevision else { return false }
+        let payload = confirmedPrivacyFlag(response?["ok"]) == true ? response?["result"] as? [String: Any] : nil
+        return applyConfirmedSettings(payload, readStarted: started, privacyOnly: privacyOnly)
+    }
+
+    // Не ставим неограниченную очередь чтений за медленной записью. Срок последнего
+    // разрешения проверяется даже пока очередь занята или IPC ещё не вернул ответ.
+    @discardableResult
+    func tickPrivacyMonitor() -> Task<Bool, Never>? {
+        let now = privacyNow()
+        if let verified = privacyVerifiedAt, verified.duration(to: now) >= Self.privacyLifetime {
+            privacyVerifiedAt = nil
+            setPrivacyMode(true)
+        }
+        if let privacyPoll { return privacyPoll }
+        if let nextPrivacyPoll, now < nextPrivacyPoll { return nil }
+        nextPrivacyPoll = now.advanced(by: Self.privacyPollInterval)
+        let poll = settingsOperations.enqueue { [weak self] in
+            guard let self else { return false }
+            defer { self.privacyPoll = nil }
+            return await self.refreshSettings(privacyOnly: true)
+        }
+        privacyPoll = poll
+        return poll
+    }
+
+    func invalidatePrivacyConnection() {
+        privacyRevision = UUID()
+        privacyVerifiedAt = nil
+        nextPrivacyPoll = nil
+        setPrivacyMode(true)
     }
 
     @discardableResult
@@ -1449,35 +1502,43 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         _ method: String, params: [String: Any], preservesPrivacy: Bool = false
     ) -> Task<Bool, Never> {
         let requestedPrivacy = confirmedPrivacyFlag(params["privacy_mode_enabled"])
-        let mayRestrictPrivacy = requestedPrivacy == true
+        let affectsPrivacy = params["privacy_mode_enabled"] != nil
             || (method == "apply_config_preset" && !preservesPrivacy)
             || method == "restore_settings_backup"
-        if mayRestrictPrivacy {
+        if affectsPrivacy {
             pendingPrivacyMutations += 1
-            setPrivacyMode(true)
+            invalidatePrivacyConnection()
         }
         return settingsOperations.enqueue { [weak self] in
             guard let self else { return false }
-            let response = try? await self.callAsyncWithRecovery(method: method, params: params)
-            if mayRestrictPrivacy { self.pendingPrivacyMutations -= 1 }
-            guard let result = response?["result"] as? [String: Any] else {
-                await self.refreshSettings()
-                return false
+            let alreadyUncertain = self.hasUnconfirmedPrivacyWrite
+            let response: [String: Any]?
+            if affectsPrivacy {
+                // После timeout сервер ещё может применить запрос. Повтор и
+                // произвольный get_settings=false не подтверждают завершение записи.
+                self.userDefaults.set(true, forKey: Self.uncertainPrivacyKey)
+                response = try? await self.ipcClient.callAsync(method: method, params: params)
+                self.pendingPrivacyMutations -= 1
+            } else {
+                response = try? await self.callAsyncWithRecovery(method: method, params: params)
             }
+            let result = confirmedPrivacyFlag(response?["ok"]) == true ? response?["result"] as? [String: Any] : nil
+            let acknowledged: Bool
             if method == "apply_config_preset" {
-                let refreshed = await self.refreshSettings()
-                return (result["applied"] as? Bool == true) && refreshed
+                acknowledged = confirmedPrivacyFlag(result?["applied"]) == true
+            } else {
+                let payload = method == "restore_settings_backup"
+                    ? result?["restored_settings"] as? [String: Any] : result
+                let saved = confirmedPrivacyFlag(payload?["privacy_mode_enabled"])
+                acknowledged = saved != nil && (requestedPrivacy == nil || saved == requestedPrivacy)
             }
-            let payload = method == "restore_settings_backup"
-                ? result["restored_settings"] as? [String: Any] : result
-            guard self.applyConfirmedSettings(payload) else {
-                await self.refreshSettings()
-                return false
+            if affectsPrivacy && acknowledged && (!alreadyUncertain || requestedPrivacy == false) {
+                self.userDefaults.removeObject(forKey: Self.uncertainPrivacyKey)
             }
-            if let requestedPrivacy {
-                return confirmedPrivacyFlag(payload?["privacy_mode_enabled"]) == requestedPrivacy
-            }
-            return true
+            // Только свежий get_settings несёт проверенную backend privacy-проекцию.
+            let refreshed = await self.refreshSettings()
+            return acknowledged && refreshed
+                && (requestedPrivacy == nil || self.settings.privacyModeEnabled == requestedPrivacy)
         }
     }
 

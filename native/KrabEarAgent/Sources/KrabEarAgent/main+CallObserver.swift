@@ -23,6 +23,7 @@ extension AgentAppDelegate {
             tokenProvider: tokenProvider)
         hudController.coordinator = coordinator
         panelController.coordinator = coordinator
+        coordinator.setAgentPrivacyRestricted(privacyModeEnabled)
         self.callObserverCoordinator = coordinator
         let watcher = VGSessionWatcher(fetcher: URLSessionVGSessionFetcher(
             baseURLProvider: { settings.lastBaseURL }, tokenProvider: tokenProvider))

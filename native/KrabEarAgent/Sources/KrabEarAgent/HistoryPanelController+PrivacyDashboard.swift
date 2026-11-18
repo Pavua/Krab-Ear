@@ -13,8 +13,8 @@
    - get_privacy_dashboard {}
        → result {
            ok Bool,
-           privacy_mode Bool,
-           encryption_enabled Bool,
+           privacy_mode Bool|null,
+           encryption_enabled Bool|null,
            storage {item_count Int, history_bytes Int, history_file_size_mb Double,
                     transcripts_count Int, transcripts_size_mb Double,
                     total_bytes Int, total_data_mb Double},
@@ -55,8 +55,8 @@ private enum PrivacyDashboardAssocKeys {
 // MARK: - Модель приватности (internal, single-source)
 
 struct PrivacyDashboardData {
-    let privacyMode: Bool
-    let encryptionEnabled: Bool
+    let privacyMode: Bool?
+    let encryptionEnabled: Bool?
     // storage
     let itemCount: Int
     let transcriptsCount: Int
@@ -68,6 +68,23 @@ struct PrivacyDashboardData {
     let auditTotalEvents: Int
     let auditLastEventTs: String?
     let purgeAvailable: Bool
+
+    init?(result: [String: Any]) {
+        guard confirmedPrivacyFlag(result["ok"]) == true else { return nil }
+        privacyMode = confirmedPrivacyFlag(result["privacy_mode"])
+        encryptionEnabled = confirmedPrivacyFlag(result["encryption_enabled"])
+        let storage = result["storage"] as? [String: Any]
+        let retention = result["retention"] as? [String: Any]
+        let audit = result["audit"] as? [String: Any]
+        itemCount = storage?["item_count"] as? Int ?? 0
+        transcriptsCount = storage?["transcripts_count"] as? Int ?? 0
+        totalDataMb = HistoryPanelController.pdDouble(storage?["total_data_mb"])
+        autoPurgeEnabled = retention?["auto_purge_enabled"] as? Bool ?? false
+        autoPurgeRetentionDays = retention?["auto_purge_retention_days"] as? Int ?? 0
+        auditTotalEvents = audit?["total_events"] as? Int ?? 0
+        auditLastEventTs = HistoryPanelController.pdTimestamp(audit?["last_event_ts"])
+        purgeAvailable = result["purge_available"] as? Bool ?? false
+    }
 }
 
 // MARK: - HistoryPanelController+PrivacyDashboard
@@ -152,26 +169,7 @@ extension HistoryPanelController {
                 let resp = try ipc.call(method: "get_privacy_dashboard", params: [:])
                 let result = resp["result"] as? [String: Any] ?? [:]
 
-                // Без ok=true карточка бессмысленна — считаем данные отсутствующими.
-                if (result["ok"] as? Bool) == true,
-                   let privacy = confirmedPrivacyFlag(result["privacy_mode"]) {
-                    let storage = result["storage"] as? [String: Any] ?? [:]
-                    let retention = result["retention"] as? [String: Any] ?? [:]
-                    let audit = result["audit"] as? [String: Any] ?? [:]
-
-                    data = PrivacyDashboardData(
-                        privacyMode: privacy,
-                        encryptionEnabled: (result["encryption_enabled"] as? Bool) ?? false,
-                        itemCount: (storage["item_count"] as? Int) ?? 0,
-                        transcriptsCount: (storage["transcripts_count"] as? Int) ?? 0,
-                        totalDataMb: HistoryPanelController.pdDouble(storage["total_data_mb"]),
-                        autoPurgeEnabled: (retention["auto_purge_enabled"] as? Bool) ?? false,
-                        autoPurgeRetentionDays: (retention["auto_purge_retention_days"] as? Int) ?? 0,
-                        auditTotalEvents: (audit["total_events"] as? Int) ?? 0,
-                        auditLastEventTs: HistoryPanelController.pdTimestamp(audit["last_event_ts"]),
-                        purgeAvailable: (result["purge_available"] as? Bool) ?? false
-                    )
-                }
+                data = PrivacyDashboardData(result: result)
             } catch {
                 data = nil
             }
@@ -215,9 +213,9 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(
             makeSettingRow(
                 label: "Режим приватности",
-                control: pdPrivacyModeToggle(on: data.privacyMode),
+                control: Self.pdPrivacyModeToggle(on: displayPrivacy(data.privacyMode), target: self),
                 badge: pdToggleBadge(
-                    on: data.privacyMode,
+                    on: displayPrivacy(data.privacyMode),
                     onSymbol: "lock.fill",
                     offSymbol: "lock.open"
                 )
@@ -302,7 +300,7 @@ extension HistoryPanelController {
         }
 
         card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Режим приватности", control: pdPrivacyModeToggle(on: data.privacyMode))
+            cdMakeRow(label: "Режим приватности", control: Self.pdPrivacyModeToggle(on: displayPrivacy(data.privacyMode), target: self))
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
@@ -376,13 +374,23 @@ extension HistoryPanelController {
 
     // MARK: - Живой тумблер privacy mode
 
+    /// Незавершённую локальную запись можно снять явной записью OFF, в том
+    /// числе когда backend пока возвращает предыдущее значение false.
+    private func displayPrivacy(_ value: Bool?) -> Bool? {
+        guard let value else { return nil }
+        return value || ((NSApp.delegate as? AgentAppDelegate)?.hasUnconfirmedPrivacyWrite == true)
+    }
+
     /// Свежий switch на каждый rebuild карточки; состояние берётся из payload.
     @MainActor
-    private func pdPrivacyModeToggle(on: Bool) -> NSButton {
-        let toggle = NSButton(checkboxWithTitle: "", target: self,
+    static func pdPrivacyModeToggle(on: Bool?, target: HistoryPanelController?) -> NSButton {
+        let toggle = NSButton(checkboxWithTitle: "", target: target,
                               action: #selector(onPrivacyModeToggled(_:)))
         toggle.setButtonType(.switch)
-        toggle.state = on ? .on : .off
+        toggle.allowsMixedState = on == nil
+        toggle.state = on.map { $0 ? .on : .off } ?? .mixed
+        toggle.isEnabled = on != nil
+        if on == nil { toggle.toolTip = "Состояние не подтверждено" }
         toggle.setAccessibilityLabel(
             "Режим приватности: отключает Sentry telemetry и принудительно "
                 + "переводит перевод в offline-режим. LM Studio (127.0.0.1) остаётся разрешённым."
@@ -446,8 +454,9 @@ extension HistoryPanelController {
     }
 
     /// Вкл/Выкл подпись.
-    private func pdOnOff(_ on: Bool) -> String {
-        on ? "Вкл" : "Выкл"
+    private func pdOnOff(_ on: Bool?) -> String {
+        guard let on else { return "Неизвестно" }
+        return on ? "Вкл" : "Выкл"
     }
 
     /// Объём в МБ с одним знаком.
@@ -466,7 +475,8 @@ extension HistoryPanelController {
 
     /// Цветной бейдж для булева флага (зелёный когда защита включена).
     @MainActor
-    private func pdToggleBadge(on: Bool, onSymbol: String?, offSymbol: String?) -> NSView {
+    private func pdToggleBadge(on: Bool?, onSymbol: String?, offSymbol: String?) -> NSView {
+        guard let on else { return pdValueLabel(pdOnOff(nil)) }
         if on {
             return makeBadge(
                 text: "Вкл",
@@ -495,7 +505,7 @@ extension HistoryPanelController {
     // MARK: - Парсинг payload (static, без MainActor)
 
     /// Извлекает Double из Int/Double/NSNumber значения payload.
-    static func pdDouble(_ value: Any?) -> Double {
+    nonisolated static func pdDouble(_ value: Any?) -> Double {
         if let d = value as? Double { return d }
         if let i = value as? Int { return Double(i) }
         if let n = value as? NSNumber { return n.doubleValue }
@@ -503,7 +513,7 @@ extension HistoryPanelController {
     }
 
     /// Нормализует last_event_ts: может прийти строкой, числом (epoch) или null.
-    static func pdTimestamp(_ value: Any?) -> String? {
+    nonisolated static func pdTimestamp(_ value: Any?) -> String? {
         if let s = value as? String {
             return s.isEmpty ? nil : s
         }

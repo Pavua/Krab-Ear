@@ -1082,9 +1082,9 @@ Returns: `{preview: true, merged_from, item_count, ...}`
 
 ### `get_settings`
 *(settings_service.py)*  
-Возвращает все текущие настройки (из кэша с TTL 5 с).  
+Возвращает текущие настройки. Для privacy берётся свежий снимок политики под блокировкой. При неизвестной политике ответ содержит `privacy_mode_enabled=true`.
 Нет params.  
-Returns: `{settings: {...}}` — полный словарь настроек
+Returns: словарь настроек внутри `result`
 
 ### `set_settings`
 *(settings_service.py)*  
@@ -3396,6 +3396,7 @@ Returns: `{ok, recommended_model, recommended_engine, tier, mic, rationale}` —
 *(service.py)*  
 Агрегированный privacy/security дашборд одним вызовом. Возвращает только счётчики/флаги/размеры — ни одного транскрипта/словаря/псевдонима спикера (читает privacy-метаданные, не пользовательский контент → gate не нужен).  
 Нет params.  
+При неизвестной политике `privacy_mode` и `encryption_enabled` содержат `null`.
 Returns: `{ok, privacy_mode, encryption_enabled, storage, retention, audit, purge_available}`  
 - `storage`: `{item_count, history_bytes, history_file_size_mb, transcripts_count, transcripts_size_mb, total_bytes, total_data_mb}`  
 - `retention`: `{auto_purge_enabled, auto_purge_retention_days}` (ключи `auto_cleanup_*` удалены 03.09.2026 — цепь была мёртвой)  
@@ -3417,6 +3418,7 @@ Returns: `{ok, enabled, total, encrypted, plaintext, pct, migrating, last_migrat
 
 
 ### `get_encryption_status`
+При неизвестной политике возвращает `ok=false`, `enabled=null`.
 *(service.py)*  
 Статус шифрования истории: включено и доступен ли macOS Keychain.  
 Нет params.  

@@ -367,6 +367,9 @@ class SettingsService:
         # Non-empty credential fields are replaced with 'REDACTED'; empty/absent fields
         # are left as-is so the UI can distinguish "not configured" from "set".
         settings = self.cached_settings()
+        # UI-дефолты и протухший кэш не подтверждают разрешение захвата.
+        policy = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5)
+        settings["privacy_mode_enabled"] = policy.privacy_mode_enabled is not False
         for k in self._SENSITIVE_FIELDS:
             if settings.get(k):
                 settings[k] = "REDACTED"

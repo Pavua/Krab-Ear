@@ -176,6 +176,32 @@ class TestPrivacyDashboardFlags(_PrivacyDashboardBase):
             "id": "set", "method": "set_settings", "params": {key: value}
         })
 
+    def test_privacy_save_discards_buffer_without_swift_stop(self):
+        live = self.service._live_subs
+        live.ingest(bytes(320), 16000, "off", False)
+        self.assertGreater(live.buffer_duration_sec(), 0)
+        self._set_setting("privacy_mode_enabled", True)
+        self.assertEqual(live.buffer_duration_sec(), 0)
+        self._set_setting("privacy_mode_enabled", False)
+        self.assertEqual(live.buffer_duration_sec(), 0)
+
+    def test_missing_policy_discards_existing_pcm_on_ingest(self):
+        live = self.service._live_subs
+        live.ingest(bytes(320), 16000, "off", False)
+        self.assertGreater(live.buffer_duration_sec(), 0)
+        self.service.store.settings_path.unlink()
+        response = live.handle_ingest({"audio_chunk": "AAA="})
+        self.assertTrue(response.get("skipped"))
+        self.assertEqual(live.buffer_duration_sec(), 0)
+
+    def test_missing_policy_is_unknown_even_after_cache_warmup(self):
+        with self._patch_audit():
+            self.assertIs(self._call()["result"]["privacy_mode"], False)
+            self.service.store.settings_path.unlink()
+            data = self._call()["result"]
+        self.assertIsNone(data["privacy_mode"])
+        self.assertIsNone(data["encryption_enabled"])
+
     def test_privacy_mode_default_false(self):
         with self._patch_audit():
             data = self._call().get("result", self._call())

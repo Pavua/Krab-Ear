@@ -139,6 +139,12 @@ class PolicySnapshot:
     fingerprint: PolicyFingerprint | None
     reason: str | None
 
+    @property
+    def encryption_enabled(self) -> bool | None:
+        if self.state is PolicyState.UNKNOWN:
+            return None
+        return self.state is PolicyState.KNOWN_ON
+
 
 def unknown_snapshot(reason: str) -> PolicySnapshot:
     """Единственный конструктор UNKNOWN-снимка (fail-closed, без payload)."""

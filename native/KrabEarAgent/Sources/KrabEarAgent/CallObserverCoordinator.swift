@@ -153,7 +153,14 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
 
     private var hudEnabled = true
     private var autoplay = false
-    private var privacyMode = false
+    private var observerPrivacy = true
+    private var agentPrivacy = false
+    private var privacyMode: Bool { observerPrivacy || agentPrivacy }
+
+    func setAgentPrivacyRestricted(_ restricted: Bool) {
+        agentPrivacy = restricted
+        applyPrivacySuppressionIfNeeded()
+    }
     private var baseURL = URL(string: "http://127.0.0.1:8090")!
 
     private static let transcriptCap = 500
@@ -764,7 +771,7 @@ final class CallObserverCoordinator: NSObject, VGSessionWatcherDelegate {
                 guard let self else { return }
                 self.hudEnabled = hudEnabled
                 self.autoplay = autoplay
-                self.privacyMode = privacy
+                self.observerPrivacy = privacy
                 self.baseURL = base
                 then?()
             }
