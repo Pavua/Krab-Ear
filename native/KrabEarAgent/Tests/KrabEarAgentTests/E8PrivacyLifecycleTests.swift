@@ -37,7 +37,8 @@ final class E8PrivacyLifecycleTests: XCTestCase {
         config.protocolClasses = [BlockingTelemetryProtocol.self]
         BlockingTelemetryProtocol.onStart.withLock { $0 = { started.fulfill() } }
         defer { BlockingTelemetryProtocol.onStart.withLock { $0 = nil } }
-        let session = SentryPrivacySession(ephemeralConfiguration: config)
+        let lease = ConfirmedPrivacyLease(until: .now + .seconds(10))
+        let session = SentryPrivacySession(lease: lease, ephemeralConfiguration: config)
         let request = URLRequest(url: URL(string: "https://telemetry.invalid/synthetic")!)
         session.dataTask(with: request) { _, _, error in
             XCTAssertEqual((error as? URLError)?.code, .cancelled)
@@ -101,7 +102,7 @@ final class E8PrivacyLifecycleTests: XCTestCase {
         let stopCalled = expectation(description: "late stream stopped")
         let identity = NSObject()
         var finishStart: CheckedContinuation<Void, Never>?
-        let capture = SystemAudioCapture(ipcClient: IPCClient(socketPath: "/unused-e8-test.sock")) { _ in
+        let capture = SystemAudioCapture(ipcClient: IPCClient(socketPath: "/unused-e8-test.sock"), makeStream: { _ in
             SystemAudioStream(
                 identity: ObjectIdentifier(identity),
                 start: {
@@ -112,17 +113,65 @@ final class E8PrivacyLifecycleTests: XCTestCase {
                 },
                 stop: { stopCalled.fulfill() }
             )
-        }
+        })
 
-        XCTAssertTrue(capture.start())
-        XCTAssertFalse(capture.start())
+        let lease = ConfirmedPrivacyLease(until: .now + .seconds(10), liveSubsEpoch: "test")
+        XCTAssertTrue(capture.start(lease: lease))
+        XCTAssertFalse(capture.start(lease: lease))
         await fulfillment(of: [startCalled], timeout: 2)
         capture.stop(flush: false)
         XCTAssertFalse(capture.isCapturing)
-        XCTAssertFalse(capture.start())
+        XCTAssertFalse(capture.start(lease: lease))
         finishStart?.resume()
         await fulfillment(of: [stopCalled], timeout: 2)
         XCTAssertFalse(capture.isCapturing)
+    }
+}
+
+@MainActor
+final class E8PrivacyDeadlineWiringTests: XCTestCase {
+    func testCaptureWithoutObservedEpochCannotStart() {
+        let capture = SystemAudioCapture(ipcClient: IPCClient(socketPath: "/unused-e8-test.sock"), makeStream: { _ in nil })
+        XCTAssertFalse(capture.start(lease: nil))
+        XCTAssertFalse(capture.start(lease: ConfirmedPrivacyLease(until: .now + .seconds(10))))
+    }
+
+    func testSuspendedTelemetryTaskCannotBeginAfterDeadline() async throws {
+        let leaked = expectation(description: "transport probe")
+        leaked.isInverted = true
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [BlockingTelemetryProtocol.self]
+        BlockingTelemetryProtocol.onStart.withLock { $0 = { leaked.fulfill() } }
+        defer { BlockingTelemetryProtocol.onStart.withLock { $0 = nil } }
+        let lease = ConfirmedPrivacyLease(until: .now + .milliseconds(100))
+        let session = SentryPrivacySession(lease: lease, ephemeralConfiguration: config)
+        let task = session.dataTask(with: URLRequest(url: URL(string: "https://telemetry.invalid/synthetic")!)) { _, _, _ in }
+        XCTAssertTrue(session.allowsTelemetry)
+        // MainActor намеренно занят: ни Timer, ни agent settings tick здесь не работают.
+        occupyPrivacyTestMainThread(for: 0.15)
+        XCTAssertFalse(session.allowsTelemetry)
+        XCTAssertFalse(lease.renew(until: .now + .seconds(10)))
+        task.resume()
+        await fulfillment(of: [leaked], timeout: 0.2)
+        session.revoke()
+    }
+
+    func testDeadlineCancelsInflightTelemetryWithoutAgentTick() async {
+        let started = expectation(description: "request intercepted")
+        let cancelled = expectation(description: "request cancelled on expiry")
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [BlockingTelemetryProtocol.self]
+        BlockingTelemetryProtocol.onStart.withLock { $0 = { started.fulfill() } }
+        defer { BlockingTelemetryProtocol.onStart.withLock { $0 = nil } }
+        let lease = ConfirmedPrivacyLease(until: .now + .milliseconds(400))
+        let transport = SentryPrivacySession(lease: lease, ephemeralConfiguration: config)
+        let request = URLRequest(url: URL(string: "https://telemetry.invalid/synthetic")!)
+        transport.dataTask(with: request) { _, _, error in
+            XCTAssertEqual((error as? URLError)?.code, .cancelled)
+            cancelled.fulfill()
+        }.resume()
+        await fulfillment(of: [started, cancelled], timeout: 2, enforceOrder: true)
+        XCTAssertFalse(transport.allowsTelemetry)
     }
 }
 

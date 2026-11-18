@@ -265,7 +265,8 @@ extension HistoryPanelController {
     nonisolated private static func confirmedEncryptionStatus(
         _ response: [String: Any]?
     ) -> (enabled: Bool, available: Bool)? {
-        guard let result = response?["result"] as? [String: Any],
+        guard confirmedPrivacyFlag(response?["ok"]) == true,
+              let result = response?["result"] as? [String: Any],
               confirmedPrivacyFlag(result["ok"]) == true,
               let enabled = confirmedPrivacyFlag(result["enabled"]),
               let available = confirmedPrivacyFlag(result["available"]) else { return nil }
@@ -548,7 +549,7 @@ extension HistoryPanelController {
                 method: "set_history_encryption",
                 params: ["enabled": desired]
             )
-            let outcome = EncryptionChangeOutcome.resolve(response: resp)
+            let outcome = EncryptionChangeOutcome.resolve(response: resp, desired: desired)
             if outcome == .applied {
                 DispatchQueue.main.async {
                     self.encryptionChangePending = false
@@ -578,7 +579,7 @@ extension HistoryPanelController {
                         + "Закройте и откройте раздел заново, чтобы увидеть актуальное состояние."
                 } else {
                     alert.messageText = "Не удалось изменить шифрование"
-                    alert.informativeText = "Настройка не применена. Сейчас шифрование истории "
+                    alert.informativeText = "Сейчас шифрование истории "
                         + (known == true ? "включено." : "выключено.")
                 }
                 alert.alertStyle = .warning

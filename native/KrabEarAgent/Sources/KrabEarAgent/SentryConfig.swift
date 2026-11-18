@@ -51,16 +51,47 @@ func confirmedPrivacyFlag(_ value: Any?) -> Bool? {
     return flag.boolValue
 }
 
+/// SDK создаёт задачу в init операции, а resume вызывает позже из очереди.
+private final class SentryLeasedTask: URLSessionDataTask, @unchecked Sendable {
+    private let task: URLSessionDataTask
+    private let lease: ConfirmedPrivacyLease
+
+    init(_ task: URLSessionDataTask, lease: ConfirmedPrivacyLease) {
+        self.task = task
+        self.lease = lease
+        super.init()
+    }
+
+    override var originalRequest: URLRequest? { lease.isValid ? task.originalRequest : nil }
+    override func resume() {
+        if lease.isValid { task.resume() } else { task.cancel() }
+    }
+    override func cancel() { task.cancel() }
+}
+
 /// Sentry 8.58.2 создаёт HTTP-задачи через dataTask(with:completionHandler:),
 /// в том числе из очереди при close(). NSURLSession не принимает новые задачи
 /// после invalidateAndCancel(). Фасад оставляет SDK безопасный путь отказа.
 final class SentryPrivacySession: URLSession, @unchecked Sendable {
     private let transport: OSAllocatedUnfairLock<URLSession?>
+    private let lease: ConfirmedPrivacyLease
+    private let expiryTask: Task<Void, Never>
     private static let rejected = URLSession(configuration: .ephemeral)
     private static let localRejection = URLRequest(url: URL(string: "about:blank")!)
 
-    init(ephemeralConfiguration: URLSessionConfiguration = .ephemeral) {
-        transport = OSAllocatedUnfairLock(initialState: URLSession(configuration: ephemeralConfiguration))
+    init(lease: ConfirmedPrivacyLease, ephemeralConfiguration: URLSessionConfiguration = .ephemeral) {
+        self.lease = lease
+        let transport = OSAllocatedUnfairLock<URLSession?>(initialState: URLSession(configuration: ephemeralConfiguration))
+        self.transport = transport
+        // Отменяет даже уже отправленные задачи, пока AppKit занят. Продление
+        // разрешено только до истечения прежнего срока.
+        expiryTask = Task.detached {
+            while let deadline = lease.deadline {
+                do { try await Task.sleep(until: deadline, clock: .continuous) }
+                catch { return }
+            }
+            Self.cancelTransport(transport)
+        }
         super.init()
     }
 
@@ -69,8 +100,8 @@ final class SentryPrivacySession: URLSession, @unchecked Sendable {
         completionHandler: @escaping @Sendable (Data?, URLResponse?, (any Error)?) -> Void
     ) -> URLSessionDataTask {
         transport.withLock { session in
-            if let session {
-                return session.dataTask(with: request, completionHandler: completionHandler)
+            if let session, lease.isValid {
+                return SentryLeasedTask(session.dataTask(with: request, completionHandler: completionHandler), lease: lease)
             }
             // В отказавшую задачу не передаём ни DSN, ни тело envelope.
             return Self.rejected.dataTask(with: Self.localRejection) { _, _, _ in
@@ -79,7 +110,14 @@ final class SentryPrivacySession: URLSession, @unchecked Sendable {
         }
     }
 
+    var allowsTelemetry: Bool { transport.withLock { $0 != nil && lease.isValid } }
+
     func revoke() {
+        expiryTask.cancel()
+        Self.cancelTransport(transport)
+    }
+
+    private static func cancelTransport(_ transport: OSAllocatedUnfairLock<URLSession?>) {
         let session = transport.withLock { session in
             defer { session = nil }
             return session
@@ -92,14 +130,12 @@ final class SentryPrivacySession: URLSession, @unchecked Sendable {
 enum SentryConfig {
     private static let cacheEpochKey = "KrabEar_SentryCacheEpoch"
     private static var transport: SentryPrivacySession?
-    private static var sessionPermission: OSAllocatedUnfairLock<Bool>?
+    private static var lease: ConfirmedPrivacyLease?
     private static var environment = "production"
     private static var release: String?
     private static let lifecycle = SentryPrivacyLifecycle(
         start: { startSDK(dsn: $0) },
         close: {
-            sessionPermission?.withLock { $0 = false }
-            sessionPermission = nil
             transport?.revoke()
             transport = nil
             SentrySDK.close()
@@ -107,10 +143,11 @@ enum SentryConfig {
         }
     )
 
-    static var isActive: Bool { lifecycle.isActive }
+    static var isActive: Bool { lifecycle.isActive && lease?.isValid == true }
 
     static func suspendForPrivacy() {
         lifecycle.reconcile(privacy: nil, dsn: nil)
+        lease = nil
         discardCacheEpoch()
     }
 
@@ -125,12 +162,17 @@ enum SentryConfig {
         dsn: String?,
         environment: String = "production",
         release: String? = nil,
-        settings: [String: Any]? = nil
+        settings: [String: Any]? = nil,
+        lease: ConfirmedPrivacyLease? = nil
     ) {
         Self.environment = environment
         Self.release = release
         let privacy = confirmedPrivacyFlag(settings?["privacy_mode_enabled"])
-        if privacy == false {
+        if privacy == false, let lease, lease.isValid {
+            if Self.lease !== lease {
+                suspendForPrivacy()
+                Self.lease = lease
+            }
             lifecycle.reconcile(privacy: privacy, dsn: dsn?.nonEmpty)
         } else {
             suspendForPrivacy()
@@ -152,15 +194,14 @@ enum SentryConfig {
     }
 
     private static func startSDK(dsn: String) {
-        let transport = SentryPrivacySession()
+        guard let lease, lease.isValid else { return }
+        let transport = SentryPrivacySession(lease: lease)
         Self.transport = transport
         let defaults = UserDefaults.standard
         let epoch = defaults.string(forKey: cacheEpochKey).flatMap(UUID.init(uuidString:)) ?? UUID()
         defaults.set(epoch.uuidString, forKey: cacheEpochKey)
         let cache = cacheDirectory(epoch: epoch)
 
-        let permission = OSAllocatedUnfairLock(initialState: true)
-        sessionPermission = permission
         // Читаем версию из Bundle один раз: CFBundleShortVersionString → releaseName,
         // CFBundleVersion → dist. Это гарантирует, что Sentry events всегда
         // несут корректные поля даже если caller передал release: nil.
@@ -178,7 +219,7 @@ enum SentryConfig {
             // При отзыве разрешения не ждём отправку очереди.
             options.shutdownTimeInterval = 0
             options.beforeSend = { event in
-                permission.withLock { $0 } ? event : nil
+                transport.allowsTelemetry ? event : nil
             }
             if let r = resolvedRelease {
                 options.releaseName = r
@@ -209,12 +250,13 @@ enum SentryConfig {
         _ settings: [String: Any],
         environment: String = "production",
         release: String? = nil,
-        fallbackDSN: String? = nil
+        fallbackDSN: String? = nil,
+        lease: ConfirmedPrivacyLease? = nil
     ) {
         let dsn = [settings["sentry_dsn_agent"] as? String, settings["sentry_dsn"] as? String, fallbackDSN]
             .compactMap { $0?.nonEmpty }
             .first { $0 != "REDACTED" }
-        initialize(dsn: dsn, environment: environment, release: release, settings: settings)
+        initialize(dsn: dsn, environment: environment, release: release, settings: settings, lease: lease)
     }
 
     // MARK: - Terminate breadcrumb

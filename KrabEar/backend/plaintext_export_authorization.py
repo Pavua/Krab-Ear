@@ -140,6 +140,11 @@ class PolicySnapshot:
     reason: str | None
 
     @property
+    def live_subs_policy_epoch(self) -> str | None:
+        """Метка настроек при захвате. Любая запись настроек меняет ревизию."""
+        return self.internal_revision if self.privacy_mode_enabled is False else None
+
+    @property
     def encryption_enabled(self) -> bool | None:
         if self.state is PolicyState.UNKNOWN:
             return None

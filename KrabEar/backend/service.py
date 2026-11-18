@@ -863,7 +863,7 @@ class BackendService:
             transcriber=self.transcriber,
             translator=self.translator,
             settings_get=self._get_runtime_setting,
-            read_privacy=lambda: self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).privacy_mode_enabled,
+            read_capture_epoch=lambda: self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).live_subs_policy_epoch,
         )
         self._settings_svc.register_after_save_hook(self._live_subs.on_settings_saved)
         self._translation = TranslationService(
@@ -5942,7 +5942,7 @@ class BackendService:
         Returns:
             {"ok": True, "enabled": bool, "available": True}
             или
-            {"ok": False, "error": "keychain_unavailable", "enabled": bool}
+            {"ok": False, "error": str, "enabled": bool | None}
         """
         enabled = params.get("enabled", False)
         if type(enabled) is not bool:
@@ -5956,11 +5956,14 @@ class BackendService:
         except HistoryEncryptionUnavailable:
             return {
                 "ok": False, "error": "keychain_unavailable",
-                "enabled": bool(self._settings_svc.cached_settings().get("history_encryption_enabled", False)),
+                "enabled": self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).encryption_enabled,
             }
         if not result.get("ok", True):
             return result
-        return {"ok": True, "enabled": enabled, "available": True}
+        confirmed = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).encryption_enabled
+        if confirmed is not enabled:
+            return {"ok": False, "error": "encryption_state_unconfirmed", "enabled": confirmed}
+        return {"ok": True, "enabled": confirmed, "available": True}
 
     def _handle_migrate_history_encryption(self, params: dict[str, Any]) -> dict[str, Any]:
         """Encrypt existing plaintext history.ndjson entries (at-rest migration).

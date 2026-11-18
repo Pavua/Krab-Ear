@@ -37,12 +37,15 @@ extension AgentAppDelegate {
     private static var watchdogCapturingLastTrueAtKey: UInt8 = 0
 
     var systemAudioCapture: SystemAudioCapture {
-        if let existing = objc_getAssociatedObject(self, &Self.captureKey) as? SystemAudioCapture {
-            return existing
+        get {
+            if let existing = objc_getAssociatedObject(self, &Self.captureKey) as? SystemAudioCapture {
+                return existing
+            }
+            let capture = SystemAudioCapture(ipcClient: ipcClient)
+            self.systemAudioCapture = capture
+            return capture
         }
-        let capture = SystemAudioCapture(ipcClient: ipcClient)
-        objc_setAssociatedObject(self, &Self.captureKey, capture, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
-        return capture
+        set { objc_setAssociatedObject(self, &Self.captureKey, newValue, .OBJC_ASSOCIATION_RETAIN_NONATOMIC) }
     }
 
     var liveSubsOverlay: LiveSubtitlesOverlay {
@@ -85,10 +88,10 @@ extension AgentAppDelegate {
     }
 
     func startLiveSubsCapture() {
-        guard !privacyModeEnabled else { return }
+        guard !privacyModeEnabled, let privacyLease, privacyLease.isValid, privacyLease.liveSubsEpoch != nil else { return }
         // Применить актуальный target lang из settings
         syncLiveSubsSettings()
-        guard systemAudioCapture.start() else { return }
+        guard systemAudioCapture.start(lease: privacyLease) else { return }
         liveSubsOverlay.show()
         liveSubsCapturingLastTrueAt = Date()
         startLiveSubsWatchdog()

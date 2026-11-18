@@ -161,6 +161,24 @@ class TestSetHistoryEncryption(unittest.TestCase):
         # Настройка НЕ изменилась
         self.assertFalse(settings.get("history_encryption_enabled"))
 
+    def test_keychain_failure_reports_unknown_for_incomplete_policy(self):
+        from backend.state_store import HistoryEncryptionUnavailable
+
+        obj, _ = self._make_obj()
+        obj.store.settings_path.write_text('{"history_encryption_enabled":false}')
+        with patch.object(obj._settings_svc, "handle_set_settings", side_effect=HistoryEncryptionUnavailable):
+            result = obj._handle_set_history_encryption({"enabled": True})
+
+        self.assertEqual(result, {"ok": False, "error": "keychain_unavailable", "enabled": None})
+
+    def test_toggle_success_requires_matching_persisted_policy(self):
+        obj, _ = self._make_obj({"history_encryption_enabled": False})
+        with patch.object(obj._settings_svc, "handle_set_settings", return_value={"ok": True}):
+            result = obj._handle_set_history_encryption({"enabled": True})
+
+        self.assertIs(result["ok"], False)
+        self.assertIs(result["enabled"], False)
+
     def test_round_trip_enable_then_disable(self):
         """Включить → выключить → статус False."""
         from backend.history_crypto import HistoryCrypto

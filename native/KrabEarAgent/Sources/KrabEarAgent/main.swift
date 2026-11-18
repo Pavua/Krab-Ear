@@ -218,6 +218,7 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
     private static let uncertainPrivacyKey = "KrabEar_UnconfirmedPrivacyWrite"
     var hasUnconfirmedPrivacyWrite: Bool { userDefaults.bool(forKey: Self.uncertainPrivacyKey) }
     private var privacyRevision = UUID()
+    private(set) var privacyLease: ConfirmedPrivacyLease?
     private var privacyVerifiedAt: ContinuousClock.Instant?
     private var nextPrivacyPoll: ContinuousClock.Instant?
     private var privacyPoll: Task<Bool, Never>?
@@ -1441,10 +1442,17 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
             || hasUnconfirmedPrivacyWrite
         setPrivacyMode(restricted)
         if !restricted {
+            let deadline = readStarted.advanced(by: Self.privacyLifetime)
+            let epoch = (payload["live_subs_policy_epoch"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            if privacyLease?.liveSubsEpoch != epoch || privacyLease?.renew(until: deadline) != true {
+                if privacyLease != nil { revokePrivacyLease() }
+                privacyLease = ConfirmedPrivacyLease(until: deadline, liveSubsEpoch: epoch)
+            }
             SentryConfig.initializeFromSettings(
                 payload,
                 environment: userDefaults.string(forKey: "KrabEar_SentryEnvironment") ?? "production",
-                fallbackDSN: userDefaults.string(forKey: "KrabEar_SentryDSN")
+                fallbackDSN: userDefaults.string(forKey: "KrabEar_SentryDSN"),
+                lease: privacyLease
             )
         }
         if updateUI && !privacyOnly {
@@ -1488,6 +1496,13 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
         }
         privacyPoll = poll
         return poll
+    }
+
+    func revokePrivacyLease() {
+        privacyLease?.revoke()
+        privacyLease = nil
+        stopLiveSubsCapture(flush: false)
+        SentryConfig.suspendForPrivacy()
     }
 
     func invalidatePrivacyConnection() {

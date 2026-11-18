@@ -191,10 +191,7 @@ extension AgentAppDelegate {
         self.privacyModeEnabled = on
         updatePlaintextExportPrivacy(on)
         callObserverCoordinator?.setAgentPrivacyRestricted(on)
-        if on {
-            SentryConfig.suspendForPrivacy()
-            stopLiveSubsCapture(flush: false)
-        }
+        if on { revokePrivacyLease() }
         self.statusIndicatorView.setPrivacyMode(on)
         self.applyHealthStateToStatusItem(self.lastHealthState)
         // Wake word не должен держать микрофон в privacy mode. Backend тоже

@@ -185,6 +185,27 @@ class TestPrivacyDashboardFlags(_PrivacyDashboardBase):
         self._set_setting("privacy_mode_enabled", False)
         self.assertEqual(live.buffer_duration_sec(), 0)
 
+    def test_delayed_pcm_from_before_external_privacy_cycle_is_rejected(self):
+        live = self.service._live_subs
+        settings = self.service._settings_svc
+        epoch = settings.handle_get_settings({}).get("live_subs_policy_epoch")
+        self.assertIsInstance(epoch, str)
+        chunk = {"audio_chunk": "AAA=", "live_subs_policy_epoch": epoch}
+        self.assertEqual(live.handle_ingest(chunk)["status"], "accepted")
+        self._set_setting("privacy_mode_enabled", True)
+        self.assertIsNone(settings.handle_get_settings({})["live_subs_policy_epoch"])
+        self._set_setting("privacy_mode_enabled", False)
+        self.assertTrue(live.handle_ingest(chunk)["skipped"])
+        self.assertTrue(live.handle_ingest({"audio_chunk": "AAA="})["skipped"])
+        self.assertEqual(live.buffer_duration_sec(), 0)
+        fresh = settings.handle_get_settings({})["live_subs_policy_epoch"]
+        self.assertNotEqual(fresh, epoch)
+        self.assertEqual(live.handle_ingest({**chunk, "live_subs_policy_epoch": fresh})["status"], "accepted")
+        for discard in (True, False):
+            self.assertEqual(live.handle_stop({"discard": discard, "live_subs_policy_epoch": epoch})["reason"],
+                             "stale_capture_policy")
+        self.assertGreater(live.buffer_duration_sec(), 0)
+
     def test_missing_policy_discards_existing_pcm_on_ingest(self):
         live = self.service._live_subs
         live.ingest(bytes(320), 16000, "off", False)

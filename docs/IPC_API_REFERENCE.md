@@ -1082,7 +1082,7 @@ Returns: `{preview: true, merged_from, item_count, ...}`
 
 ### `get_settings`
 *(settings_service.py)*  
-Возвращает текущие настройки. Для privacy берётся свежий снимок политики под блокировкой. При неизвестной политике ответ содержит `privacy_mode_enabled=true`.
+Возвращает текущие настройки. Для privacy берётся свежий снимок политики под блокировкой. При неизвестной политике ответ содержит `privacy_mode_enabled=true`. Только явный OFF возвращает строку `live_subs_policy_epoch` для нового захвата системного аудио.
 Нет params.  
 Returns: словарь настроек внутри `result`
 
@@ -2003,14 +2003,17 @@ Returns: `{ok, session_id, gateway_session_id, call_id, status}`
 ### `live_subs_ingest`
 *(live_subs_service.py)*  
 Принимает base64 PCM 16 kHz chunk от ScreenCaptureKit. Аккумулирует ≥3 с, затем Whisper STT → translate → emits `live_subs.result` via EventBus.  
-Params: `{audio_b64, is_final?}` — audio_b64: base64 PCM 16 kHz mono  
-Returns: `{ok, buffered_ms}`
+Перед захватом клиент получает `live_subs_policy_epoch` через `get_settings` и передаёт ту же метку с каждым чанком. При смене ревизии настроек старый захват завершается. Для продолжения нужен новый захват.
+
+Params: `{audio_chunk, live_subs_policy_epoch, sample_rate?, target_lang?, is_final?}`. Поле `audio_chunk` содержит base64 PCM.
+
+Returns: `{status, buffer_duration_sec, ...}`. При неизвестной политике или устаревшей/отсутствующей метке возвращает `{ok: true, skipped: true, reason}`.
 
 ### `live_subs_stop`
 *(live_subs_service.py)*  
 Обычная остановка завершает обработку накопленного буфера с ограниченным ожиданием.
 
-Params: `{discard?}`. Только JSON `true` сбрасывает буфер и инвалидирует поколение без запуска новой транскрипции. Это используется при включении приватности.
+Params: `{discard?, live_subs_policy_epoch?}`. Метка от прежнего захвата защищает текущий буфер от запоздалой команды stop. Только JSON `true` сбрасывает буфер и инвалидирует поколение без запуска новой транскрипции. Это используется при включении приватности.
 
 Returns: `{status: "stopped", flushed, discarded?, skipped?, reason?}`
 
@@ -3428,7 +3431,7 @@ Returns: `{ok, enabled, available}`
 *(service.py)*  
 Включает/выключает AES-256-GCM шифрование NDJSON-истории; без Keychain — отказ без смены настройки.  
 Params: `{enabled}` (bool)  
-Returns: `{ok, enabled, available}` или `{ok: false, error: "keychain_unavailable", enabled}`
+Успешный ответ `{ok: true, enabled, available: true}` подтверждает запрошенное состояние свежим чтением после записи. При ошибке `keychain_unavailable` или `encryption_state_unconfirmed` ответ содержит `ok: false` и `enabled: bool | null`.
 
 ### `purge_all_data`
 *(service.py → history_service.py)*  
