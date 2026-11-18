@@ -85,7 +85,8 @@ class LiveSubsService:
         self._translator = translator
         self._settings_get: Callable[[str, Any], Any] = settings_get or (lambda k, d: d)
         self._read_capture_epoch = read_capture_epoch
-        self._buffer_epoch: str | None = None
+        # Владелец поколения, включая окно после снятия с буфера.
+        self._capture_epoch: str | None = None
         # P0e: REST /v1/stream делит MLX с POST /v1/stt/transcribe в том же PID.
         # IPC BackendService эти колбэки не передаёт (другой процесс) — default None.
         self._stt_acquire = stt_acquire
@@ -154,9 +155,8 @@ class LiveSubsService:
         Returns:
             None — буфер ещё не достиг порога, ИЛИ (только при is_final=True)
                 финальный flush не успел завершиться за таймаут.
-            dict — только при is_final=True и завершении воркера в течение
-                таймаута: {"text", "translation", "start_ts", "end_ts",
-                "language_detected"}.
+            dict — результат финального flush либо причина отказа IPC при
+                смене политики между проверкой запроса и записью в буфер.
         """
         # sample_rate приходит от клиента. WS /v1/stream вызывает ingest() НАПРЯМУЮ,
         # минуя handle_ingest-санитайзер, поэтому клампим ЗДЕСЬ — в общей точке обоих
@@ -165,18 +165,11 @@ class LiveSubsService:
         if generation is None:
             if self._read_capture_epoch is not None:
                 capture_epoch = self._read_capture_epoch()
-            with self._lock:
-                generation = self._generation
-        if not self._permit_current(capture_epoch):
-            self.reset()
-            return {"text": "", "translation": None} if is_final else None
+            generation, denial = self._admit_ingest(capture_epoch)
+            if denial is not None:
+                self._reject_ingest(denial)
+                return {"text": "", "translation": None} if is_final else None
         sample_rate = self._sanitize_sample_rate(sample_rate)
-        # WS /v1/stream вызывает ingest() напрямую, минуя privacy-гейт handle_ingest: без
-        # проверки здесь чужое аудио копилось бы в буфере при включённой приватности.
-        # Финальный flush (is_final) не отсекаем: его путь сам сбрасывает буфер без STT и
-        # отвечает структурой с reason=privacy_mode_active (контракт вызывающего).
-        if not is_final and self._settings_get("privacy_mode_enabled", False):
-            return None
         audio_array = self._decode_audio(audio_bytes, sample_rate)
         # Под локом — ТОЛЬКО мутация буфера, решение о flush и снапшот+сброс.
         # Сам STT (несколько секунд) НИКОГДА не выполняется под этим локом —
@@ -185,11 +178,11 @@ class LiveSubsService:
         with self._lock:
             if self._closed:
                 raise RuntimeError("LiveSubsService is closed")
+            denial = self._capture_denial(capture_epoch)
+            if denial is not None:
+                return {"reason": denial}
             if generation != self._generation:
                 return None
-            if self._buffer_epoch != capture_epoch:
-                self._reset()
-            self._buffer_epoch = capture_epoch
             self._buffer.append(audio_array)
             self._buffer_samples += len(audio_array)
             buffer_sec = self._buffer_samples / max(sample_rate, 1)
@@ -250,6 +243,9 @@ class LiveSubsService:
             return None
 
         result = self._await_completion(seq, timeout=_FINAL_FLUSH_TIMEOUT_SEC)
+        denial = self._capture_denial(capture_epoch)
+        if denial is not None:
+            return {"reason": denial}
         if result is None:
             logger.warning(
                 "LiveSubsService: is_final flush не успел за %.1fс — воркер занят/завис",
@@ -272,7 +268,7 @@ class LiveSubsService:
             if self._stop_epoch_is_stale(expected_epoch):
                 return {"status": "stopped", "flushed": False, "reason": "stale_capture_policy"}
             generation = self._generation
-            capture_epoch = self._buffer_epoch
+            capture_epoch = self._capture_epoch
             privacy_active = not self._permit_current(capture_epoch)
             if privacy_active:
                 self._reset()
@@ -350,6 +346,35 @@ class LiveSubsService:
             return self._settings_get("privacy_mode_enabled", False) is False
         return capture_epoch is not None and self._read_capture_epoch() == capture_epoch
 
+    def _capture_denial(self, capture_epoch: str | None) -> str | None:
+        if self._read_capture_epoch is None:
+            return None if self._permit_current(None) else "privacy_mode_active"
+        current = self._read_capture_epoch()
+        if current is None:
+            return "privacy_mode_active"
+        return None if capture_epoch == current else "stale_capture_policy"
+
+    def _admit_ingest(self, capture_epoch: str | None) -> tuple[int, str | None]:
+        with self._lock:
+            denial = self._capture_denial(capture_epoch)
+            if denial is not None or self._capture_epoch == capture_epoch:
+                return self._generation, denial
+        # Новый владелец отзывает и PCM, и уже снятые окна предыдущей эпохи.
+        with self._delivery_lock, self._lock:
+            denial = self._capture_denial(capture_epoch)
+            if denial is None and self._capture_epoch != capture_epoch:
+                self.reset()
+                self._capture_epoch = capture_epoch
+            return self._generation, denial
+
+    def _reject_ingest(self, reason: str) -> dict[str, Any]:
+        if reason == "privacy_mode_active":
+            # Пока запрос ждал лок, другой захват мог получить новое разрешение.
+            with self._delivery_lock, self._lock:
+                if self._capture_denial(None) == "privacy_mode_active":
+                    self.reset()
+        return {"ok": True, "skipped": True, "reason": reason}
+
     def _stop_epoch_is_stale(self, epoch: str | None) -> bool:
         if epoch is None or self._read_capture_epoch is None:
             return False
@@ -359,8 +384,12 @@ class LiveSubsService:
 
     def on_settings_saved(self, old: dict, new: dict) -> None:
         """Отзыв PCM принадлежит серверу и не зависит от доставки stop по IPC."""
-        if new.get("privacy_mode_enabled") is not False:
-            self.reset()
+        if new.get("privacy_mode_enabled") is False:
+            return
+        with self._delivery_lock, self._lock:
+            # После быстрого ON→OFF новый владелец уже мог принять PCM.
+            if self._read_capture_epoch is None or not self._permit_current(self._capture_epoch):
+                self.reset()
 
     def reset(self) -> None:
         """Очищает буфер БЕЗ транскрипции и эмиссии событий (под локом).
@@ -405,19 +434,10 @@ class LiveSubsService:
 
     def handle_ingest(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC handler: live_subs_ingest."""
-        with self._lock:
-            generation = self._generation
-        capture_epoch = params.get("live_subs_policy_epoch")
-        if self._read_capture_epoch is not None:
-            current_epoch = self._read_capture_epoch()
-            if current_epoch is None:
-                self.reset()
-                return {"ok": True, "skipped": True, "reason": "privacy_mode_active"}
-            if capture_epoch != current_epoch:
-                return {"ok": True, "skipped": True, "reason": "stale_capture_policy"}
-        elif not self._permit_current(None):
-            self.reset()
-            return {"ok": True, "skipped": True, "reason": "privacy_mode_active"}
+        capture_epoch = params.get("live_subs_policy_epoch") if self._read_capture_epoch is not None else None
+        generation, denial = self._admit_ingest(capture_epoch)
+        if denial is not None:
+            return self._reject_ingest(denial)
 
         audio_b64 = params.get("audio_chunk", "")
         target_lang = str(params.get("target_lang", "off"))
@@ -437,6 +457,8 @@ class LiveSubsService:
             generation=generation,
             capture_epoch=capture_epoch,
         )
+        if result is not None and "reason" in result:
+            return self._reject_ingest(result["reason"])
 
         buf_sec = self.buffer_duration_sec(sample_rate)
         if result is not None:
@@ -620,7 +642,7 @@ class LiveSubsService:
         return seq
 
     def _await_completion(self, seq: int, timeout: float) -> dict[str, Any] | None:
-        """Блокирует до завершения окна с номером >= seq либо до истечения timeout.
+        """Ждёт результат данного окна до таймаута или вытеснения.
 
         Используется ТОЛЬКО синхронными путями (is_final через ingest(), stop()).
         Обычный (не финальный) путь никогда не ждёт воркер — возвращается сразу.
@@ -634,7 +656,9 @@ class LiveSubsService:
                 if remaining <= 0:
                     return None
                 self._worker_cond.wait(timeout=remaining)
-            return None if seq <= self._invalidated_seq else self._completed_result
+            if seq <= self._invalidated_seq or seq != self._completed_seq:
+                return None
+            return self._completed_result
 
     def _discard_pending_window(self, expected_generation: int | None = None) -> None:
         """Выкидывает окно из слота БЕЗ обработки.
@@ -884,7 +908,6 @@ class LiveSubsService:
     def _reset(self) -> None:
         """Сбрасывает буфер и метки времени."""
         self._buffer = []
-        self._buffer_epoch = None
         self._buffer_samples = 0
         self._session_start = time.monotonic()
 
