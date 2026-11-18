@@ -934,12 +934,6 @@ class OpenWakeWordAdapter:
                     if self._generation == generation:
                         self._stream_opened = True
                 while not self._stop_event.is_set():
-                    if self._privacy_blocked():
-                        logger.info(
-                            "OpenWakeWordAdapter: privacy mode включён — "
-                            "слушатель остановлен"
-                        )
-                        break
                     if self._guarded_read_enabled():
                         try:
                             if not wait_for_frames(
@@ -949,6 +943,7 @@ class OpenWakeWordAdapter:
                                 poll_sec=self._read_poll_sec(),
                                 starve_sec=self._stream_starve_sec(),
                                 is_recording=self._is_recording,
+                                cancel_wait=self._privacy_blocked,
                             ):
                                 break  # попросили остановиться
                             # Кадры пришли → стрим жив. Лестницу голодания
@@ -974,6 +969,9 @@ class OpenWakeWordAdapter:
                                 exc, streak,
                             )
                             break
+                    # Политика могла измениться во время ожидания кадров.
+                    if self._privacy_blocked():
+                        break
                     with self._lock:
                         if self._generation == generation:
                             self._last_read_started_ts = time.monotonic()
@@ -985,6 +983,8 @@ class OpenWakeWordAdapter:
                         with self._lock:
                             if self._generation == generation:
                                 self._last_read_completed_ts = time.monotonic()
+                    if self._privacy_blocked():
+                        break
                     # openwakeword.Model.predict() требует numpy.ndarray —
                     # НЕ list (см. KRAB-EAR-BACKEND-1C/1D). sounddevice уже
                     # возвращает ndarray, поэтому просто flatten() без .tolist().
@@ -1003,14 +1003,18 @@ class OpenWakeWordAdapter:
                         if flat.any():
                             self._last_chunk_ts = self._last_any_chunk_ts
 
-                    if oww is None:
+                    if oww is None or self._privacy_blocked():
                         break
 
                     prediction = oww.predict(flat)
                     for mdl_name, score in prediction.items():
                         if score >= threshold:
+                            if self._privacy_blocked():
+                                return
                             self._record_detection(mdl_name, float(score))
                             if self._on_detected is not None:
+                                if self._privacy_blocked():
+                                    return
                                 self._on_detected(mdl_name, float(score))
 
         except Exception:
