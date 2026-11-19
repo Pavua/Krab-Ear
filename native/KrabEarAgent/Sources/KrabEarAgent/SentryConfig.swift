@@ -22,6 +22,17 @@ enum SentryConfig {
     /// True после успешного вызова `initialize(dsn:)` с непустым DSN.
     /// Используется `recordTerminate(callsite:)` для guard-проверки.
     private(set) static var isActive: Bool = false
+    /// True, если процесс запущен XCTest-раннером (`swift test` / `xcodebuild test`).
+    /// Два независимых признака: переменная окружения `XCTestConfigurationFilePath`
+    /// (видна не всегда — в `swift test` её нет в ProcessInfo) и загруженный класс
+    /// `XCTestCase` (в продакшен-приложении его никогда нет, ложного срабатывания не будет).
+    static func isRunningUnderXCTest(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        xctestClassLoaded: Bool = NSClassFromString("XCTestCase") != nil
+    ) -> Bool {
+        environment["XCTestConfigurationFilePath"] != nil || xctestClassLoaded
+    }
+
     /// Инициализирует Sentry SDK.
     /// - Parameters:
     ///   - dsn: DSN проекта. Nil или пустая строка — SDK не запускается (no-op).
@@ -38,6 +49,12 @@ enum SentryConfig {
         // Privacy mode: skip all telemetry regardless of DSN.
         if let settings, (settings["privacy_mode_enabled"] as? Bool) == true {
             // Privacy mode active — Sentry skipped.
+            return
+        }
+
+        // Тестовый раннер (XCTest) не должен слать в прод-Sentry: иначе sleep
+        // внутри теста репортится как App Hang продакшена (KRAB-EAR-AGENT-1C).
+        if isRunningUnderXCTest() {
             return
         }
 
