@@ -69,7 +69,7 @@ class STTBudget:
     interactive_max_sec: float
     batch_max_sec: float
     allow_diarization: bool = True
-    explicit_rest_deadline: bool = False
+    explicit_rest_deadline: bool = False  # файловый POST с явным deadline_sec
 
 
 _current: ContextVar[STTBudget | None] = ContextVar("stt_budget", default=None)

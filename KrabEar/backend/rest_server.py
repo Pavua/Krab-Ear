@@ -2152,13 +2152,16 @@ def transcribe_audio():
             _transcribe_timeout_sec = response_deadline - now
             if _transcribe_timeout_sec <= 0:
                 return jsonify({"error": timeout_error}), 504
-            # Резерв берём только из времени сверх минимума одной попытки,
-            # чтобы короткий call-запрос всё ещё мог запустить тёплый STT.
-            # Абсолютный срок не начинает отсчёт заново в треде executor.
-            work_deadline = response_deadline - min(
-                _STT_RESPONSE_MARGIN_SEC,
-                max(0.0, _transcribe_timeout_sec - stt_budget.MIN_USEFUL_ATTEMPT_SEC) * 0.2,
-            )
+            # Очередь сокращает время инференса, но не запас на завершение
+            # supervised Whisper worker. Короткий звонок без очереди
+            # сохраняет собственный резерв и внутренний watchdog.
+            response_margin = _STT_RESPONSE_MARGIN_SEC
+            if _deadline_sec is None:
+                response_margin = min(
+                    response_margin,
+                    max(0.0, _transcribe_timeout_sec - stt_budget.MIN_USEFUL_ATTEMPT_SEC) * 0.2,
+                )
+            work_deadline = response_deadline - response_margin
             _future = _pool.submit(
                 _REST_ACTIVITY.run,
                 _activity_token,
@@ -2168,7 +2171,7 @@ def transcribe_audio():
                 profile=stt_budget.INTERACTIVE,
                 deadline_monotonic=work_deadline,
                 allow_diarization=diarize_override is not False,
-                explicit_rest_deadline=request_deadline is not None,
+                explicit_rest_deadline=_deadline_sec is not None,
                 settings_snapshot=_budget_settings_snapshot,
                 **_transcribe_kwargs,
             )

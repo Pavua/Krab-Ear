@@ -208,7 +208,8 @@ def test_explicit_deadline_shares_one_cleanup_reserve_with_whisper(client_engine
 
 
 @pytest.mark.parametrize("chunked", [False, True])
-def test_queued_request_with_no_useful_budget_skips_whisper(client_engine, monkeypatch, chunked):
+@pytest.mark.parametrize("queue_wait", [18.01, 19.0, 21.0])
+def test_queued_request_with_no_useful_budget_skips_whisper(client_engine, monkeypatch, chunked, queue_wait):
     client, _engine, abort_rest = client_engine
     monkeypatch.setattr(audio_engine.settings, "STT_STREAMING_ENABLED", chunked)
     monkeypatch.setattr(audio_engine.settings, "STT_STREAMING_MIN_AUDIO_SEC", 0.5)
@@ -217,7 +218,7 @@ def test_queued_request_with_no_useful_budget_skips_whisper(client_engine, monke
     acquire = rest.try_acquire_stt_singleflight
 
     def wait_for_slot(timeout):
-        now[0] += 21.0
+        now[0] += queue_wait
         return acquire(timeout)
 
     monkeypatch.setattr(rest, "try_acquire_stt_singleflight", wait_for_slot)
@@ -232,7 +233,8 @@ def test_queued_request_with_no_useful_budget_skips_whisper(client_engine, monke
     rest.release_stt_singleflight()
 
 
-def test_rest_reserves_response_margin_inside_client_deadline(client_engine, monkeypatch):
+@pytest.mark.parametrize("deadline", [10, 25])
+def test_rest_reserves_response_margin_inside_client_deadline(client_engine, monkeypatch, deadline):
     client, engine, _abort_rest = client_engine
     remaining = []
 
@@ -241,8 +243,8 @@ def test_rest_reserves_response_margin_inside_client_deadline(client_engine, mon
         return _recognized()
 
     monkeypatch.setattr(engine, "_transcribe_with_fallback", transcribe)
-    assert post(client, deadline_sec="25", diarize="false")[0] == 200
-    assert 0.0 < remaining[0] <= 23.0
+    assert post(client, deadline_sec=str(deadline), diarize="false")[0] == 200
+    assert 0.0 < remaining[0] <= deadline - 2.0
 
 
 def test_explicit_deadline_counts_preprocessing_and_waiting_for_slot(client_engine, monkeypatch):
@@ -255,18 +257,18 @@ def test_explicit_deadline_counts_preprocessing_and_waiting_for_slot(client_engi
 
     def acquire_after_wait(timeout):
         wait_budget.append(timeout)
-        clock[0] += 14.0
+        clock[0] += 13.99
         return acquire(0.0)
 
-    def transcribe(*args, **kwargs):
-        work_budget.append(stt_budget.remaining_sec())
+    def transcribe(_audio, _params, *, timeout_sec, model_name):
+        work_budget.append(timeout_sec)
         return _recognized()
 
     monkeypatch.setattr(rest, "try_acquire_stt_singleflight", acquire_after_wait)
-    monkeypatch.setattr(engine, "_transcribe_with_fallback", transcribe)
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", transcribe)
     assert post(client, deadline_sec="25", diarize="false")[0] == 200
     assert wait_budget == [21.0]
-    assert 5.0 < work_budget[0] < 7.0
+    assert work_budget == pytest.approx([5.01])
 
 
 def test_exhaustion_before_stt_admission_does_not_start_work(client_engine, monkeypatch):
@@ -346,10 +348,18 @@ def test_rest_diarization_policy_reaches_whisperx_fallback(client_engine, monkey
 
 def test_call_with_six_seconds_can_still_start_whisper(client_engine, monkeypatch):
     client, _engine, abort_rest = client_engine
-    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", _recognized)
+    monkeypatch.setattr(rest.time, "monotonic", lambda: 100.0)
+    budgets = []
+
+    def worker(_audio, _params, *, timeout_sec, model_name):
+        budgets.append(timeout_sec)
+        return _recognized()
+
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", worker)
     status, body = post(client, request_profile="voice_gateway_call", deadline_sec="6")
     assert status == 200
     assert body["text"] == "hola"
+    assert budgets == pytest.approx([4.64])
     abort_rest.assert_not_called()
 
 
