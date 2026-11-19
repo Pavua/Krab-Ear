@@ -61,9 +61,6 @@ def _ensure_stubs() -> None:
         "requests",
         "sounddevice",
         "soundfile",
-        "torch",
-        "pyannote",
-        "pyannote.audio",
     ]:
         if m in sys.modules:
             continue

@@ -30,7 +30,7 @@ if KRAB_EAR_ROOT not in sys.path:
     sys.path.insert(0, KRAB_EAR_ROOT)
 
 # ---------------------------------------------------------------------------
-# Stub тяжёлых зависимостей (mlx_whisper, sounddevice, pyannote…)
+# Stub тяжёлых зависимостей (mlx_whisper, sounddevice…)
 # до импорта backend-модулей, чтобы CI на ubuntu не падал.
 # ---------------------------------------------------------------------------
 
@@ -43,8 +43,7 @@ def _stub_module(name: str) -> types.ModuleType:
 
 for _heavy in [
     "mlx_whisper", "mlx", "mlx.core", "mlx.nn",
-    "sounddevice", "pyannote", "pyannote.audio",
-    "torch", "torchaudio", "transformers",
+    "sounddevice", "torchaudio", "transformers",
     "sentry_sdk",
 ]:
     _stub_module(_heavy)
