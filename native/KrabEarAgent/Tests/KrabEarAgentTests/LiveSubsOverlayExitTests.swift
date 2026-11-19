@@ -190,7 +190,7 @@ final class LiveSubsOverlayExitWiringSourceContractTests: XCTestCase {
     func test_stopLiveSubsCapture_stopsWatchdog() throws {
         let src = try Self.source("main+LiveSubs.swift")
         guard
-            let sigRange = src.range(of: "func stopLiveSubsCapture() {"),
+            let sigRange = src.range(of: "func stopLiveSubsCapture(flush: Bool = true) {"),
             let closeRange = src.range(
                 of: "\n    }\n",
                 range: sigRange.upperBound..<src.endIndex
@@ -199,6 +199,8 @@ final class LiveSubsOverlayExitWiringSourceContractTests: XCTestCase {
             return XCTFail("Не найдена stopLiveSubsCapture() в main+LiveSubs.swift")
         }
         let block = src[sigRange.lowerBound..<closeRange.upperBound]
+        XCTAssertTrue(block.contains("capture?.stop(flush: flush)"))
+        XCTAssertTrue(block.contains("overlay?.hide()"))
         XCTAssertTrue(
             block.contains("stopLiveSubsWatchdog()"),
             "stopLiveSubsCapture обязана остановить watchdog-таймер — иначе он крутится " +
@@ -206,9 +208,9 @@ final class LiveSubsOverlayExitWiringSourceContractTests: XCTestCase {
         )
     }
 
-    // MARK: 4d. tickLiveSubsWatchdog реально зовёт LiveSubsOverlayWatchdogGate и hide()
+    // MARK: 4d. tickLiveSubsWatchdog отменяет просроченный Start через общий Stop
 
-    func test_tickLiveSubsWatchdog_callsWatchdogGateAndHides() throws {
+    func test_tickLiveSubsWatchdog_callsWatchdogGateAndCancelsCapture() throws {
         let src = try Self.source("main+LiveSubs.swift")
         guard
             let sigRange = src.range(of: "func tickLiveSubsWatchdog() {"),
@@ -231,8 +233,8 @@ final class LiveSubsOverlayExitWiringSourceContractTests: XCTestCase {
             "гейт по «активности распознавания» вместо «жизни захвата» (запрещено спекой)"
         )
         XCTAssertTrue(
-            block.contains("liveSubsOverlay.hide()"),
-            "На истёкшем grace-периоде тик обязан скрыть оверлей (спека §4: hide() + logger.info)"
+            block.contains("stopLiveSubsCapture(flush: false)"),
+            "По истечении grace-периода Stop должен отменить запоздалый Start и скрыть оверлей"
         )
     }
 

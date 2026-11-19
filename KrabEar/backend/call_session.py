@@ -139,11 +139,13 @@ class CallSession:
     operator_interruptions: list[dict[str, Any]] = field(default_factory=list)
     end_reason: str | None = None
     duration_sec: float | None = None
+    #: session_id Voice Gateway: единственный адрес, по которому звонок можно положить.
+    gateway_session_id: str = ""
 
     # ----- Factory -----
 
     @classmethod
-    def create(cls, phone_number: str, goal_text: str) -> "CallSession":
+    def create(cls, phone_number: str, goal_text: str, gateway_session_id: str = "") -> "CallSession":
         """Создаёт новую сессию в состоянии IDLE."""
         return cls(
             id=f"cs_{uuid.uuid4().hex[:12]}",
@@ -151,6 +153,7 @@ class CallSession:
             phone_number=phone_number.strip(),
             goal_text=goal_text.strip(),
             status=CallStatus.IDLE.value,
+            gateway_session_id=str(gateway_session_id or "").strip(),
         )
 
     # ----- Serialization -----
@@ -169,6 +172,7 @@ class CallSession:
             "operator_interruptions": list(self.operator_interruptions),
             "end_reason": self.end_reason,
             "duration_sec": self.duration_sec,
+            "gateway_session_id": self.gateway_session_id,
         }
 
     @classmethod
@@ -192,4 +196,5 @@ class CallSession:
             operator_interruptions=list(interruptions),
             end_reason=data.get("end_reason"),
             duration_sec=data.get("duration_sec"),
+            gateway_session_id=str(data.get("gateway_session_id") or ""),
         )

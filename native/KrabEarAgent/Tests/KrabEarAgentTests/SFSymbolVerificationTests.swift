@@ -335,17 +335,12 @@ final class SFSymbolVerificationTests: XCTestCase {
             }
         }
 
-        // DiagnosticsTabView has a known fallback runModal — track it here
-        // so any NEW site is caught immediately.
-        let knownSites: Set<String> = ["DiagnosticsTabView.swift"]
-        let newViolations = violations.filter { !knownSites.contains($0.file) }
-
         XCTAssertTrue(
-            newViolations.isEmpty,
+            violations.isEmpty,
             "NSAlert.runModal() found outside allowlist. On macOS Sequoia this blocks main thread.\n" +
             "Use AlertHelpers.showAlert(in:) or beginSheetModal(for:completionHandler:) instead.\n" +
             "New violations:\n" +
-            newViolations.map { "  \($0.file):\($0.line) — \($0.text)" }.joined(separator: "\n")
+            violations.map { "  \($0.file):\($0.line) — \($0.text)" }.joined(separator: "\n")
         )
     }
 }

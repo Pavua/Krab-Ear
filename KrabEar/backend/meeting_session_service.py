@@ -1220,6 +1220,12 @@ class MeetingSessionService:
         if self._settings_get("privacy_mode_enabled", False):
             with self._lock:
                 s.privacy_stopped = True
+                # Накопленные live-тексты не переживают включение приватности (RAM-буфер).
+                s.chunks.clear()
+                s.transcript_len = 0
+                s.items = []
+                s.decisions = []
+                s.questions = []
             self._release_lease()
             logger.info("meeting: privacy включён посреди встречи — live-обработка остановлена")
             return None
@@ -1277,6 +1283,11 @@ class MeetingSessionService:
             audio_data=audio, quality_profile="balanced")
         text = payload.get("text") if isinstance(payload, dict) else str(payload or "")
         text = (text or "").strip()
+        # Распознавание длится секунды: приватность могли включить за это время. Текст,
+        # родившийся после включения, не копится и не публикуется; живую обработку глушит
+        # обычный путь `_run_due_job_once` на следующем тике.
+        if text and self._settings_get("privacy_mode_enabled", False):
+            return
         with self._lock:
             if self._session is not s:  # протухший тик после stop (см. _job_diar_window)
                 return

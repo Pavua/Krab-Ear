@@ -33,35 +33,31 @@ if [ -z "${HF_TOKEN:-}" ] && [ -f "$SECRETS_FILE" ]; then
 fi
 if [ -z "${HF_TOKEN:-}" ]; then
   printf '[install-rest] HF_TOKEN не найден. Введи token (Hugging Face): '
-  read -r HF_TOKEN
+  read -rs HF_TOKEN
+  printf '\n'
   [ -n "$HF_TOKEN" ] || fail "HF_TOKEN пустой, abort"
 fi
 
-# 1. Bootout старой версии
+# Подготавливаем и проверяем приватный plist до остановки сервиса.
+log "render template → $TARGET"
+STAGED_PLIST=""
+trap '[ -z "$STAGED_PLIST" ] || rm -f -- "$STAGED_PLIST"' EXIT
+STAGED_PLIST="$(printf '%s' "$HF_TOKEN" |
+  python3 "$ROOT_DIR/scripts/render_launchagent_plist.py" "$TEMPLATE" "$TARGET" "$HOME" "$ROOT_DIR")" ||
+  fail "не удалось подготовить plist"
+if ! plutil -lint "$STAGED_PLIST" >/dev/null; then
+  fail "plutil lint failed для нового plist"
+fi
+
 if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
   log "bootout gui/$UID_NUM/$LABEL"
   launchctl bootout "gui/$UID_NUM/$LABEL" 2>&1 || true
   sleep 1
 fi
 
-# 2. Render template → target
-log "render template → $TARGET"
-sed -e "s|__HOME__|$HOME|g" \
-    -e "s|__PROJECT_ROOT__|$ROOT_DIR|g" \
-    "$TEMPLATE" > "$TARGET.tmp"
-python3 -c "
-import sys, pathlib
-p = pathlib.Path('$TARGET.tmp')
-p.write_text(p.read_text().replace('__HF_TOKEN__', sys.argv[1]))
-" "$HF_TOKEN"
-mv "$TARGET.tmp" "$TARGET"
-chmod 600 "$TARGET"
-
-# 3. Validate
-if ! plutil -lint "$TARGET" >/dev/null; then
-  fail "plutil lint failed для $TARGET"
-fi
-log "plutil lint OK"
+# Подмена в том же каталоге сохраняет права временного файла.
+mv -f -- "$STAGED_PLIST" "$TARGET"
+STAGED_PLIST=""
 
 # 4. Bootstrap
 log "bootstrap gui/$UID_NUM/$LABEL"

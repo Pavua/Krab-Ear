@@ -12,6 +12,7 @@ enum PlaintextExportSink: String {
     case historyMeetingReport = "history-meeting-report"
     case historyStatsReport = "history-stats-report"
     case historyPDF = "history-pdf"
+    case historyHTML = "history-html"
 }
 
 @MainActor
@@ -127,11 +128,18 @@ final class PlaintextExportCoordinator {
     private var sequence = 0
     private var seenReceipts = Set<String>()
     private var closed = false
+    private var privacyRestricted = false
     // MainActor реентерабелен: очередь удерживается через transport/consent await.
     private var inFlight = false
     private var waiters: [CheckedContinuation<Bool, Never>] = []
 
     init(ipc: IPCClient) { self.ipc = ipc }
+
+    func setPrivacyRestricted(_ restricted: Bool) {
+        guard privacyRestricted != restricted else { return }
+        privacyRestricted = restricted
+        if restricted { invalidate() }
+    }
 
     static func errorMessage(_ error: Error) -> String {
         (error as? Failure)?.errorDescription ?? Failure.writeFailed.errorDescription!
@@ -162,7 +170,7 @@ final class PlaintextExportCoordinator {
     /// Вторая Markdown-копия имеет собственный билет с контекстом ДО SavePanel.
     /// Она не получает разрешение от первой записи: backend проверит policy заново.
     func deriveBackendTicket(from ticket: Ticket, method: BackendMethod) throws -> BackendTicket {
-        try ensureOpen()
+        try ensureExportAllowed()
         guard ticket.owner == owner, let local = locals[ticket.id] else { throw Failure.expired }
         let id = UUID()
         backends[id] = BackendOperation(context: local.context, method: method, prerequisite: local.completion)
@@ -195,7 +203,8 @@ final class PlaintextExportCoordinator {
         params["sink_kind"] = operation.sink.rawValue
         do {
             let response = try await request("validate_plaintext_export", params)
-            try ensureOpen()
+            try ensureExportAllowed()
+            guard operation.context.version == authorizationVersion else { throw Failure.expired }
             let result = try successResult(response)
             guard epoch(result["epoch"]) == operation.context.policy.epoch,
                   integer(result["policy_generation"]) == operation.context.policy.generation,
@@ -267,8 +276,10 @@ final class PlaintextExportCoordinator {
 
     private func prepareContext(consent: () async -> Bool) async throws -> Context {
         do {
+            let version = authorizationVersion
             let response = try await request("get_plaintext_export_policy", [:])
-            try ensureOpen()
+            try ensureExportAllowed()
+            guard version == authorizationVersion else { throw Failure.expired }
             let result = try successResult(response)
             guard let currentEpoch = epoch(result["epoch"]),
                   let generation = integer(result["policy_generation"]),
@@ -282,16 +293,18 @@ final class PlaintextExportCoordinator {
             if let grant, grant.policy != policy { invalidate() }
             if !encrypted { return Context(version: authorizationVersion, session: session, policy: policy, capability: nil) }
             if let grant { return grant }
+            let consentVersion = authorizationVersion
             guard await consent() else { throw Failure.cancelled }
-            try ensureOpen()
-            return try await issueGrant(policy: policy, session: session)
+            try ensureExportAllowed()
+            guard consentVersion == authorizationVersion else { throw Failure.expired }
+            return try await issueGrant(policy: policy, session: session, version: consentVersion)
         } catch {
             invalidate()
             throw safeFailure(error)
         }
     }
 
-    private func issueGrant(policy: Policy, session: String) async throws -> Context {
+    private func issueGrant(policy: Policy, session: String, version: UUID) async throws -> Context {
         pendingGrants += 1
         defer { pendingGrants -= 1; finishCleanupIfIdle() }
         let response = try await request("grant_plaintext_export_session", [
@@ -302,7 +315,7 @@ final class PlaintextExportCoordinator {
         guard epoch(issued["epoch"]) == policy.epoch,
               integer(issued["policy_generation"]) == policy.generation,
               let capability = token(issued["capability"]) else { throw Failure.malformed }
-        let context = Context(version: authorizationVersion, session: session, policy: policy, capability: capability)
+        let context = Context(version: version, session: session, policy: policy, capability: capability)
         if closed {
             // Регистрируем поздний отзыв ДО pendingGrants decrement: normal quit
             // ждёт его до ответа или до общего watchdog, а не завершает app сразу.
@@ -310,7 +323,8 @@ final class PlaintextExportCoordinator {
             throw Failure.closed
         }
         revokeOnlyContext = context
-        try ensureOpen()
+        try ensureExportAllowed()
+        guard version == authorizationVersion else { throw Failure.expired }
         grant = context
         return context
     }
@@ -353,12 +367,16 @@ final class PlaintextExportCoordinator {
         guard !closed else { throw Failure.closed }
         guard !Task.isCancelled else { throw Failure.cancelled }
     }
-    private func enter() async throws {
+    private func ensureExportAllowed() throws {
         try ensureOpen()
+        guard !privacyRestricted else { throw Failure.privacy }
+    }
+    private func enter() async throws {
+        try ensureExportAllowed()
         if inFlight {
             let admitted = await withCheckedContinuation { waiters.append($0) }
             guard admitted else { throw Failure.closed }
-            do { try ensureOpen() } catch { leave(); throw error }
+            do { try ensureExportAllowed() } catch { leave(); throw error }
         } else {
             inFlight = true
         }

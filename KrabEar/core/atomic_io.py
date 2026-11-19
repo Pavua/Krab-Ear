@@ -9,23 +9,36 @@ one another's temp file. On any error the temp file is removed.
 """
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 
 def atomic_write_text(path, text, *, encoding="utf-8"):
     """Atomically write *text* to *path* (unique temp → fsync → os.replace)."""
+    atomic_write_bytes(path, text.encode(encoding))
+
+
+def atomic_write_bytes(path, content):
+    """Atomically write bytes with owner-only permissions."""
+    with atomic_binary_writer(path) as output:
+        output.write(content)
+
+
+@contextmanager
+def atomic_binary_writer(path):
+    """Yield a private temporary file and publish it only on normal exit."""
     path = Path(path)
     parent_dir = path.parent
     parent_dir.mkdir(parents=True, exist_ok=True)
 
     fd, tmp_path = tempfile.mkstemp(dir=parent_dir, prefix=path.name + "-", suffix=".tmp")
     try:
-        with os.fdopen(fd, "w", encoding=encoding) as f:
-            f.write(text)
+        with os.fdopen(fd, "wb") as f:
+            yield f
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
-    except Exception:
+    except BaseException:
         try:
             os.unlink(tmp_path)
         except OSError:

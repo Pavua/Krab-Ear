@@ -175,7 +175,7 @@ extension AgentAppDelegate {
     }
 
     var privacyModeEnabled: Bool {
-        get { objc_getAssociatedObject(self, &privacyModeEnabledKey) as? Bool ?? false }
+        get { objc_getAssociatedObject(self, &privacyModeEnabledKey) as? Bool ?? true }
         set { objc_setAssociatedObject(self, &privacyModeEnabledKey, newValue, .OBJC_ASSOCIATION_RETAIN) }
     }
 
@@ -185,7 +185,13 @@ extension AgentAppDelegate {
     }
 
     func setPrivacyMode(_ on: Bool) {
+        settings.privacyModeEnabled = on
+        let previous = objc_getAssociatedObject(self, &privacyModeEnabledKey) as? Bool
+        guard on != previous else { return }
         self.privacyModeEnabled = on
+        updatePlaintextExportPrivacy(on)
+        callObserverCoordinator?.setAgentPrivacyRestricted(on)
+        if on { revokePrivacyLease() }
         self.statusIndicatorView.setPrivacyMode(on)
         self.applyHealthStateToStatusItem(self.lastHealthState)
         // Wake word не должен держать микрофон в privacy mode. Backend тоже
@@ -193,7 +199,7 @@ extension AgentAppDelegate {
         // двойная защита, агентская сторона срабатывает первой.
         if on {
             wakeWordPoller?.pause(.privacyMode)
-        } else {
+        } else if previous == true {
             wakeWordPoller?.resume(.privacyMode)
         }
     }
@@ -468,10 +474,12 @@ extension AgentAppDelegate {
         let timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
             Task { @MainActor [weak self] in
                 guard let self, let monitor = self.healthMonitor else { return }
+                self.tickPrivacyMonitor()
                 let state = await monitor.currentState()
                 self.applyHealthStateToStatusItem(state)
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
         self.statusUpdateTimer = timer
 
         logger.info("HealthMonitor запущен: pingInterval=3s, hangThreshold=2")

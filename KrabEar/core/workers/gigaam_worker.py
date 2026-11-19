@@ -80,36 +80,34 @@ def _acquire_singleton_lock() -> None:
         return
 
     import fcntl
+    import stat
     import tempfile
 
-    lock_path = os.path.join(
-        tempfile.gettempdir(), "krab_ear_gigaam_worker.lock"
-    )
+    lock_path = os.path.join(tempfile.gettempdir(), "krab_ear_gigaam_worker.lock")
     try:
-        # Открываем/создаём PID-файл. Держим fd открытым всё время жизни процесса —
-        # при завершении (нормальном или по сигналу) ядро автоматически снимет flock.
-        fd = open(lock_path, "w")  # noqa: WPS515  — intentionally kept open
-        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fd.write(str(os.getpid()))
-        fd.flush()
-        # Не закрываем fd — пока процесс живёт, lock держится.
-        # CPython держит fd в глобальном __builtins__ GC, поэтому не нужен глобал,
-        # но для явности сохраним в module-level переменную.
-        globals()["_singleton_lock_fd"] = fd
-    except OSError:
-        # LOCK_NB → EWOULDBLOCK если другой процесс держит lock.
-        existing_pid = "(unknown)"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        owner_file = os.fdopen(fd, "r+", encoding="ascii")
         try:
-            with open(lock_path) as _lf:
-                existing_pid = _lf.read().strip()
-        except Exception:
-            pass
-        sys.stderr.write(
-            f"gigaam_worker: singleton guard — уже запущен PID {existing_pid}, "
-            "этот экземпляр завершается (duplicate prevention, Wave 525)\n"
-        )
-        sys.stderr.flush()
-        sys.exit(0)
+            metadata = os.fstat(fd)
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1:
+                raise OSError("недопустимый lock-файл")
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print("gigaam_worker: singleton guard — другой воркер удерживает lock", file=sys.stderr, flush=True)
+                sys.exit(0)
+            os.fchmod(fd, 0o600)
+            owner_file.write(str(os.getpid()))
+            owner_file.truncate()
+            owner_file.flush()
+        except BaseException:
+            owner_file.close()
+            raise
+    except OSError:
+        print("gigaam_worker: singleton guard — не удалось подготовить lock-файл", file=sys.stderr, flush=True)
+        sys.exit(1)
+    # Удерживаем дескриптор до завершения процесса.
+    globals()["_singleton_lock_fd"] = owner_file
 
 
 _acquire_singleton_lock()

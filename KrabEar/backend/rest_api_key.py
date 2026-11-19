@@ -20,6 +20,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import logging
 import os
 import secrets
@@ -85,14 +87,56 @@ def _replace_invalid(path: Path, key: str) -> None:
         raise
 
 
+@contextlib.contextmanager
+def _key_lock(base: Path):
+    """Эксклюзивный межпроцессный flock на весь цикл чтение → создание/замена ключа.
+
+    Без него два одновременных старта (backend и standalone REST) оба видели негодный
+    или отсутствующий файл и каждый записывал СВОЙ ключ: клиенты получали разные ключи.
+    Блокировка берётся на отдельном lock-файле (его inode не заменяется).
+    """
+    fd = os.open(base / ".rest_api_key.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _tighten_mode(path: Path) -> None:
+    """Принятый ключ не должен читаться другими: приводим права к 0600."""
+    try:
+        if path.stat().st_mode & 0o077:
+            os.chmod(path, 0o600)
+    except OSError:
+        logger.warning("REST: не удалось ограничить права файла ключа %s до 0600", path, exc_info=True)
+
+
 def _obtain_key(data_dir: Any) -> str:
     base = Path(data_dir)
     path = base / KEY_FILENAME
     try:
         base.mkdir(parents=True, exist_ok=True)
+        with _key_lock(base):
+            return _obtain_key_locked(base, path)
+    except OSError:
+        logger.exception(
+            "REST: ключ %s недоступен — работаем с временным ключом процесса "
+            "(auth остаётся включён, файл не тронут)",
+            path,
+        )
+    return secrets.token_urlsafe(32)
+
+
+def _obtain_key_locked(base: Path, path: Path) -> str:
+    try:
         for _ in range(3):
             existing = _read_valid(path)
             if existing:
+                _tighten_mode(path)
                 return existing
             candidate = secrets.token_urlsafe(32)
             if path.exists():
@@ -104,13 +148,10 @@ def _obtain_key(data_dir: Any) -> str:
             # Конкурент успел создать файл первым: перечитываем его.
         existing = _read_valid(path)
         if existing:
+            _tighten_mode(path)
             return existing
     except OSError:
-        logger.exception(
-            "REST: ключ %s недоступен — работаем с временным ключом процесса "
-            "(auth остаётся включён, файл не тронут)",
-            path,
-        )
+        raise
     return secrets.token_urlsafe(32)
 
 

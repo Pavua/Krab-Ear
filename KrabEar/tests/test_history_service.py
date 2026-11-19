@@ -368,10 +368,17 @@ class HistoryServiceTestCase(unittest.TestCase):
 
     def test_delete_does_not_erase_neighbour_md_files(self) -> None:
         """W1762: удаление одной записи не стирает .md файлы других записей того же дня."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        item_a = self.store.add_history_item(text="запись А", paste_status="ok")
-        item_b = self.store.add_history_item(text="запись Б", paste_status="ok")
+        from backend.models import HistoryItem
+
+        item_a = HistoryItem.create(text="запись А", paste_status="ok")
+        item_a.ts = "2026-11-18T10:04:00+00:00"
+        item_b = HistoryItem.create(text="запись Б", paste_status="ok")
+        item_b.ts = "2026-11-18T10:04:01+00:00"
+        with self.store._lock():
+            for item in (item_a, item_b):
+                self.store._append_ndjson(self.store.history_path, item.to_dict())
 
         transcripts_dir = Path(self.tmp.name) / "data" / "transcripts"
         transcripts_dir.mkdir(parents=True, exist_ok=True)
@@ -382,16 +389,14 @@ class HistoryServiceTestCase(unittest.TestCase):
 
         md_a = transcripts_dir / _md_name(item_a.ts)
         md_b = transcripts_dir / _md_name(item_b.ts)
-        md_a.write_text("текст А", encoding="utf-8")
-        md_b.write_text("текст Б", encoding="utf-8")
+        md_a.write_text(item_a.text, encoding="utf-8")
+        md_b.write_text(item_b.text, encoding="utf-8")
 
         # Удаляем только item_a
         self.svc.handle_delete_history_item({"id": item_a.id})
 
         self.assertFalse(md_a.exists(), "md файл удалённой записи должен исчезнуть")
-        # Файл item_b должен остаться нетронутым (если ts отличается)
-        if item_a.ts != item_b.ts:
-            self.assertTrue(md_b.exists(), "md файл соседней записи не должен быть затронут")
+        self.assertTrue(md_b.exists(), "md файл соседней записи не должен быть затронут")
 
 
 if __name__ == "__main__":

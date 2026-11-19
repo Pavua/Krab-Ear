@@ -153,7 +153,8 @@ final class SystemSelectionAccessibilityAccess: SelectionAccessibilityAccess {
 
         var roleRef: CFTypeRef?
         _ = AXUIElementCopyAttributeValue(focusedElement, kAXRoleAttribute as CFString, &roleRef)
-        if (roleRef as? String) == "AXSecureTextField" { return nil }
+        // E4 п.3: AXSecureTextField — подроль, а не роль.
+        if AXSecureField.isSecure(role: roleRef as? String, subrole: AXSecureField.subrole(of: focusedElement)) { return nil }
         var selectedRef: CFTypeRef?
         guard AXUIElementCopyAttributeValue(
             focusedElement,
@@ -182,7 +183,7 @@ final class SystemSelectionAccessibilityAccess: SelectionAccessibilityAccess {
         let current = focused as! AXUIElement
         var role: CFTypeRef?
         _ = AXUIElementCopyAttributeValue(current, kAXRoleAttribute as CFString, &role)
-        guard role as? String != "AXSecureTextField" else { return false }
+        guard !AXSecureField.isSecure(role: role as? String, subrole: AXSecureField.subrole(of: current)) else { return false }
         if let element { return element.systemElement.map { CFEqual(current, $0) } ?? false }
         return true
     }

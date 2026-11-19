@@ -153,7 +153,9 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     func _testResyncTimerAndPulse() { resyncTimerAndPulseIfNeeded() }
     /// Прямой вызов SSE-парсера строки — без реального сетевого стрима (образец
     /// MeetingLivePanelController._testHandleSSELine).
-    func _testHandleSSELine(_ line: String) { handleSSELine(line) }
+    func _testHandleSSELine(_ line: String, generation: UInt64? = nil) {
+        handleSSELine(line, generation: generation ?? sseGeneration)
+    }
 
     // MARK: - Init
 
@@ -303,7 +305,9 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         // именно для ЭТОЙ попытки.
         let delegate = SSESessionDelegate(
             onLine: { [weak self] line in
-                Task { @MainActor [weak self] in self?.handleSSELine(line) }
+                Task { @MainActor [weak self] in
+                    self?.handleSSELine(line, generation: generation)
+                }
             },
             onComplete: { [weak self] _ in
                 Task { @MainActor [weak self] in self?.handleSSECompletion(generation: generation) }
@@ -368,7 +372,8 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
     /// Паттерн MeetingLivePanelController.handleSSELine: `event: ` трекает тип,
     /// `data: ` диспатчит по нему.
-    private func handleSSELine(_ line: String) {
+    private func handleSSELine(_ line: String, generation: UInt64) {
+        guard generation == sseGeneration else { return }
         // Любая полученная строка (включая пустые keep-alive) доказывает, что
         // поток жив — сбрасываем backoff, чтобы следующий обрыв снова начинал
         // с минимальной задержки, а не с потолка, накопленного прошлой серией.

@@ -11,7 +11,7 @@ from backend.plaintext_export_authorization import (
 # Имена описывают конечную запись, а не формат произвольного вызова.
 LOCAL_PLAINTEXT_SINKS = frozenset({
     "history-md", "history-ndjson", "history-selected", "history-action-items",
-    "history-meeting-report", "history-stats-report", "history-pdf",
+    "history-meeting-report", "history-stats-report", "history-pdf", "history-html",
 })
 
 

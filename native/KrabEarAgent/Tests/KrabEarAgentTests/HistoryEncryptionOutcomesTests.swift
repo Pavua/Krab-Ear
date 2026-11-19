@@ -51,34 +51,47 @@ final class HistoryEncryptionOutcomesTests: XCTestCase {
 
     func test_encryption_change_success() {
         let resp: [String: Any] = ["ok": true, "result": ["ok": true, "enabled": true, "available": true]]
-        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: resp), .applied)
+        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: resp, desired: true), .applied)
+    }
+
+    func test_encryption_change_requires_confirmed_target_and_strict_booleans() throws {
+        let cases: [(String, EncryptionChangeOutcome)] = [
+            (#"{"ok":true,"result":{"ok":true,"available":true}}"#, .failed(enabled: nil)),
+            (#"{"ok":true,"result":{"ok":true,"enabled":false,"available":true}}"#, .failed(enabled: false)),
+            (#"{"ok":true,"result":{"ok":1,"enabled":true,"available":true}}"#, .failed(enabled: true)),
+            (#"{"ok":true,"result":{"ok":true,"enabled":1,"available":true}}"#, .failed(enabled: nil)),
+            (#"{"ok":true,"result":{"ok":true,"enabled":true,"available":1}}"#, .failed(enabled: true)),
+            (#"{"ok":0,"result":{"ok":true,"enabled":true,"available":true}}"#, .failed(enabled: nil)),
+            (#"{"ok":true,"result":{"ok":false,"error":"keychain_unavailable","enabled":0}}"#, .keychainUnavailable(enabled: nil)),
+        ]
+        for (wire, expected) in cases {
+            let response = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(wire.utf8)) as? [String: Any])
+            XCTAssertEqual(EncryptionChangeOutcome.resolve(response: response, desired: true), expected, wire)
+        }
     }
 
     func test_encryption_change_keychain_unavailable() {
-        let resp: [String: Any] = ["result": ["ok": false, "error": "keychain_unavailable", "enabled": false]]
-        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: resp), .keychainUnavailable(enabled: false))
+        let resp: [String: Any] = ["ok": true, "result": ["ok": false, "error": "keychain_unavailable", "enabled": false]]
+        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: resp, desired: true), .keychainUnavailable(enabled: false))
     }
 
     func test_encryption_change_other_rejection_is_failed_with_reported_state() {
-        let resp: [String: Any] = ["result": ["ok": false, "error": "settings_write_failed", "enabled": true]]
-        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: resp), .failed(enabled: true))
+        let resp: [String: Any] = ["ok": true, "result": ["ok": false, "error": "settings_write_failed", "enabled": true]]
+        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: resp, desired: true), .failed(enabled: true))
     }
 
     func test_encryption_change_missing_ok_is_failed_not_applied() {
-        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: ["result": ["enabled": true]]), .failed(enabled: true))
+        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: ["ok": true, "result": ["enabled": true]], desired: true), .failed(enabled: true))
     }
 
     func test_encryption_change_ipc_failure_or_garbage_is_failed() {
-        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: nil), .failed(enabled: nil))
-        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: ["ok": false]), .failed(enabled: nil))
+        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: nil, desired: true), .failed(enabled: nil))
+        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: ["ok": false], desired: true), .failed(enabled: nil))
     }
 
-    func test_actual_enabled_prefers_reread_then_reported_then_negated_desire() {
-        XCTAssertFalse(EncryptionChangeOutcome.failed(enabled: true).actualEnabled(desired: true, reread: false))
-        XCTAssertFalse(EncryptionChangeOutcome.failed(enabled: false).actualEnabled(desired: true, reread: nil))
-        XCTAssertFalse(EncryptionChangeOutcome.failed(enabled: nil).actualEnabled(desired: true, reread: nil))
-        XCTAssertTrue(EncryptionChangeOutcome.failed(enabled: nil).actualEnabled(desired: false, reread: nil))
-        XCTAssertTrue(EncryptionChangeOutcome.applied.actualEnabled(desired: true, reread: nil))
+    func test_encryption_change_confirms_disabled_target() {
+        let response: [String: Any] = ["ok": true, "result": ["ok": true, "enabled": false, "available": true]]
+        XCTAssertEqual(EncryptionChangeOutcome.resolve(response: response, desired: false), .applied)
     }
 }
 
@@ -100,10 +113,15 @@ final class SecuritySettingsWiringContractTests: XCTestCase {
 
     func test_encryption_toggle_failure_rereads_state_and_does_not_return_silently() throws {
         let fn = try body(of: "private func applyEncryptionChange(", in: try source())
-        XCTAssertTrue(fn.contains("EncryptionChangeOutcome.resolve(response: resp)"))
-        XCTAssertTrue(fn.contains("method: \"get_encryption_status\""))
-        XCTAssertTrue(fn.contains("outcome.actualEnabled(desired: desired, reread: reread)"))
-        XCTAssertTrue(fn.contains("toggleRef.state = actual ? .on : .off"))
+        XCTAssertTrue(fn.contains("EncryptionChangeOutcome.resolve(response: resp, desired: desired)"))
+        let reread = try XCTUnwrap(fn.range(of: "method: \"get_encryption_status\""))
+        let parsed = try XCTUnwrap(fn.range(of: "confirmedEncryptionStatus(rereadResponse)"))
+        let resolved = try XCTUnwrap(fn.range(of: "outcome.knownEnabled(desired: desired, reread: status?.enabled)"))
+        let rendered = try XCTUnwrap(fn.range(of: "syncSecuritySettings(enabled: known,"))
+        XCTAssertLessThan(reread.lowerBound, parsed.lowerBound)
+        XCTAssertLessThan(parsed.lowerBound, resolved.lowerBound)
+        XCTAssertLessThan(resolved.lowerBound, rendered.lowerBound)
+        XCTAssertTrue(fn.contains("presentAlertSheet(alert, for: self.window)"))
         XCTAssertFalse(fn.contains(") else { return }"),"IPC-сбой не должен молча оставлять тоггл в выбранной позиции")
         XCTAssertFalse(fn.contains("runModal"))
     }
@@ -187,8 +205,17 @@ final class EncryptionToggleUnknownStateTests: XCTestCase {
 
     func test_toggle_failure_uses_known_state_and_honest_unknown_message() throws {
         let src = try source("HistoryPanelController+SecuritySettings.swift")
-        XCTAssertTrue(src.contains("outcome.knownEnabled(desired: desired, reread: reread)"))
+        XCTAssertTrue(src.contains("else if known == nil"))
         XCTAssertTrue(src.contains("Не удалось подтвердить состояние шифрования"))
+        let marker = try XCTUnwrap(src.range(of: "func syncSecuritySettings("))
+        let render = String(src[marker.lowerBound...])
+        XCTAssertTrue(render.contains("enabled.map { $0 ? .on : .off } ?? .mixed"))
+        XCTAssertTrue(render.contains("let canToggle = available == true && enabled != nil"))
+        XCTAssertTrue(render.contains("Статус шифрования недоступен"))
+        XCTAssertTrue(render.contains("SecurityAssocKeys.encryptionToggle"))
+        XCTAssertTrue(render.contains("SecurityAssocKeys.cdEncryptionToggle"))
+        XCTAssertEqual(render.components(separatedBy: "toggle.state = toggleState").count - 1, 2)
+        XCTAssertEqual(render.components(separatedBy: "toggle.isEnabled = canToggle").count - 1, 2)
     }
 
 

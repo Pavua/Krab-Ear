@@ -57,7 +57,6 @@ final class ConversationViewControllerTests: XCTestCase {
         if vc.isSessionActive {
             vc.isSessionActive = false
         }
-        ConversationViewController._rtSessionActive = false
         vc = nil
         try await super.tearDown()
     }

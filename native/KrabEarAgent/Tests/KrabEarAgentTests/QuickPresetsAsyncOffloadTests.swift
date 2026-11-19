@@ -55,7 +55,8 @@ final class QuickPresetsCycleTests: XCTestCase {
     private func makeDelegate() -> AgentAppDelegate {
         final class NoOpProvider: IPCSocketProviding, @unchecked Sendable {
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
-                return Data(#"{"id":"x","ok":true,"result":{}}"#.utf8)
+                let response = Data(#"{"id":"x","ok":true,"result":{"privacy_mode_enabled":false}}"#.utf8)
+                return IPCFakeServerSupport.echoingRequestID(request: payload, intoData: response)
             }
         }
         let delegate = AgentAppDelegate(
@@ -71,7 +72,7 @@ final class QuickPresetsCycleTests: XCTestCase {
         defaultsDomain.defaults.set("default", forKey: key)
 
         delegate.cycleToNextPreset()
-        // Allow Task.detached to settle
+        // Allow settings operation to settle
         try await Task.sleep(for: .milliseconds(300))
 
         XCTAssertEqual(
@@ -136,6 +137,9 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
             init(recorder: ProfileRecorder) { self.recorder = recorder }
 
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
                 if
                     let dict = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                     let method = dict["method"] as? String,
@@ -145,7 +149,7 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
                 {
                     await recorder.append(profile)
                 }
-                return Data(#"{"id":"x","ok":true,"result":{}}"#.utf8)
+                return Data(#"{"id":"x","ok":true,"result":{"privacy_mode_enabled":false}}"#.utf8)
             }
         }
 
@@ -157,7 +161,7 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
 
         delegate.applyRecordingPreset("meeting", source: "test")
 
-        // Allow the Task.detached IPC call to complete
+        // Allow the settings operation IPC call to complete
         try await Task.sleep(for: .milliseconds(300))
 
         let profiles = await recorder.profiles
@@ -168,7 +172,8 @@ final class QuickPresetsIPCOffloadTests: XCTestCase {
     func test_applyRecordingPreset_updatesUserDefaults_afterIPCSuccess() async throws {
         final class SuccessProvider: IPCSocketProviding, @unchecked Sendable {
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
-                return Data(#"{"id":"x","ok":true,"result":{}}"#.utf8)
+                let response = Data(#"{"id":"x","ok":true,"result":{"privacy_mode_enabled":false}}"#.utf8)
+                return IPCFakeServerSupport.echoingRequestID(request: payload, intoData: response)
             }
         }
 

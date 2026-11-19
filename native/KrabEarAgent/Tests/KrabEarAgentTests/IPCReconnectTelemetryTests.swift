@@ -46,6 +46,9 @@ private final class RecordingMockProvider: IPCSocketProviding, @unchecked Sendab
     }
 
     func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
         if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any] {
             lock.withLock { _requests.append(json) }
         }
