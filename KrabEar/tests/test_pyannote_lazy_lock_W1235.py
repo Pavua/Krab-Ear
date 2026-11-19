@@ -53,10 +53,10 @@ class TestPyannoteDoubleCheckedLock(unittest.TestCase):
 
         import torch as _torch_module
 
-        with patch("core.engine.Pipeline") as mock_pipeline_cls, \
+        with patch("core.engine._pyannote_pipeline_class") as mock_pipeline_cls, \
                 patch("core.engine.settings") as mock_settings, \
-                patch("core.engine.torch", _torch_module):
-            mock_pipeline_cls.from_pretrained.side_effect = slow_from_pretrained
+                patch("core.engine._load_torch", return_value=_torch_module):
+            mock_pipeline_cls.return_value.from_pretrained.side_effect = slow_from_pretrained
             mock_settings.DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
             mock_settings.HF_TOKEN = ""
 
@@ -115,10 +115,10 @@ class TestPyannoteDoubleCheckedLock(unittest.TestCase):
 
         import torch as _torch_module
 
-        with patch("core.engine.Pipeline") as mock_pipeline_cls, \
+        with patch("core.engine._pyannote_pipeline_class") as mock_pipeline_cls, \
                 patch("core.engine.settings") as mock_settings, \
-                patch("core.engine.torch", _torch_module):
-            mock_pipeline_cls.from_pretrained.side_effect = counting_from_pretrained
+                patch("core.engine._load_torch", return_value=_torch_module):
+            mock_pipeline_cls.return_value.from_pretrained.side_effect = counting_from_pretrained
             mock_settings.DIARIZATION_MODEL = "pyannote/speaker-diarization-3.1"
             mock_settings.HF_TOKEN = ""
 
@@ -225,7 +225,7 @@ class TestWhisperXDoubleCheckedLock(unittest.TestCase):
         import torch as _torch_module
 
         with patch("core.engine._whisperx", fake_whisperx), \
-                patch("core.engine.torch", _torch_module), \
+                patch("core.engine._load_torch", return_value=_torch_module), \
                 patch("core.engine.settings") as mock_settings:
             mock_settings.WHISPERX_MODEL = "large-v3"
             mock_settings.WHISPERX_DEVICE = "cpu"

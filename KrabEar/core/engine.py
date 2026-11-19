@@ -16,10 +16,14 @@ import subprocess
 import tempfile
 import threading
 import time
+from functools import cache
 from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
 
 if TYPE_CHECKING:
+    import torch
+    from pyannote.audio import Pipeline
+
     from backend.llm_rewriter import LLMRewriter
 
 import numpy as np
@@ -48,11 +52,6 @@ try:
 except Exception:
     sf = None  # type: ignore[assignment]
 
-try:
-    import torch  # type: ignore
-except Exception:
-    torch = None  # type: ignore[assignment]
-
 # Телеметрия pyannote 4.x (OpenTelemetry-метрики) — выключаем ДО импорта:
 # privacy-first продукт не шлёт usage-метрики, плюс её track_pipeline_apply
 # крашится TypeError на файлах с неопределяемой длительностью
@@ -60,11 +59,6 @@ except Exception:
 # Явный пользовательский opt-in через env уважается (только default).
 if "PYANNOTE_METRICS_ENABLED" not in os.environ:
     os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
-
-try:
-    from pyannote.audio import Pipeline  # type: ignore
-except Exception:
-    Pipeline = None  # type: ignore[assignment,misc]
 
 # SenseVoice (FunASR) — опциональный альтернативный STT движок (Alibaba).
 # Поддерживает 50+ языков (вкл. RU) и эмоцию. Lazy: если funasr не установлен,
@@ -462,6 +456,22 @@ def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
 # Сознательно больше, чем у превью (1.0с, transcriber.py): смена профиля —
 # редкая операция на пути, где результат ждёт пользователь.
 MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC = 2.0
+
+
+@cache
+def _load_torch():
+    # PyTorch нужен диаризации и WhisperX. Whisper через MLX работает отдельно.
+    try:
+        import torch
+    except Exception:
+        return None
+    return torch
+
+
+def _pyannote_pipeline_class() -> type[Pipeline]:
+    from pyannote.audio import Pipeline
+
+    return Pipeline
 
 
 class AudioEngine:
@@ -3733,15 +3743,15 @@ class AudioEngine:
             device = settings.WHISPERX_DEVICE
             # MPS доступен только на macOS с Apple Silicon (torch >= 1.12).
             # Если запрошен mps но недоступен — безопасный fallback на cpu.
-            if device == "mps" and torch is not None:
+            torch_module = _load_torch()
+            if device == "mps" and torch_module is not None:
                 try:
-                    import torch as _torch
-                    if not _torch.backends.mps.is_available():
+                    if not torch_module.backends.mps.is_available():
                         logger.warning("WhisperX: MPS недоступен, переключаюсь на cpu")
                         device = "cpu"
                 except Exception:
                     device = "cpu"
-            elif torch is None:
+            elif torch_module is None:
                 device = "cpu"
 
             # compute_type: на cpu/mps рекомендуется "float32" или "int8".
@@ -4440,13 +4450,14 @@ class AudioEngine:
                         annotation = pipeline(pipeline_input)
                     finally:
                         gc.collect()
+                        torch_module = _load_torch()
                         if (
-                            torch is not None
-                            and hasattr(torch, "mps")
-                            and torch.backends.mps.is_available()
+                            torch_module is not None
+                            and hasattr(torch_module, "mps")
+                            and torch_module.backends.mps.is_available()
                         ):
                             try:
-                                torch.mps.empty_cache()
+                                torch_module.mps.empty_cache()
                             except Exception:
                                 pass
                 if hasattr(annotation, "speaker_diarization"):
@@ -4553,6 +4564,12 @@ class AudioEngine:
             if self._diarization_load_error:
                 raise RuntimeError(self._diarization_load_error)
 
+            try:
+                pipeline_class = _pyannote_pipeline_class()
+            except Exception as exc:
+                self._diarization_load_error = f"Не удалось импортировать pyannote: {exc}"
+                raise RuntimeError(self._diarization_load_error) from exc
+
             hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
 
             # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
@@ -4569,7 +4586,7 @@ class AudioEngine:
                 with _profiler.start_span(f"model_load_{_short_model_name(model_name)}"):
                     try:
                         kwargs = {"token": hf_token} if hf_token else {}
-                        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+                        pipeline = pipeline_class.from_pretrained(model_name, **kwargs)
                     except Exception as e:
                         # Пер-кандидатная семантика: провал одного кандидата не
                         # блокирует следующих; латч ставится после провала ВСЕХ.
@@ -4603,11 +4620,14 @@ class AudioEngine:
         больше не вызывает Metal GPU assertion failure.
         Протестировано 2026-04-11 — 0.2s на 5 сек аудио, без crash.
         """
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        return torch.device("cpu")
+        torch_module = _load_torch()
+        if torch_module is None:
+            raise RuntimeError("PyTorch недоступен")
+        if torch_module.backends.mps.is_available():
+            return torch_module.device("mps")
+        if torch_module.cuda.is_available():
+            return torch_module.device("cuda")
+        return torch_module.device("cpu")
 
     def _run_diarization(self, audio_path: str) -> list[dict[str, Any]]:
         """Запускает pyannote diarization и нормализует результат в словари."""
@@ -4630,13 +4650,14 @@ class AudioEngine:
                     # следующий pyannote-вызов не должен стартовать посреди
                     # освобождения общих Metal-ресурсов.
                     gc.collect()
+                    torch_module = _load_torch()
                     if (
-                        torch is not None
-                        and hasattr(torch, "mps")
-                        and torch.backends.mps.is_available()
+                        torch_module is not None
+                        and hasattr(torch_module, "mps")
+                        and torch_module.backends.mps.is_available()
                     ):
                         try:
-                            torch.mps.empty_cache()
+                            torch_module.mps.empty_cache()
                         except Exception:
                             pass
         except Exception:
@@ -4678,13 +4699,14 @@ class AudioEngine:
             finally:
                 # Паттерн утечки MPS — как в _run_diarization_impl.
                 gc.collect()
+                torch_module = _load_torch()
                 if (
-                    torch is not None
-                    and hasattr(torch, "mps")
-                    and torch.backends.mps.is_available()
+                    torch_module is not None
+                    and hasattr(torch_module, "mps")
+                    and torch_module.backends.mps.is_available()
                 ):
                     try:
-                        torch.mps.empty_cache()
+                        torch_module.mps.empty_cache()
                     except Exception:
                         pass
         diarization = getattr(out, "speaker_diarization", out)
@@ -4715,7 +4737,8 @@ class AudioEngine:
         диаризация молча отключалась. Словарь с waveform обходит torchcodec.
         При любом сбое чтения возвращается прежний путь (старое поведение).
         """
-        if torch is None:
+        torch_module = _load_torch()
+        if torch_module is None:
             return audio_path
         try:
             import soundfile as _sf
@@ -4723,7 +4746,7 @@ class AudioEngine:
             data, sample_rate = _sf.read(str(audio_path), dtype="float32", always_2d=True)
             mono = np.ascontiguousarray(data.mean(axis=1, dtype=np.float32))
             return {
-                "waveform": torch.from_numpy(mono)[None, :],
+                "waveform": torch_module.from_numpy(mono)[None, :],
                 "sample_rate": int(sample_rate),
                 "uri": Path(audio_path).stem,
             }
