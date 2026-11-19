@@ -3124,8 +3124,11 @@ class AudioEngine:
                                 attempt_deadline_monotonic=attempt_deadline,
                             )
                             result = future.result(timeout=timeout)
-                        finally:
+                        except Exception:
                             _executor.shutdown(wait=False, cancel_futures=True)
+                            raise
+                        else:
+                            _executor.shutdown(wait=False)
                 result["model_used"] = model_name
                 return result
             except (MLXLockTimeoutError, MLXInterLockTimeout) as exc:
