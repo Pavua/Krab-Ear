@@ -253,6 +253,10 @@ _UNAVAILABLE_MODEL_TTL_SEC = 300  # 5 минут
 _UNAVAILABLE_TTL_SEC = _UNAVAILABLE_MODEL_TTL_SEC
 
 
+class _BudgetLimitedWhisperTimeout(MLXTimeoutError):
+    """Воркер остановлен раньше его штатного лимита ради бюджета попытки."""
+
+
 def _get_available_memory_gb() -> float:
     """Возвращает примерный объём доступной памяти (free + inactive) в GB.
 
@@ -800,7 +804,7 @@ class AudioEngine:
         # это выбивает рабочий GigaAM на 300 с и отправляет следующую диктовку
         # в облако, которого нет, — тот же дефект, что разбирала спека #1956,
         # только в adapter-ветке, куда он попадает как наследник TimeoutError.
-        if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout)):
+        if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout, _BudgetLimitedWhisperTimeout)):
             return False
         if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
             return True
@@ -1615,7 +1619,8 @@ class AudioEngine:
             )
         except Exception:
             pass
-        if _pipeline_v2_enabled:
+        # V2 не пробрасывает per-request отказ от диаризации в STT stage.
+        if _pipeline_v2_enabled and diarize is not False:
             global _pipeline_v2_warned
             if not _pipeline_v2_warned:
                 logger.warning("pipeline_v2 EXPERIMENTAL — Phase 4 deterministic pipeline activated.")
@@ -1670,6 +1675,7 @@ class AudioEngine:
         # в LLM-переписывание и автовставку. Не зависит от STT_STREAMING_ENABLED.
         if (
             not is_preview
+            and diarize is not False
             and getattr(settings, "DIARIZED_TRANSCRIPTION_ENABLED", False)
             and isinstance(audio_data, (str, Path))
             and os.path.exists(str(audio_data))
@@ -2908,6 +2914,8 @@ class AudioEngine:
         _gigaam_mode = getattr(settings, "STT_GIGAAM_MODE", "rnnt")
         _gigaam_model_label = f"gigaam-{_gigaam_mode}"
         _gigaam_source_rate = 16000 if chain_sample_rate is None else chain_sample_rate
+        # ContextVar читаем до submit: WhisperX работает в другом треде.
+        allow_diarization = stt_budget.diarization_allowed()
         _adapter_dispatch = [
             (
                 self._GIGAAM_MARKER,
@@ -2944,7 +2952,9 @@ class AudioEngine:
                 self._WHISPERX_MARKER,
                 "stt_whisperx",
                 settings.WHISPERX_MODEL,
-                lambda: self._transcribe_whisperx(chain_audio_data, language=language),
+                lambda: self._transcribe_whisperx(
+                    chain_audio_data, language=language, diarize=allow_diarization,
+                ),
             ),
             (
                 self._VOXTRAL_MARKER,
@@ -3109,6 +3119,9 @@ class AudioEngine:
                 )
                 if self._blacklist_allowed_for(exc):
                     self._unavailable_models[model_name] = time.monotonic()
+            except _BudgetLimitedWhisperTimeout:
+                # Следующий запрос получит свой бюджет и новый worker.
+                continue
             except MLXTimeoutError as e:
                 # Watchdog-таймаут: Metal GPU завис.
                 # Помечаем модель недоступной → fallback на следующий адаптер.
@@ -3302,6 +3315,16 @@ class AudioEngine:
                             raise last_inference_error
                         raise
                     except MLXTimeoutError as e:
+                        if timeout_sec < configured_timeout_sec:
+                            if last_inference_error is not None:
+                                raise last_inference_error from e
+                            logger.warning(
+                                "Whisper worker исчерпал бюджет попытки %.1fs (model=%s)",
+                                e.timeout_sec, model_name,
+                            )
+                            raise _BudgetLimitedWhisperTimeout(
+                                e.timeout_sec, model_name,
+                            ) from e
                         logger.error(
                             "MLX worker timeout %.1fs (model=%s) — fallback",
                             e.timeout_sec, model_name,
@@ -3693,12 +3716,15 @@ class AudioEngine:
             logger.info("WhisperX модель загружена: %s (device=%s)", settings.WHISPERX_MODEL, device)
             return self._whisperx_model
 
-    def _transcribe_whisperx(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+    def _transcribe_whisperx(
+        self, audio_data: Any, language: str | None = None, *, diarize: bool = True,
+    ) -> dict[str, Any]:
         """Транскрибация через WhisperX с word-level timestamps и diarization.
 
         Args:
             audio_data: путь к wav-файлу (str/Path) или numpy.ndarray (16kHz mono float32).
             language: ISO 639-1 код языка ("ru", "es", "en") или None для авто.
+            diarize: разрешает запуск встроенной разметки спикеров.
 
         Returns:
             dict с ключами:
@@ -3769,7 +3795,7 @@ class AudioEngine:
 
         # --- Diarization через pyannote внутри whisperx ---
         speaker_turns = None
-        if settings.WHISPERX_DIARIZATION and settings.HF_TOKEN:
+        if diarize and settings.WHISPERX_DIARIZATION and settings.HF_TOKEN:
             try:
                 diarize_model = _whisperx.DiarizationPipeline(
                     use_auth_token=settings.HF_TOKEN,
@@ -3817,7 +3843,7 @@ class AudioEngine:
                     f"WhisperX diarization failed: {type(exc).__name__}: {exc}",
                     severity="info",
                 )
-        elif settings.WHISPERX_DIARIZATION and not settings.HF_TOKEN:
+        elif diarize and settings.WHISPERX_DIARIZATION and not settings.HF_TOKEN:
             logger.warning(
                 "WhisperX: WHISPERX_DIARIZATION=True, но HF_TOKEN не задан — "
                 "diarization пропущена. Задайте KRAB_EAR_HF_TOKEN=<ваш_токен>."

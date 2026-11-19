@@ -261,14 +261,11 @@ class MLXWhisperSession:
         self._proc = None
         if proc is None:
             return
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        # stderr принадлежит drain-треду. Даже после выхода child
+        # его блокирующий read не должен задерживать следующий запрос.
         for pipe in (
             getattr(proc, "stdin", None),
             getattr(proc, "stdout", None),
-            getattr(proc, "stderr", None),
         ):
             if pipe is not None:
                 try:
@@ -448,7 +445,7 @@ class MLXWhisperSession:
             return True
 
     def kill(self) -> None:
-        """SIGKILL без wait. Не блокировать путь к ``os._exit``."""
+        """Только SIGKILL на пути к ``os._exit``, который закроет pipe."""
         proc = self._proc
         self._proc = None
         if proc is None:
@@ -457,16 +454,6 @@ class MLXWhisperSession:
             proc.kill()
         except OSError:
             pass
-        for pipe in (
-            getattr(proc, "stdin", None),
-            getattr(proc, "stdout", None),
-            getattr(proc, "stderr", None),
-        ):
-            if pipe is not None:
-                try:
-                    pipe.close()
-                except (OSError, BrokenPipeError):
-                    pass
 
     def _send(
         self,
@@ -522,13 +509,19 @@ class MLXWhisperSession:
                 with timeout_guard:
                     active = False
 
+            if timed_out:
+                # Таймер уже послал SIGKILL. Удерживаем I/O-lock и внешний
+                # GPU-lock до подтверждения выхода, без graceful shutdown.
+                proc.wait()
+                if self._proc is proc:
+                    self._reap_dead_unlocked()
+                raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
+
             if write_error is not None or not line:
                 rc = proc.poll()
                 stderr_tail = "".join(self._stderr_ring)[-2000:]
                 # Cleanup принадлежит этому же запросу, пока I/O-lock удерживается.
                 self._close_unlocked()
-                if timed_out:
-                    raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
                 raise MLXWorkerCrashed(rc, model_name, stderr_tail=stderr_tail) from write_error
             try:
                 parsed = json.loads(line)
@@ -546,6 +539,10 @@ class MLXWhisperSession:
         if self._proc is None or self._proc.stderr is None:
             return
         proc = self._proc
+        # Старый drain может закрыться после respawn. Его строки принадлежат
+        # предыдущему процессу, поэтому буфер привязан к конкретному drain.
+        stderr_ring: deque[str] = deque(maxlen=200)
+        self._stderr_ring = stderr_ring
 
         def _drain_loop() -> None:
             try:
@@ -556,17 +553,22 @@ class MLXWhisperSession:
                         break
                     if isinstance(line, bytes):
                         line = line.decode(errors="replace")
-                    self._stderr_ring.append(line)
+                    stderr_ring.append(line)
                 try:
                     leftover = proc.stderr.read()
                     if isinstance(leftover, bytes):
                         leftover = leftover.decode(errors="replace")
                     if isinstance(leftover, str) and leftover:
-                        self._stderr_ring.append(leftover)
+                        stderr_ring.append(leftover)
                 except Exception:
                     pass
             except Exception:
                 pass
+            finally:
+                try:
+                    proc.stderr.close()
+                except (OSError, ValueError):
+                    pass
 
         thread = threading.Thread(
             target=_drain_loop,

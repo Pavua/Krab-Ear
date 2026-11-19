@@ -3,6 +3,7 @@
 import ast
 from pathlib import Path
 import sys
+import threading
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -15,7 +16,7 @@ _SERVICE = _PACKAGE / "backend" / "service.py"
 
 def _load_timeout_functions(*, backend_owner=False, static_setting=False):
     tree = ast.parse(_SOURCE.read_text(encoding="utf-8"), filename=str(_SOURCE))
-    names = {"_mark_backend_process", "_exit_poisoned_rest_process", "_arm_timeout_exit"}
+    names = {"_mark_backend_process", "_rest_may_exit_on_timeout", "_exit_poisoned_rest_process", "_arm_timeout_exit"}
     definitions = [node for node in tree.body
                    if (isinstance(node, ast.FunctionDef) and node.name in names)
                    or (isinstance(node, ast.Assign) and any(
@@ -28,6 +29,7 @@ def _load_timeout_functions(*, backend_owner=False, static_setting=False):
         "os": fake_os,
         "_flush_logs_before_exit": Mock(),
         "_TRANSCRIBE_TIMEOUT_EXIT_CODE": 70,
+        "_STT_RECYCLE_PENDING": threading.Event(),
         "Response": object,
         "_Any": object,
     }
