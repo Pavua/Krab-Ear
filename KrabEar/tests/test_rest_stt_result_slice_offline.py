@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import Mock
 
 SOURCE = Path(__file__).resolve().parents[1] / "backend" / "rest_server.py"
+DEADLINE_EXCEEDED = "stt_deadline_exceeded"
 
 
 def result_handler():
@@ -35,10 +36,12 @@ def result_handler():
 
 
 class RestResultSliceTests(unittest.TestCase):
-    def invoke(self, result, call=False, private=False):
+    def invoke(self, result, call=False, private=False, deadline=False):
         code, ns = result_handler()
         deps = SimpleNamespace(store=Mock(), metrics=Mock())
-        ns.update(result=result, call_profile=call, request_deadline=42.0 if call else None,
+        ns.update(result=result, call_profile=call, request_deadline=42.0 if call or deadline else None,
+                  stt_budget=SimpleNamespace(DEADLINE_EXCEEDED=DEADLINE_EXCEEDED),
+                  timeout_error="call STT timeout" if call else "Transcription timeout",
                   time=SimpleNamespace(monotonic=lambda: 41.0), diarization_skipped=False,
                   _call_profile_privacy_enabled=lambda: private,
                   _privacy_mode_enabled=lambda: private, persist_history=not call,
@@ -60,6 +63,14 @@ class RestResultSliceTests(unittest.TestCase):
                     self.assertEqual(body, {"status": "error", "error": "stt_failed", "text": ""})
                     deps.store.add_history_item.assert_not_called()
                     deps.metrics.record.assert_not_called()
+
+    def test_request_budget_exhaustion_returns_timeout_without_persisting(self):
+        result = {"status": "error", "error_code": DEADLINE_EXCEEDED, "text": "PRIVATE"}
+        body, status, deps = self.invoke(result, deadline=True)
+        self.assertEqual(status, 504)
+        self.assertEqual(body, {"error": "Transcription timeout", "text": ""})
+        deps.store.add_history_item.assert_not_called()
+        deps.metrics.record.assert_not_called()
 
     def test_privacy_wins(self):
         for call in (False, True):
