@@ -18,6 +18,7 @@ import shutil
 import struct
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch, call
@@ -170,6 +171,8 @@ class _Base(unittest.TestCase):
             patch.object(_rest_mod, "transcriber", self.transcriber),
             patch.object(_rest_mod, "metrics", self.metrics),
             patch.object(_rest_mod, "_exit_poisoned_rest_process", self.process_exit),
+            patch.object(_rest_mod, "_STT_RECYCLE_PENDING", threading.Event()),
+            patch.object(_rest_mod, "_PROCESS_HOSTS_BACKEND", False),
         ]
         for p in self._patches:
             p.start()

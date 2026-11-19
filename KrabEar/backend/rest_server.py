@@ -633,13 +633,22 @@ _REST_ACTIVITY = ActivityReservations()
 # R7 (2026-11-07): слот передан брошенному после таймаута worker'у. Пока он
 # жив, MLX занят: ждать бессмысленно (живой замер — 92с), отвечаем 503 сразу.
 _STT_ORPHAN_ACTIVE = threading.Event()
+# Пока закрытие ответа может завершить standalone REST, новый STT запрещён.
+# Признак действует до конца жизни процесса, независимо от старого Future.
+_STT_RECYCLE_PENDING = threading.Event()
 
 
 def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
     """Захватить STT-слот. False → 503 stt_busy, transcribe не стартует."""
-    if _STT_ORPHAN_ACTIVE.is_set():
+    if _STT_RECYCLE_PENDING.is_set() or _STT_ORPHAN_ACTIVE.is_set():
         return False
-    return _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec)))
+    if not _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec))):
+        return False
+    # Таймаут мог произойти, пока этот запрос ждал удерживаемый слот.
+    if _STT_RECYCLE_PENDING.is_set():
+        _STT_SINGLEFLIGHT.release()
+        return False
+    return True
 
 
 def hand_off_stt_singleflight(future: "concurrent.futures.Future") -> None:
@@ -711,6 +720,10 @@ def _mark_backend_process() -> None:
     _PROCESS_HOSTS_BACKEND = True
 
 
+def _rest_may_exit_on_timeout() -> bool:
+    return not (_PROCESS_HOSTS_BACKEND or bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)))
+
+
 def _exit_poisoned_rest_process(exit_code: int) -> None:
     """Немедленно завершает только REST-процесс, не запуская Python-finalize.
 
@@ -727,7 +740,7 @@ def _exit_poisoned_rest_process(exit_code: int) -> None:
     самоубийство запрещено: остаёмся с отравленным MLX-локом до штатного
     рестарта — деградация STT предпочтительнее потери записи владельца.
     """
-    if _PROCESS_HOSTS_BACKEND or bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)):
+    if not _rest_may_exit_on_timeout():
         logger.error(
             "REST transcribe timeout: MLX-локом, возможно, владеет зависший "
             "поток, но процесс НЕ завершается — REST работает внутри backend, "
@@ -760,9 +773,10 @@ def _arm_timeout_exit(response: Response, temp_path: _Any) -> Response:
 
     ``call_on_close`` вызывается WSGI-сервером после выдачи тела ответа. До этой
     границы временный файл остаётся на месте и зависший decoder не получает путь,
-    удалённый из-под него. После закрытия ответа файл удаляется непосредственно
-    перед невозвратным завершением poisoned REST-процесса.
+    удалённый из-под него. Только standalone REST ставит завершение процесса.
+    Допуск STT закрывается до передачи слота Future, пока слот ещё удерживается.
     """
+    should_exit = _rest_may_exit_on_timeout()
 
     def _cleanup_and_exit() -> None:
         try:
@@ -774,9 +788,12 @@ def _arm_timeout_exit(response: Response, temp_path: _Any) -> Response:
                 exc,
             )
         finally:
-            _exit_poisoned_rest_process(_TRANSCRIBE_TIMEOUT_EXIT_CODE)
+            if should_exit:
+                _exit_poisoned_rest_process(_TRANSCRIBE_TIMEOUT_EXIT_CODE)
 
     response.call_on_close(_cleanup_and_exit)
+    if should_exit:
+        _STT_RECYCLE_PENDING.set()
     return response
 
 
@@ -1710,7 +1727,7 @@ def _load_settings_field(key: str, default):
         return default
 
 
-def _privacy_mode_enabled() -> bool:
+def _privacy_mode_enabled(*, nowait: bool = False) -> bool:
     """FAIL-CLOSED чтение ``privacy_mode_enabled`` для обычного REST/WS.
 
     IO/lock ошибка → privacy ON. Отсутствие ключа после успешного чтения →
@@ -1719,7 +1736,7 @@ def _privacy_mode_enabled() -> bool:
     Эталон: ``RecordingCoreService._privacy_mode_enabled``.
     """
     try:
-        return bool(_deps().store.load_settings().get("privacy_mode_enabled", False))
+        return bool(_deps().store.load_settings(nowait=nowait).get("privacy_mode_enabled", False))
     except Exception:
         logger.warning(
             "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
@@ -1794,6 +1811,8 @@ def _transcribe_call_ru(deadline: float):
         decode_call_wav(wav_bytes)
     except CallSTTValidationError:
         return jsonify({"error": "invalid call WAV"}), 400
+    if _STT_RECYCLE_PENDING.is_set():
+        return jsonify({"error": "stt_busy", "text": ""}), 503
     # Совпадает с native BackendService default и явным CLI override.
     # REST DATA_DIR исторически может быть другим каталогом — не ищем сокеты.
     socket_override = os.getenv("KRAB_EAR_SOCKET", "").strip()
@@ -2060,6 +2079,8 @@ def transcribe_audio():
                 _transcribe_timeout_sec,
                 safe_base,
             )
+            if not call_profile and _privacy_mode_enabled(nowait=True):
+                return jsonify({"skipped": "privacy_mode", "text": ""}), 403
             return jsonify({"error": "stt_busy"}), 503
 
         # F2: ограничиваем весь вызов транскрайбера wall-clock таймаутом.
@@ -2142,10 +2163,6 @@ def transcribe_audio():
                     # Не ждём non-daemon worker: ожидание снова превратило бы
                     # быстрый 504 в зависание Python-finalize.
                     _pool.shutdown(wait=False, cancel_futures=True)
-                    # R7: слот уходит вместе с работающим worker'ом — иначе
-                    # следующий запрос «получит» singleflight и повиснет на MLX.
-                    hand_off_stt_singleflight(_future)
-                    _slot_handed_off = True
                     logger.error(
                         "Transcription timed out after %ss for %s",
                         _transcribe_timeout_sec,
@@ -2155,6 +2172,10 @@ def transcribe_audio():
                     timeout_response.status_code = 504
                     _arm_timeout_exit(timeout_response, temp_path)
                     temp_cleanup_deferred = True
+                    # R7: слот держится до завершения Future. Standalone
+                    # уже закрыл допуск, в том числе если Future закончил работу.
+                    hand_off_stt_singleflight(_future)
+                    _slot_handed_off = True
                     return timeout_response
                 else:
                     # Для стандартного Future ветка недостижима. Нестандартному
