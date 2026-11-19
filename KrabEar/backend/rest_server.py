@@ -1713,7 +1713,7 @@ def _load_settings_field(key: str, default):
         return default
 
 
-def _privacy_mode_enabled() -> bool:
+def _privacy_mode_enabled(*, nowait: bool = False) -> bool:
     """FAIL-CLOSED чтение ``privacy_mode_enabled`` для обычного REST/WS.
 
     IO/lock ошибка → privacy ON. Отсутствие ключа после успешного чтения →
@@ -1722,7 +1722,7 @@ def _privacy_mode_enabled() -> bool:
     Эталон: ``RecordingCoreService._privacy_mode_enabled``.
     """
     try:
-        return bool(_deps().store.load_settings().get("privacy_mode_enabled", False))
+        return bool(_deps().store.load_settings(nowait=nowait).get("privacy_mode_enabled", False))
     except Exception:
         logger.warning(
             "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
@@ -1754,7 +1754,15 @@ def _privacy_gate(f):
             return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
         result = f(*args, **kwargs)
         if not call_profile:
-            return result
+            if not getattr(g, "rest_stt_has_explicit_deadline", False):
+                return result
+            # Для явного дедлайна проверяем 503 и 504 перед возможным fallback,
+            # в том числе таймаут до запуска STT. Не ждём файловый lock.
+            response = current_app.make_response(result)
+            if response.status_code in (503, 504) and _privacy_mode_enabled(nowait=True):
+                response.set_data(json.dumps({"skipped": "privacy_mode", "text": ""}))
+                response.status_code = 403
+            return response
         # Проверяем ВСЕ исходы, включая busy/ошибку auth/inference. Сохраняем
         # исходный Response и его close-callback poisoned REST cleanup.
         response = current_app.make_response(result)
@@ -1954,6 +1962,7 @@ def transcribe_audio():
     request_deadline = call_deadline
     if _deadline_sec is not None:
         request_deadline = entered_at + _deadline_sec
+        g.rest_stt_has_explicit_deadline = True
     timeout_error = "call STT timeout" if call_profile else "Transcription timeout"
     deps = _deps()
     chat_id = request.form.get("chat_id")
@@ -2223,9 +2232,9 @@ def transcribe_audio():
         # Внутренний error может содержать пути/текст; наружу только stable code.
         # Этот ответ не аттестует завершение вложенной native-работы.
         if result.get("status") == "error" or result.get("error"):
-            # Обычный профиль не имеет post-call проверки в _privacy_gate.
-            # Новый retryable503 не должен разрешить cloud fallback при privacy.
-            if not call_profile and _privacy_mode_enabled():
+            # Запросы без явного срока проверяются здесь. Остальные профили
+            # проверяются в _privacy_gate на ответах 503 и 504.
+            if request_deadline is None and _privacy_mode_enabled():
                 return jsonify({"skipped": "privacy_mode", "text": ""}), 403
             return jsonify({"status": "error", "error": "stt_failed", "text": ""}), 503
         text = result.get("text", "")

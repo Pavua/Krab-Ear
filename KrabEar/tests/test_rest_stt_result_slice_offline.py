@@ -38,7 +38,8 @@ class RestResultSliceTests(unittest.TestCase):
     def invoke(self, result, call=False, private=False):
         code, ns = result_handler()
         deps = SimpleNamespace(store=Mock(), metrics=Mock())
-        ns.update(result=result, call_profile=call, call_deadline=None,
+        ns.update(result=result, call_profile=call, request_deadline=42.0 if call else None,
+                  time=SimpleNamespace(monotonic=lambda: 41.0), diarization_skipped=False,
                   _call_profile_privacy_enabled=lambda: private,
                   _privacy_mode_enabled=lambda: private, persist_history=not call,
                   chat_id=None, message_id=None, elapsed_sec=0.01, deps=deps,
