@@ -1,5 +1,7 @@
 """Граница допуска standalone REST после running timeout, без GPU и сокетов."""
 
+import base64
+import json
 import threading
 from concurrent.futures import Future, TimeoutError
 from unittest.mock import Mock
@@ -159,3 +161,111 @@ def test_privacy_rechecked_on_ordinary_busy_reply(timeout_route, monkeypatch, un
         assert retry.get_json() == {"skipped": "privacy_mode", "text": ""}
     executor.submit.assert_not_called()
     store.load_settings.assert_called_with(nowait=True)
+
+
+def test_ru_call_does_not_dispatch_while_local_stt_can_still_timeout(timeout_route, monkeypatch):
+    from backend import call_stt_client
+
+    client, rs, _, _, _, _ = timeout_route
+    client.application.config["REST_DEPS"].store.call_privacy_mode.return_value = False
+    owner = Mock(return_value={"status": "ok", "text": "синтетика"})
+    monkeypatch.setattr(call_stt_client, "transcribe_ephemeral_call", owner)
+    assert rs.try_acquire_stt_singleflight(0)
+    try:
+        with client.post("/v1/stt/transcribe", headers=AUTH, data={
+            "file": (wav_upload(), "call.wav"),
+            "request_profile": "voice_gateway_call",
+            "lang_hint": "ru",
+        }) as call:
+            assert call.status_code == 503
+            assert call.get_json() == {"error": "stt_busy", "text": ""}
+    finally:
+        rs.release_stt_singleflight()
+    owner.assert_not_called()
+
+
+def cloud_stream(client, rs, final):
+    ws = Mock()
+    messages = [
+        {"type": "config", "backend": "cloud"},
+        {"type": "audio", "data": base64.b64encode(b"\x00\x00").decode(), "is_final": final == "audio"},
+    ]
+    if final == "end":
+        messages.append({"type": "end"})
+    ws.receive.side_effect = [*map(json.dumps, messages), None]
+    with client.application.test_request_context("/v1/stream", headers=AUTH):
+        rs._ws_stream_handler(ws)
+    return ws
+
+
+@pytest.mark.parametrize("final", ["end", "audio"])
+@pytest.mark.parametrize("blocked_by", ["held_slot", "retiring_process"])
+def test_cloud_stream_cannot_send_audio_during_local_stt_or_recycle(timeout_route, monkeypatch, final, blocked_by):
+    client, rs, _, _, running, _ = timeout_route
+    provider = Mock()
+    provider.transcribe.return_value = {"text": "synthetic"}
+    monkeypatch.setattr(rs, "get_cloud_stt_provider", Mock(return_value=provider))
+    monkeypatch.setattr(rs, "LiveSubsService", Mock())
+    if blocked_by == "held_slot":
+        assert rs.try_acquire_stt_singleflight(0)
+        old = None
+    else:
+        old = post(client)
+        assert old.status_code == 504
+        running.set_result({})
+    try:
+        ws = cloud_stream(client, rs, final)
+        last_message = json.loads(ws.send.call_args.args[0])
+        assert last_message["type"] == "error"
+        assert last_message["code"] == "stt_busy"
+        provider.transcribe.assert_not_called()
+    finally:
+        if old is None:
+            rs.release_stt_singleflight()
+        else:
+            old.close()
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_cloud_stream_releases_slot_after_provider_success_or_exception(timeout_route, monkeypatch, failed):
+    client, rs, _, _, _, _ = timeout_route
+
+    def transcribe(*_):
+        assert rs._STT_SINGLEFLIGHT.locked()
+        if failed:
+            raise RuntimeError("synthetic provider failure")
+        return {"text": "synthetic"}
+
+    provider = Mock()
+    provider.transcribe.side_effect = transcribe
+    monkeypatch.setattr(rs, "get_cloud_stt_provider", Mock(return_value=provider))
+    monkeypatch.setattr(rs, "LiveSubsService", Mock())
+    ws = cloud_stream(client, rs, "end")
+    provider.transcribe.assert_called_once()
+    ws.close.assert_called_once()
+    if failed:
+        ws.send.assert_not_called()
+    else:
+        assert json.loads(ws.send.call_args.args[0])["text"] == "synthetic"
+    assert rs.try_acquire_stt_singleflight(0)
+    rs.release_stt_singleflight()
+
+
+def test_cloud_stream_checks_privacy_again_at_final_admission(timeout_route, monkeypatch):
+    client, rs, _, _, _, _ = timeout_route
+    store = client.application.config["REST_DEPS"].store
+    acquire = rs.try_acquire_stt_singleflight
+
+    def acquire_after_privacy_changes(timeout):
+        store.load_settings.return_value = {"privacy_mode_enabled": True}
+        return acquire(timeout)
+
+    monkeypatch.setattr(rs, "try_acquire_stt_singleflight", acquire_after_privacy_changes)
+    provider_factory = Mock()
+    monkeypatch.setattr(rs, "get_cloud_stt_provider", provider_factory)
+    monkeypatch.setattr(rs, "LiveSubsService", Mock())
+    ws = cloud_stream(client, rs, "audio")
+    assert json.loads(ws.send.call_args.args[0])["code"] == "privacy_mode_active"
+    provider_factory.assert_not_called()
+    assert acquire(0)
+    rs.release_stt_singleflight()

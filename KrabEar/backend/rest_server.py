@@ -1811,12 +1811,14 @@ def _transcribe_call_ru(deadline: float):
         decode_call_wav(wav_bytes)
     except CallSTTValidationError:
         return jsonify({"error": "invalid call WAV"}), 400
-    if _STT_RECYCLE_PENDING.is_set():
-        return jsonify({"error": "stt_busy", "text": ""}), 503
     # Совпадает с native BackendService default и явным CLI override.
     # REST DATA_DIR исторически может быть другим каталогом — не ищем сокеты.
     socket_override = os.getenv("KRAB_EAR_SOCKET", "").strip()
     socket_path = Path(socket_override).expanduser() if socket_override else default_socket_path(default_data_dir())
+    # Удерживаем допуск до получения IPC-результата. Пока этот запрос
+    # ждёт владельца, локальный STT не может поставить завершение REST.
+    if not try_acquire_stt_singleflight(0.0):
+        return jsonify({"error": "stt_busy", "text": ""}), 503
     try:
         result = transcribe_ephemeral_call(
             wav_bytes, socket_path=socket_path, deadline_monotonic=deadline,
@@ -1833,6 +1835,8 @@ def _transcribe_call_ru(deadline: float):
         if _call_profile_privacy_enabled():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403
         return jsonify({"error": "call STT unavailable", "text": ""}), 503
+    finally:
+        release_stt_singleflight()
     if _call_profile_privacy_enabled() or result.get("status") == "privacy_mode":
         return jsonify({"skipped": "privacy_mode", "text": ""}), 403
     status = result.get("status")
@@ -2786,8 +2790,8 @@ def _ws_stream_handler(ws):
     mode = config.get("mode", "transcribe")
     target_lang = config.get("target_lang", "off") if mode == "translate" else "off"
 
-    # P0e: native WS делит REST STT-слот с POST; acquire(0) внутри _process_window.
-    # Cloud-ветка ниже LiveSubsService не использует. IPC BackendService gate не получает.
+    # Native WS делит REST STT-слот с остальными путями, acquire(0) внутри _process_window.
+    # Во внешнем BackendService свои правила допуска IPC.
     observed_acquire, observed_release = _REST_ACTIVITY.slot_callbacks(
         try_acquire_stt_singleflight, release_stt_singleflight, "native_ws",
     )
@@ -2801,6 +2805,40 @@ def _ws_stream_handler(ws):
 
     cloud_audio_buffer = bytearray()
     cloud_sample_rate = 16000
+
+    def flush_cloud_audio() -> None:
+        if not cloud_audio_buffer:
+            return
+        acquired = try_acquire_stt_singleflight(0.0)
+        try:
+            private = _privacy_mode_enabled(nowait=True)
+            provider = get_cloud_stt_provider(cloud_provider_name) if acquired and not private else None
+            res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang) if provider else {}
+        finally:
+            if acquired:
+                release_stt_singleflight()
+
+        # Слот защищает обращение к STT. Перевод и запись в WebSocket
+        # выполняются после освобождения, чтобы медленный клиент не держал слот.
+        if private:
+            ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
+        elif not acquired:
+            ws.send(json.dumps({"type": "error", "code": "stt_busy", "message": "STT is busy"}))
+        elif not provider:
+            ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
+        elif "error" in res:
+            code = "cloud_no_api_key" if res["error"] == "no_api_key" else "cloud_api_error"
+            ws.send(json.dumps({"type": "error", "code": code, "message": res.get("message", "")}))
+        elif text := res.get("text", ""):
+            reply = {
+                "type": "final",
+                "text": text,
+                "lang": res.get("lang") or "ru",
+                "confidence": res.get("confidence", 0.0),
+            }
+            if mode == "translate" and target_lang != "off":
+                reply["translation"] = deps.translator.translate(text, target_lang)
+            ws.send(json.dumps(reply))
 
     logger.info("WS /v1/stream: Client connected")
 
@@ -2824,29 +2862,7 @@ def _ws_stream_handler(ws):
             msg_type = msg.get("type")
             if msg_type == "end":
                 if backend == "cloud":
-                    if cloud_audio_buffer:
-                        provider = get_cloud_stt_provider(cloud_provider_name)
-                        if not provider:
-                            ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
-                        else:
-                            res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang)
-                            if "error" in res:
-                                if res["error"] == "no_api_key":
-                                    ws.send(json.dumps({"type": "error", "code": "cloud_no_api_key", "message": res.get("message", "")}))
-                                else:
-                                    ws.send(json.dumps({"type": "error", "code": "cloud_api_error", "message": res.get("message", "")}))
-                            else:
-                                text = res.get("text", "")
-                                if text:
-                                    resp = {
-                                        "type": "final",
-                                        "text": text,
-                                        "lang": res.get("lang") or "ru",
-                                        "confidence": res.get("confidence", 0.0),
-                                    }
-                                    if mode == "translate" and text and target_lang != "off":
-                                        resp["translation"] = deps.translator.translate(text, target_lang)
-                                    ws.send(json.dumps(resp))
+                    flush_cloud_audio()
                 else:
                     result = live_subs.ingest(audio_bytes=b"", sample_rate=16000, target_lang=target_lang, is_final=True)
                     if result and result.get("text"):
@@ -2882,29 +2898,7 @@ def _ws_stream_handler(ws):
                         ws.send(json.dumps({"type": "error", "code": "audio_too_large", "message": "Cloud audio buffer exceeded limit"}))
                         break
                     if is_final:
-                        if cloud_audio_buffer:
-                            provider = get_cloud_stt_provider(cloud_provider_name)
-                            if not provider:
-                                ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
-                            else:
-                                res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang)
-                                if "error" in res:
-                                    if res["error"] == "no_api_key":
-                                        ws.send(json.dumps({"type": "error", "code": "cloud_no_api_key", "message": res.get("message", "")}))
-                                    else:
-                                        ws.send(json.dumps({"type": "error", "code": "cloud_api_error", "message": res.get("message", "")}))
-                                else:
-                                    text = res.get("text", "")
-                                    if text:
-                                        resp = {
-                                            "type": "final",
-                                            "text": text,
-                                            "lang": res.get("lang") or "ru",
-                                            "confidence": res.get("confidence", 0.0),
-                                        }
-                                        if mode == "translate" and text and target_lang != "off":
-                                            resp["translation"] = deps.translator.translate(text, target_lang)
-                                        ws.send(json.dumps(resp))
+                        flush_cloud_audio()
                         break
                 else:
                     result = live_subs.ingest(

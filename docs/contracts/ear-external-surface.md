@@ -22,6 +22,8 @@
 
 Аутентификация REST (с 2026-11-15, по умолчанию ВКЛЮЧЕНА): защищённые маршруты требуют `Authorization: Bearer <ключ>`. Ключ выдаёт backend в `~/Library/Application Support/KrabEar/rest_api_key` (0600) либо задаётся явно (`KRAB_EAR_REST_API_KEY`, `REST_API_AUTH_ENABLED`); VG читает `KRAB_EAR_REST_API_KEY`. Без ключа `401`. Открыты: `GET /health`, `/info`, `/api/docs`. Опт-аут: env `KRAB_EAR_REST_API_ALLOW_ANONYMOUS=true`. Чужой заголовок `Host` (не loopback и не из `REST_ALLOWED_HOSTS`) даёт `403`. Бриф потребителям: `krab-handoffs/2026-11-15/EAR_REST_AUTH_BRIEF_FOR_VG_AND_KRAB.md`.
 
+REST использует один слот STT на процесс. RU-профиль `voice_gateway_call` держит слот на время IPC-вызова к владельцу GigaAM и при занятости сразу возвращает HTTP `503 stt_busy`. Native WebSocket использует тот же слот для распознавания. Облачный `/v1/stream` при финализации `end` или `audio.is_final=true` либо занимает слот на время обращения к провайдеру, либо выдаёт WS-ошибку `stt_busy`. Отказ по приватности имеет приоритет. Если standalone REST уже поставил fail-fast после локального STT-таймаута, новая работа STT в этом процессе не допускается.
+
 ## Общие файлы-замки (не API, но стык)
 
 | Файл | Кто пишет | Смысл |
