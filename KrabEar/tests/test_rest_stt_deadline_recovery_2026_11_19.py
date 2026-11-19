@@ -123,10 +123,13 @@ def test_regular_file_request_keeps_explicit_diarization(client_engine, monkeypa
 def test_short_worker_timeout_does_not_create_a_series_of_503(client_engine, monkeypatch):
     client, _engine, abort_rest = client_engine
     calls = []
+    now = [100.0]
+    monkeypatch.setattr(rest.time, "monotonic", lambda: now[0])
 
     def run_worker(_audio, _params, *, timeout_sec, model_name):
         calls.append(timeout_sec)
         if len(calls) == 1:
+            now[0] += timeout_sec
             raise MLXTimeoutError(timeout_sec, model_name)
         return _recognized()
 
@@ -135,6 +138,54 @@ def test_short_worker_timeout_does_not_create_a_series_of_503(client_engine, mon
     statuses = [post(client, **fields)[0] for _ in range(3)]
     assert statuses[0] == 504
     assert statuses[1:] == [200, 200]
+    abort_rest.assert_not_called()
+
+
+def test_profile_capped_whisper_keeps_remote_fallback_with_time_left(client_engine, monkeypatch):
+    client, engine, abort_rest = client_engine
+    now = [100.0]
+    monkeypatch.setattr(rest.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(audio_engine.settings, "NETWORK_MODE", "hybrid")
+    store = client.application.config["REST_DEPS"].store
+    store.load_settings.return_value = {"stt_timeout_interactive_max_sec": 30.0}
+    monkeypatch.setattr(engine, "_remote_stt_retry_configured", lambda: True)
+    remote = Mock(side_effect=_recognized)
+    monkeypatch.setattr(engine, "_transcribe_remote", remote)
+
+    def worker(_audio, _params, *, timeout_sec, model_name):
+        assert timeout_sec == 30.0
+        now[0] += timeout_sec
+        raise MLXTimeoutError(timeout_sec, model_name)
+
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", worker)
+    status, body = post(client, deadline_sec="120", diarize="false")
+    assert status == 200
+    assert body["text"] == "hola"
+    remote.assert_called_once()
+    abort_rest.assert_not_called()
+
+
+def test_ru_finetune_timeout_preserves_request_deadline_outcome(client_engine, monkeypatch):
+    client, engine, abort_rest = client_engine
+    now = [100.0]
+    monkeypatch.setattr(rest.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(audio_engine.settings, "STT_USE_RU_FINETUNE", True)
+    monkeypatch.setattr(audio_engine.settings, "STT_RU_FINETUNE_MODEL", "synthetic-ru-whisper")
+    monkeypatch.setattr(audio_engine.settings, "NETWORK_MODE", "hybrid")
+    monkeypatch.setattr(engine, "_remote_stt_retry_configured", lambda: True)
+    remote = Mock(side_effect=AssertionError("request budget is spent"))
+    monkeypatch.setattr(engine, "_transcribe_remote", remote)
+
+    def worker(_audio, _params, *, timeout_sec, model_name):
+        assert model_name == "synthetic-ru-whisper"
+        now[0] += timeout_sec
+        raise MLXTimeoutError(timeout_sec, model_name)
+
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", worker)
+    status, body = post(client, deadline_sec="25", diarize="false", lang_hint="ru")
+    assert status == 504
+    assert body == {"error": "Transcription timeout", "text": ""}
+    remote.assert_not_called()
     abort_rest.assert_not_called()
 
 
@@ -156,8 +207,11 @@ def test_explicit_deadline_shares_one_cleanup_reserve_with_whisper(client_engine
     abort_rest.assert_not_called()
 
 
-def test_queued_request_with_no_useful_budget_skips_whisper(client_engine, monkeypatch):
+@pytest.mark.parametrize("chunked", [False, True])
+def test_queued_request_with_no_useful_budget_skips_whisper(client_engine, monkeypatch, chunked):
     client, _engine, abort_rest = client_engine
+    monkeypatch.setattr(audio_engine.settings, "STT_STREAMING_ENABLED", chunked)
+    monkeypatch.setattr(audio_engine.settings, "STT_STREAMING_MIN_AUDIO_SEC", 0.5)
     now = [100.0]
     monkeypatch.setattr(rest.time, "monotonic", lambda: now[0])
     acquire = rest.try_acquire_stt_singleflight

@@ -2053,10 +2053,7 @@ class AudioEngine:
                 "multipass_attempts": result.get("multipass_attempts"),
             }
         except stt_budget.STTDeadlineExceeded as exc:
-            return {
-                "text": "", "error": str(exc), "status": "error",
-                "error_code": stt_budget.DEADLINE_EXCEEDED,
-            }
+            return exc.as_transcribe_result()
         except Exception as exc:
             logger.exception("Критическая ошибка распознавания")
             # Wave 77: push stt.critical_recognition_error (68 occurrences in production logs)
@@ -2662,6 +2659,9 @@ class AudioEngine:
                     len(cleaned),
                     conf,
                 )
+            except stt_budget.STTDeadlineExceeded as exc:
+                # Незавершённый файл по REST-дедлайну не является успешным STT.
+                return exc.as_transcribe_result()
             except Exception as exc:
                 logger.warning(
                     "Chunk %d failed: %s", info["idx"], exc
@@ -2968,8 +2968,11 @@ class AudioEngine:
                 lambda: self._transcribe_voxtral(chain_audio_data, language=language),
             ),
         ]
+        from core.mlx_whisper_session import mlx_whisper_worker_enabled
+
         _adapter_map = {marker: (span_pfx, model, fn) for marker, span_pfx, model, fn in _adapter_dispatch}
         explicit_rest_deadline = stt_budget.has_explicit_rest_deadline()
+        supervised_worker = explicit_rest_deadline and mlx_whisper_worker_enabled()
         deadline_limited = False
         inference_failed = False
 
@@ -3014,29 +3017,32 @@ class AudioEngine:
                     if _adapter_remaining_sec is not None:
                         _adapter_timeout = min(_adapter_timeout, _adapter_remaining_sec)
                     _adapter_timeout = max(_adapter_timeout, stt_budget.MIN_USEFUL_ATTEMPT_SEC)
+                    _adapter_kwargs = {}
+                    ru_finetune = model_name == self._RU_FINETUNE_MARKER
+                    if ru_finetune:
+                        _adapter_kwargs = {
+                            "attempt_timeout_sec": _adapter_timeout,
+                            "attempt_deadline_monotonic": _mlx_attempt_deadline(_adapter_timeout),
+                        }
                     with _profiler.start_span(span_name):
-                        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                        try:
-                            _adapter_kwargs = {}
-                            if model_name == self._RU_FINETUNE_MARKER:
-                                _adapter_kwargs = {
-                                    "attempt_timeout_sec": _adapter_timeout,
-                                    "attempt_deadline_monotonic": _mlx_attempt_deadline(_adapter_timeout),
-                                }
-                            _fut = _pool.submit(adapter_fn, **_adapter_kwargs)
+                        if ru_finetune and supervised_worker:
+                            adapter_result = adapter_fn(**_adapter_kwargs, supervised_worker=True)
+                        else:
+                            _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                             try:
-                                adapter_result = _fut.result(timeout=_adapter_timeout)
-                            except (MLXLockTimeoutError, MLXInterLockTimeout):
-                                # Future возвращает исходную ошибку очереди. Не
-                                # подменять её общим timeout: это включит blacklist.
-                                raise
-                            except concurrent.futures.TimeoutError:
-                                _fut.cancel()
-                                raise TimeoutError(
-                                    f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
-                                )
-                        finally:
-                            _pool.shutdown(wait=False)
+                                _fut = _pool.submit(adapter_fn, **_adapter_kwargs)
+                                try:
+                                    adapter_result = _fut.result(timeout=_adapter_timeout)
+                                except (MLXLockTimeoutError, MLXInterLockTimeout):
+                                    # Сохраняем ошибку очереди для гейта blacklist.
+                                    raise
+                                except concurrent.futures.TimeoutError:
+                                    _fut.cancel()
+                                    raise TimeoutError(
+                                        f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
+                                    )
+                            finally:
+                                _pool.shutdown(wait=False)
                     if model_name == self._GIGAAM_MARKER:
                         _gigaam_text = str(adapter_result.get("text", "")).strip()
                         _gigaam_engine = str(adapter_result.get("engine", ""))
@@ -3070,7 +3076,9 @@ class AudioEngine:
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
-                    if not isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout)):
+                    if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout, _BudgetLimitedWhisperTimeout)):
+                        deadline_limited |= stt_budget.budget_exhausted()
+                    else:
                         inference_failed = True
                     logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
                     if self._blacklist_allowed_for(exc, is_adapter=True):
@@ -3094,10 +3102,8 @@ class AudioEngine:
                 timeout = stt_budget.resolve_attempt_timeout_sec(_chain_duration_sec)
                 span_name = f"stt_model_{_short_model_name(model_name)}"
                 with _profiler.start_span(span_name):
-                    from core.mlx_whisper_session import mlx_whisper_worker_enabled
-
                     attempt_deadline = _mlx_attempt_deadline(timeout)
-                    if explicit_rest_deadline and mlx_whisper_worker_enabled():
+                    if supervised_worker:
                         # REST уже ждёт этот поток с запасом на очистку.
                         # Подпроцесс сам ограничивает I/O и подтверждает свой выход.
                         result = self._transcribe_model(
@@ -3143,7 +3149,7 @@ class AudioEngine:
                     self._unavailable_models[model_name] = time.monotonic()
             except _BudgetLimitedWhisperTimeout:
                 # Следующий запрос получит свой бюджет и новый worker.
-                deadline_limited = True
+                deadline_limited |= stt_budget.budget_exhausted()
                 continue
             except MLXTimeoutError as e:
                 inference_failed = True
@@ -3194,9 +3200,6 @@ class AudioEngine:
                 logger.warning("Модель %s не сработала: %s", model_name, e)
                 self._unavailable_models[model_name] = time.monotonic()
 
-        if explicit_rest_deadline and deadline_limited and not inference_failed:
-            raise stt_budget.STTDeadlineExceeded("Бюджет запроса STT исчерпан")
-
         # Если локально ничего не вышло — пробуем облако (если разрешено И настроено).
         # 🔴 Sibling-гейт (инцидент 2026-08-26): волна 22.08 закрыла ровно этот
         # класс у ДРУГОГО вызывающего (retry_candidates в multipass), а здесь
@@ -3204,7 +3207,10 @@ class AudioEngine:
         # часового таймаута локального движка каскад шёл в облако без ключа и
         # выдавал «Критическая ошибка распознавания речи», подменяя настоящую
         # причину (все локальные движки не справились) сообщением про облако.
-        if settings.NETWORK_MODE != "offline_strict":
+        if explicit_rest_deadline and deadline_limited:
+            if not inference_failed:
+                raise stt_budget.STTDeadlineExceeded("Бюджет запроса STT исчерпан")
+        elif settings.NETWORK_MODE != "offline_strict":
             if self._remote_stt_retry_configured():
                 logger.info("Локальные модели недоступны, переключаюсь на Remote STT...")
                 with _profiler.start_span("stt_remote"):

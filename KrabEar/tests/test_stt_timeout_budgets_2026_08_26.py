@@ -932,7 +932,8 @@ class RestScopeWiringTests(unittest.TestCase):
 
         def transcribe(path, **kwargs):
             return (threading.get_ident(), stt_budget.current_profile(),
-                    stt_budget.remaining_sec(), tracker.snapshot()["inflight"])
+                    stt_budget.remaining_sec(), tracker.snapshot()["inflight"],
+                    stt_budget.has_explicit_rest_deadline())
 
         # Исполняем настоящий submit-expression с настоящими обёртками и
         # executor, заменив только STT leaf. Импорт Flask/ML owners не нужен.
@@ -942,20 +943,23 @@ class RestScopeWiringTests(unittest.TestCase):
                 "_activity_token": token, "stt_budget": stt_budget,
                 "deps": SimpleNamespace(transcriber=SimpleNamespace(transcribe=transcribe)),
                 "_transcribe_path": "unused.wav", "work_deadline": time.monotonic() + 30.0,
+                "request_deadline": time.monotonic() + 32.0,
                 "diarize_override": None,
                 "_budget_settings_snapshot": {}, "_transcribe_kwargs": {},
             }
             expression = ast.Expression(body=submits[0])
             future = eval(compile(expression, "<rest-submit-extract>", "eval"), namespace)
-            worker_id, profile, remaining, inflight = future.result(timeout=2)
+            worker_id, profile, remaining, inflight, explicit = future.result(timeout=2)
         self.assertNotEqual(worker_id, threading.get_ident())
         self.assertEqual(profile, stt_budget.INTERACTIVE)
         self.assertIsNotNone(remaining, "Бюджет не доехал до worker-треда")
         self.assertGreater(remaining, 0)
         self.assertLessEqual(remaining, 30.0)
+        self.assertTrue(explicit)
         self.assertEqual(inflight, 1, "Учёт занятости не охватывает transcribe")
         self.assertEqual(tracker.snapshot()["reservations"], 0)
         self.assertIsNone(stt_budget.remaining_sec(), "Worker scope протёк в caller")
+        self.assertFalse(stt_budget.has_explicit_rest_deadline())
 
 
 class RestDeadlineSecFloorTests(unittest.TestCase):

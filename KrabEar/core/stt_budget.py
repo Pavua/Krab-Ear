@@ -40,6 +40,9 @@ DEADLINE_EXCEEDED = "stt_deadline_exceeded"
 class STTDeadlineExceeded(RuntimeError):
     """Явный дедлайн запроса исчерпан без подтверждённого сбоя модели."""
 
+    def as_transcribe_result(self) -> dict[str, str]:
+        return {"text": "", "error": str(self), "status": "error", "error_code": DEADLINE_EXCEEDED}
+
 # Единственный источник границ (min, max, default); settings_validator
 # дублирует литералы в _RANGE_FIELDS, а тест волны сверяет равенство —
 # синхронизация тестом вместо прод-импорта backend← core.
