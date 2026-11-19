@@ -1915,8 +1915,9 @@ def transcribe_audio():
           for callers streaming ephemeral utterances (e.g. Voice Gateway's
           "Разговор с AI" conversation turns) that should not pollute permanent
           history. privacy_mode_enabled ALWAYS wins over this flag — see below.
-        - deadline_sec (W2c, optional): wall-clock бюджет Future.result вместо
-          глобальных 600 с. Пусто/нет поля → 600. Число clamp [10, 120].
+        - deadline_sec (W2c, optional): общий срок с момента входа в запрос,
+          включая подготовку и очередь STT. Пусто/нет поля → прежний лимит
+          600 с на транскрибацию. Число clamp [10, 120].
           Мусор / ≤0 / >120 → 400 ``invalid deadline_sec`` без транскрибации.
           До 25 с включительно STT возвращает текст без диаризации, отмечая
           её пропуск в ``diarization.skipped`` при запрошенной разметке.
@@ -1931,6 +1932,7 @@ def transcribe_audio():
         return jsonify({"error": "invalid request_profile"}), 400
     call_profile = profile == "voice_gateway_call"
     call_deadline = None
+    _deadline_sec = None
     if call_profile:
         if _call_profile_privacy_enabled():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403
@@ -1945,6 +1947,14 @@ def transcribe_audio():
         call_language = (request.form.get("lang_hint") or request.form.get("language") or "auto").strip().lower()
         if call_language == "ru":
             return _transcribe_call_ru(call_deadline)
+    else:
+        _deadline_sec, deadline_error = _resolve_transcribe_deadline_sec(request.form.get("deadline_sec"))
+        if deadline_error is not None:
+            return jsonify({"error": "invalid deadline_sec"}), 400
+    request_deadline = call_deadline
+    if _deadline_sec is not None:
+        request_deadline = entered_at + _deadline_sec
+    timeout_error = "call STT timeout" if call_profile else "Transcription timeout"
     deps = _deps()
     chat_id = request.form.get("chat_id")
     message_id = request.form.get("message_id")
@@ -2046,26 +2056,25 @@ def transcribe_audio():
         if call_profile:
             diarize_override = False
 
-        _deadline_sec, _deadline_err = _resolve_transcribe_deadline_sec(
-            request.form.get("deadline_sec"),
-        )
-        if _deadline_err is not None:
-            return jsonify({"error": "invalid deadline_sec"}), 400
         diarization_skipped = False
         if not call_profile and _deadline_sec is not None and _deadline_sec <= _SHORT_STT_DEADLINE_SEC:
             diarization_skipped = diarize_override
             if diarization_skipped is None:
-                diarization_skipped = settings.DIARIZATION_ENABLED or settings.DIARIZED_TRANSCRIPTION_ENABLED
+                diarization_skipped = (
+                    settings.DIARIZATION_ENABLED
+                    or settings.DIARIZED_TRANSCRIPTION_ENABLED
+                    or (settings.WHISPERX_ENABLED and settings.WHISPERX_DIARIZATION)
+                )
             diarize_override = False
-        _transcribe_timeout_sec = (
-            _TRANSCRIBE_TIMEOUT_SEC if _deadline_sec is None else _deadline_sec
-        )
-        if call_deadline is not None:
-            _transcribe_timeout_sec = call_deadline - time.monotonic()
+        _transcribe_timeout_sec = _TRANSCRIBE_TIMEOUT_SEC
+        if request_deadline is not None:
+            _transcribe_timeout_sec = request_deadline - time.monotonic()
             if _transcribe_timeout_sec <= 0:
-                return jsonify({"error": "call STT timeout"}), 504
+                return jsonify({"error": timeout_error}), 504
 
         if not try_acquire_stt_singleflight(0.0 if call_profile else _transcribe_timeout_sec):
+            if request_deadline is not None and time.monotonic() >= request_deadline:
+                return jsonify({"error": timeout_error}), 504
             logger.warning(
                 "REST STT singleflight busy after %.1fs for %s",
                 _transcribe_timeout_sec,
@@ -2104,18 +2113,17 @@ def transcribe_audio():
         except Exception:
             _budget_settings_snapshot = None
         try:
-            if call_deadline is not None:
-                _transcribe_timeout_sec = call_deadline - time.monotonic()
-                if _transcribe_timeout_sec <= 0:
-                    return jsonify({"error": "call STT timeout"}), 504
-            response_deadline = (
-                call_deadline if call_deadline is not None
-                else time.monotonic() + _transcribe_timeout_sec
-            )
-            # Оставляем время на выход из каскада и формирование HTTP-ответа.
+            now = time.monotonic()
+            response_deadline = request_deadline if request_deadline is not None else now + _TRANSCRIBE_TIMEOUT_SEC
+            _transcribe_timeout_sec = response_deadline - now
+            if _transcribe_timeout_sec <= 0:
+                return jsonify({"error": timeout_error}), 504
+            # Резерв берём только из времени сверх минимума одной попытки,
+            # чтобы короткий call-запрос всё ещё мог запустить тёплый STT.
             # Абсолютный срок не начинает отсчёт заново в треде executor.
             work_deadline = response_deadline - min(
-                _STT_RESPONSE_MARGIN_SEC, _transcribe_timeout_sec * 0.2,
+                _STT_RESPONSE_MARGIN_SEC,
+                max(0.0, _transcribe_timeout_sec - stt_budget.MIN_USEFUL_ATTEMPT_SEC) * 0.2,
             )
             _future = _pool.submit(
                 _REST_ACTIVITY.run,
@@ -2125,6 +2133,7 @@ def transcribe_audio():
                 _transcribe_path,
                 profile=stt_budget.INTERACTIVE,
                 deadline_monotonic=work_deadline,
+                allow_diarization=diarize_override is not False,
                 settings_snapshot=_budget_settings_snapshot,
                 **_transcribe_kwargs,
             )
@@ -2207,8 +2216,8 @@ def transcribe_audio():
 
         if call_profile and _call_profile_privacy_enabled():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-        if call_deadline is not None and time.monotonic() >= call_deadline:
-            return jsonify({"error": "call STT timeout", "text": ""}), 504
+        if request_deadline is not None and time.monotonic() >= request_deadline:
+            return jsonify({"error": timeout_error, "text": ""}), 504
         # AudioEngine возвращает ошибку словарём, а не исключением. Не превращать
         # её в успешный пустой STT/прогрев и не сохранять в history/metrics.
         # Внутренний error может содержать пути/текст; наружу только stable code.

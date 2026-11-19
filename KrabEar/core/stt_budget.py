@@ -58,6 +58,7 @@ class STTBudget:
     batch_factor: float
     interactive_max_sec: float
     batch_max_sec: float
+    allow_diarization: bool = True
 
 
 _current: ContextVar[STTBudget | None] = ContextVar("stt_budget", default=None)
@@ -129,6 +130,7 @@ def stt_budget_scope(
     audio_duration_sec: float | None = None,
     deadline_sec: float | None = None,
     deadline_monotonic: float | None = None,
+    allow_diarization: bool = True,
     quiet: bool = False,
 ) -> Iterator[STTBudget]:
     """Открыть бюджет-контекст одного STT-запроса В ТЕКУЩЕМ ТРЕДЕ.
@@ -150,7 +152,7 @@ def stt_budget_scope(
                 settings_get, "stt_timeout_request_attempts"
             )
         deadline_monotonic = now + float(deadline_sec)
-    budget = replace(base, deadline_monotonic=deadline_monotonic)
+    budget = replace(base, deadline_monotonic=deadline_monotonic, allow_diarization=allow_diarization)
     log = logger.debug if quiet else logger.info
     log(
         "stt_budget: scope opened",
@@ -171,6 +173,12 @@ def stt_budget_scope(
 def current_profile() -> str:
     budget = _current.get()
     return budget.profile if budget is not None else INTERACTIVE
+
+
+def diarization_allowed() -> bool:
+    """Разрешена ли разметка спикеров для текущего запроса."""
+    budget = _current.get()
+    return budget is None or budget.allow_diarization
 
 
 def remaining_sec() -> float | None:
@@ -217,6 +225,7 @@ def call_in_scope(
     audio_duration_sec: float | None = None,
     deadline_sec: float | None = None,
     deadline_monotonic: float | None = None,
+    allow_diarization: bool = True,
     quiet: bool = False,
     **kwargs: Any,
 ) -> Any:
@@ -236,6 +245,7 @@ def call_in_scope(
         audio_duration_sec=audio_duration_sec,
         deadline_sec=deadline_sec,
         deadline_monotonic=deadline_monotonic,
+        allow_diarization=allow_diarization,
         quiet=quiet,
     ):
         return fn(*args, **kwargs)

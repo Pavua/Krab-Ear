@@ -41,6 +41,7 @@ def client_engine(monkeypatch, tmp_path):
     store = Mock()
     store.load_settings.return_value = {}
     store.load_vocabulary.return_value = []
+    store.call_privacy_mode.return_value = False
     deps = rest.StaticDeps(
         engine=engine, store=store, transcriber=Transcriber(engine),
         translator=Mock(), tts_service=Mock(), metrics=Mock(),
@@ -150,6 +151,43 @@ def test_rest_reserves_response_margin_inside_client_deadline(client_engine, mon
     assert 0.0 < remaining[0] <= 23.0
 
 
+def test_explicit_deadline_counts_preprocessing_and_waiting_for_slot(client_engine, monkeypatch):
+    client, engine, _abort_rest = client_engine
+    clock = [100.0]
+    monkeypatch.setattr(rest.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(engine, "normalize_audio", lambda _path: clock.__setitem__(0, 104.0))
+    wait_budget, work_budget = [], []
+    acquire = rest.try_acquire_stt_singleflight
+
+    def acquire_after_wait(timeout):
+        wait_budget.append(timeout)
+        clock[0] += 14.0
+        return acquire(0.0)
+
+    def transcribe(*args, **kwargs):
+        work_budget.append(stt_budget.remaining_sec())
+        return _recognized()
+
+    monkeypatch.setattr(rest, "try_acquire_stt_singleflight", acquire_after_wait)
+    monkeypatch.setattr(engine, "_transcribe_with_fallback", transcribe)
+    assert post(client, deadline_sec="25", diarize="false")[0] == 200
+    assert wait_budget == [21.0]
+    assert 5.0 < work_budget[0] < 7.0
+
+
+def test_exhaustion_before_stt_admission_does_not_start_work(client_engine, monkeypatch):
+    client, engine, abort_rest = client_engine
+    clock = [100.0]
+    monkeypatch.setattr(rest.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(engine, "normalize_audio", lambda _path: clock.__setitem__(0, 126.0))
+    transcribe = Mock(return_value=_recognized())
+    monkeypatch.setattr(engine, "_transcribe_with_fallback", transcribe)
+
+    assert post(client, deadline_sec="25", diarize="false")[0] == 504
+    transcribe.assert_not_called()
+    abort_rest.assert_not_called()
+
+
 def test_full_worker_timeout_preserves_model_cooldown(client_engine, monkeypatch):
     client, _engine, _abort_rest = client_engine
     monkeypatch.setattr(audio_engine.settings, "MLX_TRANSCRIBE_TIMEOUT_SEC", 7.0)
@@ -162,6 +200,63 @@ def test_full_worker_timeout_preserves_model_cooldown(client_engine, monkeypatch
     fields = {"deadline_sec": "25", "diarize": "false"}
     assert [post(client, **fields)[0] for _ in range(2)] == [503, 503]
     worker.assert_called_once()
+
+
+def test_short_timeout_keeps_earlier_confirmed_worker_failure(client_engine, monkeypatch):
+    client, _engine, _abort_rest = client_engine
+    worker_calls = []
+
+    def worker(_audio, _params, *, timeout_sec, model_name):
+        worker_calls.append(timeout_sec)
+        if len(worker_calls) == 1:
+            raise RuntimeError("synthetic GPU failure")
+        if len(worker_calls) == 2:
+            raise MLXTimeoutError(timeout_sec, model_name)
+        return _recognized()
+
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", worker)
+    fields = {"deadline_sec": "25", "diarize": "false"}
+    assert [post(client, **fields)[0] for _ in range(2)] == [503, 503]
+    assert len(worker_calls) == 2
+
+
+@pytest.mark.parametrize(
+    ("fields", "expect_speakers"),
+    [({"deadline_sec": "25"}, False), ({"request_profile": "voice_gateway_call"}, False), ({}, True)],
+)
+def test_rest_diarization_policy_reaches_whisperx_fallback(client_engine, monkeypatch, fields, expect_speakers):
+    client, engine, _abort_rest = client_engine
+    settings = audio_engine.settings
+    monkeypatch.setattr(settings, "WHISPERX_ENABLED", True)
+    monkeypatch.setattr(settings, "WHISPERX_DIARIZATION", True)
+    monkeypatch.setattr(settings, "WHISPERX_WORD_TIMESTAMPS", False)
+    monkeypatch.setattr(settings, "HF_TOKEN", "synthetic-fixture")
+    monkeypatch.setattr(settings, "DIARIZATION_ENABLED", False)
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", Mock(side_effect=RuntimeError("synthetic failure")))
+    model = SimpleNamespace(
+        transcribe=lambda *_args, **_kwargs: {"segments": [{"text": "hola"}], "language": "es"},
+    )
+    monkeypatch.setattr(engine, "_load_whisperx_model", lambda: model)
+    load_speakers = Mock(return_value=lambda _audio: [])
+    monkeypatch.setattr(audio_engine, "_whisperx", SimpleNamespace(
+        load_audio=lambda _path: object(),
+        DiarizationPipeline=load_speakers,
+    ))
+
+    status, result = post(client, **fields)
+    assert status == 200
+    assert result["text"] == "hola"
+    assert result["engine"] == "whisperx"
+    assert load_speakers.called == expect_speakers
+
+
+def test_call_with_six_seconds_can_still_start_whisper(client_engine, monkeypatch):
+    client, _engine, abort_rest = client_engine
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", _recognized)
+    status, body = post(client, request_profile="voice_gateway_call", deadline_sec="6")
+    assert status == 200
+    assert body["text"] == "hola"
+    abort_rest.assert_not_called()
 
 
 def test_timed_out_whisper_does_not_enter_graceful_shutdown(monkeypatch):
