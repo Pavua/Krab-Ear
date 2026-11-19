@@ -941,7 +941,7 @@ class RestScopeWiringTests(unittest.TestCase):
                 "_pool": pool, "_REST_ACTIVITY": tracker,
                 "_activity_token": token, "stt_budget": stt_budget,
                 "deps": SimpleNamespace(transcriber=SimpleNamespace(transcribe=transcribe)),
-                "_transcribe_path": "unused.wav", "_transcribe_timeout_sec": 30.0,
+                "_transcribe_path": "unused.wav", "work_deadline": time.monotonic() + 30.0,
                 "_budget_settings_snapshot": {}, "_transcribe_kwargs": {},
             }
             expression = ast.Expression(body=submits[0])

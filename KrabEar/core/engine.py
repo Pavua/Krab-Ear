@@ -253,6 +253,10 @@ _UNAVAILABLE_MODEL_TTL_SEC = 300  # 5 минут
 _UNAVAILABLE_TTL_SEC = _UNAVAILABLE_MODEL_TTL_SEC
 
 
+class _BudgetLimitedWhisperTimeout(MLXTimeoutError):
+    """Воркер остановлен раньше его штатного лимита ради бюджета попытки."""
+
+
 def _get_available_memory_gb() -> float:
     """Возвращает примерный объём доступной памяти (free + inactive) в GB.
 
@@ -800,7 +804,7 @@ class AudioEngine:
         # это выбивает рабочий GigaAM на 300 с и отправляет следующую диктовку
         # в облако, которого нет, — тот же дефект, что разбирала спека #1956,
         # только в adapter-ветке, куда он попадает как наследник TimeoutError.
-        if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout)):
+        if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout, _BudgetLimitedWhisperTimeout)):
             return False
         if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
             return True
@@ -1615,7 +1619,8 @@ class AudioEngine:
             )
         except Exception:
             pass
-        if _pipeline_v2_enabled:
+        # V2 не пробрасывает per-request отказ от диаризации в STT stage.
+        if _pipeline_v2_enabled and diarize is not False:
             global _pipeline_v2_warned
             if not _pipeline_v2_warned:
                 logger.warning("pipeline_v2 EXPERIMENTAL — Phase 4 deterministic pipeline activated.")
@@ -1670,6 +1675,7 @@ class AudioEngine:
         # в LLM-переписывание и автовставку. Не зависит от STT_STREAMING_ENABLED.
         if (
             not is_preview
+            and diarize is not False
             and getattr(settings, "DIARIZED_TRANSCRIPTION_ENABLED", False)
             and isinstance(audio_data, (str, Path))
             and os.path.exists(str(audio_data))
@@ -3109,6 +3115,9 @@ class AudioEngine:
                 )
                 if self._blacklist_allowed_for(exc):
                     self._unavailable_models[model_name] = time.monotonic()
+            except _BudgetLimitedWhisperTimeout:
+                # Следующий запрос получит свой бюджет и новый worker.
+                continue
             except MLXTimeoutError as e:
                 # Watchdog-таймаут: Metal GPU завис.
                 # Помечаем модель недоступной → fallback на следующий адаптер.
@@ -3302,6 +3311,14 @@ class AudioEngine:
                             raise last_inference_error
                         raise
                     except MLXTimeoutError as e:
+                        if timeout_sec < configured_timeout_sec:
+                            logger.warning(
+                                "Whisper worker исчерпал бюджет попытки %.1fs (model=%s)",
+                                e.timeout_sec, model_name,
+                            )
+                            raise _BudgetLimitedWhisperTimeout(
+                                e.timeout_sec, model_name,
+                            ) from e
                         logger.error(
                             "MLX worker timeout %.1fs (model=%s) — fallback",
                             e.timeout_sec, model_name,

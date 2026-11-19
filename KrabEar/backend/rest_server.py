@@ -606,6 +606,9 @@ _TRANSCRIBE_TIMEOUT_SEC = 600  # 10 minutes
 # ЕДИНСТВЕННОГО источника истины (stt_budget), а не новой магической константой.
 _DEADLINE_SEC_MIN = stt_budget.MIN_USEFUL_ATTEMPT_SEC * 2  # 10.0
 _DEADLINE_SEC_MAX = 120.0
+# In-process pyannote cannot be stopped safely once loading or MPS work starts.
+_SHORT_STT_DEADLINE_SEC = 25.0
+_STT_RESPONSE_MARGIN_SEC = 2.0
 
 
 def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | None]:
@@ -1913,8 +1916,10 @@ def transcribe_audio():
           "Разговор с AI" conversation turns) that should not pollute permanent
           history. privacy_mode_enabled ALWAYS wins over this flag — see below.
         - deadline_sec (W2c, optional): wall-clock бюджет Future.result вместо
-          глобальных 600 с. Пусто/нет поля → 600. Число clamp [5, 120].
+          глобальных 600 с. Пусто/нет поля → 600. Число clamp [10, 120].
           Мусор / ≤0 / >120 → 400 ``invalid deadline_sec`` без транскрибации.
+          До 25 с включительно STT возвращает текст без диаризации, отмечая
+          её пропуск в ``diarization.skipped`` при запрошенной разметке.
 
     Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
@@ -2046,6 +2051,12 @@ def transcribe_audio():
         )
         if _deadline_err is not None:
             return jsonify({"error": "invalid deadline_sec"}), 400
+        diarization_skipped = False
+        if not call_profile and _deadline_sec is not None and _deadline_sec <= _SHORT_STT_DEADLINE_SEC:
+            diarization_skipped = diarize_override
+            if diarization_skipped is None:
+                diarization_skipped = settings.DIARIZATION_ENABLED or settings.DIARIZED_TRANSCRIPTION_ENABLED
+            diarize_override = False
         _transcribe_timeout_sec = (
             _TRANSCRIBE_TIMEOUT_SEC if _deadline_sec is None else _deadline_sec
         )
@@ -2097,6 +2108,15 @@ def transcribe_audio():
                 _transcribe_timeout_sec = call_deadline - time.monotonic()
                 if _transcribe_timeout_sec <= 0:
                     return jsonify({"error": "call STT timeout"}), 504
+            response_deadline = (
+                call_deadline if call_deadline is not None
+                else time.monotonic() + _transcribe_timeout_sec
+            )
+            # Оставляем время на выход из каскада и формирование HTTP-ответа.
+            # Абсолютный срок не начинает отсчёт заново в треде executor.
+            work_deadline = response_deadline - min(
+                _STT_RESPONSE_MARGIN_SEC, _transcribe_timeout_sec * 0.2,
+            )
             _future = _pool.submit(
                 _REST_ACTIVITY.run,
                 _activity_token,
@@ -2104,16 +2124,13 @@ def transcribe_audio():
                 deps.transcriber.transcribe,
                 _transcribe_path,
                 profile=stt_budget.INTERACTIVE,
-                deadline_sec=_transcribe_timeout_sec,
+                deadline_monotonic=work_deadline,
                 settings_snapshot=_budget_settings_snapshot,
                 **_transcribe_kwargs,
             )
             _REST_ACTIVITY.follow_future(_activity_token, _future)
             try:
-                result = _future.result(timeout=(
-                    max(0.0, call_deadline - time.monotonic())
-                    if call_deadline is not None else _transcribe_timeout_sec
-                ))
+                result = _future.result(timeout=max(0.0, response_deadline - time.monotonic()))
             except concurrent.futures.TimeoutError:
                 if _future.done():
                     # Сам транскрайбер тоже может завершиться исключением
@@ -2241,6 +2258,12 @@ def transcribe_audio():
             "diarization": result.get("diarization", {}),
             "history_id": history_item_id,
         }
+        if diarization_skipped:
+            response_payload["diarization"] = {
+                **response_payload["diarization"],
+                "enabled": False,
+                "skipped": "request_deadline",
+            }
         # W-2026-08-19: пустой text скрывал ДВЕ разных причины (тишина vs не
         # смогли распознать — вырожденный вход/VAD-скип), клиент (Voice
         # Gateway) вынужден был гадать по длительности ответа. Причина уже
