@@ -34,6 +34,12 @@ MIN_USEFUL_ATTEMPT_SEC = 5.0
 # брошенный subprocess осиротеет с ~1.5 ГБ модели на GPU.
 ADAPTER_MIN_BUDGET_SEC = 200.0
 
+DEADLINE_EXCEEDED = "stt_deadline_exceeded"
+
+
+class STTDeadlineExceeded(RuntimeError):
+    """Явный дедлайн запроса исчерпан без подтверждённого сбоя модели."""
+
 # Единственный источник границ (min, max, default); settings_validator
 # дублирует литералы в _RANGE_FIELDS, а тест волны сверяет равенство —
 # синхронизация тестом вместо прод-импорта backend← core.
@@ -59,6 +65,7 @@ class STTBudget:
     interactive_max_sec: float
     batch_max_sec: float
     allow_diarization: bool = True
+    explicit_rest_deadline: bool = False
 
 
 _current: ContextVar[STTBudget | None] = ContextVar("stt_budget", default=None)
@@ -131,6 +138,7 @@ def stt_budget_scope(
     deadline_sec: float | None = None,
     deadline_monotonic: float | None = None,
     allow_diarization: bool = True,
+    explicit_rest_deadline: bool = False,
     quiet: bool = False,
 ) -> Iterator[STTBudget]:
     """Открыть бюджет-контекст одного STT-запроса В ТЕКУЩЕМ ТРЕДЕ.
@@ -152,7 +160,12 @@ def stt_budget_scope(
                 settings_get, "stt_timeout_request_attempts"
             )
         deadline_monotonic = now + float(deadline_sec)
-    budget = replace(base, deadline_monotonic=deadline_monotonic, allow_diarization=allow_diarization)
+    budget = replace(
+        base,
+        deadline_monotonic=deadline_monotonic,
+        allow_diarization=allow_diarization,
+        explicit_rest_deadline=explicit_rest_deadline,
+    )
     log = logger.debug if quiet else logger.info
     log(
         "stt_budget: scope opened",
@@ -179,6 +192,11 @@ def diarization_allowed() -> bool:
     """Разрешена ли разметка спикеров для текущего запроса."""
     budget = _current.get()
     return budget is None or budget.allow_diarization
+
+
+def has_explicit_rest_deadline() -> bool:
+    budget = _current.get()
+    return budget is not None and budget.explicit_rest_deadline
 
 
 def remaining_sec() -> float | None:
@@ -226,6 +244,7 @@ def call_in_scope(
     deadline_sec: float | None = None,
     deadline_monotonic: float | None = None,
     allow_diarization: bool = True,
+    explicit_rest_deadline: bool = False,
     quiet: bool = False,
     **kwargs: Any,
 ) -> Any:
@@ -246,6 +265,7 @@ def call_in_scope(
         deadline_sec=deadline_sec,
         deadline_monotonic=deadline_monotonic,
         allow_diarization=allow_diarization,
+        explicit_rest_deadline=explicit_rest_deadline,
         quiet=quiet,
     ):
         return fn(*args, **kwargs)

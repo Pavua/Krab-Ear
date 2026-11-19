@@ -133,9 +133,49 @@ def test_short_worker_timeout_does_not_create_a_series_of_503(client_engine, mon
     monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", run_worker)
     fields = {"deadline_sec": "25", "diarize": "false"}
     statuses = [post(client, **fields)[0] for _ in range(3)]
-    assert statuses[0] in {503, 504}
+    assert statuses[0] == 504
     assert statuses[1:] == [200, 200]
     abort_rest.assert_not_called()
+
+
+def test_explicit_deadline_shares_one_cleanup_reserve_with_whisper(client_engine, monkeypatch):
+    client, _engine, abort_rest = client_engine
+    now = [100.0]
+    monkeypatch.setattr(rest.time, "monotonic", lambda: now[0])
+
+    def worker(_audio, _params, *, timeout_sec, model_name):
+        if timeout_sec <= 22.0:
+            raise MLXTimeoutError(timeout_sec, model_name)
+        now[0] += 22.0
+        return _recognized()
+
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", worker)
+    status, body = post(client, deadline_sec="25", diarize="false")
+    assert status == 200
+    assert body["text"] == "hola"
+    abort_rest.assert_not_called()
+
+
+def test_queued_request_with_no_useful_budget_skips_whisper(client_engine, monkeypatch):
+    client, _engine, abort_rest = client_engine
+    now = [100.0]
+    monkeypatch.setattr(rest.time, "monotonic", lambda: now[0])
+    acquire = rest.try_acquire_stt_singleflight
+
+    def wait_for_slot(timeout):
+        now[0] += 21.0
+        return acquire(timeout)
+
+    monkeypatch.setattr(rest, "try_acquire_stt_singleflight", wait_for_slot)
+    worker = Mock(side_effect=AssertionError("no budget for worker"))
+    monkeypatch.setattr(whisper, "transcribe_via_mlx_worker", worker)
+    status, body = post(client, deadline_sec="25", diarize="false")
+    assert status == 504
+    assert body == {"error": "Transcription timeout", "text": ""}
+    worker.assert_not_called()
+    abort_rest.assert_not_called()
+    assert rest.try_acquire_stt_singleflight(0.0)
+    rest.release_stt_singleflight()
 
 
 def test_rest_reserves_response_margin_inside_client_deadline(client_engine, monkeypatch):

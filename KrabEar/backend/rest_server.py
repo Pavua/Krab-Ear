@@ -2168,6 +2168,7 @@ def transcribe_audio():
                 profile=stt_budget.INTERACTIVE,
                 deadline_monotonic=work_deadline,
                 allow_diarization=diarize_override is not False,
+                explicit_rest_deadline=request_deadline is not None,
                 settings_snapshot=_budget_settings_snapshot,
                 **_transcribe_kwargs,
             )
@@ -2250,7 +2251,10 @@ def transcribe_audio():
 
         if call_profile and _call_profile_privacy_enabled():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-        if request_deadline is not None and time.monotonic() >= request_deadline:
+        if request_deadline is not None and (
+            time.monotonic() >= request_deadline
+            or result.get("error_code") == stt_budget.DEADLINE_EXCEEDED
+        ):
             return jsonify({"error": timeout_error, "text": ""}), 504
         # AudioEngine возвращает ошибку словарём, а не исключением. Не превращать
         # её в успешный пустой STT/прогрев и не сохранять в history/metrics.
