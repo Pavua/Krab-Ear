@@ -76,6 +76,18 @@ class RestTimeoutProcessOwnerTests(unittest.TestCase):
         namespace["_wait_call_ipc_drain"].assert_called_once_with(30.0)
         fake_os._exit.assert_called_once_with(70)
 
+    def test_admission_is_reopened_when_exit_is_refused_at_close(self):
+        namespace, fake_os = _load_timeout_functions()
+        response = Mock()
+        namespace["_arm_timeout_exit"](response, Mock())
+        self.assertTrue(namespace["_STT_RECYCLE_PENDING"].is_set())
+        namespace["_mark_backend_process"]()  # Между arm и close REST стал встроенным.
+        response.call_on_close.call_args.args[0]()
+        fake_os._exit.assert_not_called()
+        self.assertFalse(namespace["_STT_RECYCLE_PENDING"].is_set())
+        # Выхода не будет, значит ходы звонка не ждём.
+        namespace["_wait_call_ipc_drain"].assert_not_called()
+
     def test_static_true_still_blocks_exit(self):
         namespace, fake_os = _load_timeout_functions(static_setting=True)
         kill = self._exercise(namespace)

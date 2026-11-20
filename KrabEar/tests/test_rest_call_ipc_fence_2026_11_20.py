@@ -63,7 +63,7 @@ def test_counter_is_released_on_every_outcome(owner, monkeypatch, failure):
     }[failure]
     ipc.side_effect = error("synthetic")
     with _ru_call(client) as call:
-        assert call.status_code in (403, 503, 504)
+        assert call.status_code == {"rejected": 403, "timeout": 504, "protocol": 503}[failure]
     assert rs._call_ipc_inflight == 0
 
 
@@ -99,14 +99,15 @@ def test_fail_fast_waits_for_a_call_turn_that_started_before_the_timeout(owner):
 
 def test_fail_fast_drain_is_bounded(owner, monkeypatch):
     client, rs, _, exits, _ = owner
-    monkeypatch.setattr(rs, "_CALL_IPC_DRAIN_MAX_SEC", 0.2)
+    monkeypatch.setattr(rs, "_CALL_IPC_DRAIN_MAX_SEC", 0.4)
     assert rs._call_ipc_enter()
     try:
         response = post(client)
         assert response.status_code == 504
         started = time.monotonic()
         response.close()
-        assert time.monotonic() - started < 3
+        elapsed = time.monotonic() - started
+        assert 0.35 <= elapsed < 3  # ждали ровно потолок, а не ноль и не вечность
         exits.assert_called_once()
     finally:
         rs._call_ipc_exit()
@@ -123,3 +124,51 @@ def test_embedded_rest_never_waits_or_exits(owner, monkeypatch):
     finally:
         rs._call_ipc_exit()
     exits.assert_not_called()
+    assert not rs._STT_RECYCLE_PENDING.is_set()
+    with _ru_call(client) as call:
+        assert call.status_code == 200
+
+
+def test_fail_fast_waits_until_the_call_reply_is_delivered_not_just_ipc_done(owner):
+    """Ревью B1: после IPC остаются пост-проверка приватности и запись ответа."""
+    client, rs, _, exits, ipc = owner
+    store = client.application.config["REST_DEPS"].store
+    in_post, release = threading.Event(), threading.Event()
+    calls = []
+
+    def privacy(*_args, **_kwargs):
+        calls.append(1)
+        if len(calls) == 3:  # вход гейта, вход обработчика, затем пост-проверка после IPC
+            in_post.set()
+            assert release.wait(5)
+        return False
+
+    store.call_privacy_mode.side_effect = privacy
+    outcome = {}
+
+    def run_call():
+        with _ru_call(client) as call:
+            outcome["status"] = call.status_code
+
+    caller = threading.Thread(target=run_call)
+    caller.start()
+    response = None
+    closer = None
+    try:
+        assert in_post.wait(5)
+        ipc.assert_called_once()
+        response = post(client)  # локальный STT: 504, ставит fail-fast
+        assert response.status_code == 504
+        closer = threading.Thread(target=response.close)
+        closer.start()
+        time.sleep(0.3)
+        exits.assert_not_called()
+        assert closer.is_alive()
+    finally:
+        release.set()
+        caller.join(timeout=5)
+        if closer is not None:
+            closer.join(timeout=5)
+    assert outcome["status"] == 200
+    exits.assert_called_once()
+    assert rs._call_ipc_inflight == 0

@@ -44,6 +44,14 @@ _session_lock = threading.Lock()
 _session: Optional["MLXWhisperSession"] = None
 
 
+class MLXWorkerUnconfirmedExit(MLXLockTimeoutError):
+    """Убитый по таймауту child не подтвердил выход и может держать GPU.
+
+    Наследует MLXLockTimeoutError: движок не помечает модель неисправной и идёт дальше,
+    но причина отказа различима (нужен штатный рестарт процесса, а не просто очередь).
+    """
+
+
 class MLXWorkerCrashed(RuntimeError):
     """Worker вышел без JSON-ответа (SIGSEGV/SIGBUS/OOM-kill)."""
 
@@ -114,6 +122,10 @@ def reset_mlx_whisper_session() -> None:
     with _session_lock:
         if _session is not None:
             _session.close()
+            if _session.has_live_unconfirmed_child():
+                # Сессия помнит убитого, но не подтвердившего выход child: новая
+                # сессия запустила бы второй worker рядом с ним. Оставляем её.
+                return
             _session = None
 
 
@@ -264,14 +276,28 @@ class MLXWhisperSession:
                 self._reap_dead_unlocked()
             self._spawn_unlocked()
 
+    def has_live_unconfirmed_child(self) -> bool:
+        orphan = self._unconfirmed_exit
+        return orphan is not None and orphan.poll() is None
+
+    def _kill_unconfirmed_child(self) -> None:
+        orphan = self._unconfirmed_exit
+        if orphan is None or orphan.poll() is not None:
+            return
+        try:
+            orphan.kill()
+        except OSError:
+            pass
+
     def _refuse_while_unconfirmed_alive(self) -> None:
         """Быстрый отказ, пока убитый по таймауту child может жить (под I/O-lock)."""
         orphan = self._unconfirmed_exit
         if orphan is None:
             return
         if orphan.poll() is None:
-            raise MLXLockTimeoutError(
-                f"Whisper worker pid={getattr(orphan, 'pid', None)} не подтвердил выход после SIGKILL"
+            raise MLXWorkerUnconfirmedExit(
+                f"Whisper worker pid={getattr(orphan, 'pid', None)} не подтвердил выход после SIGKILL: "
+                "второй worker не запускается, нужен штатный рестарт процесса"
             )
         self._unconfirmed_exit = None
 
@@ -377,6 +403,9 @@ class MLXWhisperSession:
                 return empty_snapshot("busy", "worker")
             try:
                 proc = self._proc
+                if proc is None or proc.poll() is not None:
+                    # Убитый, но не подтвердивший выход child может держать память GPU.
+                    proc = self._unconfirmed_exit if self.has_live_unconfirmed_child() else proc
                 alive = proc is not None and proc.poll() is None
                 result = empty_snapshot("busy" if self._inflight else "unknown" if alive else "unloaded", "worker")
                 result.update(
@@ -398,6 +427,7 @@ class MLXWhisperSession:
         вызывающих — в первую очередь reset_mlx_whisper_session(), который
         сам держит модульный _session_lock. Тело — в _close_unlocked() для
         вызовов ИЗНУТРИ уже удерживаемого self._lock (см. _send())."""
+        self._kill_unconfirmed_child()
         if self._proc is None:
             return
         acquired = self._lock.acquire(timeout=timeout)
@@ -514,15 +544,29 @@ class MLXWhisperSession:
             timer = threading.Timer(remaining, timeout_kill)
             timer.start()
             write_error = None
+            io_error: BaseException | None = None
             line = ""
-            try:
+
+            def _pipe_io() -> None:
+                # Блокирующий pipe I/O живёт в отдельном потоке: убитый child в
+                # непрерываемом состоянии может не закрыть свой stdout, и readline()
+                # не вернулся бы никогда. Запрос ждёт поток с потолком (join ниже).
+                nonlocal write_error, io_error, line
                 try:
-                    proc.stdin.write(payload)
-                    proc.stdin.flush()
-                except (BrokenPipeError, OSError) as exc:
-                    write_error = exc
-                if write_error is None:
+                    try:
+                        proc.stdin.write(payload)
+                        proc.stdin.flush()
+                    except (BrokenPipeError, OSError) as exc:
+                        write_error = exc
+                        return
                     line = proc.stdout.readline()
+                except BaseException as exc:  # noqa: BLE001 - пробросим из потока запроса
+                    io_error = exc
+
+            io_thread = threading.Thread(target=_pipe_io, name="mlx-whisper-pipe-io", daemon=True)
+            try:
+                io_thread.start()
+                io_thread.join(timeout=remaining + _KILL_CONFIRM_TIMEOUT_SEC)
             finally:
                 timer.cancel()
                 # cancel не останавливает уже вошедший callback. Retire под
@@ -530,23 +574,41 @@ class MLXWhisperSession:
                 with timeout_guard:
                     active = False
 
-            if timed_out:
-                # Таймер уже послал SIGKILL. Удерживаем I/O-lock и внешний
-                # GPU-lock до подтверждения выхода, без graceful shutdown.
+            if timed_out or io_thread.is_alive():
+                # Таймер послал SIGKILL (или I/O завис после него). Ждём подтверждения
+                # выхода под I/O-lock без graceful shutdown, но не дольше
+                # _KILL_CONFIRM_TIMEOUT_SEC. Если child не умер, внешние локи (GPU /
+                # межпроцессный flock) всё равно отпускаются при выходе из запроса:
+                # защищает только запрет второго worker этой сессией
+                # (_unconfirmed_exit), а не GPU целиком.
                 try:
                     proc.wait(timeout=_KILL_CONFIRM_TIMEOUT_SEC)
+                    exited = True
                 except subprocess.TimeoutExpired:
+                    exited = False
                     # Выход не подтверждён: не отдаём слот следующему запросу как
                     # свободный. Запросы получат отказ, пока poll() is None.
                     self._unconfirmed_exit = proc
                     logger.error(
-                        "mlx_whisper worker pid=%s не завершился за %.1fс после SIGKILL",
+                        "mlx_whisper worker pid=%s не завершился за %.1fс после SIGKILL: "
+                        "он мог остаться владельцем GPU, второй worker не запускается, "
+                        "нужен штатный рестарт процесса (backend: scripts/safe_backend_restart.command)",
                         getattr(proc, "pid", None),
                         _KILL_CONFIRM_TIMEOUT_SEC,
                     )
+                if exited:
+                    io_thread.join(timeout=1.0)
                 if self._proc is proc:
-                    self._reap_dead_unlocked()
+                    if io_thread.is_alive():
+                        # stdout принадлежит брошенному читателю: close() из другого
+                        # потока заблокируется на локе буфера. Просто отпускаем ссылку.
+                        self._proc = None
+                    else:
+                        self._reap_dead_unlocked()
                 raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
+
+            if io_error is not None:
+                raise io_error
 
             if write_error is not None or not line:
                 rc = proc.poll()
