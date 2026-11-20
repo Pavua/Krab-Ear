@@ -24,7 +24,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator, Optional
 
 from core.parsing_utils import safe_json_loads
 from backend.call_session import (
@@ -34,8 +34,33 @@ from backend.call_session import (
     TranscriptEntry,
     _now_iso,
 )
+from backend.history_crypto import HistoryCrypto
+from backend.history_encryption_policy import data_dir_policy_reader, policy_blocks
+from backend.ipc_errors import IpcOperationalError
 
 logger = logging.getLogger("KrabEar.Backend.CallSessionStore")
+
+
+class CallSessionEncryptionUnavailable(IpcOperationalError):
+    """Шифрование истории включено, но ключа нет: plaintext-запись звонка запрещена."""
+
+
+def _default_crypto_getter() -> Callable[[], Optional[HistoryCrypto]]:
+    """Ленивый ключ из Keychain без создания; успех кэшируется, неудача повторяется."""
+    cache: list[HistoryCrypto] = []
+
+    def get() -> Optional[HistoryCrypto]:
+        if not cache:
+            from backend.history_crypto import build_history_crypto
+
+            crypto = build_history_crypto(allow_create=False)
+            if crypto is None:
+                return None
+            cache.append(crypto)
+        return cache[0]
+
+    return get
+
 
 # Порог числа строк в call_sessions.ndjson, при превышении которого
 # maybe_compact() запускает компактирование.
@@ -58,10 +83,34 @@ class CallSessionStore:
       а также явно через IPC-метод call_session_compact.
     """
 
-    def __init__(self, data_dir: Path) -> None:
+    def __init__(
+        self,
+        data_dir: Path,
+        *,
+        policy_read: Optional[Callable[[], bool]] = None,
+        crypto_getter: Optional[Callable[[], Optional[HistoryCrypto]]] = None,
+    ) -> None:
+        """
+        Args:
+            policy_read: fail-closed читатель ``history_encryption_enabled``.
+                По умолчанию читает ``<data_dir>/settings.json`` тем же
+                механизмом, что остальные сателлитные хранилища.
+            crypto_getter: возвращает ``HistoryCrypto`` или ``None`` (ключ
+                недоступен). BackendService передаёт ``StateStore``-ключ.
+
+        При включённой политике каждая строка пишется как ``ENC1:``; читаются
+        оба формата. Журнал не входит в реестр десяти журналов истории
+        (``HISTORY_JOURNAL_FILENAMES``): у снапшотов жёсткий инвариант 10 файлов.
+        """
         self.data_dir = data_dir
         self.sessions_path = data_dir / "call_sessions.ndjson"
         self.lock_path = data_dir / "call_sessions.lock"
+        self._policy_read = policy_read or data_dir_policy_reader(data_dir)
+        self._crypto_getter = crypto_getter or _default_crypto_getter()
+        # Сколько ENC1-строк не удалось расшифровать при последнем проходе.
+        # compact() по ненулевому значению отказывается переписывать файл:
+        # иначе потеря ключа стирала бы журнал.
+        self._undecryptable_lines = 0
 
         data_dir.mkdir(parents=True, exist_ok=True)
         self.sessions_path.touch(exist_ok=True)
@@ -324,6 +373,77 @@ class CallSessionStore:
         return True
 
     # ------------------------------------------------------------------
+    # At-rest encryption migration
+    # ------------------------------------------------------------------
+
+    def migrate_encryption(self) -> dict[str, Any]:
+        """Шифрует plaintext-строки журнала, если политика истории включена.
+
+        Гарантии:
+          - tmp пишется рядом, каждая НОВАЯ ENC1-строка расшифровывается обратно
+            и сверяется с исходной ДО ``os.replace``; при расхождении оригинал
+            не тронут (plaintext-``.bak`` не создаётся — он был бы той самой
+            открытой копией, от которой уходим);
+          - уже зашифрованные строки проходят без изменений (идемпотентно);
+          - выключенная политика или отсутствующий ключ — отказ без записи.
+
+        Returns:
+            ``{"ok": True, "encrypted": n, "total": n, "already_encrypted": n}``
+            или ``{"ok": False, "reason": "encryption_disabled" |
+            "encryption_unavailable" | "verification_failed"}``.
+        """
+        with self._lock():
+            if not policy_blocks(self._policy_read):
+                return {"ok": False, "reason": "encryption_disabled"}
+            crypto = self._crypto_getter()
+            if crypto is None:
+                return {"ok": False, "reason": "encryption_unavailable"}
+            if not self.sessions_path.exists():
+                return {"ok": True, "encrypted": 0, "total": 0, "already_encrypted": 0}
+
+            with self.sessions_path.open("r", encoding="utf-8") as fh:
+                raw_lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
+
+            out_lines: list[str] = []
+            fresh: list[tuple[str, str]] = []  # (исходная строка, её ENC1)
+            already = 0
+            for raw in raw_lines:
+                if HistoryCrypto.is_encrypted(raw):
+                    out_lines.append(raw)
+                    already += 1
+                else:
+                    token = crypto.encrypt_line(raw)
+                    out_lines.append(token)
+                    fresh.append((raw, token))
+
+            total = len(raw_lines)
+            if not fresh:
+                return {"ok": True, "encrypted": 0, "total": total, "already_encrypted": already}
+
+            tmp = self.sessions_path.with_suffix(".ndjson.migration_tmp")
+            replaced = False
+            try:
+                for original, token in fresh:
+                    try:
+                        if crypto.decrypt_line(token) != original:
+                            raise ValueError("расхождение после расшифровки")
+                    except Exception:  # noqa: BLE001
+                        logger.error("call_session_store: проверка миграции провалена")
+                        return {"ok": False, "reason": "verification_failed"}
+                with tmp.open("w", encoding="utf-8") as fh:
+                    for out in out_lines:
+                        fh.write(out + "\n")
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                tmp.replace(self.sessions_path)
+                replaced = True
+            finally:
+                if not replaced:
+                    tmp.unlink(missing_ok=True)
+
+        return {"ok": True, "encrypted": len(fresh), "total": total, "already_encrypted": already}
+
+    # ------------------------------------------------------------------
     # Compaction (Wave 1772)
     # ------------------------------------------------------------------
 
@@ -378,12 +498,25 @@ class CallSessionStore:
         lines_before = self._count_lines_unlocked()
         active = self._load_all_unlocked()
 
+        if self._undecryptable_lines:
+            # Переписать файл по расшифрованной части = стереть остальное навсегда.
+            logger.error(
+                "call_session_store compact отменён: %d ENC1-строк не расшифровано",
+                self._undecryptable_lines,
+            )
+            return {
+                "lines_before": lines_before,
+                "lines_after": lines_before,
+                "sessions_kept": len(active),
+                "skipped_undecryptable": self._undecryptable_lines,
+            }
+
         tmp = self.sessions_path.with_suffix(".ndjson.tmp")
         replaced = False
         try:
             with tmp.open("w", encoding="utf-8") as fh:
                 for session in active:
-                    fh.write(json.dumps(session.to_dict(), ensure_ascii=False) + "\n")
+                    fh.write(self._encode_line(session.to_dict()) + "\n")
                 fh.flush()
                 os.fsync(fh.fileno())
             tmp.replace(self.sessions_path)
@@ -497,17 +630,61 @@ class CallSessionStore:
             session.transcript_history.append(TranscriptEntry.from_dict(entry_data))
 
     def _iter_records_unlocked(self) -> Iterator[dict[str, Any]]:
-        """Итерация по NDJSON-строкам файла."""
+        """Итерация по NDJSON-строкам файла (открытым и ENC1).
+
+        ENC1-строку без ключа или с неверным ключом пропускаем и считаем в
+        ``_undecryptable_lines``: чтение не падает, а compact() по счётчику
+        отказывается переписывать файл.
+        """
+        self._undecryptable_lines = 0
         if not self.sessions_path.exists():
             return
+        crypto: Optional[HistoryCrypto] = None
+        crypto_fetched = False
         with self.sessions_path.open("r", encoding="utf-8") as fh:
             for line in fh:
                 raw = line.strip()
                 if not raw:
                     continue
+                if HistoryCrypto.is_encrypted(raw):
+                    if not crypto_fetched:
+                        crypto = self._crypto_getter()
+                        crypto_fetched = True
+                    decoded: Optional[str] = None
+                    if crypto is not None:
+                        try:
+                            decoded = crypto.decrypt_line(raw)
+                        except Exception:  # noqa: BLE001 - неверный ключ / порча
+                            decoded = None
+                    if decoded is None:
+                        self._undecryptable_lines += 1
+                        continue
+                    raw = decoded
                 payload = safe_json_loads(raw)
                 if isinstance(payload, dict):
                     yield payload
+        if self._undecryptable_lines:
+            logger.warning(
+                "call_session_store: %d ENC1-строк не расшифровано (нет ключа?)",
+                self._undecryptable_lines,
+            )
+
+    def _encode_line(self, payload: dict[str, Any]) -> str:
+        """JSON-строка для записи: ENC1 при включённой политике.
+
+        Политика ON (или нечитаемая → ON) без ключа — отказ, а не молчаливый
+        plaintext: звонок содержит номер, цель и реплики.
+        """
+        text = json.dumps(payload, ensure_ascii=False)
+        if not policy_blocks(self._policy_read):
+            return text
+        crypto = self._crypto_getter()
+        if crypto is None:
+            raise CallSessionEncryptionUnavailable(
+                "call_sessions: шифрование истории включено, ключ недоступен — "
+                "запись журнала звонков отклонена"
+            )
+        return crypto.encrypt_line(text)
 
     def _count_lines_unlocked(self) -> int:
         """Подсчитывает непустые строки файла без парсинга JSON."""
@@ -521,9 +698,10 @@ class CallSessionStore:
         return count
 
     def _append(self, payload: dict[str, Any]) -> None:
-        """Атомарный append JSON-строки с fsync."""
+        """Атомарный append строки (ENC1 при включённой политике) с fsync."""
+        line = self._encode_line(payload)  # до open(): при отказе файл не тронут
         with self.sessions_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
+            fh.write(line + "\n")
             fh.flush()
             os.fsync(fh.fileno())
 
