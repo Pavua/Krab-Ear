@@ -165,6 +165,17 @@ enum SentryConfig {
 
     static var isActive: Bool { lifecycle.isActive }
 
+    /// True, если процесс запущен XCTest-раннером (`swift test` / `xcodebuild test`).
+    /// Два независимых признака: переменная окружения `XCTestConfigurationFilePath`
+    /// (видна не всегда — в `swift test` её нет в ProcessInfo) и загруженный класс
+    /// `XCTestCase` (в продакшен-приложении его никогда нет, ложного срабатывания не будет).
+    static func isRunningUnderXCTest(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        xctestClassLoaded: Bool = NSClassFromString("XCTestCase") != nil
+    ) -> Bool {
+        environment["XCTestConfigurationFilePath"] != nil || xctestClassLoaded
+    }
+
     /// Инициализирует Sentry SDK.
     /// - Parameters:
     ///   - dsn: DSN проекта. Nil или пустая строка — SDK не запускается (no-op).
@@ -180,6 +191,10 @@ enum SentryConfig {
         lease: ConfirmedPrivacyLease? = nil,
         owner: SentryPrivacyLifecycle? = nil
     ) {
+        // Под XCTest реальный lifecycle не трогаем: он работает с боевыми Caches и
+        // UserDefaults и поднял бы SDK с прод-DSN. Инжектированный owner — тестовый
+        // seam со своими start/close-заглушками, SentrySDK там не вызывается.
+        if owner == nil, isRunningUnderXCTest() { return }
         Self.environment = environment
         Self.release = release
         (owner ?? lifecycle).reconcile(privacy: confirmedPrivacyFlag(settings?["privacy_mode_enabled"]),
