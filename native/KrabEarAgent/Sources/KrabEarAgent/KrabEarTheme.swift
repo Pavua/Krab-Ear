@@ -805,7 +805,7 @@ public class CollapsibleSectionView: NSView {
             // выглядит "natural", как Apple System Settings 16. Honors Reduce Motion.
             let reducedMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
             NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = reducedMotion ? 0.001 : 0.28
+                ctx.duration = reducedMotion ? 0.001 : KrabEarTheme.Motion.Duration.short
                 ctx.allowsImplicitAnimation = true
                 ctx.timingFunction = CAMediaTimingFunction(controlPoints: 0.32, 0.72, 0.0, 1.0) // ease-out cubic
                 applyChanges()
