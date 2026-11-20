@@ -202,6 +202,9 @@ class CallAssistService:
         # None = прямые юнит-конструкции (legacy-поведение, см. гейт ниже).
         self._recording_core: Any = recording_core
         self._lock: threading.Lock = threading.Lock()
+        # Capture -> state (briefly); drop state before Core/recorder I/O.
+        # RLock permits old-debt release and aborted-start compensation.
+        self._capture_lock = threading.RLock()
         self._state: dict[str, Any] = {
             "active": False,
             "status": "idle",
@@ -238,36 +241,37 @@ class CallAssistService:
         R8 (2026-11-08): вызывается при штатном останове, компенсации сбоя старта,
         или вытеснении старта пришедшим stop. Не держит self._lock во время I/O.
         """
-        with self._lock:
-            if self._borrowed_capture:
-                return "borrowed"
-            if gen is not None and self._capture_gen is not None and self._capture_gen is not gen:
-                return "not_owner"
+        with self._capture_lock:
+            with self._lock:
+                if self._borrowed_capture:
+                    return "borrowed"
+                if gen is not None and self._capture_gen is not None and self._capture_gen is not gen:
+                    return "not_owner"
 
-        core = self._recording_core
-        stopped_status = "stopped"
-        try:
-            if core is not None and hasattr(core, "stop_unmanaged_capture"):
-                stopped_status = core.stop_unmanaged_capture(timeout_sec=timeout_sec)
-            else:
-                if getattr(self.recorder, "is_recording", False) and self._may_stop_shared_recorder():
-                    if timeout_sec is not None:
-                        self.recorder.stop(timeout_sec=timeout_sec)
-                    else:
-                        self.recorder.stop()
-                    stopped_status = "stopped"
+            core = self._recording_core
+            stopped_status = "stopped"
+            try:
+                if core is not None and hasattr(core, "stop_unmanaged_capture"):
+                    stopped_status = core.stop_unmanaged_capture(timeout_sec=timeout_sec)
                 else:
-                    stopped_status = "not_recording"
-        except Exception:
-            logger.exception("call_assist: сбой физического stop рекордера")
-            # Долг остаётся в _capture_gen, не сбрасываем (фаза а R2-01)!
-            return "cleanup_pending"
+                    if getattr(self.recorder, "is_recording", False) and self._may_stop_shared_recorder():
+                        if timeout_sec is not None:
+                            self.recorder.stop(timeout_sec=timeout_sec)
+                        else:
+                            self.recorder.stop()
+                        stopped_status = "stopped"
+                    else:
+                        stopped_status = "not_recording"
+            except Exception:
+                logger.exception("call_assist: сбой физического stop рекордера")
+                # Долг остаётся в _capture_gen, не сбрасываем (фаза а R2-01)!
+                return "cleanup_pending"
 
-        # Снимаем долг при успехе ("stopped", "not_recording") или "owned_by_other"
-        with self._lock:
-            if gen is None or self._capture_gen is gen:
-                self._capture_gen = None
-        return stopped_status
+            # Снимаем долг при успехе ("stopped", "not_recording") или "owned_by_other"
+            with self._lock:
+                if gen is None or self._capture_gen is gen:
+                    self._capture_gen = None
+            return stopped_status
 
     @staticmethod
     def _default_extract_text(payload: Any) -> str:
@@ -350,75 +354,31 @@ class CallAssistService:
             self._state["active"] = True
             self._state["status"] = "starting"
             self._state["session_id"] = session_id
-            self._borrowed_capture = False
             # Новая generation забирает владение: идущий stop прошлой сессии
             # больше не вправе писать в общее состояние (F3).
             self._stop_owner = None
-            old_capture_gen = self._capture_gen
 
-        # R8 D6: снятие долга очистки предыдущего сбоя (фаза б R2-01), если воркер уже завершился
-        if old_capture_gen is not None:
-            self._release_capture(old_capture_gen)
-
-        started = False
-        recorder_orphaned = False
-        if getattr(self.recorder, "is_recording", False):
-            # Заимствованный capture: рекордер уже писал до старта звонка
+        # Physical acquire/release is serialized after the logical slot claim.
+        # Never wait for capture while holding the state lock.
+        with self._capture_lock:
             with self._lock:
-                self._borrowed_capture = True
-        else:
-            with self._lock:
-                self._borrowed_capture = False
-            try:
-                started = bool(self.recorder.start())
-            except Exception as exc:
-                logger.exception("handle_start: сбой recorder.start()")
-                with self._lock:
-                    if self._gen is gen:
-                        self._state["active"] = False
-                        self._state["status"] = "idle"
-                        self._state["session_id"] = None
-                        self._gen = None
-                return {
-                    "ok": False,
-                    "error": "start_failed",
-                    "error_type": exc.__class__.__name__,
-                    "session_id": session_id,
-                    "status": "idle",
-                }
-
-            is_really_busy = (
-                getattr(self.recorder, "worker_alive", False)
-                or getattr(self.recorder, "is_worker_thread_alive", False)
-                or (
-                    getattr(self.recorder, "_thread", None) is not None
-                    and getattr(self.recorder._thread, "is_alive", lambda: False)()
-                )
-            )
-            if not started and (is_really_busy or self._capture_gen is not None):
-                # D7: рекордер занят другим процессом / незавершённым worker потоком (R2-01).
-                # Fail-closed отказ с сохранением чистого idle-состояния.
-                with self._lock:
-                    if self._gen is gen:
-                        self._state["active"] = False
-                        self._state["status"] = "idle"
-                        self._state["session_id"] = None
-                        self._gen = None
-                return {
-                    "ok": False,
-                    "error": "recorder_busy",
-                    "session_id": session_id,
-                    "status": "idle",
-                }
-
-            with self._lock:
-                if started:
-                    self._capture_gen = gen
                 if not self._still_starting_locked(gen):
-                    recorder_orphaned = True
+                    return {
+                        "ok": False,
+                        "error": "stopped_during_start",
+                        "session_id": session_id,
+                        "status": "stopped",
+                    }
+                # Read the current cleanup debt only after acquiring capture.
+                # Keep the previous borrowed flag until physical acquisition.
+                old_capture_gen = self._capture_gen
 
-            if recorder_orphaned:
-                self._release_capture(gen)
+            # R8 D6: снятие долга очистки предыдущего сбоя (фаза б R2-01), если воркер уже завершился
+            if old_capture_gen is not None:
+                self._release_capture(old_capture_gen)
+
+            # Cleanup may block while stop cancels this generation.
+            if not self._still_starting(gen):
                 return {
                     "ok": False,
                     "error": "stopped_during_start",
@@ -426,9 +386,75 @@ class CallAssistService:
                     "status": "stopped",
                 }
 
-            if started:
-                self._reset_preview()
-                self._start_preview("balanced")
+            started = False
+            recorder_orphaned = False
+            if getattr(self.recorder, "is_recording", False):
+                # Заимствованный capture: рекордер уже писал до старта звонка
+                with self._lock:
+                    self._borrowed_capture = True
+            else:
+                with self._lock:
+                    self._borrowed_capture = False
+                try:
+                    started = bool(self.recorder.start())
+                except Exception as exc:
+                    logger.exception("handle_start: сбой recorder.start()")
+                    with self._lock:
+                        if self._gen is gen:
+                            self._state["active"] = False
+                            self._state["status"] = "idle"
+                            self._state["session_id"] = None
+                            self._gen = None
+                    return {
+                        "ok": False,
+                        "error": "start_failed",
+                        "error_type": exc.__class__.__name__,
+                        "session_id": session_id,
+                        "status": "idle",
+                    }
+
+                is_really_busy = (
+                    getattr(self.recorder, "worker_alive", False)
+                    or getattr(self.recorder, "is_worker_thread_alive", False)
+                    or (
+                        getattr(self.recorder, "_thread", None) is not None
+                        and getattr(self.recorder._thread, "is_alive", lambda: False)()
+                    )
+                )
+                if not started and (is_really_busy or self._capture_gen is not None):
+                    # D7: рекордер занят другим процессом / незавершённым worker потоком (R2-01).
+                    # Fail-closed отказ с сохранением чистого idle-состояния.
+                    with self._lock:
+                        if self._gen is gen:
+                            self._state["active"] = False
+                            self._state["status"] = "idle"
+                            self._state["session_id"] = None
+                            self._gen = None
+                    return {
+                        "ok": False,
+                        "error": "recorder_busy",
+                        "session_id": session_id,
+                        "status": "idle",
+                    }
+
+                with self._lock:
+                    if started:
+                        self._capture_gen = gen
+                    if not self._still_starting_locked(gen):
+                        recorder_orphaned = True
+
+                if recorder_orphaned:
+                    self._release_capture(gen)
+                    return {
+                        "ok": False,
+                        "error": "stopped_during_start",
+                        "session_id": session_id,
+                        "status": "stopped",
+                    }
+
+        if started:
+            self._reset_preview()
+            self._start_preview("balanced")
 
         gateway_session_id = None
         gateway_status = "disabled"
@@ -622,12 +648,13 @@ class CallAssistService:
         current_gen: object | None = None
         is_starting = False
 
+        replay: dict[str, Any] | None = None
+        # Admission, generation snapshot and stop ownership are one transition.
+        # Never reacquire a replacement generation after admitting this stop.
         with self._lock:
             active = bool(self._state.get("active"))
             state = dict(self._state)
             if not active and self._stop_owner is not None:
-                # R3 шаг 2: первый stop ещё работает (summary/Gateway). Ничего не
-                # затираем — клиент повторит и получит итог.
                 return {
                     "active": False,
                     "status": "stopped",
@@ -636,19 +663,8 @@ class CallAssistService:
                     "gateway_session_id": state.get("gateway_session_id"),
                 }
             if not active and state.get("status") == "stopped" and "summary_status" in state:
-                # R3 шаг 2: повтор после завершённого stop (потерянный ответ) —
-                # отдаём тот же итог (summary_history_id), без новых записей.
                 replay = dict(state, replayed=True)
-                # Privacy mode включили после stop — текст summary из кэша не отдаём,
-                # только метаданные (id, статусы). _settings_get для privacy fail-closed.
-                if self._settings_get("privacy_mode_enabled", False):
-                    replay.pop("summary", None)
-                    # F1: тексты ошибок Gateway могут нести тело HTTP-ответа.
-                    for key in ("summary_error", "gateway_stop_error", "gateway_error"):
-                        replay.pop(key, None)
-                    replay["privacy_mode_active"] = True
-                return replay
-            if not active:
+            elif not active:
                 old_capture_gen = self._capture_gen
                 idle_state = {
                     "active": False,
@@ -660,22 +676,29 @@ class CallAssistService:
                 self._state = idle_state
                 self._gen = None
                 self._borrowed_capture = False
+            else:
+                current_gen = self._gen
+                is_starting = (self._state.get("status") == "starting")
+                self._state["active"] = False
+                self._state["status"] = "stopped"
+                self._state["stopped_at"] = stopped_at
+                if is_starting:
+                    self._state["start_aborted"] = True
+                state = dict(self._state)
+                self._stop_owner = token
 
+        # The injected settings getter may do I/O; the replay snapshot is private.
+        if replay is not None:
+            if self._settings_get("privacy_mode_enabled", False):
+                replay.pop("summary", None)
+                for key in ("summary_error", "gateway_stop_error", "gateway_error"):
+                    replay.pop(key, None)
+                replay["privacy_mode_active"] = True
+            return replay
         if not active:
             if old_capture_gen is not None:
                 self._release_capture(old_capture_gen)
             return idle_state
-
-        with self._lock:
-            current_gen = self._gen
-            is_starting = (self._state.get("status") == "starting")
-            self._state["active"] = False
-            self._state["status"] = "stopped"
-            self._state["stopped_at"] = stopped_at
-            if is_starting:
-                self._state["start_aborted"] = True
-            state = dict(self._state)
-            self._stop_owner = token
 
         # R8 D2/D3: останавливаем рекордер, если захват принадлежит нам (или legacy-активная сессия)
         self._release_capture(current_gen)
