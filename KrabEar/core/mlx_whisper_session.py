@@ -9,6 +9,7 @@
 Child получает ``KRAB_EAR_MLX_WHISPER_WORKER=0``, иначе рекурсия.
 ``start()`` респавнит мёртвый child (``poll() is not None``) — сиблинг GigaAM W1216 F1.
 """
+
 from __future__ import annotations
 
 import json
@@ -34,6 +35,10 @@ _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"0", "false", "no", "off"})
 _WORKER_SCRIPT = Path(__file__).resolve().parent / "workers" / "mlx_whisper_worker.py"
 _REQUIRED_SAMPLE_RATE = 16000
+# Сколько ждать подтверждения выхода child после SIGKILL по таймауту. Процесс в
+# непрерываемом состоянии ядра/GPU может не умереть: безграничное ожидание держало
+# бы I/O-lock и слот STT навсегда.
+_KILL_CONFIRM_TIMEOUT_SEC = 5.0
 
 _session_lock = threading.Lock()
 _session: Optional["MLXWhisperSession"] = None
@@ -202,6 +207,9 @@ class MLXWhisperSession:
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen[str]] = None
+        # Child, получивший SIGKILL по таймауту, но не подтвердивший выход: он мог
+        # остаться владельцем GPU, второй worker рядом с ним запускать нельзя.
+        self._unconfirmed_exit: Optional[subprocess.Popen[str]] = None
         self._lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._stderr_ring: deque[str] = deque(maxlen=200)
@@ -245,6 +253,7 @@ class MLXWhisperSession:
     def start(self, deadline_monotonic: float | None = None) -> None:
         """Idempotent spawn. Мёртвый child (poll()!=None) — сиблинг GigaAM W1216 F1."""
         with self._request_lock(deadline_monotonic):
+            self._refuse_while_unconfirmed_alive()
             if self._proc is not None and self._proc.poll() is None:
                 return
             if self._proc is not None:
@@ -254,6 +263,17 @@ class MLXWhisperSession:
                 )
                 self._reap_dead_unlocked()
             self._spawn_unlocked()
+
+    def _refuse_while_unconfirmed_alive(self) -> None:
+        """Быстрый отказ, пока убитый по таймауту child может жить (под I/O-lock)."""
+        orphan = self._unconfirmed_exit
+        if orphan is None:
+            return
+        if orphan.poll() is None:
+            raise MLXLockTimeoutError(
+                f"Whisper worker pid={getattr(orphan, 'pid', None)} не подтвердил выход после SIGKILL"
+            )
+        self._unconfirmed_exit = None
 
     def _reap_dead_unlocked(self) -> None:
         """Снять мёртвый Popen без shutdown JSON (pipe уже мёртв)."""
@@ -448,12 +468,13 @@ class MLXWhisperSession:
         """Только SIGKILL на пути к ``os._exit``, который закроет pipe."""
         proc = self._proc
         self._proc = None
-        if proc is None:
-            return
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        for victim in (proc, self._unconfirmed_exit):
+            if victim is None:
+                continue
+            try:
+                victim.kill()
+            except OSError:
+                pass
 
     def _send(
         self,
@@ -512,7 +533,17 @@ class MLXWhisperSession:
             if timed_out:
                 # Таймер уже послал SIGKILL. Удерживаем I/O-lock и внешний
                 # GPU-lock до подтверждения выхода, без graceful shutdown.
-                proc.wait()
+                try:
+                    proc.wait(timeout=_KILL_CONFIRM_TIMEOUT_SEC)
+                except subprocess.TimeoutExpired:
+                    # Выход не подтверждён: не отдаём слот следующему запросу как
+                    # свободный. Запросы получат отказ, пока poll() is None.
+                    self._unconfirmed_exit = proc
+                    logger.error(
+                        "mlx_whisper worker pid=%s не завершился за %.1fс после SIGKILL",
+                        getattr(proc, "pid", None),
+                        _KILL_CONFIRM_TIMEOUT_SEC,
+                    )
                 if self._proc is proc:
                     self._reap_dead_unlocked()
                 raise MLXTimeoutError(timeout_sec=timeout_sec, model_name=model_name)
