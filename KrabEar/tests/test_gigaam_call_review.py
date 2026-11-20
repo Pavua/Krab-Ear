@@ -99,13 +99,13 @@ def test_close_does_not_wait_for_dictation_cold_load_lock():
     assert results == [False]
 
 
-def _params(deadline):
+def _params(deadline, *, sample_rate=8000):
     data = io.BytesIO()
     with wave.open(data, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
-        wav.setframerate(8000)
-        wav.writeframes(np.full(8000, 1000, dtype=np.int16).tobytes())
+        wav.setframerate(sample_rate)
+        wav.writeframes(np.full(sample_rate, 1000, dtype=np.int16).tobytes())
     return {
         "request_id": "review-call", "language": "ru",
         "deadline_monotonic": deadline,
@@ -149,7 +149,9 @@ def test_real_session_late_drain_preserves_temp_and_serializes_dictation():
     timer = timer_patch.start()
     try:
         # Настоящий handle/lease/session._send, только pipe I/O герметичен.
-        response = service.handle(_params(time.monotonic() + 0.2))
+        # Здесь измеряем владение после записи в pipe. Ресемплинг
+        # с 8 кГц покрыт отдельно и не входит в дедлайн этого сценария.
+        response = service.handle(_params(time.monotonic() + 0.2, sample_rate=16000))
         assert entered.is_set()
         assert response == {"status": "timeout", "text": ""}
         assert adapter.inflight == 1

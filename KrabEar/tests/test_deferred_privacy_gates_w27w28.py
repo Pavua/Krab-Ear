@@ -206,8 +206,7 @@ def _invoke_handle_get_context_memory(
     # Stub out heavy modules before importing service
     for mod_name in [
         "mlx_whisper", "mlx", "mlx.core",
-        "pyannote", "pyannote.audio",
-        "sounddevice", "torch", "transformers",
+        "sounddevice", "transformers",
     ]:
         if mod_name not in sys.modules:
             sys.modules[mod_name] = types.ModuleType(mod_name)

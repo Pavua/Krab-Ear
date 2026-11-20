@@ -22,14 +22,14 @@ def rest(monkeypatch, tmp_path):
     return app.test_client(), deps, tmp_path
 
 
-def post(client, call):
+def post(client, call, **fields):
     output = io.BytesIO()
     with wave.open(output, "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(8000)
         wav.writeframes(b"\x10\0" * 4000)
-    data = {"file": (io.BytesIO(output.getvalue()), "audio.wav", "audio/wav")}
+    data = {"file": (io.BytesIO(output.getvalue()), "audio.wav", "audio/wav"), **fields}
     if call:
         data.update(request_profile="voice_gateway_call", language="auto")
     return client.post("/v1/stt/transcribe", data=data)
@@ -86,10 +86,14 @@ def test_call_privacy_still_wins_over_engine_error(rest):
 
 
 @pytest.mark.parametrize("unreadable", [False, True])
-def test_general_privacy_change_or_read_failure_wins_over_engine_error(rest, unreadable):
+@pytest.mark.parametrize("deadline", [{}, {"deadline_sec": "25"}])
+def test_general_privacy_change_or_read_failure_wins_over_engine_error(rest, monkeypatch, unreadable, deadline):
     client, deps, _ = rest
+    clock = [100.0]
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock[0])
 
     def failure(*args, **kwargs):
+        clock[0] += 26.0
         if unreadable:
             deps.store.load_settings.side_effect = OSError("settings unavailable")
         else:
@@ -97,9 +101,26 @@ def test_general_privacy_change_or_read_failure_wins_over_engine_error(rest, unr
         return {"status": "error", "error": "PRIVATE_ENGINE_DETAIL", "text": ""}
 
     deps.transcriber.transcribe.side_effect = failure
-    response = post(client, False)
+    response = post(client, False, **deadline)
     assert response.status_code == 403
     assert response.json["skipped"] == "privacy_mode"
     assert "PRIVATE_" not in response.get_data(as_text=True)
     deps.store.add_history_item.assert_not_called()
     deps.metrics.record.assert_not_called()
+
+
+def test_general_privacy_wins_over_deadline_expiring_in_queue(rest, monkeypatch):
+    client, deps, _ = rest
+    clock = [100.0]
+    monkeypatch.setattr(rs.time, "monotonic", lambda: clock[0])
+
+    def queue_timeout(_timeout):
+        clock[0] += 25.0
+        deps.store.load_settings.return_value = {"privacy_mode_enabled": True}
+        return False
+
+    monkeypatch.setattr(rs, "try_acquire_stt_singleflight", queue_timeout)
+    response = post(client, False, deadline_sec="25")
+    assert response.status_code == 403
+    assert response.json == {"skipped": "privacy_mode", "text": ""}
+    deps.transcriber.transcribe.assert_not_called()

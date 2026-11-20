@@ -16,10 +16,14 @@ import subprocess
 import tempfile
 import threading
 import time
+from functools import cache
 from typing import Any, Callable, Optional, TYPE_CHECKING
 from pathlib import Path
 
 if TYPE_CHECKING:
+    import torch
+    from pyannote.audio import Pipeline
+
     from backend.llm_rewriter import LLMRewriter
 
 import numpy as np
@@ -48,11 +52,6 @@ try:
 except Exception:
     sf = None  # type: ignore[assignment]
 
-try:
-    import torch  # type: ignore
-except Exception:
-    torch = None  # type: ignore[assignment]
-
 # Телеметрия pyannote 4.x (OpenTelemetry-метрики) — выключаем ДО импорта:
 # privacy-first продукт не шлёт usage-метрики, плюс её track_pipeline_apply
 # крашится TypeError на файлах с неопределяемой длительностью
@@ -60,11 +59,6 @@ except Exception:
 # Явный пользовательский opt-in через env уважается (только default).
 if "PYANNOTE_METRICS_ENABLED" not in os.environ:
     os.environ["PYANNOTE_METRICS_ENABLED"] = "false"
-
-try:
-    from pyannote.audio import Pipeline  # type: ignore
-except Exception:
-    Pipeline = None  # type: ignore[assignment,misc]
 
 # SenseVoice (FunASR) — опциональный альтернативный STT движок (Alibaba).
 # Поддерживает 50+ языков (вкл. RU) и эмоцию. Lazy: если funasr не установлен,
@@ -251,6 +245,10 @@ _HEAVY_MODEL_MIN_FREE_GB = 4.0
 _UNAVAILABLE_MODEL_TTL_SEC = 300  # 5 минут
 # W1562: backward-compat alias for _UNAVAILABLE_MODEL_TTL_SEC
 _UNAVAILABLE_TTL_SEC = _UNAVAILABLE_MODEL_TTL_SEC
+
+
+class _BudgetLimitedWhisperTimeout(MLXTimeoutError):
+    """Воркер остановлен раньше его штатного лимита ради бюджета попытки."""
 
 
 def _get_available_memory_gb() -> float:
@@ -458,6 +456,22 @@ def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
 # Сознательно больше, чем у превью (1.0с, transcriber.py): смена профиля —
 # редкая операция на пути, где результат ждёт пользователь.
 MLX_CACHE_FLUSH_LOCK_TIMEOUT_SEC = 2.0
+
+
+@cache
+def _load_torch():
+    # PyTorch нужен диаризации и WhisperX. Whisper через MLX работает отдельно.
+    try:
+        import torch
+    except Exception:
+        return None
+    return torch
+
+
+def _pyannote_pipeline_class() -> type[Pipeline]:
+    from pyannote.audio import Pipeline
+
+    return Pipeline
 
 
 class AudioEngine:
@@ -800,7 +814,7 @@ class AudioEngine:
         # это выбивает рабочий GigaAM на 300 с и отправляет следующую диктовку
         # в облако, которого нет, — тот же дефект, что разбирала спека #1956,
         # только в adapter-ветке, куда он попадает как наследник TimeoutError.
-        if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout)):
+        if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout, _BudgetLimitedWhisperTimeout)):
             return False
         if not isinstance(exc, (TimeoutError, concurrent.futures.TimeoutError)):
             return True
@@ -1615,7 +1629,8 @@ class AudioEngine:
             )
         except Exception:
             pass
-        if _pipeline_v2_enabled:
+        # V2 не пробрасывает per-request отказ от диаризации в STT stage.
+        if _pipeline_v2_enabled and diarize is not False:
             global _pipeline_v2_warned
             if not _pipeline_v2_warned:
                 logger.warning("pipeline_v2 EXPERIMENTAL — Phase 4 deterministic pipeline activated.")
@@ -1670,6 +1685,7 @@ class AudioEngine:
         # в LLM-переписывание и автовставку. Не зависит от STT_STREAMING_ENABLED.
         if (
             not is_preview
+            and diarize is not False
             and getattr(settings, "DIARIZED_TRANSCRIPTION_ENABLED", False)
             and isinstance(audio_data, (str, Path))
             and os.path.exists(str(audio_data))
@@ -2046,6 +2062,8 @@ class AudioEngine:
                 # Присутствует только если STT_MULTIPASS_ENABLED=True и не preview.
                 "multipass_attempts": result.get("multipass_attempts"),
             }
+        except stt_budget.STTDeadlineExceeded as exc:
+            return exc.as_transcribe_result()
         except Exception as exc:
             logger.exception("Критическая ошибка распознавания")
             # Wave 77: push stt.critical_recognition_error (68 occurrences in production logs)
@@ -2651,6 +2669,9 @@ class AudioEngine:
                     len(cleaned),
                     conf,
                 )
+            except stt_budget.STTDeadlineExceeded as exc:
+                # Незавершённый файл по REST-дедлайну не является успешным STT.
+                return exc.as_transcribe_result()
             except Exception as exc:
                 logger.warning(
                     "Chunk %d failed: %s", info["idx"], exc
@@ -2908,6 +2929,8 @@ class AudioEngine:
         _gigaam_mode = getattr(settings, "STT_GIGAAM_MODE", "rnnt")
         _gigaam_model_label = f"gigaam-{_gigaam_mode}"
         _gigaam_source_rate = 16000 if chain_sample_rate is None else chain_sample_rate
+        # ContextVar читаем до submit: WhisperX работает в другом треде.
+        allow_diarization = stt_budget.diarization_allowed()
         _adapter_dispatch = [
             (
                 self._GIGAAM_MARKER,
@@ -2944,7 +2967,9 @@ class AudioEngine:
                 self._WHISPERX_MARKER,
                 "stt_whisperx",
                 settings.WHISPERX_MODEL,
-                lambda: self._transcribe_whisperx(chain_audio_data, language=language),
+                lambda: self._transcribe_whisperx(
+                    chain_audio_data, language=language, diarize=allow_diarization,
+                ),
             ),
             (
                 self._VOXTRAL_MARKER,
@@ -2953,10 +2978,17 @@ class AudioEngine:
                 lambda: self._transcribe_voxtral(chain_audio_data, language=language),
             ),
         ]
+        from core.mlx_whisper_session import mlx_whisper_worker_enabled
+
         _adapter_map = {marker: (span_pfx, model, fn) for marker, span_pfx, model, fn in _adapter_dispatch}
+        explicit_rest_deadline = stt_budget.has_explicit_rest_deadline()
+        supervised_worker = explicit_rest_deadline and mlx_whisper_worker_enabled()
+        deadline_limited = False
+        inference_failed = False
 
         for model_name in candidates:
             if stt_budget.budget_exhausted(stt_budget.MIN_USEFUL_ATTEMPT_SEC):
+                deadline_limited = True
                 logger.warning(
                     "STT: бюджет запроса исчерпан — каскад прерван перед %s",
                     model_name,
@@ -2995,29 +3027,32 @@ class AudioEngine:
                     if _adapter_remaining_sec is not None:
                         _adapter_timeout = min(_adapter_timeout, _adapter_remaining_sec)
                     _adapter_timeout = max(_adapter_timeout, stt_budget.MIN_USEFUL_ATTEMPT_SEC)
+                    _adapter_kwargs = {}
+                    ru_finetune = model_name == self._RU_FINETUNE_MARKER
+                    if ru_finetune:
+                        _adapter_kwargs = {
+                            "attempt_timeout_sec": _adapter_timeout,
+                            "attempt_deadline_monotonic": _mlx_attempt_deadline(_adapter_timeout),
+                        }
                     with _profiler.start_span(span_name):
-                        _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                        try:
-                            _adapter_kwargs = {}
-                            if model_name == self._RU_FINETUNE_MARKER:
-                                _adapter_kwargs = {
-                                    "attempt_timeout_sec": _adapter_timeout,
-                                    "attempt_deadline_monotonic": _mlx_attempt_deadline(_adapter_timeout),
-                                }
-                            _fut = _pool.submit(adapter_fn, **_adapter_kwargs)
+                        if ru_finetune and supervised_worker:
+                            adapter_result = adapter_fn(**_adapter_kwargs, supervised_worker=True)
+                        else:
+                            _pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
                             try:
-                                adapter_result = _fut.result(timeout=_adapter_timeout)
-                            except (MLXLockTimeoutError, MLXInterLockTimeout):
-                                # Future возвращает исходную ошибку очереди. Не
-                                # подменять её общим timeout: это включит blacklist.
-                                raise
-                            except concurrent.futures.TimeoutError:
-                                _fut.cancel()
-                                raise TimeoutError(
-                                    f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
-                                )
-                        finally:
-                            _pool.shutdown(wait=False)
+                                _fut = _pool.submit(adapter_fn, **_adapter_kwargs)
+                                try:
+                                    adapter_result = _fut.result(timeout=_adapter_timeout)
+                                except (MLXLockTimeoutError, MLXInterLockTimeout):
+                                    # Сохраняем ошибку очереди для гейта blacklist.
+                                    raise
+                                except concurrent.futures.TimeoutError:
+                                    _fut.cancel()
+                                    raise TimeoutError(
+                                        f"{span_pfx} adapter таймаут {_adapter_timeout}s — GPU stall?"
+                                    )
+                            finally:
+                                _pool.shutdown(wait=False)
                     if model_name == self._GIGAAM_MARKER:
                         _gigaam_text = str(adapter_result.get("text", "")).strip()
                         _gigaam_engine = str(adapter_result.get("engine", ""))
@@ -3051,6 +3086,10 @@ class AudioEngine:
                     adapter_result["model_used"] = adapter_model
                     return adapter_result
                 except Exception as exc:
+                    if isinstance(exc, (MLXLockTimeoutError, MLXInterLockTimeout, _BudgetLimitedWhisperTimeout)):
+                        deadline_limited |= stt_budget.budget_exhausted()
+                    else:
+                        inference_failed = True
                     logger.warning("%s adapter не сработал: %s — продолжаю chain", span_pfx, exc)
                     if self._blacklist_allowed_for(exc, is_adapter=True):
                         self._unavailable_models[model_name] = time.monotonic()
@@ -3073,34 +3112,46 @@ class AudioEngine:
                 timeout = stt_budget.resolve_attempt_timeout_sec(_chain_duration_sec)
                 span_name = f"stt_model_{_short_model_name(model_name)}"
                 with _profiler.start_span(span_name):
-                    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-                    try:
-                        future = _executor.submit(
-                            self._transcribe_model,
-                            chain_audio_data,
-                            model_name,
-                            prompt,
-                            language,
-                            attempt_timeout_sec=timeout,
-                            attempt_deadline_monotonic=_mlx_attempt_deadline(timeout),
+                    attempt_deadline = _mlx_attempt_deadline(timeout)
+                    if supervised_worker:
+                        # REST уже ждёт этот поток с запасом на очистку.
+                        # Подпроцесс сам ограничивает I/O и подтверждает свой выход.
+                        result = self._transcribe_model(
+                            chain_audio_data, model_name, prompt, language,
+                            attempt_deadline_monotonic=attempt_deadline,
+                            supervised_worker=True,
                         )
-                        result = future.result(timeout=timeout)
-                    except (concurrent.futures.TimeoutError, concurrent.futures.CancelledError):
-                        _executor.shutdown(wait=False, cancel_futures=True)
-                        raise
-                    except Exception:
-                        _executor.shutdown(wait=False, cancel_futures=True)
-                        raise
                     else:
-                        _executor.shutdown(wait=False)
+                        _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+                        try:
+                            future = _executor.submit(
+                                self._transcribe_model,
+                                chain_audio_data,
+                                model_name,
+                                prompt,
+                                language,
+                                attempt_timeout_sec=timeout,
+                                attempt_deadline_monotonic=attempt_deadline,
+                            )
+                            result = future.result(timeout=timeout)
+                        except Exception:
+                            _executor.shutdown(wait=False, cancel_futures=True)
+                            raise
+                        else:
+                            _executor.shutdown(wait=False)
                 result["model_used"] = model_name
                 return result
             except (MLXLockTimeoutError, MLXInterLockTimeout) as exc:
+                deadline_limited |= stt_budget.budget_exhausted()
                 logger.warning(
                     "Очередь MLX для %s: %s — модель не помечается неисправной",
                     model_name, exc,
                 )
             except concurrent.futures.TimeoutError as exc:
+                if stt_budget.budget_exhausted():
+                    deadline_limited = True
+                else:
+                    inference_failed = True
                 # Лог обязан называть СРАБОТАВШЕЕ число, не глобальную
                 # константу — иначе следующий разбор идёт по ложному следу.
                 logger.error(
@@ -3109,7 +3160,12 @@ class AudioEngine:
                 )
                 if self._blacklist_allowed_for(exc):
                     self._unavailable_models[model_name] = time.monotonic()
+            except _BudgetLimitedWhisperTimeout:
+                # Следующий запрос получит свой бюджет и новый worker.
+                deadline_limited |= stt_budget.budget_exhausted()
+                continue
             except MLXTimeoutError as e:
+                inference_failed = True
                 # Watchdog-таймаут: Metal GPU завис.
                 # Помечаем модель недоступной → fallback на следующий адаптер.
                 logger.error(
@@ -3118,6 +3174,7 @@ class AudioEngine:
                 )
                 self._unavailable_models[model_name] = time.monotonic()
             except MemoryError:
+                inference_failed = True
                 logger.error("MemoryError при загрузке модели %s — помечаю как недоступную", model_name)
                 self._unavailable_models[model_name] = time.monotonic()
                 # Phase B.2: stt.load_fail — model failed to init due to OOM
@@ -3132,6 +3189,7 @@ class AudioEngine:
                     f"MemoryError evicted {model_name} from STT chain",
                 )
             except OSError as e:
+                inference_failed = True
                 # errno 12 = Cannot allocate memory — ядро отказало в mmap
                 if e.errno == 12 or "Cannot allocate memory" in str(e):
                     logger.error("OOM (OSError) при модели %s: %s — помечаю как недоступную", model_name, e)
@@ -3151,6 +3209,7 @@ class AudioEngine:
                     logger.warning("Модель %s не сработала (OSError): %s", model_name, e)
                     self._unavailable_models[model_name] = time.monotonic()
             except Exception as e:
+                inference_failed = True
                 logger.warning("Модель %s не сработала: %s", model_name, e)
                 self._unavailable_models[model_name] = time.monotonic()
 
@@ -3161,7 +3220,10 @@ class AudioEngine:
         # часового таймаута локального движка каскад шёл в облако без ключа и
         # выдавал «Критическая ошибка распознавания речи», подменяя настоящую
         # причину (все локальные движки не справились) сообщением про облако.
-        if settings.NETWORK_MODE != "offline_strict":
+        if explicit_rest_deadline and deadline_limited:
+            if not inference_failed:
+                raise stt_budget.STTDeadlineExceeded("Бюджет запроса STT исчерпан")
+        elif settings.NETWORK_MODE != "offline_strict":
             if self._remote_stt_retry_configured():
                 logger.info("Локальные модели недоступны, переключаюсь на Remote STT...")
                 with _profiler.start_span("stt_remote"):
@@ -3210,6 +3272,8 @@ class AudioEngine:
         language: str | None = None,
         attempt_timeout_sec: float | None = None,
         attempt_deadline_monotonic: float | None = None,
+        *,
+        supervised_worker: bool = False,
     ) -> dict[str, Any]:
         """Низкоуровневый вызов MLX Whisper с обработкой несовместимых аргументов.
 
@@ -3222,6 +3286,8 @@ class AudioEngine:
         Python-поток: watchdog ждёт bounded join перед MLXTimeoutError.
         Абсолютный срок ограничивает ожидание и допуск обеих ветвей инференса;
         уже начавшийся Metal этот срок принудительно не останавливает.
+        supervised_worker=True оставляет только subprocess и использует
+        уже выделенный снаружи REST запас между работой и ответом.
         """
         effective_language = (
             None
@@ -3280,13 +3346,15 @@ class AudioEngine:
             transcribe_via_mlx_worker,
         )
 
-        if mlx_whisper_worker_enabled():
+        if supervised_worker or mlx_whisper_worker_enabled():
             # P0c: Metal только в child. Родитель держит flock (если флаг ON).
             # Child flock не берёт — иначе deadlock: родитель ждёт JSON, child ждёт flock.
             with mlx_inter_process_lock(timeout_sec=min(5.0, remaining_attempt_sec())):
                 for params in variants:
-                    timeout_sec = _fit_worker_timeout(
-                        configured_timeout_sec, remaining_attempt_sec()
+                    remaining = remaining_attempt_sec()
+                    timeout_sec = (
+                        min(configured_timeout_sec, remaining) if supervised_worker
+                        else _fit_worker_timeout(configured_timeout_sec, remaining)
                     )
                     try:
                         return transcribe_via_mlx_worker(
@@ -3302,6 +3370,16 @@ class AudioEngine:
                             raise last_inference_error
                         raise
                     except MLXTimeoutError as e:
+                        if timeout_sec < configured_timeout_sec:
+                            if last_inference_error is not None:
+                                raise last_inference_error from e
+                            logger.warning(
+                                "Whisper worker исчерпал бюджет попытки %.1fs (model=%s)",
+                                e.timeout_sec, model_name,
+                            )
+                            raise _BudgetLimitedWhisperTimeout(
+                                e.timeout_sec, model_name,
+                            ) from e
                         logger.error(
                             "MLX worker timeout %.1fs (model=%s) — fallback",
                             e.timeout_sec, model_name,
@@ -3665,15 +3743,15 @@ class AudioEngine:
             device = settings.WHISPERX_DEVICE
             # MPS доступен только на macOS с Apple Silicon (torch >= 1.12).
             # Если запрошен mps но недоступен — безопасный fallback на cpu.
-            if device == "mps" and torch is not None:
+            torch_module = _load_torch()
+            if device == "mps" and torch_module is not None:
                 try:
-                    import torch as _torch
-                    if not _torch.backends.mps.is_available():
+                    if not torch_module.backends.mps.is_available():
                         logger.warning("WhisperX: MPS недоступен, переключаюсь на cpu")
                         device = "cpu"
                 except Exception:
                     device = "cpu"
-            elif torch is None:
+            elif torch_module is None:
                 device = "cpu"
 
             # compute_type: на cpu/mps рекомендуется "float32" или "int8".
@@ -3693,12 +3771,15 @@ class AudioEngine:
             logger.info("WhisperX модель загружена: %s (device=%s)", settings.WHISPERX_MODEL, device)
             return self._whisperx_model
 
-    def _transcribe_whisperx(self, audio_data: Any, language: str | None = None) -> dict[str, Any]:
+    def _transcribe_whisperx(
+        self, audio_data: Any, language: str | None = None, *, diarize: bool = True,
+    ) -> dict[str, Any]:
         """Транскрибация через WhisperX с word-level timestamps и diarization.
 
         Args:
             audio_data: путь к wav-файлу (str/Path) или numpy.ndarray (16kHz mono float32).
             language: ISO 639-1 код языка ("ru", "es", "en") или None для авто.
+            diarize: разрешает запуск встроенной разметки спикеров.
 
         Returns:
             dict с ключами:
@@ -3769,7 +3850,7 @@ class AudioEngine:
 
         # --- Diarization через pyannote внутри whisperx ---
         speaker_turns = None
-        if settings.WHISPERX_DIARIZATION and settings.HF_TOKEN:
+        if diarize and settings.WHISPERX_DIARIZATION and settings.HF_TOKEN:
             try:
                 diarize_model = _whisperx.DiarizationPipeline(
                     use_auth_token=settings.HF_TOKEN,
@@ -3817,7 +3898,7 @@ class AudioEngine:
                     f"WhisperX diarization failed: {type(exc).__name__}: {exc}",
                     severity="info",
                 )
-        elif settings.WHISPERX_DIARIZATION and not settings.HF_TOKEN:
+        elif diarize and settings.WHISPERX_DIARIZATION and not settings.HF_TOKEN:
             logger.warning(
                 "WhisperX: WHISPERX_DIARIZATION=True, но HF_TOKEN не задан — "
                 "diarization пропущена. Задайте KRAB_EAR_HF_TOKEN=<ваш_токен>."
@@ -4369,13 +4450,14 @@ class AudioEngine:
                         annotation = pipeline(pipeline_input)
                     finally:
                         gc.collect()
+                        torch_module = _load_torch()
                         if (
-                            torch is not None
-                            and hasattr(torch, "mps")
-                            and torch.backends.mps.is_available()
+                            torch_module is not None
+                            and hasattr(torch_module, "mps")
+                            and torch_module.backends.mps.is_available()
                         ):
                             try:
-                                torch.mps.empty_cache()
+                                torch_module.mps.empty_cache()
                             except Exception:
                                 pass
                 if hasattr(annotation, "speaker_diarization"):
@@ -4482,6 +4564,12 @@ class AudioEngine:
             if self._diarization_load_error:
                 raise RuntimeError(self._diarization_load_error)
 
+            try:
+                pipeline_class = _pyannote_pipeline_class()
+            except Exception as exc:
+                self._diarization_load_error = f"Не удалось импортировать pyannote: {exc}"
+                raise RuntimeError(self._diarization_load_error) from exc
+
             hf_token = os.environ.get("HF_TOKEN") or settings.HF_TOKEN or None
 
             # Используем ленивую инициализацию, чтобы не тянуть модель в realtime-пути.
@@ -4498,7 +4586,7 @@ class AudioEngine:
                 with _profiler.start_span(f"model_load_{_short_model_name(model_name)}"):
                     try:
                         kwargs = {"token": hf_token} if hf_token else {}
-                        pipeline = Pipeline.from_pretrained(model_name, **kwargs)
+                        pipeline = pipeline_class.from_pretrained(model_name, **kwargs)
                     except Exception as e:
                         # Пер-кандидатная семантика: провал одного кандидата не
                         # блокирует следующих; латч ставится после провала ВСЕХ.
@@ -4532,11 +4620,14 @@ class AudioEngine:
         больше не вызывает Metal GPU assertion failure.
         Протестировано 2026-04-11 — 0.2s на 5 сек аудио, без crash.
         """
-        if torch.backends.mps.is_available():
-            return torch.device("mps")
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-        return torch.device("cpu")
+        torch_module = _load_torch()
+        if torch_module is None:
+            raise RuntimeError("PyTorch недоступен")
+        if torch_module.backends.mps.is_available():
+            return torch_module.device("mps")
+        if torch_module.cuda.is_available():
+            return torch_module.device("cuda")
+        return torch_module.device("cpu")
 
     def _run_diarization(self, audio_path: str) -> list[dict[str, Any]]:
         """Запускает pyannote diarization и нормализует результат в словари."""
@@ -4559,13 +4650,14 @@ class AudioEngine:
                     # следующий pyannote-вызов не должен стартовать посреди
                     # освобождения общих Metal-ресурсов.
                     gc.collect()
+                    torch_module = _load_torch()
                     if (
-                        torch is not None
-                        and hasattr(torch, "mps")
-                        and torch.backends.mps.is_available()
+                        torch_module is not None
+                        and hasattr(torch_module, "mps")
+                        and torch_module.backends.mps.is_available()
                     ):
                         try:
-                            torch.mps.empty_cache()
+                            torch_module.mps.empty_cache()
                         except Exception:
                             pass
         except Exception:
@@ -4607,13 +4699,14 @@ class AudioEngine:
             finally:
                 # Паттерн утечки MPS — как в _run_diarization_impl.
                 gc.collect()
+                torch_module = _load_torch()
                 if (
-                    torch is not None
-                    and hasattr(torch, "mps")
-                    and torch.backends.mps.is_available()
+                    torch_module is not None
+                    and hasattr(torch_module, "mps")
+                    and torch_module.backends.mps.is_available()
                 ):
                     try:
-                        torch.mps.empty_cache()
+                        torch_module.mps.empty_cache()
                     except Exception:
                         pass
         diarization = getattr(out, "speaker_diarization", out)
@@ -4644,7 +4737,8 @@ class AudioEngine:
         диаризация молча отключалась. Словарь с waveform обходит torchcodec.
         При любом сбое чтения возвращается прежний путь (старое поведение).
         """
-        if torch is None:
+        torch_module = _load_torch()
+        if torch_module is None:
             return audio_path
         try:
             import soundfile as _sf
@@ -4652,7 +4746,7 @@ class AudioEngine:
             data, sample_rate = _sf.read(str(audio_path), dtype="float32", always_2d=True)
             mono = np.ascontiguousarray(data.mean(axis=1, dtype=np.float32))
             return {
-                "waveform": torch.from_numpy(mono)[None, :],
+                "waveform": torch_module.from_numpy(mono)[None, :],
                 "sample_rate": int(sample_rate),
                 "uri": Path(audio_path).stem,
             }

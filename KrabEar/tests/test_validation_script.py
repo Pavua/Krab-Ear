@@ -25,6 +25,7 @@ import sys
 import tracemalloc
 import types
 import unittest
+from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +180,6 @@ class TestEnvVarBypassDisablesFix(unittest.TestCase):
     def tearDown(self) -> None:
         tracemalloc.stop()
         sys.modules.pop("gigaam_worker", None)
-        os.environ.pop("KRAB_EAR_DISABLE_MPS_POOL_FREE", None)
 
     def test_env_var_bypass_disables_fix(self) -> None:
         """When KRAB_EAR_DISABLE_MPS_POOL_FREE=1, torch.mps.empty_cache must NOT be called."""
@@ -189,14 +189,11 @@ class TestEnvVarBypassDisablesFix(unittest.TestCase):
 
         fake_mps = types.SimpleNamespace(empty_cache=lambda: empty_cache_calls.append(1))
         fake_torch = types.SimpleNamespace(mps=fake_mps)
-        sys.modules["torch"] = fake_torch  # type: ignore[assignment]
-
-        os.environ["KRAB_EAR_DISABLE_MPS_POOL_FREE"] = "1"
-        try:
+        with (
+            patch.dict(sys.modules, {"torch": fake_torch}),
+            patch.dict(os.environ, {"KRAB_EAR_DISABLE_MPS_POOL_FREE": "1"}),
+        ):
             mod._free_mps_pool()
-        finally:
-            sys.modules.pop("torch", None)
-            os.environ.pop("KRAB_EAR_DISABLE_MPS_POOL_FREE", None)
 
         self.assertEqual(
             len(empty_cache_calls),
@@ -210,19 +207,15 @@ class TestEnvVarBypassDisablesFix(unittest.TestCase):
 
         gc_collect_calls: list[int] = []
 
-        original_gc_collect = mod.gc.collect
-
         def _mock_collect(*args: object, **kwargs: object) -> int:
             gc_collect_calls.append(1)
             return 0
 
-        mod.gc.collect = _mock_collect  # type: ignore[assignment]
-        os.environ["KRAB_EAR_DISABLE_MPS_POOL_FREE"] = "1"
-        try:
+        with (
+            patch.object(mod.gc, "collect", _mock_collect),
+            patch.dict(os.environ, {"KRAB_EAR_DISABLE_MPS_POOL_FREE": "1"}),
+        ):
             mod._free_mps_pool()
-        finally:
-            mod.gc.collect = original_gc_collect
-            os.environ.pop("KRAB_EAR_DISABLE_MPS_POOL_FREE", None)
 
         self.assertEqual(
             len(gc_collect_calls),
@@ -237,14 +230,9 @@ class TestEnvVarBypassDisablesFix(unittest.TestCase):
         empty_cache_calls: list[int] = []
         fake_mps = types.SimpleNamespace(empty_cache=lambda: empty_cache_calls.append(1))
         fake_torch = types.SimpleNamespace(mps=fake_mps)
-        sys.modules["torch"] = fake_torch  # type: ignore[assignment]
-
-        # Ensure env var is NOT set
-        os.environ.pop("KRAB_EAR_DISABLE_MPS_POOL_FREE", None)
-        try:
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.dict(os.environ):
+            os.environ.pop("KRAB_EAR_DISABLE_MPS_POOL_FREE", None)
             mod._free_mps_pool()
-        finally:
-            sys.modules.pop("torch", None)
 
         self.assertEqual(
             len(empty_cache_calls),
@@ -259,14 +247,11 @@ class TestEnvVarBypassDisablesFix(unittest.TestCase):
         empty_cache_calls: list[int] = []
         fake_mps = types.SimpleNamespace(empty_cache=lambda: empty_cache_calls.append(1))
         fake_torch = types.SimpleNamespace(mps=fake_mps)
-        sys.modules["torch"] = fake_torch  # type: ignore[assignment]
-
-        os.environ["KRAB_EAR_DISABLE_MPS_POOL_FREE"] = "0"
-        try:
+        with (
+            patch.dict(sys.modules, {"torch": fake_torch}),
+            patch.dict(os.environ, {"KRAB_EAR_DISABLE_MPS_POOL_FREE": "0"}),
+        ):
             mod._free_mps_pool()
-        finally:
-            sys.modules.pop("torch", None)
-            os.environ.pop("KRAB_EAR_DISABLE_MPS_POOL_FREE", None)
 
         self.assertEqual(
             len(empty_cache_calls),
@@ -277,11 +262,8 @@ class TestEnvVarBypassDisablesFix(unittest.TestCase):
     def test_bypass_no_raise(self) -> None:
         """Bypassed _free_mps_pool() must not raise under any condition."""
         mod = _reload_worker({"KRAB_EAR_DISABLE_MPS_POOL_FREE": None})
-        os.environ["KRAB_EAR_DISABLE_MPS_POOL_FREE"] = "1"
-        try:
+        with patch.dict(os.environ, {"KRAB_EAR_DISABLE_MPS_POOL_FREE": "1"}):
             mod._free_mps_pool()  # must complete without exception
-        finally:
-            os.environ.pop("KRAB_EAR_DISABLE_MPS_POOL_FREE", None)
 
 
 if __name__ == "__main__":

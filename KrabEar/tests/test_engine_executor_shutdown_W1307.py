@@ -247,6 +247,7 @@ class ExecutorNormalCompletionUnaffectedTest(unittest.TestCase):
         """Drive _transcribe_with_fallback_impl with a successful balanced model."""
         engine = _make_engine()
         engine.quality_profile = "balanced"
+        engine.current_model = "balanced-model"
 
         expected = _stt_result(0.90, model="balanced-model")
         mock_executor_cls, mock_executor = _make_success_executor_mock(expected)
@@ -272,25 +273,16 @@ class ExecutorNormalCompletionUnaffectedTest(unittest.TestCase):
             mock_cfg.VOXTRAL_ENABLED = False
             mock_cfg.TRANSCRIBE_LANGUAGE = "ru"
 
-            try:
-                result = engine._transcribe_with_fallback_impl(b"\x00" * 320, "prompt", "ru")
-            except Exception:
-                result = None
+            result = engine._transcribe_with_fallback_impl(b"\x00" * 320, "prompt", "ru")
 
         return mock_executor, result
 
     def test_fallback_impl_no_cancel_futures_on_success(self):
         """_transcribe_with_fallback_impl: no cancel_futures=True on success."""
-        mock_executor, _ = self._run_fallback_impl_success()
-        if mock_executor.shutdown.called:
-            cancel_calls = [
-                c for c in mock_executor.shutdown.call_args_list
-                if c.kwargs.get("cancel_futures") is True
-            ]
-            self.assertEqual(
-                len(cancel_calls), 0,
-                f"Unexpected cancel_futures=True on success: {cancel_calls}",
-            )
+        mock_executor, result = self._run_fallback_impl_success()
+        self.assertEqual(result["text"], "hello")
+        self.assertEqual(result["model_used"], "balanced-model")
+        mock_executor.shutdown.assert_called_once_with(wait=False)
 
 
 # ---------------------------------------------------------------------------

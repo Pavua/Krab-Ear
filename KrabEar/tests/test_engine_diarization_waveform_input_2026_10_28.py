@@ -85,7 +85,7 @@ class DiarizationPipelineInputTests(unittest.TestCase):
 
     def test_without_torch_falls_back_to_path(self):
         from core.engine import AudioEngine
-        with patch("core.engine.torch", None):
+        with patch("core.engine._load_torch", return_value=None):
             self.assertEqual(AudioEngine._diarization_pipeline_input("/tmp/a.wav"), "/tmp/a.wav")
 
     @_needs_audio_stack
