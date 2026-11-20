@@ -30,6 +30,8 @@ def _load_timeout_functions(*, backend_owner=False, static_setting=False):
         "_flush_logs_before_exit": Mock(),
         "_TRANSCRIBE_TIMEOUT_EXIT_CODE": 70,
         "_STT_RECYCLE_PENDING": threading.Event(),
+        "_CALL_IPC_DRAIN_MAX_SEC": 30.0,
+        "_wait_call_ipc_drain": Mock(return_value=True),
         "Response": object,
         "_Any": object,
     }
@@ -63,12 +65,15 @@ class RestTimeoutProcessOwnerTests(unittest.TestCase):
         kill = self._exercise(namespace)
         fake_os._exit.assert_not_called()
         kill.assert_not_called()
+        namespace["_wait_call_ipc_drain"].assert_not_called()
 
     def test_standalone_path_retains_fail_fast(self):
         namespace, fake_os = _load_timeout_functions()
         kill = self._exercise(namespace)
         kill.assert_called_once_with()
         namespace["_flush_logs_before_exit"].assert_called_once_with()
+        # Выход ждёт ходы звонка в полёте (RU IPC), и только затем убивает процесс.
+        namespace["_wait_call_ipc_drain"].assert_called_once_with(30.0)
         fake_os._exit.assert_called_once_with(70)
 
     def test_static_true_still_blocks_exit(self):
