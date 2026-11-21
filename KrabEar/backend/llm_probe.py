@@ -26,6 +26,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timezone
@@ -34,6 +35,10 @@ from typing import Callable
 from backend.error_bus import KrabError
 
 logger = logging.getLogger("KrabEar.Backend.LLMHttpProbe")
+
+# Границы интервала зонда — совпадают с settings_validator._RANGE_FIELDS["llm_probe_interval_sec"].
+_MIN_PROBE_INTERVAL_SEC = 1.0
+_MAX_PROBE_INTERVAL_SEC = 300.0
 
 
 class LLMHttpProbe:
@@ -153,8 +158,12 @@ class LLMHttpProbe:
         """
         try:
             val = self._settings_provider().get("llm_probe_interval_sec")
-            if val and float(val) > 0:
-                return float(val)
+            if val:
+                interval = float(val)
+                # KE05A-15: inf/NaN → Event.wait падает или интервал не ограничен;
+                # 1e-9 → probe flood. Границы те же, что в settings_validator.
+                if math.isfinite(interval) and interval > 0:
+                    return min(max(interval, _MIN_PROBE_INTERVAL_SEC), _MAX_PROBE_INTERVAL_SEC)
         except Exception:
             pass
         return self._current_interval_sec

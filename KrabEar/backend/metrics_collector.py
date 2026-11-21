@@ -16,6 +16,14 @@ import numpy as np
 logger = logging.getLogger("KrabEar.Backend.Metrics")
 
 
+def _is_finite_number(value) -> bool:
+    """``math.isfinite`` без исключений: огромный int бросает OverflowError (KE05C-21)."""
+    try:
+        return math.isfinite(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
 class MetricsCollector:
     """Потокобезопасный сборщик метрик со скользящим окном."""
 
@@ -41,9 +49,7 @@ class MetricsCollector:
         Не-конечные значения (NaN, Inf) молча отбрасываются, чтобы не
         испортить numpy-квантили и json.dumps результата get_summary().
         """
-        if not is_error and (
-            not math.isfinite(latency_ms) or not math.isfinite(confidence)
-        ):
+        if not is_error and not (_is_finite_number(latency_ms) and _is_finite_number(confidence)):
             logger.debug(
                 "metrics_collector: dropped non-finite sample",
                 extra={"latency_ms": latency_ms, "confidence": confidence},

@@ -923,7 +923,7 @@ class LiveSubsService:
         """
         try:
             sr = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # int(float("inf")) → OverflowError (KE05A-19)
             logger.warning(
                 "LiveSubsService: нечисловой sample_rate — дефолт 16000",
                 extra={"raw_sample_rate": repr(raw)},

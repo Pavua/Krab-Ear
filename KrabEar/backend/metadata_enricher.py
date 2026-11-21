@@ -104,7 +104,7 @@ def _coerce_finite_float(v: Any, default: float = 0.0) -> float:
     """
     try:
         parsed = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # float(10**500) → OverflowError (KE05C-24)
         return default
     return _safe_float(parsed, default)
 
