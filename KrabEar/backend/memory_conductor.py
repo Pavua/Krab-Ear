@@ -128,6 +128,7 @@ class MemoryConductor:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._workers: list[threading.Thread] = []
+        self._sequence_inflight = False
         self._pressure_streak = 0
         self._cooldown_until: dict[str, float] = {}
         self._counters = {r: {"attempted": 0, "succeeded": 0, "skipped_gate": 0,
@@ -435,13 +436,7 @@ class MemoryConductor:
             c["failed"] += 1
             logger.exception("%s unload call failed", resident)
             return
-        deadline = time.monotonic() + self._verify_timeout
-        outcome: Optional[bool] = True
-        while time.monotonic() < deadline:
-            outcome = self.model_loaded_fn(base, model_id, api_key=self._llm_api_key())
-            if outcome is not True:
-                break
-            time.sleep(self._verify_poll)
+        outcome = self._verify_unloaded(base, model_id)
         if outcome is False:
             c["succeeded"] += 1
             self._cooldown_until[resident] = (
@@ -456,6 +451,26 @@ class MemoryConductor:
             self._note("evict %s: still loaded after %.0fs" % (resident, self._verify_timeout))
         if resident == "brain":
             self._update_brain_state(outcome)
+
+    def _verify_unloaded(self, base: str, model_id: str) -> Optional[bool]:
+        """Опрашивает «модель ещё загружена?» до таймаута. Три исхода C-EFFECT-CHECK:
+        False — выгружена (подтверждено), True — всё ещё загружена, None — неизвестно.
+
+        Исключение провайдера = None (KE05C-22): иначе оно уходило наружу, а попытка
+        учитывалась без исхода.
+        """
+        deadline = time.monotonic() + self._verify_timeout
+        outcome: Optional[bool] = True
+        while time.monotonic() < deadline:
+            try:
+                outcome = self.model_loaded_fn(base, model_id, api_key=self._llm_api_key())
+            except Exception:
+                logger.warning("verify model_loaded_fn failed — outcome unknown", exc_info=True)
+                return None
+            if outcome is not True:
+                break
+            time.sleep(self._verify_poll)
+        return outcome
 
     def _distinct_llm_instances(self, resident: str, base: str, first: str, second: str) -> bool:
         """Fail-closed stopgap: общий/неизвестный instance нельзя выселять.
@@ -549,10 +564,25 @@ class MemoryConductor:
         🔴 Ровно ОДИН воркер-поток: два конкурентных fire-and-forget давали бы
         транзиентный пик (+5 ГБ поверх невыгруженных 19) в момент старта Whisper.
         """
+        # KE05C-09: «ровно один воркер» — повторный старт, пока секвенс идёт, пропускается.
+        with self._lock:
+            if self._sequence_inflight:
+                self._note("recording sequence already running — duplicate start skipped")
+                return
+            self._sequence_inflight = True
         try:
-            self._spawn(self._recording_sequence_worker)
+            self._spawn(self._recording_sequence_guarded)
         except Exception:
+            with self._lock:
+                self._sequence_inflight = False
             logger.exception("on_recording_start failed")
+
+    def _recording_sequence_guarded(self) -> None:
+        try:
+            self._recording_sequence_worker()
+        finally:
+            with self._lock:
+                self._sequence_inflight = False
 
     def _recording_sequence_worker(self) -> None:
         if not self.enforce_for("recording_sequence"):
@@ -570,18 +600,17 @@ class MemoryConductor:
             except Exception:
                 logger.exception("sequence: brain unload failed")
                 return
-            deadline = time.monotonic() + self._verify_timeout
-            outcome: Optional[bool] = True
-            while time.monotonic() < deadline:
-                outcome = self.model_loaded_fn(base, brain, api_key=self._llm_api_key())
-                if outcome is not True:
-                    break
-                time.sleep(self._verify_poll)
+            outcome = self._verify_unloaded(base, brain)
             # LOW финального гейта: та же витрина, тот же verify-исход — этот
             # секвенс тоже authoritative-проверяет brain, _publish не смеет
             # его игнорировать (иначе после enforce'd recording-sequence
             # состояние осталось бы "unknown" даже после реального verify).
             self._update_brain_state(outcome)
+            if outcome is not False:
+                # KE05C-08: brain не подтверждённо выгружен (ещё загружен / неизвестно) —
+                # грузить rewriter значит получить пик RAM/VRAM поверх невыгруженных ~19 ГБ.
+                self._note("recording sequence: brain unload not verified — rewriter load skipped")
+                return
         if rewriter:
             try:
                 self.load_model_fn(base, rewriter, api_key=self._llm_api_key())
