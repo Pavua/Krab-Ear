@@ -77,7 +77,14 @@ def _yaml_scalar(value: str) -> str:
     strings that appear in transcript frontmatter.
     """
     _NEEDS_QUOTE = re.compile(r'[:{}\[\]#&*!|>\'"\n\r,]|^\s|\s$|^[-?]')
-    if _NEEDS_QUOTE.search(value) or not value:
+    # KE05D-22: значения, которые YAML читает НЕ как строку (bool/null/число/дата), тоже в кавычки:
+    # «no» — код норвежского языка, «2026» — числовой тег, «null» — тег. Любое значение, начинающееся
+    # с цифры/знака/точки+цифры, считаем потенциально числом или датой.
+    _NON_STRING = re.compile(
+        r'^(?:true|false|yes|no|on|off|y|n|null|~|nan|inf)$|^[-+.]?\d|^\.(?:inf|nan)$',
+        re.IGNORECASE,
+    )
+    if _NEEDS_QUOTE.search(value) or _NON_STRING.search(value) or not value:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
         return f'"{escaped}"'
     return value
