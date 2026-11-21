@@ -419,7 +419,7 @@ class ObsidianSyncManager:
         # mkdir входит в fresh-authorized запись первого файла.
 
         if self._event_bus is not None:
-            self._event_bus.emit("app.status", {
+            self._emit_status({
                 "op": "obsidian_sync",
                 "stage": "started",
                 "total_files": len(items),
@@ -438,7 +438,7 @@ class ObsidianSyncManager:
                     if _ts_le(item_ts, last_sync_ts):
                         result.skipped_count += 1
                         if self._event_bus is not None:
-                            self._event_bus.emit("app.status", {
+                            self._emit_status({
                                 "op": "obsidian_sync",
                                 "stage": "syncing",
                                 "file_index": i + 1,
@@ -480,7 +480,7 @@ class ObsidianSyncManager:
                 result.errors.append(f"{item_repr}: {exc}")
 
             if self._event_bus is not None:
-                self._event_bus.emit("app.status", {
+                self._emit_status({
                     "op": "obsidian_sync",
                     "stage": "syncing",
                     "file_index": i + 1,
@@ -496,10 +496,13 @@ class ObsidianSyncManager:
         if not result.errors and not truncated:
             with self._lock:
                 self._last_sync_ts = now_ts
-                self._save_state()
+                state_saved = self._save_state()
+            if not state_saved:
+                # Файлы записаны, но водяной знак не сохранён: следующий запуск пересинхронизирует.
+                result.errors.append("state_save_failed")
 
         if self._event_bus is not None:
-            self._event_bus.emit("app.status", {
+            self._emit_status({
                 "op": "idle",
                 "stage": "",
                 "progress": 1.0,
@@ -780,8 +783,8 @@ class ObsidianSyncManager:
         history_service.py) оборачивает вызов в try/except и записывает
         "obsidian" в secondary_errors — таким образом частичный сбой
         не остаётся незамеченным, а PII-файлы не теряются молча.
-        Failure путь-traversal (ValueError из _validate_and_resolve_folder)
-        по-прежнему не бросает — это безопасный no-op.
+        Небезопасный folder (ValueError из _validate_and_resolve_folder): вне vault
+        ничего не удаляется, но бросается OSError — очистка не подтверждена (KE05D-05).
         """
         with self._lock:
             vault_path = self._vault_path
@@ -815,7 +818,9 @@ class ObsidianSyncManager:
                 folder,
                 exc,
             )
-            return 0
+            # KE05D-05: удалять нечего и вне vault не трогаем, но «0 удалено» выглядело бы
+            # успешной очисткой. Неподтверждённый wipe виден вызывающему (secondary_errors).
+            raise OSError("obsidian purge: unsafe sync folder, cleanup unverified") from exc
 
         deleted = 0
         failed_paths: list[str] = []
@@ -943,10 +948,23 @@ class ObsidianSyncManager:
         except Exception as exc:
             logger.warning("Не удалось загрузить состояние ObsidianSync: %s", exc)
 
-    def _save_state(self) -> None:
-        """Сохранить состояние в JSON-файл. Вызывать под self._lock."""
-        if self._state_path is None:
+    def _emit_status(self, payload: dict) -> None:
+        """Статус-событие для UI. Сбой шины не должен обрывать синхронизацию (KE05D-18)."""
+        bus = self._event_bus
+        if bus is None:
             return
+        try:
+            bus.emit("app.status", payload)
+        except Exception:
+            logger.debug("ObsidianSync: статус-событие не доставлено", exc_info=True)
+
+    def _save_state(self) -> bool:
+        """Сохранить состояние в JSON-файл. Вызывать под self._lock.
+
+        True — сохранено (или хранить негде); False — запись не удалась (KE05D-14).
+        """
+        if self._state_path is None:
+            return True
         if self._data_dir is not None:
             self._data_dir.mkdir(parents=True, exist_ok=True)
         state: dict[str, Any] = {
@@ -958,5 +976,7 @@ class ObsidianSyncManager:
             tmp = self._state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self._state_path)
+            return True
         except Exception as exc:
             logger.error("Не удалось сохранить состояние ObsidianSync: %s", exc)
+            return False
