@@ -29,6 +29,8 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from backend.strict_bool import parse_bool
+
 logger = logging.getLogger("KrabEar.Backend.MemoryConductor")
 
 _OWN_LEASE_OWNER = "krab_ear"
@@ -170,6 +172,9 @@ class MemoryConductor:
 
     def _get(self, key: str, default):
         val = self._settings().get(key, default)
+        if isinstance(default, bool):
+            # KE05C-26: bool("false") is True — строки разбираем строго.
+            return parse_bool(val, default)
         try:
             return type(default)(val)
         except (TypeError, ValueError):
@@ -177,8 +182,8 @@ class MemoryConductor:
 
     def enforce_for(self, resident: str) -> bool:
         s = self._settings()
-        return bool(s.get("memory_conductor_enforce", False)) or bool(
-            s.get(f"memory_conductor_enforce_{resident}", False)
+        return parse_bool(s.get("memory_conductor_enforce", False), False) or parse_bool(
+            s.get(f"memory_conductor_enforce_{resident}", False), False
         )
 
     # -- жизненный цикл ------------------------------------------------------
