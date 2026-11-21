@@ -1070,6 +1070,8 @@ class LLMRewriter:
             data = response.json()
             message = data["choices"][0]["message"]
             content = message.get("content") if isinstance(message, dict) else message["content"]
+            if content is not None and not isinstance(content, str):
+                raise TypeError(f"content is {type(content).__name__}, not str")  # KE05B-14
             # 6a. tool_calls_emitted guard — gemma-4 / tool-capable models leak tool_calls
             if not content and isinstance(message, dict) and message.get("tool_calls"):
                 self._circuit.record_failure()
@@ -1268,6 +1270,8 @@ class LLMRewriter:
         try:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
+            if content is not None and not isinstance(content, str):
+                raise TypeError(f"content is {type(content).__name__}, not str")  # KE05B-14
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             self._circuit.record_failure()
             logger.debug("fix_punctuation_only: parse error: %s", exc)
@@ -1288,13 +1292,14 @@ class LLMRewriter:
             )
             return None
 
-        # Word-set guard: exact vocabulary must match (case-insensitive, strip punct)
+        # Word guard: слова и их ПОРЯДОК должны совпасть (без учёта регистра и пунктуации по
+        # краям). Сравнение множеств пропускало перестановку и подмену повторов (KE05B-11).
         _punct_chars = ".,!?;:-—"
-        input_set = {w.lower().strip(_punct_chars) for w in input_words}
-        result_set = {w.lower().strip(_punct_chars) for w in result_words}
-        if input_set != result_set:
+        input_norm = [w.lower().strip(_punct_chars) for w in input_words]
+        result_norm = [w.lower().strip(_punct_chars) for w in result_words]
+        if input_norm != result_norm:
             logger.warning(
-                "fix_punctuation_only: word set mismatch, LLM changed words, rejecting"
+                "fix_punctuation_only: words changed or reordered by LLM, rejecting"
             )
             return None
 
@@ -1417,6 +1422,8 @@ class LLMRewriter:
         try:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
+            if content is not None and not isinstance(content, str):
+                raise TypeError(f"content is {type(content).__name__}, not str")  # KE05B-14
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             self._circuit.record_failure()
             self._last_error = f"parse_error: {exc}"
