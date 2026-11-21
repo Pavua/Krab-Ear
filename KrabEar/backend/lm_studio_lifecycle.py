@@ -71,10 +71,21 @@ class _SchemeCheckingRedirectHandler(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urlparse(newurl).scheme.lower() not in _ALLOWED_SCHEMES:
+        target = urlparse(newurl)
+        if target.scheme.lower() not in _ALLOWED_SCHEMES:
             raise urllib.error.HTTPError(
                 newurl, code,
                 f"redirect to disallowed scheme blocked: {newurl!r}",
+                headers, fp,
+            )
+        # KE05B-02: urllib переносит ВСЕ заголовки (включая Authorization: Bearer)
+        # на новый адрес. Редирект на другой хост/порт — отказ; LM Studio в норме
+        # не редиректит, так что легитимный сценарий не страдает.
+        origin = urlparse(req.full_url)
+        if (target.scheme.lower(), target.netloc.lower()) != (origin.scheme.lower(), origin.netloc.lower()):
+            raise urllib.error.HTTPError(
+                newurl, code,
+                "cross-origin redirect blocked",
                 headers, fp,
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)

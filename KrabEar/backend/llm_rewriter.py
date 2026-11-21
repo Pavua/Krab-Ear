@@ -72,6 +72,21 @@ def _validate_llm_url(url: str) -> str:
     return url
 
 
+class _NoRedirectSession(requests.Session):
+    """requests.Session, который никогда не следует за 3xx.
+
+    ``requests`` повторяет POST вместе с телом на 307/308, так что один забытый
+    ``allow_redirects=False`` отправляет транскрипт на любой адрес из
+    ``Location`` (KE05B-01). Запрет вынесен в сессию, а не в каждый вызов:
+    новый ``post``/``get`` не может случайно вернуть редиректы. Ответ 3xx
+    остаётся обычным не-200 и обрабатывается как HTTP-ошибка.
+    """
+
+    def request(self, method, url, **kwargs):  # type: ignore[override]
+        kwargs["allow_redirects"] = False
+        return super().request(method, url, **kwargs)
+
+
 class CircuitState(Enum):
     CLOSED = "closed"
     OPEN = "open"
@@ -351,7 +366,7 @@ class LLMRewriter:
         self._last_latency_ms: Optional[int] = None
         self._last_error: str | None = None
         # Connection pooling: переиспользуем TCP соединение между запросами
-        self._session = requests.Session()
+        self._session = _NoRedirectSession()
         # Serialise ALL POST /v1/chat/completions calls — LM Studio JIT-loads the model
         # on the first concurrent request and cannot handle parallel POSTs during cold load
         # (returns "Unexpected endpoint or method. Returning 200 anyway" + Channel Errors).
