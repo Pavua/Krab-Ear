@@ -44,6 +44,7 @@ _ITEMS_MIN_GROWTH = 200    # симв.: минимальный прирост т
 # (allow_request/record_failure, экспоненциальный откат до 600с) — здесь
 # лечится не он, а потеря обновлений.
 _ITEMS_WINDOW_CHARS = 12000
+_ITEMS_CONTEXT_CHARS = 1000  # контекст слева при проходе по приросту, не влезающему в окно
 _LEASE_RENEW_SEC = 15.0    # период продления brain-lease
 _LEASE_TTL_SEC = 45.0      # TTL lease (перекрывает период продления с запасом)
 _WORKER_WAIT_SEC = 0.5     # шаг ожидания воркера
@@ -1283,6 +1284,11 @@ class MeetingSessionService:
         bump_stt_activity()
         payload = self._transcriber.transcribe_preview(
             audio_data=audio, quality_profile="balanced")
+        # KE05C-10: превью при занятом GPU/сбое отвечает пустым текстом с маркером пропуска.
+        # Это НЕ тишина: курсор остаётся, и следующий тик заново снимет тот же диапазон
+        # (иначе кусок встречи терялся бы навсегда).
+        if isinstance(payload, dict) and (payload.get("skipped") or payload.get("error")):
+            return
         text = payload.get("text") if isinstance(payload, dict) else str(payload or "")
         text = (text or "").strip()
         # Распознавание длится секунды: приватность могли включить за это время. Текст,
@@ -1318,7 +1324,18 @@ class MeetingSessionService:
         # В модель уходит ХВОСТ, а не вся встреча: полный транскрипт растёт
         # неограниченно и однажды перестаёт помещаться в контекст. Ранее
         # названные пункты не теряются — они накапливаются ниже (_merge_*).
-        window_text = full_text[-_ITEMS_WINDOW_CHARS:]
+        # KE05C-07: если прирост не влезает в окно, идём по необработанной части вперёд
+        # окнами (с небольшим контекстом слева), а не отбрасываем середину. В обычном
+        # случае (прирост меньше окна) — прежний хвост из последних _ITEMS_WINDOW_CHARS.
+        total = len(full_text)
+        unprocessed_from = max(0, s.last_extract_len - _ITEMS_CONTEXT_CHARS)
+        if total - unprocessed_from > _ITEMS_WINDOW_CHARS:
+            win_start = unprocessed_from
+            win_end = win_start + _ITEMS_WINDOW_CHARS
+        else:
+            win_start = max(0, total - _ITEMS_WINDOW_CHARS)
+            win_end = total
+        window_text = full_text[win_start:win_end]
         self._recording_core.pause_realtime_partials()
         try:
             result = self._extractor.extract(window_text, language=s.language)
@@ -1338,7 +1355,7 @@ class MeetingSessionService:
                 s.items = _merge_items(s.items, fresh)
                 s.decisions = _merge_texts(s.decisions, result.decisions)
                 s.questions = _merge_texts(s.questions, result.questions)
-                s.last_extract_len = len(full_text)
+                s.last_extract_len = win_end
                 s.last_updated_ts = time.time()
         if result.ok:
             self._emit("meeting.items_updated", {
