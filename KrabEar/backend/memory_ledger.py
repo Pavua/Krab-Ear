@@ -23,6 +23,8 @@ LEDGER_LOCK_FILENAME = "memory_ledger.lock"
 LEDGER_TTL_SEC = 120.0
 _CORRUPT_KEEP = 5
 _SCHEMA_V = 1
+# Допуск на перекос часов между процессами: запись «из будущего» дальше этого — мусор (KE05C-18).
+_FUTURE_SKEW_SEC = 5.0
 
 
 # 🔴 Тестовый шов (финальный гейт волны, HIGH-3): сотни юнит-тестов создают
@@ -168,7 +170,7 @@ class LedgerClient:
                 if key.startswith(self._owner + "/"):
                     continue  # заменяется ниже собственными свежими записями
                 ts = entry.get("updated_ts") if isinstance(entry, dict) else None
-                if isinstance(ts, (int, float)) and (now - ts) <= LEDGER_TTL_SEC:
+                if isinstance(ts, (int, float)) and -_FUTURE_SKEW_SEC <= (now - ts) <= LEDGER_TTL_SEC:
                     kept[key] = entry
                 # отсутствующий/протухший updated_ts = мёртвая запись чужого владельца → GC (fail-closed)
             for name, entry in entries.items():
@@ -178,7 +180,12 @@ class LedgerClient:
                     "resident": name,
                     "updated_ts": now,
                 }
-            self._write_atomic({"v": _SCHEMA_V, "entries": kept})
+            # KE05C-25: версию и поля верхнего уровня более новой схемы не теряем.
+            out = {k: v for k, v in doc.items() if k != "entries"}
+            raw_v = doc.get("v")
+            out["v"] = raw_v if type(raw_v) is int and raw_v > _SCHEMA_V else _SCHEMA_V
+            out["entries"] = kept
+            self._write_atomic(out)
             return True
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
