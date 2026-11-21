@@ -13,6 +13,7 @@ Privacy: все хендлеры гейтятся privacy_mode_enabled; вклю
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
@@ -380,6 +381,7 @@ class MeetingSessionService:
             # Worker — последний потенциально падающий setup-шаг ДО физического
             # recorder.start/promote. Так ошибка не оставляет скрытый захват
             # микрофона после сообщения UI «встреча не запущена».
+            self._sweep_stale_diar_wavs()
             self._start_worker()
             self._raise_if_closed()
             # ``start_request_id`` создаёт клиент до IPC и должен дойти до
@@ -1376,9 +1378,12 @@ class MeetingSessionService:
             audio = self._recorder.snapshot_range(start, upto)
             if getattr(audio, "size", 0) == 0:
                 return
-            tmp_dir = self._data_dir / "tmp_meeting"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_dir = self._tmp_meeting_dir()
             wav_path = tmp_dir / f"diar_{uuid.uuid4().hex}.wav"
+            # KE05C-03: файл с аудио встречи создаём сами (0600, O_EXCL|O_NOFOLLOW), а не
+            # правами по umask; soundfile затем открывает уже существующий inode.
+            fd = os.open(wav_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            os.close(fd)
             try:
                 _sf.write(str(wav_path), audio,
                           int(getattr(self._recorder, "sample_rate", 16000)))
@@ -1412,6 +1417,27 @@ class MeetingSessionService:
             logger.warning("meeting: DIAR_WINDOW-тик упал", exc_info=True)
             with self._lock:
                 s.degraded_diarization = True
+
+    def _tmp_meeting_dir(self) -> Path:
+        """<data_dir>/tmp_meeting с правами 0700 (создаётся/подтягивается к 0700)."""
+        tmp_dir = self._data_dir / "tmp_meeting"
+        tmp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(tmp_dir, 0o700)
+        return tmp_dir
+
+    def _sweep_stale_diar_wavs(self) -> None:
+        """KE05C-27: удалить diar_*.wav, оставшиеся от прошлой жизни процесса (best-effort).
+
+        Вызывается только на свежем старте, до запуска воркера: in-flight WAV текущего
+        процесса в этот момент существовать не может (старый воркер → gpu_slot_busy).
+        """
+        if self._data_dir is None:
+            return
+        try:
+            for stale in (self._data_dir / "tmp_meeting").glob("diar_*.wav"):
+                stale.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("meeting: не удалось очистить старые tmp_meeting/diar_*.wav", exc_info=True)
 
     # ------------------------------------------------------------ intervals
 
