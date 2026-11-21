@@ -266,17 +266,19 @@ class LLMOpsService:
 
         # Замена с учётом границ слова и без учёта регистра
         pattern = re.compile(r'\b' + re.escape(old) + r'\b', re.IGNORECASE)
-        new_text, replaced_count = pattern.subn(new, item.text)
+        # KE05A-13: новое слово — литерал, а не шаблон замены (\1, \g<0>, \U в нём — обычный текст).
+        new_text, replaced_count = pattern.subn(lambda _m: new, item.text)
 
         if replaced_count == 0:
             return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "word_not_found"}
 
-        self._store.update_history_item_text(history_id, new_text)
+        # KE05A-08: False = запись исчезла между чтением и записью; ложный ok=True не отдаём.
+        if self._store.update_history_item_text(history_id, new_text) is False:
+            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "item_not_found"}
+        # KE05A-02: сами слова — содержимое транскрипта, в лог их не пишем.
         logger.info(
-            "replace_word_in_last_transcript: history_id=%s old=%r new=%r count=%d",
+            "replace_word_in_last_transcript: history_id=%s count=%d",
             history_id,
-            old,
-            new,
             replaced_count,
         )
 

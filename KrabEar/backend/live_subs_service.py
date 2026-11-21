@@ -26,6 +26,7 @@ from typing import Any, Callable, TYPE_CHECKING
 import numpy as np
 
 from backend.event_bus import bus as event_bus
+from backend.strict_bool import parse_bool
 from contracts.live_subs_events import LiveSubsResult
 from contracts.registry import EventType
 from core.utils import is_likely_repetition_loop
@@ -442,10 +443,13 @@ class LiveSubsService:
         audio_b64 = params.get("audio_chunk", "")
         target_lang = str(params.get("target_lang", "off"))
         sample_rate = self._sanitize_sample_rate(params.get("sample_rate", 16000))
-        is_final = bool(params.get("is_final", False))
+        # KE05A-18: bool("false") is True — строки разбираем строго.
+        is_final = parse_bool(params.get("is_final", False), False)
 
         try:
-            audio_bytes = base64.b64decode(audio_b64)
+            # validate=True: мусор вне алфавита base64 не принимается молча; переносы строк
+            # и пробелы (обёрнутый base64) убираем заранее.
+            audio_bytes = base64.b64decode("".join(str(audio_b64).split()), validate=True)
         except Exception as exc:
             raise ValueError(f"audio_chunk: invalid base64: {exc}") from exc
 
