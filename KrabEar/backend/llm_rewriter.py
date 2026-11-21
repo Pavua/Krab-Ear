@@ -72,6 +72,21 @@ def _validate_llm_url(url: str) -> str:
     return url
 
 
+class _NoRedirectSession(requests.Session):
+    """requests.Session, который никогда не следует за 3xx.
+
+    ``requests`` повторяет POST вместе с телом на 307/308, так что один забытый
+    ``allow_redirects=False`` отправляет транскрипт на любой адрес из
+    ``Location`` (KE05B-01). Запрет вынесен в сессию, а не в каждый вызов:
+    новый ``post``/``get`` не может случайно вернуть редиректы. Ответ 3xx
+    остаётся обычным не-200 и обрабатывается как HTTP-ошибка.
+    """
+
+    def request(self, method, url, **kwargs):  # type: ignore[override]
+        kwargs["allow_redirects"] = False
+        return super().request(method, url, **kwargs)
+
+
 class CircuitState(Enum):
     CLOSED = "closed"
     OPEN = "open"
@@ -351,7 +366,7 @@ class LLMRewriter:
         self._last_latency_ms: Optional[int] = None
         self._last_error: str | None = None
         # Connection pooling: переиспользуем TCP соединение между запросами
-        self._session = requests.Session()
+        self._session = _NoRedirectSession()
         # Serialise ALL POST /v1/chat/completions calls — LM Studio JIT-loads the model
         # on the first concurrent request and cannot handle parallel POSTs during cold load
         # (returns "Unexpected endpoint or method. Returning 200 anyway" + Channel Errors).
@@ -698,6 +713,21 @@ class LLMRewriter:
                 fallback_reason="feature_flag_disabled",
                 latency_ms=None,
             )
+        # KE05B-03: privacy-гейт на уровне метода, как у fix_punctuation_only()/summarize().
+        # Проверка вызывающего (engine/LLMRewriteStage) не защищает от переключения режима
+        # до отправки и от прямых вызовов (RewriterFallbackChain). FAIL CLOSED.
+        try:
+            settings_getter = getattr(self, "_settings_getter", None)
+            if settings_getter and settings_getter("privacy_mode_enabled", False):
+                logger.debug("rewrite: skipped — privacy_mode_enabled")
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="privacy_mode", latency_ms=None
+                )
+        except Exception:
+            logger.warning("rewrite: privacy guard getter raised — failing safe (skipping LLM)")
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="privacy_guard_error", latency_ms=None
+            )
         with _profiler.start_span("llm_rewrite"):
             return self._rewrite_impl(text)
 
@@ -1040,6 +1070,8 @@ class LLMRewriter:
             data = response.json()
             message = data["choices"][0]["message"]
             content = message.get("content") if isinstance(message, dict) else message["content"]
+            if content is not None and not isinstance(content, str):
+                raise TypeError(f"content is {type(content).__name__}, not str")  # KE05B-14
             # 6a. tool_calls_emitted guard — gemma-4 / tool-capable models leak tool_calls
             if not content and isinstance(message, dict) and message.get("tool_calls"):
                 self._circuit.record_failure()
@@ -1238,6 +1270,8 @@ class LLMRewriter:
         try:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
+            if content is not None and not isinstance(content, str):
+                raise TypeError(f"content is {type(content).__name__}, not str")  # KE05B-14
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             self._circuit.record_failure()
             logger.debug("fix_punctuation_only: parse error: %s", exc)
@@ -1258,13 +1292,14 @@ class LLMRewriter:
             )
             return None
 
-        # Word-set guard: exact vocabulary must match (case-insensitive, strip punct)
+        # Word guard: слова и их ПОРЯДОК должны совпасть (без учёта регистра и пунктуации по
+        # краям). Сравнение множеств пропускало перестановку и подмену повторов (KE05B-11).
         _punct_chars = ".,!?;:-—"
-        input_set = {w.lower().strip(_punct_chars) for w in input_words}
-        result_set = {w.lower().strip(_punct_chars) for w in result_words}
-        if input_set != result_set:
+        input_norm = [w.lower().strip(_punct_chars) for w in input_words]
+        result_norm = [w.lower().strip(_punct_chars) for w in result_words]
+        if input_norm != result_norm:
             logger.warning(
-                "fix_punctuation_only: word set mismatch, LLM changed words, rejecting"
+                "fix_punctuation_only: words changed or reordered by LLM, rejecting"
             )
             return None
 
@@ -1387,6 +1422,8 @@ class LLMRewriter:
         try:
             data = response.json()
             content = data["choices"][0]["message"]["content"]
+            if content is not None and not isinstance(content, str):
+                raise TypeError(f"content is {type(content).__name__}, not str")  # KE05B-14
         except (ValueError, KeyError, IndexError, TypeError) as exc:
             self._circuit.record_failure()
             self._last_error = f"parse_error: {exc}"

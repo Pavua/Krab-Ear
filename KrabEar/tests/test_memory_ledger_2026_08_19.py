@@ -243,6 +243,10 @@ class SidecarLockOnlySourceContractTestCase(unittest.TestCase):
 
         self.assertTrue(open_call_targets, "expected at least one os.open() call in the module")
         for target in open_call_targets:
+            if target == "self._path.parent":
+                # KE05C-17: каталог открывается O_RDONLY только ради fsync после replace —
+                # это не файл данных и не flock-цель (self._path остаётся под запретом ниже).
+                continue
             self.assertIn(
                 "_lock_path",
                 target,

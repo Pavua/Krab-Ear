@@ -104,7 +104,7 @@ def _coerce_finite_float(v: Any, default: float = 0.0) -> float:
     """
     try:
         parsed = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # float(10**500) → OverflowError (KE05C-24)
         return default
     return _safe_float(parsed, default)
 
@@ -319,7 +319,9 @@ class MetadataEnricher:
             topics: list[str] = []
             logger.debug("MetadataEnricher: topic enrichment skipped (privacy_mode_enabled=True)")
         else:
-            topics = self._extract_topics_for_item(item)
+            # KE05C-12: TopicTracker получает уже усечённый текст — backstop обязан
+            # действовать и здесь, а не только для regex-операций выше.
+            topics = self._extract_topics_for_item({**item, "text": safe_text})
 
         elapsed = time.monotonic() - t0
         self._enriched_count += 1

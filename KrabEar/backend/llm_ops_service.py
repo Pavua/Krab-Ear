@@ -19,6 +19,8 @@ import logging
 import re
 from typing import Any, TYPE_CHECKING
 
+from backend.strict_bool import parse_bool
+
 if TYPE_CHECKING:
     from backend.state_store import StateStore
     from backend.settings_service import SettingsService
@@ -266,17 +268,19 @@ class LLMOpsService:
 
         # Замена с учётом границ слова и без учёта регистра
         pattern = re.compile(r'\b' + re.escape(old) + r'\b', re.IGNORECASE)
-        new_text, replaced_count = pattern.subn(new, item.text)
+        # KE05A-13: новое слово — литерал, а не шаблон замены (\1, \g<0>, \U в нём — обычный текст).
+        new_text, replaced_count = pattern.subn(lambda _m: new, item.text)
 
         if replaced_count == 0:
             return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "word_not_found"}
 
-        self._store.update_history_item_text(history_id, new_text)
+        # KE05A-08: False = запись исчезла между чтением и записью; ложный ok=True не отдаём.
+        if self._store.update_history_item_text(history_id, new_text) is False:
+            return {"ok": False, "replaced_count": 0, "history_id": history_id, "error": "item_not_found"}
+        # KE05A-02: сами слова — содержимое транскрипта, в лог их не пишем.
         logger.info(
-            "replace_word_in_last_transcript: history_id=%s old=%r new=%r count=%d",
+            "replace_word_in_last_transcript: history_id=%s count=%d",
             history_id,
-            old,
-            new,
             replaced_count,
         )
 
@@ -316,7 +320,7 @@ class LLMOpsService:
         """
         try:
             cached = self._settings_svc.cached_settings() if self._settings_svc is not None else {}
-            if not cached.get("auto_learn_corrections_enabled", False):
+            if not parse_bool(cached.get("auto_learn_corrections_enabled", False), False):
                 return False
 
             # Sanity checks: non-empty, short, and meaningfully different from old word
@@ -326,27 +330,29 @@ class LLMOpsService:
             if word.lower() == old_word.strip().lower():
                 return False
             if len(word) > 60:
-                logger.debug("auto_learn: skipping long token %r (len=%d)", word, len(word))
+                logger.debug("auto_learn: skipping long token (len=%d)", len(word))
                 return False
             if len(word.split()) > 4:
-                logger.debug("auto_learn: skipping multi-token phrase %r", word)
+                logger.debug("auto_learn: skipping multi-token phrase")
                 return False
 
             current: list = cached.get("stt_hotwords", [])
             if not isinstance(current, list):
                 current = []
             if word in current:
-                logger.debug("auto_learn: %r already in stt_hotwords, skip", word)
+                logger.debug("auto_learn: word already in stt_hotwords, skip")
                 return False
 
             updated = current + [word]
             if len(updated) > self._STT_HOTWORDS_MAX:
                 excess = len(updated) - self._STT_HOTWORDS_MAX
                 updated = updated[excess:]
-            self._settings_svc.handle_set_settings({"stt_hotwords": updated})
-            logger.debug(
-                "auto_learn: added %r to stt_hotwords (total=%d)", word, len(updated)
-            )
+            result = self._settings_svc.handle_set_settings({"stt_hotwords": updated})
+            # KE05A-14: отклонённая запись настроек — слово НЕ выучено (legacy None не считаем отказом).
+            if isinstance(result, dict) and result.get("ok") is False:
+                logger.debug("auto_learn: set_settings rejected stt_hotwords update")
+                return False
+            logger.debug("auto_learn: word added to stt_hotwords (total=%d)", len(updated))
             return True
         except Exception as exc:  # noqa: BLE001
             logger.debug("auto_learn_correction failed (non-fatal): %s", exc)
