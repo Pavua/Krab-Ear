@@ -672,6 +672,47 @@ def release_stt_singleflight() -> None:
     _STT_SINGLEFLIGHT.release()
 
 
+# RU-звонок идёт по IPC к владельцу GigaAM и не трогает MLX этого процесса, поэтому слот
+# файлового STT ему не нужен (иначе длинная транскрипция превращала ход звонка в
+# 503 stt_busy). Нужна лишь защита от fail-fast выхода standalone REST посреди хода:
+# считаем ходы в полёте, а выход ждёт их завершения. Ограничение — потолок бюджета
+# звонка (25 с) плюс запас.
+_CALL_IPC_COND = threading.Condition()
+_call_ipc_inflight = 0
+_CALL_IPC_DRAIN_MAX_SEC = 30.0
+
+
+def _call_ipc_enter() -> bool:
+    """Занять ход звонка. False — fail-fast уже поставлен, новый ход не допускается."""
+    global _call_ipc_inflight
+    with _CALL_IPC_COND:
+        # Проверка и инкремент под одним локом: drain стартует после установки
+        # признака, поэтому он либо увидит этот ход, либо ход увидит признак.
+        if _STT_RECYCLE_PENDING.is_set():
+            return False
+        _call_ipc_inflight += 1
+        return True
+
+
+def _call_ipc_exit() -> None:
+    global _call_ipc_inflight
+    with _CALL_IPC_COND:
+        _call_ipc_inflight = max(0, _call_ipc_inflight - 1)
+        _CALL_IPC_COND.notify_all()
+
+
+def _wait_call_ipc_drain(timeout_sec: float) -> bool:
+    """Дождаться ходов звонка в полёте. False — не успели, выходим всё равно."""
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    with _CALL_IPC_COND:
+        while _call_ipc_inflight > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _CALL_IPC_COND.wait(remaining)
+    return True
+
+
 # EX_SOFTWARE из sysexits.h. Отдельный код отличает намеренный fail-fast после
 # зависшей транскрибации от обычного исключения приложения в launchd/gunicorn.
 _TRANSCRIBE_TIMEOUT_EXIT_CODE = 70
@@ -744,6 +785,9 @@ def _exit_poisoned_rest_process(exit_code: int) -> None:
     рестарта — деградация STT предпочтительнее потери записи владельца.
     """
     if not _rest_may_exit_on_timeout():
+        # Выхода не будет, значит и закрывать допуск навсегда незачем: слот STT остаётся
+        # у брошенного Future (_STT_ORPHAN_ACTIVE), а RU-ходы не должны отказывать вечно.
+        _STT_RECYCLE_PENDING.clear()
         logger.error(
             "REST transcribe timeout: MLX-локом, возможно, владеет зависший "
             "поток, но процесс НЕ завершается — REST работает внутри backend, "
@@ -792,6 +836,19 @@ def _arm_timeout_exit(response: Response, temp_path: _Any) -> Response:
             )
         finally:
             if should_exit:
+                # Владелец мог смениться между arm и close: тогда выхода не будет и
+                # ждать ходы звонка незачем. Любой сбой ожидания не должен отменять выход.
+                if _rest_may_exit_on_timeout():
+                    try:
+                        drained = _wait_call_ipc_drain(_CALL_IPC_DRAIN_MAX_SEC)
+                    except Exception:
+                        drained = False
+                        logger.exception("REST fail-fast: ожидание ходов звонка завершилось ошибкой")
+                    if not drained:
+                        logger.error(
+                            "REST fail-fast: ход звонка не завершился за %.0fс, выходим без ожидания",
+                            _CALL_IPC_DRAIN_MAX_SEC,
+                        )
                 _exit_poisoned_rest_process(_TRANSCRIBE_TIMEOUT_EXIT_CODE)
 
     response.call_on_close(_cleanup_and_exit)
@@ -1826,34 +1883,46 @@ def _transcribe_call_ru(deadline: float):
     # REST DATA_DIR исторически может быть другим каталогом — не ищем сокеты.
     socket_override = os.getenv("KRAB_EAR_SOCKET", "").strip()
     socket_path = Path(socket_override).expanduser() if socket_override else default_socket_path(default_data_dir())
-    # Удерживаем допуск до получения IPC-результата. Пока этот запрос
-    # ждёт владельца, локальный STT не может поставить завершение REST.
-    if not try_acquire_stt_singleflight(0.0):
+    # Слот файлового STT не берём: ход идёт через владельца, не через MLX этого
+    # процесса. Счётчик удерживает fail-fast выход REST до ДОСТАВКИ ответа: после IPC
+    # остаются пост-проверка приватности, сериализация и запись в сокет, и выход между
+    # ними терял бы уже готовый текст.
+    if not _call_ipc_enter():
         return jsonify({"error": "stt_busy", "text": ""}), 503
+
+    def _owner_reply():
+        try:
+            result = transcribe_ephemeral_call(
+                wav_bytes, socket_path=socket_path, deadline_monotonic=deadline,
+                signing_enabled=settings.IPC_SIGNING_ENABLED,
+                signing_secret=settings.IPC_SIGNING_SECRET,
+            )
+        except CallSTTRejectedError:
+            return jsonify({"error": "owner policy refused", "text": ""}), 403
+        except CallSTTTimeoutError:
+            if _call_profile_privacy_enabled():
+                return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+            return jsonify({"error": "call STT timeout", "text": ""}), 504
+        except CallSTTProtocolError:
+            if _call_profile_privacy_enabled():
+                return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+            return jsonify({"error": "call STT unavailable", "text": ""}), 503
+        if _call_profile_privacy_enabled() or result.get("status") == "privacy_mode":
+            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+        status = result.get("status")
+        if status != "ok":
+            return jsonify(result), 504 if status == "timeout" else 503
+        return jsonify({**result, "history_id": "", "request_profile": "voice_gateway_call"}), 200
+
     try:
-        result = transcribe_ephemeral_call(
-            wav_bytes, socket_path=socket_path, deadline_monotonic=deadline,
-            signing_enabled=settings.IPC_SIGNING_ENABLED,
-            signing_secret=settings.IPC_SIGNING_SECRET,
-        )
-    except CallSTTRejectedError:
-        return jsonify({"error": "owner policy refused", "text": ""}), 403
-    except CallSTTTimeoutError:
-        if _call_profile_privacy_enabled():
-            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-        return jsonify({"error": "call STT timeout", "text": ""}), 504
-    except CallSTTProtocolError:
-        if _call_profile_privacy_enabled():
-            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-        return jsonify({"error": "call STT unavailable", "text": ""}), 503
-    finally:
-        release_stt_singleflight()
-    if _call_profile_privacy_enabled() or result.get("status") == "privacy_mode":
-        return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-    status = result.get("status")
-    if status != "ok":
-        return jsonify(result), 504 if status == "timeout" else 503
-    return jsonify({**result, "history_id": "", "request_profile": "voice_gateway_call"}), 200
+        response = current_app.make_response(_owner_reply())
+    except BaseException:
+        _call_ipc_exit()
+        raise
+    # Тот же объект Response проходит через _privacy_gate (он меняет тело и статус,
+    # сохраняя close-callback), поэтому счётчик снимется ровно один раз при закрытии.
+    response.call_on_close(_call_ipc_exit)
+    return response
 
 
 @v1_blp.route("/tts/synthesize", methods=["POST"])

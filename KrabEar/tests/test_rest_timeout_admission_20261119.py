@@ -163,25 +163,7 @@ def test_privacy_rechecked_on_ordinary_busy_reply(timeout_route, monkeypatch, un
     store.load_settings.assert_called_with(nowait=True)
 
 
-def test_ru_call_does_not_dispatch_while_local_stt_can_still_timeout(timeout_route, monkeypatch):
-    from backend import call_stt_client
-
-    client, rs, _, _, _, _ = timeout_route
-    client.application.config["REST_DEPS"].store.call_privacy_mode.return_value = False
-    owner = Mock(return_value={"status": "ok", "text": "синтетика"})
-    monkeypatch.setattr(call_stt_client, "transcribe_ephemeral_call", owner)
-    assert rs.try_acquire_stt_singleflight(0)
-    try:
-        with client.post("/v1/stt/transcribe", headers=AUTH, data={
-            "file": (wav_upload(), "call.wav"),
-            "request_profile": "voice_gateway_call",
-            "lang_hint": "ru",
-        }) as call:
-            assert call.status_code == 503
-            assert call.get_json() == {"error": "stt_busy", "text": ""}
-    finally:
-        rs.release_stt_singleflight()
-    owner.assert_not_called()
+# RU-звонок больше не делит слот файлового STT (2026-11-20): см. test_rest_call_ipc_fence_2026_11_20.py.
 
 
 def cloud_stream(client, rs, final):
