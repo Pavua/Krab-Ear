@@ -713,6 +713,21 @@ class LLMRewriter:
                 fallback_reason="feature_flag_disabled",
                 latency_ms=None,
             )
+        # KE05B-03: privacy-гейт на уровне метода, как у fix_punctuation_only()/summarize().
+        # Проверка вызывающего (engine/LLMRewriteStage) не защищает от переключения режима
+        # до отправки и от прямых вызовов (RewriterFallbackChain). FAIL CLOSED.
+        try:
+            settings_getter = getattr(self, "_settings_getter", None)
+            if settings_getter and settings_getter("privacy_mode_enabled", False):
+                logger.debug("rewrite: skipped — privacy_mode_enabled")
+                return LLMRewriteResult(
+                    ok=False, text=None, fallback_reason="privacy_mode", latency_ms=None
+                )
+        except Exception:
+            logger.warning("rewrite: privacy guard getter raised — failing safe (skipping LLM)")
+            return LLMRewriteResult(
+                ok=False, text=None, fallback_reason="privacy_guard_error", latency_ms=None
+            )
         with _profiler.start_span("llm_rewrite"):
             return self._rewrite_impl(text)
 
