@@ -115,15 +115,37 @@ class LedgerClient:
     def _write_atomic(self, doc: dict) -> None:
         fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=".ledger_tmp_")
         try:
-            os.write(fd, json.dumps(doc, ensure_ascii=False).encode("utf-8"))
+            # KE05C-16: os.write может записать меньше запрошенного — дописываем до конца,
+            # иначе усечённый файл публикуется как успешный.
+            view = memoryview(json.dumps(doc, ensure_ascii=False).encode("utf-8"))
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("memory ledger: запись не продвигается (short write)")
+                view = view[written:]
+            # KE05C-17: файл на диск ДО replace, каталог — после, иначе успех не переживает power loss.
+            os.fsync(fd)
             os.close(fd)
             fd = -1
             os.replace(tmp, self._path)
             self._path.chmod(0o600)
+            self._fsync_parent_dir()
         finally:
             if fd >= 0:
                 os.close(fd)
             Path(tmp).unlink(missing_ok=True)
+
+    def _fsync_parent_dir(self) -> None:
+        try:
+            dir_fd = os.open(self._path.parent, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass  # часть ФС не поддерживает fsync каталога — не провал публикации
+        finally:
+            os.close(dir_fd)
 
     def publish_own(self, entries: dict) -> bool:
         """Публикует СВОИ записи как дельту (RMW). True=опубликовано,
