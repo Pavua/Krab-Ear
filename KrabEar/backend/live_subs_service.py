@@ -26,6 +26,7 @@ from typing import Any, Callable, TYPE_CHECKING
 import numpy as np
 
 from backend.event_bus import bus as event_bus
+from backend.strict_bool import parse_bool
 from contracts.live_subs_events import LiveSubsResult
 from contracts.registry import EventType
 from core.utils import is_likely_repetition_loop
@@ -46,6 +47,11 @@ _FLUSH_THRESHOLD_SEC = 3.0
 # порогу _FLUSH_THRESHOLD_SEC никогда не срабатывает → буфер растёт без границ.
 # Этот потолок форсирует flush независимо от sample_rate. См. W1770 HIGH.
 _MAX_BUFFER_SAMPLES = 16000 * 60
+
+# KE05A-07: ОДИН чанк ограничен двумя потолками буфера (int16 → 2 байта/сэмпл). Чанк чуть
+# больше потолка по-прежнему допустим и форсирует flush; проверка — ДО декодирования, иначе
+# огромный чанк раздувает память раньше, чем сработает потолок буфера.
+_MAX_CHUNK_BYTES = _MAX_BUFFER_SAMPLES * 2 * 2
 
 # Допустимый диапазон частоты дискретизации (Гц). Значения вне диапазона
 # (включая отрицательные/огромные) клампятся в handle_ingest со структурным
@@ -170,6 +176,8 @@ class LiveSubsService:
                 self._reject_ingest(denial)
                 return {"text": "", "translation": None} if is_final else None
         sample_rate = self._sanitize_sample_rate(sample_rate)
+        if len(audio_bytes) > _MAX_CHUNK_BYTES:
+            raise ValueError(f"audio chunk too large: {len(audio_bytes)} bytes > {_MAX_CHUNK_BYTES}")
         audio_array = self._decode_audio(audio_bytes, sample_rate)
         # Под локом — ТОЛЬКО мутация буфера, решение о flush и снапшот+сброс.
         # Сам STT (несколько секунд) НИКОГДА не выполняется под этим локом —
@@ -442,10 +450,16 @@ class LiveSubsService:
         audio_b64 = params.get("audio_chunk", "")
         target_lang = str(params.get("target_lang", "off"))
         sample_rate = self._sanitize_sample_rate(params.get("sample_rate", 16000))
-        is_final = bool(params.get("is_final", False))
+        # KE05A-18: bool("false") is True — строки разбираем строго.
+        is_final = parse_bool(params.get("is_final", False), False)
 
+        # Размер base64 проверяем ДО декодирования: 4 символа → 3 байта (+ запас на padding).
+        if len(str(audio_b64)) > (_MAX_CHUNK_BYTES * 4) // 3 + 16:
+            raise ValueError("audio_chunk: payload too large")
         try:
-            audio_bytes = base64.b64decode(audio_b64)
+            # validate=True: мусор вне алфавита base64 не принимается молча; переносы строк
+            # и пробелы (обёрнутый base64) убираем заранее.
+            audio_bytes = base64.b64decode("".join(str(audio_b64).split()), validate=True)
         except Exception as exc:
             raise ValueError(f"audio_chunk: invalid base64: {exc}") from exc
 
@@ -923,7 +937,7 @@ class LiveSubsService:
         """
         try:
             sr = int(raw)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):  # int(float("inf")) → OverflowError (KE05A-19)
             logger.warning(
                 "LiveSubsService: нечисловой sample_rate — дефолт 16000",
                 extra={"raw_sample_rate": repr(raw)},

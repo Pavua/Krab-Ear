@@ -143,7 +143,19 @@ class ModelCacheManager:
         import shutil
 
         folder = self._model_folder_name(model_id)
+        # KE05C-01: имя папки — ровно один компонент внутри кэша. Имена с "models--" обходят
+        # преобразование "/" → "--", и "models--a/../../x" выводило rmtree за пределы кэша.
+        if (
+            not folder
+            or folder in (".", "..")
+            or "/" in folder
+            or "\\" in folder
+            or "\x00" in folder
+        ):
+            return False
         model_path = self._cache_dir / folder
+        if model_path.parent != self._cache_dir or model_path.is_symlink():
+            return False
         if model_path.exists():
             try:
                 shutil.rmtree(model_path)
@@ -177,8 +189,8 @@ class ModelCacheManager:
         for m in models:
             if not self.is_over_size_limit():
                 break
-            self.evict(m.name)
-            evicted.append(m.name)
+            if self.evict(m.name):  # KE05C-20: неудавшаяся эвикция не считается удалённой
+                evicted.append(m.name)
         return evicted
 
     def get_cache_info(self) -> dict:

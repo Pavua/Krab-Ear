@@ -16,7 +16,7 @@ handlers ``configure_obsidian_sync`` / ``run_obsidian_sync`` (Unix socket).
 - sync() повторно проверяет инвариант, когда _folder подделан в state-файле
   и перезагружен при рестарте (запись вне vault не происходит);
 - _load_state() откатывает подделанный folder к безопасному значению по умолчанию;
-- purge_all_synced_files() — безопасный no-op при подделанном folder.
+- purge_all_synced_files() — при подделанном folder ничего не удаляет вне vault и бросает OSError.
 """
 
 from __future__ import annotations
@@ -218,7 +218,7 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_purge_safe_noop_on_tampered_folder(self) -> None:
-        """purge() при подделанном _folder — no-op, ничего не удаляет вне vault."""
+        """purge() при подделанном _folder — ничего не удаляет вне vault и сообщает об ошибке."""
         self.mgr.configure(str(self.vault_dir), folder="Transcriptions")
         # Кладём посторонний .md в outside_dir, который НЕ должен быть удалён.
         self.outside_dir.mkdir(parents=True, exist_ok=True)
@@ -228,8 +228,9 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
         with self.mgr._lock:
             self.mgr._folder = "../../" + self.outside_dir.name
 
-        deleted = self.mgr.purge_all_synced_files()
-        self.assertEqual(deleted, 0)
+        # KE05D-05: ничего вне vault не удалено, но неподтверждённая очистка не выглядит успехом.
+        with self.assertRaises(OSError):
+            self.mgr.purge_all_synced_files()
         self.assertTrue(victim.exists())
 
 
