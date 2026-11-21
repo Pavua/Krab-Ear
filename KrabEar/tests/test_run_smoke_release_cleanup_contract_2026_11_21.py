@@ -20,8 +20,8 @@ import pytest
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "run_smoke_release.command"
 
 pytestmark = pytest.mark.skipif(
-    shutil.which("zsh") is None or shutil.which("pgrep") is None,
-    reason="нужны zsh и pgrep",
+    sys.platform != "darwin" or shutil.which("zsh") is None or shutil.which("pgrep") is None,
+    reason="скрипт и семантика pgrep -a/ps ucomm — macOS; нужны zsh и pgrep",
 )
 
 
@@ -236,15 +236,20 @@ def test_script_never_broadcasts_control_notifications():
         assert forbidden not in code, forbidden
 
 
-def test_default_agent_discovery_is_by_process_name_and_includes_ancestors(tree, tmp_path):
-    """Без override агент ищется pgrep -x по имени процесса, а preflight берёт и предков (-a)."""
-    root, _ = tree
+def test_default_agent_discovery_is_by_real_process_name_and_includes_ancestors(tree, tmp_path):
+    """Без override: pgrep -x, затем сверка НАСТОЯЩЕГО имени (ucomm); preflight берёт и предков (-a)."""
+    root, spawned = tree
     _with_venv(root)
+    live = _bystander(root, spawned, "unrelated")  # настоящий живой PID, имя которого подменит заглушка ps
     log = tmp_path / "pgrep.args"
     bin_dir = tmp_path / "bin"
     _write(
         bin_dir / "pgrep",
-        f'#!/bin/sh\necho "$@" >> "{log}"\ncase "$*" in *"-x KrabEarAgent"*) echo 4242; exit 0;; esac\nexit 1\n',
+        f'#!/bin/sh\necho "$@" >> "{log}"\ncase "$*" in *"-x KrabEarAgent"*) echo {live.pid}; exit 0;; esac\nexit 1\n',
+    )
+    _write(
+        bin_dir / "ps",
+        '#!/bin/sh\ncase "$*" in *ucomm*) echo KrabEarAgent; exit 0;; esac\nexec /bin/ps "$@"\n',
     )
     env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "KRAB_SMOKE_AGENT_PATTERN_OVERRIDE": ""}
     result = _run_smoke(root, env)
@@ -252,6 +257,23 @@ def test_default_agent_discovery_is_by_process_name_and_includes_ancestors(tree,
     assert not (root / "start_agent.ran").exists()
     first = log.read_text().splitlines()[0]
     assert "-a" in first.split() and "-x" in first.split() and "KrabEarAgent" in first.split()
+    assert _alive(live), "preflight не должен трогать процесс"
+
+
+def test_pgrep_x_match_with_a_different_real_name_is_not_an_agent(tree, tmp_path):
+    """pgrep -x следует за argv[0]: подделанное имя без настоящего KrabEarAgent агентом не считается."""
+    root, spawned = tree
+    _with_venv(root)
+    live = _bystander(root, spawned, "unrelated")
+    bin_dir = tmp_path / "bin"
+    _write(
+        bin_dir / "pgrep",
+        f'#!/bin/sh\ncase "$*" in *"-x KrabEarAgent"*) echo {live.pid}; exit 0;; esac\nexit 1\n',
+    )
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "KRAB_SMOKE_AGENT_PATTERN_OVERRIDE": ""}
+    _run_smoke(root, env)
+    assert (root / "start_agent.ran").exists(), "процесс с чужим настоящим именем принят за агента"
+    assert _alive(live)
 
 
 def test_missing_venv_leaves_foreign_agent_untouched(tree):
@@ -547,6 +569,9 @@ def test_pid_found_by_the_last_good_enumeration_is_not_lost(tree, tmp_path):
         time.sleep(0.2)
     else:
         pytest.fail("PID агента потерян из-за сбоя второго pgrep: очистка его не убрала")
+    # backend — ребёнок агента: находится по таблице ps pid/ppid без pgrep и тоже убирается.
+    leftovers = _settle(root)
+    assert leftovers == [], f"backend остался сиротой при сбое pgrep: {leftovers}"
 
 
 def test_second_signal_during_cleanup_does_not_interrupt_it(tree):
@@ -574,3 +599,78 @@ def test_second_signal_during_cleanup_does_not_interrupt_it(tree):
     assert (root / "agent.pid").exists(), "поздний агент не стартовал: тест пустой"
     leftovers = _settle(root)
     assert leftovers == [], f"повторный сигнал прервал очистку: {leftovers}"
+
+
+def _main_py_as_shell_script(root: Path) -> Path:
+    return _write(root / "KrabEar" / "main.py", "while true; do sleep 1; done\n")
+
+
+def test_process_with_a_spoofed_python_argv0_is_not_a_backend(tree):
+    """ps comm следует за argv[0]; настоящее имя исполняемого файла (ucomm) — sh, не Python."""
+    root, spawned = tree
+    _with_venv(root)
+    script = _main_py_as_shell_script(root)
+    decoy = subprocess.Popen(
+        ["python", str(script)],
+        executable="/bin/sh",
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    spawned.append(decoy)
+    time.sleep(0.5)
+    ps = subprocess.run(["ps", "-p", str(decoy.pid), "-o", "comm=,ucomm="], capture_output=True, text=True).stdout
+    assert "python" in ps and "sh" in ps, ps  # подмена действительно сработала
+    result = _run_smoke(root)
+    assert (root / "start_agent.ran").exists(), "процесс с подменённым argv[0] принят за backend и заблокировал smoke"
+    assert _alive(decoy), "очистка убила процесс с подменённым argv[0]"
+    # Итог smoke здесь не проверяем: backend-заглушка в этом тесте — shell-скрипт.
+
+
+def test_real_python_running_c_code_with_the_backend_path_is_not_a_backend(tree):
+    root, spawned = tree
+    _with_venv(root)
+    decoy = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(300)", str(root / "KrabEar" / "main.py")],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    spawned.append(decoy)
+    time.sleep(0.5)
+    result = _run_smoke(root)
+    assert (root / "start_agent.ran").exists(), "python -c с путём принят за backend и заблокировал smoke"
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _alive(decoy), "очистка убила python -c, лишь несущий путь backend в аргументах"
+
+
+def _call_filter_ucomm(tmp_path, pid, ps_fails):
+    """Вызывает filter_ucomm из скрипта в zsh; ps при ps_fails ломается для запросов ucomm."""
+    bin_dir = tmp_path / "psbin"
+    if ps_fails:
+        _write(bin_dir / "ps", '#!/bin/sh\ncase "$*" in *ucomm*) exit 1;; esac\nexec /bin/ps "$@"\n')
+    func = subprocess.run(
+        ["/usr/bin/sed", "-n", "/^filter_ucomm()/,/^}/p", str(SCRIPT)], capture_output=True, text=True
+    ).stdout
+    assert "filter_ucomm" in func
+    env = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}" if ps_fails else os.environ["PATH"]}
+    out = subprocess.run(
+        ["/bin/zsh", "-c", f"{func}\nout=$(filter_ucomm '^sleep$' {pid}); rc=$?; echo \"rc=$rc out=$out\""],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=30,
+    )
+    return out.stdout.strip()
+
+
+def test_failed_ps_on_a_live_pid_is_unknown_not_absent(tmp_path):
+    live = subprocess.Popen(["/bin/sleep", "60"])
+    try:
+        time.sleep(0.3)
+        assert _call_filter_ucomm(tmp_path, live.pid, ps_fails=False) == f"rc=0 out={live.pid}"
+        assert _call_filter_ucomm(tmp_path, live.pid, ps_fails=True) == "rc=2 out="
+    finally:
+        live.kill()
+        live.wait(timeout=10)
+    assert _call_filter_ucomm(tmp_path, live.pid, ps_fails=True) == "rc=0 out="  # исчезнувший PID — не «неизвестно»
