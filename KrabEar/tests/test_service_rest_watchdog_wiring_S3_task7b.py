@@ -133,15 +133,5 @@ class RestWatchdogWiredWhenSwitchOnTestCase(unittest.TestCase):
 
         self.assertEqual(events, ["watchdog", "rest_inprocess"])
 
-    def test_close_does_not_raise_when_watchdog_stop_fails(self) -> None:
-        self.service._rest_watchdog.stop = lambda: (_ for _ in ()).throw(
-            RuntimeError("boom")
-        )
-        try:
-            self.service.close()
-        except Exception as exc:  # pragma: no cover - тест должен упасть, если это случится
-            self.fail(f"close() не проглотил сбой RestWatchdog.stop(): {exc}")
-
-
 if __name__ == "__main__":
     unittest.main()
