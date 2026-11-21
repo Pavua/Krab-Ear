@@ -94,11 +94,17 @@ touch "$ROOT/start_agent.ran"
 ROOT="$ROOT" IGNORE_QUIT="$IGNORE_QUIT" "$PYTHON" -c "
 import os, subprocess
 subprocess.Popen(
-    ['/bin/sh', '-c', 'sleep 1.5; exec ' + os.environ['ROOT'] + '/native/runtime/KrabEarAgent --project-root ' + os.environ['ROOT']],
+    ['/bin/sh', os.environ['ROOT'] + '/late_launch.sh'],
     start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
 )
 "
 while true; do sleep 1; done
+"""
+
+# Отложенный запуск агента из отдельного файла: путь с пробелом корректно квотируется в самом sh.
+LATE_LAUNCH = """#!/bin/sh
+sleep 1.5
+exec "$ROOT/native/runtime/KrabEarAgent" --project-root "$ROOT"
 """
 
 
@@ -440,6 +446,7 @@ def test_agent_started_late_by_launch_services_is_still_cleaned_within_settle(tr
     root, spawned = tree
     _with_venv(root)
     _write(root / "scripts" / "start_agent.command", START_AGENT_LATE)
+    _write(root / "late_launch.sh", LATE_LAUNCH)
     env = {**os.environ, "KRAB_SMOKE_SETTLE": "4", "KRAB_SMOKE_WAIT_START": "30", "KRAB_SMOKE_WAIT_BACKEND": "30"}
     proc = subprocess.Popen(
         ["/bin/zsh", str(root / "scripts" / "run_smoke_release.command")],
@@ -455,6 +462,7 @@ def test_agent_started_late_by_launch_services_is_still_cleaned_within_settle(tr
     time.sleep(0.3)  # лаунчер уже отправил запрос, агента ещё нет
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=40) == 143
+    assert (root / "agent.pid").exists(), "поздний агент вообще не стартовал: тест пустой"
     leftovers = _settle(root)
     assert leftovers == [], f"поздно поднятый агент остался после очистки: {leftovers}"
 
@@ -473,3 +481,96 @@ def test_native_executable_is_found_by_process_name(tmp_path):
     finally:
         proc.kill()
         proc.wait(timeout=10)
+
+
+def _full_python_invocation_decoy(root: Path) -> list[str]:
+    """Чужой процесс (awk), в аргументах которого лежит ПОЛНАЯ строка запуска backend."""
+    return ["/usr/bin/awk", 'BEGIN { while (1) system("sleep 5") }', sys.executable, str(root / "KrabEar" / "main.py")]
+
+
+def test_unrelated_process_carrying_a_full_python_invocation_is_not_a_backend(tree, spawned_decoy=None):
+    root, spawned = tree
+    _with_venv(root)
+    decoy = subprocess.Popen(
+        _full_python_invocation_decoy(root),
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    spawned.append(decoy)
+    time.sleep(0.5)
+    result = _run_smoke(root)
+    assert (root / "start_agent.ran").exists(), "awk с полной строкой запуска принят за backend и заблокировал smoke"
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _alive(decoy), "очистка убила процесс, только несущий строку запуска backend в аргументах"
+
+
+def test_python_with_separate_value_options_is_still_a_backend(tree):
+    root, spawned = tree
+    _with_venv(root)
+    owner = subprocess.Popen(
+        [sys.executable, "-X", "utf8", str(root / "KrabEar" / "main.py")],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    spawned.append(owner)
+    time.sleep(0.5)
+    result = _run_smoke(root)
+    assert result.returncode != 0
+    assert not (root / "start_agent.ran").exists(), "backend с `-X utf8` не распознан, smoke стартовал поверх него"
+    assert _alive(owner)
+
+
+def test_pid_found_by_the_last_good_enumeration_is_not_lost(tree, tmp_path):
+    """pgrep ломается СРАЗУ после первого успешного перечисления агента: PID всё равно записан и убирается."""
+    root, spawned = tree
+    _with_venv(root)
+    bin_dir = tmp_path / "bin"
+    _write(
+        bin_dir / "pgrep",
+        '#!/bin/sh\n'
+        'if [ -e "$ROOT/pgrep.fail" ]; then exit 3; fi\n'
+        'out=$(/usr/bin/pgrep "$@"); rc=$?\n'
+        'if [ "$rc" -eq 0 ] && [ -e "$ROOT/agent.pid" ]; then touch "$ROOT/pgrep.fail"; fi\n'
+        'printf "%s" "$out"; exit $rc\n',
+    )
+    result = _run_smoke(root, {"PATH": f"{bin_dir}:{os.environ['PATH']}", "IGNORE_QUIT": "1"})
+    assert result.returncode != 0
+    agent_pid = int((root / "agent.pid").read_text().strip())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(agent_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("PID агента потерян из-за сбоя второго pgrep: очистка его не убрала")
+
+
+def test_second_signal_during_cleanup_does_not_interrupt_it(tree):
+    root, spawned = tree
+    _with_venv(root)
+    _write(root / "scripts" / "start_agent.command", START_AGENT_LATE)
+    _write(root / "late_launch.sh", LATE_LAUNCH)
+    env = {**os.environ, "KRAB_SMOKE_SETTLE": "4", "KRAB_SMOKE_WAIT_START": "30", "KRAB_SMOKE_WAIT_BACKEND": "30"}
+    proc = subprocess.Popen(
+        ["/bin/zsh", str(root / "scripts" / "run_smoke_release.command")],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    spawned.append(proc)
+    deadline = time.monotonic() + 15
+    while not (root / "start_agent.ran").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    time.sleep(0.3)
+    proc.send_signal(signal.SIGTERM)
+    time.sleep(0.8)  # cleanup уже в окне settle
+    proc.send_signal(signal.SIGINT)
+    proc.wait(timeout=40)
+    assert (root / "agent.pid").exists(), "поздний агент не стартовал: тест пустой"
+    leftovers = _settle(root)
+    assert leftovers == [], f"повторный сигнал прервал очистку: {leftovers}"

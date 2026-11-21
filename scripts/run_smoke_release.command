@@ -19,8 +19,9 @@
 #   в одной и той же проверке;
 # - фоновый старт убирается, пока он наш ПОТОМОК (проверка по ppid, а не по командной
 #   строке: start_agent.command делает exec open -W и строка меняется).
-# - backend определяется по структуре командной строки (интерпретатор Python + скрипт этого
-#   каталога), а не по подстроке пути: `vim .../KrabEar/main.py` backend не считается;
+# - backend = процесс, ИСПОЛНЯЕМЫЙ ФАЙЛ которого Python (python, python3.14, Python.app/.../Python)
+#   и в командной строке есть скрипт этого каталога: `vim .../KrabEar/main.py` или `awk ... python
+#   .../KrabEar/main.py` backend не считаются (имя процесса, а не подстрока командной строки);
 # - запомненные PID перед TERM перепроверяются через ps (имя процесса/командная строка), а не
 #   через pgrep: сбой перечисления не мешает убрать свои процессы и не заставляет трогать чужие.
 # - Известные остатки (безопасная граница, не гарантия): (1) процесс, который чужой launchd поднял
@@ -45,12 +46,9 @@ AGENT_PATTERN_OVERRIDE="${KRAB_SMOKE_AGENT_PATTERN_OVERRIDE:-}"
 # macOS = ERE, не BRE — см. test_ensure_agent_running_contract.py) матчит оба,
 # иначе смок сочтёт живой backend отсутствующим.
 BACKEND_PATTERN="$ROOT_DIR/KrabEar/(backend/service|main)\.py( |$)"
-# Backend = интерпретатор Python (python, python3.14, Python.app/.../Python) + необязательные опции
-# + скрипт: редактор или отладчик с путём к скрипту под это не подпадают.
-BACKEND_INTERPRETER='(^|/)[Pp]ython[0-9.]*( -[^ ]+)* '
 # Путь каталога попадает в регулярное выражение: экранируем метасимволы ERE (скобки, точку...).
 ROOT_RE="$(printf '%s' "$ROOT_DIR" | sed -E 's/[][\\.^$*+?(){}|]/\\&/g')"
-BACKEND_MATCH="${BACKEND_INTERPRETER}${ROOT_RE}${BACKEND_PATTERN#"$ROOT_DIR"}"
+BACKEND_MATCH="${ROOT_RE}${BACKEND_PATTERN#"$ROOT_DIR"}"
 SOCKET_PATH="${KRAB_EAR_SOCKET:-$HOME/Library/Application Support/KrabEar/krabear.sock}"
 
 # Таймауты ожидания; переопределяются в тестах на заглушках.
@@ -59,6 +57,18 @@ WAIT_BACKEND="${KRAB_SMOKE_WAIT_BACKEND:-15}"
 WAIT_STOP="${KRAB_SMOKE_WAIT_STOP:-12}"
 WAIT_STOP_RETRY="${KRAB_SMOKE_WAIT_STOP_RETRY:-6}"
 SETTLE_SEC="${KRAB_SMOKE_SETTLE:-2}"
+
+# Оставляет из списка PID только процессы, исполняемый файл которых Python (по имени, не по
+# подстроке командной строки). Сбой ps для PID = не наш.
+only_python_processes() {
+  local pid comm
+  for pid in "$@"; do
+    comm="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+    case "${comm##*/}" in
+      [Pp]ython|[Pp]ython[0-9]*) printf '%s\n' "$pid" ;;
+    esac
+  done
+}
 
 # Перечисление процессов вида $1 (agent|backend). Печатает PID.
 # Код: 0 — найдены, 1 — нет, 2 — pgrep не отработал («неизвестно», не «нет»).
@@ -75,6 +85,10 @@ discover() {
     fi
   else
     out="$(pgrep "$@" -f "$BACKEND_MATCH" 2>/dev/null)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      out="$(only_python_processes ${=out})"
+      [ -n "$out" ] || rc=1
+    fi
   fi
   case "$rc" in
     0) printf '%s\n' "$out"; return 0 ;;
@@ -133,10 +147,11 @@ PY
 wait_for_kind() {
   local kind="$1"
   local timeout="$2"
-  local i=0
+  local i=0 found
   while [ "$i" -lt "$timeout" ]; do
-    if discover "$kind" >/dev/null 2>&1; then
-      remember_own_pids
+    if found="$(discover "$kind" 2>/dev/null)"; then
+      # PID берём из ЭТОГО успешного перечисления: повторный pgrep мог бы уже сломаться.
+      record_pids "$kind" ${=found}
       return 0
     fi
     sleep 1
@@ -184,20 +199,22 @@ OWN_PIDS=""
 START_PID=""
 START_OK="no"
 CLEANED_UP="no"
+record_pids() {
+  local kind="$1" pid
+  shift
+  for pid in "$@"; do
+    case " $OWN_PIDS " in
+      *" $kind:$pid "*) ;;
+      *) OWN_PIDS="$OWN_PIDS $kind:$pid" ;;
+    esac
+  done
+}
 remember_own_pids() {
-  local pid
-  for pid in $(pids_of agent); do
-    case " $OWN_PIDS " in
-      *" agent:$pid "*) ;;
-      *) OWN_PIDS="$OWN_PIDS agent:$pid" ;;
-    esac
-  done
-  for pid in $(pids_of backend); do
-    case " $OWN_PIDS " in
-      *" backend:$pid "*) ;;
-      *) OWN_PIDS="$OWN_PIDS backend:$pid" ;;
-    esac
-  done
+  local agents backends
+  agents="$(pids_of agent)"
+  backends="$(pids_of backend)"
+  record_pids agent ${=agents}
+  record_pids backend ${=backends}
 }
 
 # Перепроверка идентичности PID через ps, НЕЗАВИСИМО от pgrep: PID мог умереть и быть выдан
@@ -214,7 +231,11 @@ pid_is_ours() {
       [ "${comm##*/}" = "KrabEarAgent" ]
     fi
   else
-    grep -Eq -e "$BACKEND_MATCH" <<<"$cmd"
+    comm="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+    case "${comm##*/}" in
+      [Pp]ython|[Pp]ython[0-9]*) grep -Eq -e "$BACKEND_MATCH" <<<"$cmd" ;;
+      *) return 1 ;;
+    esac
   fi
 }
 
@@ -233,6 +254,8 @@ cleanup() {
   # Однократно: EXIT срабатывает и после обработчика сигнала.
   [ "$CLEANED_UP" = "yes" ] && return 0
   CLEANED_UP="yes"
+  # Повторные INT/TERM/HUP во время очистки (settle-окно) не должны её прервать.
+  trap '' INT TERM HUP
   local ppid_of_start killed_launcher="no"
   remember_own_pids
   terminate_remembered
