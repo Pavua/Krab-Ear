@@ -33,7 +33,8 @@ def _write(path: Path, text: str, mode: int = 0o755) -> Path:
 
 
 FAKE_AGENT = """#!/bin/sh
-# Заглушка агента: ждёт флаг quit, backend поднимает как свой дочерний процесс.
+# Заглушка агента: публикует свой PID, ждёт флаг quit, backend поднимает как свой дочерний процесс.
+echo $$ > "$ROOT/agent.pid"
 sh "$ROOT/KrabEar/main.py" &
 BACKEND=$!
 if [ -n "$IGNORE_QUIT" ]; then
@@ -57,31 +58,62 @@ subprocess.Popen(
 while true; do sleep 1; done
 """
 
+# После exec командная строка лаунчера перестаёт содержать путь start_agent.command (как у open -W).
+START_AGENT_EXEC = """#!/bin/sh
+echo $$ > "$ROOT/launcher.pid"
+exec "$PYTHON" -c "import time; time.sleep(300)"
+"""
+
 VENV_PYTHON = """#!/bin/sh
-# python - <pid>: запрос завершения конкретному агенту (NSRunningApplication.terminate) -> флаг-файл.
-echo "$2" >> "$ROOT/terminate.requests"
-touch "$ROOT/quit.flag"
-exit 0
+# python - <pid>: запрос завершения конкретному агенту (NSRunningApplication.terminate).
+# Принимает ТОЛЬКО PID заглушки агента, любой другой отклоняется (код 1).
+if [ -r "$ROOT/agent.pid" ] && [ "$2" = "$(cat "$ROOT/agent.pid")" ]; then
+  echo "$2" >> "$ROOT/terminate.requests"
+  touch "$ROOT/quit.flag"
+  [ -n "$PGREP_FAIL_AFTER_TERMINATE" ] && touch "$ROOT/pgrep.fail"
+  exit 0
+fi
+echo "rejected:$2" >> "$ROOT/terminate.rejected"
+exit 1
+"""
+
+# pgrep, который после запроса завершения «ломается» (код 3), как при сбое перечисления.
+PGREP_STUB = """#!/bin/sh
+if [ -e "$ROOT/pgrep.fail" ]; then
+  exit 3
+fi
+exec /usr/bin/pgrep "$@"
 """
 
 
-@pytest.fixture
-def tree(tmp_path, monkeypatch):
-    root = tmp_path / "krab ear"
+def re_escape(root: Path) -> str:
+    return re.escape(str(root))
+
+
+def _make_tree(root: Path) -> Path:
     _write(root / "scripts" / "run_smoke_release.command", SCRIPT.read_text(encoding="utf-8"))
     _write(root / "scripts" / "start_agent.command", START_AGENT)
     _write(root / "native" / "runtime" / "KrabEarAgent", FAKE_AGENT)
     _write(root / "KrabEar" / "main.py", "while true; do sleep 1; done\n")
+    return root
+
+
+@pytest.fixture
+def tree(tmp_path, monkeypatch):
+    root = _make_tree(tmp_path / "krab ear")
     monkeypatch.setenv("ROOT", str(root))
     monkeypatch.setenv("PYTHON", sys.executable)
     # Изоляция от настоящей машины: свой HOME (сокет), агент только внутри временного каталога.
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.delenv("KRAB_EAR_SOCKET", raising=False)
-    monkeypatch.setenv("KRAB_SMOKE_AGENT_PATTERN_OVERRIDE", re_escape(root) + "/native/runtime/KrabEarAgent")
+    monkeypatch.setenv(
+        "KRAB_SMOKE_AGENT_PATTERN_OVERRIDE", "^/bin/sh " + re_escape(root) + "/native/runtime/KrabEarAgent( |$)"
+    )
     monkeypatch.setenv("KRAB_SMOKE_WAIT_START", "4")
     monkeypatch.setenv("KRAB_SMOKE_WAIT_BACKEND", "4")
     monkeypatch.setenv("KRAB_SMOKE_WAIT_STOP", "4")
     monkeypatch.setenv("KRAB_SMOKE_WAIT_STOP_RETRY", "2")
+    monkeypatch.setenv("KRAB_SMOKE_SETTLE", "0")
     spawned = []
     yield root, spawned
     for proc in spawned:
@@ -90,18 +122,23 @@ def tree(tmp_path, monkeypatch):
         except (ProcessLookupError, PermissionError):
             pass
         proc.wait(timeout=10)
+    # Заглушки smoke, поднятые в отдельных сессиях, в spawned не попадают: убираем по уникальному
+    # временному пути (обычный pgrep/pkill -f по каталогу теста, чужие процессы сюда не входят).
+    subprocess.run(["pkill", "-9", "-f", re_escape(root)], capture_output=True)
 
 
 def _with_venv(root: Path) -> None:
     _write(root / ".venv_krab_ear" / "bin" / "python", VENV_PYTHON)
 
 
-def _run_smoke(root: Path):
+def _run_smoke(root: Path, extra_env: dict | None = None):
+    env = {**os.environ, **(extra_env or {})}
     return subprocess.run(
         ["/bin/zsh", str(root / "scripts" / "run_smoke_release.command")],
         capture_output=True,
         text=True,
         timeout=120,
+        env=env,
     )
 
 
@@ -112,6 +149,9 @@ def _bystander(root: Path, spawned: list, kind: str) -> subprocess.Popen:
         env = {**os.environ, "IGNORE_QUIT": "1"}
     elif kind == "backend":
         argv = ["/bin/sh", str(root / "KrabEar" / "main.py")]
+        env = os.environ.copy()
+    elif kind == "debugger":  # командная строка содержит путь агента, но это не агент
+        argv = ["/bin/sh", "-c", "sleep 300", str(root / "native" / "runtime" / "KrabEarAgent")]
         env = os.environ.copy()
     else:
         argv = ["/bin/sleep", "300"]
@@ -137,13 +177,48 @@ def _matching(root: Path) -> list[str]:
     return described
 
 
-def re_escape(root: Path) -> str:
-    return re.escape(str(root))
+def _settle(root: Path, seconds: float = 10) -> list[str]:
+    deadline = time.monotonic() + seconds
+    leftovers = _matching(root)
+    while leftovers and time.monotonic() < deadline:
+        time.sleep(0.2)
+        leftovers = _matching(root)
+    return leftovers
+
+
+def _code_lines() -> str:
+    return "\n".join(
+        line for line in SCRIPT.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")
+    )
 
 
 def test_source_has_no_pattern_kill():
-    code = [line for line in SCRIPT.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")]
+    code = _code_lines().splitlines()
     assert not [line for line in code if "pkill" in line or "killall" in line]
+
+
+def test_script_never_broadcasts_control_notifications():
+    code = _code_lines()
+    for forbidden in ("NSDistributedNotificationCenter", "com.krabear.agent.control", "show_history", '"quit"'):
+        assert forbidden not in code, forbidden
+
+
+def test_default_agent_discovery_is_by_process_name_and_includes_ancestors(tree, tmp_path):
+    """Без override агент ищется pgrep -x по имени процесса, а preflight берёт и предков (-a)."""
+    root, _ = tree
+    _with_venv(root)
+    log = tmp_path / "pgrep.args"
+    bin_dir = tmp_path / "bin"
+    _write(
+        bin_dir / "pgrep",
+        f'#!/bin/sh\necho "$@" >> "{log}"\ncase "$*" in *"-x KrabEarAgent"*) echo 4242; exit 0;; esac\nexit 1\n',
+    )
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "KRAB_SMOKE_AGENT_PATTERN_OVERRIDE": ""}
+    result = _run_smoke(root, env)
+    assert result.returncode != 0
+    assert not (root / "start_agent.ran").exists()
+    first = log.read_text().splitlines()[0]
+    assert "-a" in first.split() and "-x" in first.split() and "KrabEarAgent" in first.split()
 
 
 def test_missing_venv_leaves_foreign_agent_untouched(tree):
@@ -166,77 +241,6 @@ def test_live_instance_is_refused_and_left_running(tree, kind):
     assert not (root / "start_agent.ran").exists(), "smoke не должен стартовать поверх живого экземпляра"
 
 
-def test_success_stops_only_its_own_processes(tree):
-    root, spawned = tree
-    _with_venv(root)
-    unrelated = _bystander(root, spawned, "unrelated")
-    result = _run_smoke(root)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert _alive(unrelated)
-    deadline = time.monotonic() + 10
-    while _matching(root) and time.monotonic() < deadline:
-        time.sleep(0.2)
-    leftovers = _matching(root)
-    assert leftovers == [], f"свои процессы smoke остались после успешного завершения: {leftovers}"
-
-
-def test_hung_agent_is_cleaned_up_but_unrelated_process_survives(tree, monkeypatch):
-    root, spawned = tree
-    _with_venv(root)
-    monkeypatch.setenv("IGNORE_QUIT", "1")
-    unrelated = _bystander(root, spawned, "unrelated")
-    result = _run_smoke(root)
-    assert result.returncode != 0
-    assert _alive(unrelated)
-    deadline = time.monotonic() + 10
-    while _matching(root) and time.monotonic() < deadline:
-        time.sleep(0.2)
-    leftovers = _matching(root)
-    assert leftovers == [], f"зависший агент smoke не убран своей очисткой: {leftovers}"
-
-
-def _default_agent_pattern() -> "re.Pattern[str]":
-    match = re.search(
-        r'^AGENT_PATTERN="\$\{KRAB_SMOKE_AGENT_PATTERN_OVERRIDE:-(.*)\}"$', SCRIPT.read_text(encoding="utf-8"), re.M
-    )
-    assert match, "не найден AGENT_PATTERN с дефолтом"
-    return re.compile(match.group(1))
-
-
-@pytest.mark.parametrize(
-    "cmdline",
-    [
-        "/Users/x/Krab Ear/Krab Ear.app/Contents/MacOS/KrabEarAgent",  # живой агент: без --project-root
-        "/Users/x/Krab Ear/Krab Ear.app/Contents/MacOS/KrabEarAgent --project-root /Users/x/Krab Ear",
-        "/Users/x/Krab Ear/native/runtime/KrabEarAgent --project-root /Users/x/Krab Ear --launched-by-launchd",
-        "/tmp/other checkout/Krab Ear.app/Contents/MacOS/KrabEarAgent",  # агент другого checkout
-        "KrabEarAgent",
-    ],
-)
-def test_default_agent_pattern_sees_any_agent_on_the_machine(cmdline):
-    assert _default_agent_pattern().search(cmdline)
-
-
-@pytest.mark.parametrize(
-    "cmdline",
-    [
-        "tail -f /Users/x/Library/Logs/KrabEar/KrabEarAgent.log",
-        "/usr/bin/grep KrabEarAgent",
-        "/opt/tools/KrabEarAgentHelper --x",
-    ],
-)
-def test_default_agent_pattern_ignores_unrelated_commands(cmdline):
-    assert not _default_agent_pattern().search(cmdline)
-
-
-def test_script_never_broadcasts_control_notifications():
-    code = "\n".join(
-        line for line in SCRIPT.read_text(encoding="utf-8").splitlines() if not line.lstrip().startswith("#")
-    )
-    for forbidden in ("NSDistributedNotificationCenter", "com.krabear.agent.control", "show_history", '"quit"'):
-        assert forbidden not in code, forbidden
-
-
 def test_existing_socket_is_refused_and_left_alone(tree):
     root, spawned = tree
     _with_venv(root)
@@ -248,23 +252,126 @@ def test_existing_socket_is_refused_and_left_alone(tree):
     assert not (root / "start_agent.ran").exists()
 
 
-def test_terminate_request_goes_to_our_agent_pid_only(tree):
+def test_checkout_path_with_regex_metacharacters_is_matched_literally(tmp_path, monkeypatch):
+    root = _make_tree(tmp_path / "krab.ear (rel) [x]")
+    _with_venv(root)
+    monkeypatch.setenv("ROOT", str(root))
+    monkeypatch.setenv("PYTHON", sys.executable)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv(
+        "KRAB_SMOKE_AGENT_PATTERN_OVERRIDE", "^/bin/sh " + re_escape(root) + "/native/runtime/KrabEarAgent( |$)"
+    )
+    proc = subprocess.Popen(
+        ["/bin/sh", str(root / "KrabEar" / "main.py")],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        time.sleep(0.5)
+        result = _run_smoke(root)
+        assert result.returncode != 0
+        assert proc.poll() is None, "backend каталога со скобками не распознан, smoke его тронул"
+        assert not (root / "start_agent.ran").exists()
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
+
+
+def test_backend_script_with_a_longer_name_is_not_a_backend(tree, tmp_path, spawned_name="main.py.backup"):
     root, spawned = tree
     _with_venv(root)
+    other = _write(root / "KrabEar" / spawned_name, "while true; do sleep 1; done\n")
+    proc = subprocess.Popen(
+        ["/bin/sh", str(other)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    spawned.append(proc)
+    time.sleep(0.5)
+    result = _run_smoke(root)
+    assert (root / "start_agent.ran").exists(), "main.py.backup принят за backend и заблокировал smoke"
+    assert _alive(proc)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_success_stops_only_its_own_processes(tree):
+    root, spawned = tree
+    _with_venv(root)
+    unrelated = _bystander(root, spawned, "unrelated")
     result = _run_smoke(root)
     assert result.returncode == 0, result.stdout + result.stderr
-    requests = (root / "terminate.requests").read_text().split()
-    assert requests and all(pid.isdigit() for pid in requests)
+    assert _alive(unrelated)
+    leftovers = _settle(root)
+    assert leftovers == [], f"свои процессы smoke остались после успешного завершения: {leftovers}"
 
 
-def test_hung_agent_is_reported_as_failed_not_ok(tree, monkeypatch):
+def test_terminate_request_goes_exactly_to_our_agent_pid(tree):
     root, spawned = tree
     _with_venv(root)
-    monkeypatch.setenv("IGNORE_QUIT", "1")
+    decoy = _bystander(root, spawned, "debugger")  # его PID не должен получить запрос
     result = _run_smoke(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    agent_pid = (root / "agent.pid").read_text().strip()
+    assert (root / "terminate.requests").read_text().split() == [agent_pid]
+    assert not (root / "terminate.rejected").exists(), "запрос ушёл на чужой PID"
+    assert _alive(decoy), "процесс, лишь упоминающий путь агента, тронут"
+
+
+def test_unrelated_process_mentioning_the_agent_path_survives_cleanup(tree):
+    root, spawned = tree
+    _with_venv(root)
+    decoy = _bystander(root, spawned, "debugger")
+    result = _run_smoke(root, {"IGNORE_QUIT": "1"})
+    assert result.returncode != 0  # зависший агент
+    assert _alive(decoy), "очистка убила процесс, не являющийся агентом"
+
+
+def test_hung_agent_is_cleaned_up_and_reported_as_failed(tree):
+    root, spawned = tree
+    _with_venv(root)
+    unrelated = _bystander(root, spawned, "unrelated")
+    result = _run_smoke(root, {"IGNORE_QUIT": "1"})
     assert result.returncode != 0
+    assert _alive(unrelated)
     reports = list((root / "docs" / "reports").glob("smoke_release_*.md"))
     assert reports and "status: **FAILED**" in reports[0].read_text()
+    leftovers = _settle(root)
+    assert leftovers == [], f"зависший агент smoke не убран своей очисткой: {leftovers}"
+
+
+def test_process_enumeration_failure_is_not_reported_as_a_clean_shutdown(tree, tmp_path):
+    """pgrep упал (код 3) после запроса завершения при живом агенте: это «неизвестно», не «остановлен»."""
+    root, spawned = tree
+    _with_venv(root)
+    bin_dir = tmp_path / "bin"
+    _write(bin_dir / "pgrep", PGREP_STUB)
+    result = _run_smoke(
+        root, {"PATH": f"{bin_dir}:{os.environ['PATH']}", "IGNORE_QUIT": "1", "PGREP_FAIL_AFTER_TERMINATE": "1"}
+    )
+    assert result.returncode != 0
+    reports = list((root / "docs" / "reports").glob("smoke_release_*.md"))
+    assert reports
+    text = reports[0].read_text()
+    assert "status: **FAILED**" in text and "shutdown_ok: no" in text
+    assert "current_agent_count: unknown" in text
+
+
+def test_exec_transition_of_the_launcher_does_not_hide_it_from_cleanup(tree):
+    """start_agent.command делает exec open -W: командная строка меняется, но он остаётся нашим потомком."""
+    root, spawned = tree
+    _with_venv(root)
+    _write(root / "scripts" / "start_agent.command", START_AGENT_EXEC)
+    result = _run_smoke(root)
+    assert result.returncode != 0  # агент так и не появился
+    launcher_pid = int((root / "launcher.pid").read_text().strip())
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(launcher_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.2)
+    else:
+        pytest.fail("лаунчер после exec остался жить: очистка его не узнала")
 
 
 def test_sigterm_on_the_script_still_cleans_up_its_own_processes(tree):
@@ -286,9 +393,5 @@ def test_sigterm_on_the_script_still_cleans_up_its_own_processes(tree):
     assert any("KrabEarAgent" in line for line in _matching(root))
     proc.send_signal(signal.SIGTERM)
     assert proc.wait(timeout=30) == 143
-    deadline = time.monotonic() + 10
-    leftovers = _matching(root)
-    while leftovers and time.monotonic() < deadline:
-        time.sleep(0.2)
-        leftovers = _matching(root)
+    leftovers = _settle(root)
     assert leftovers == [], f"после SIGTERM остались процессы smoke: {leftovers}"
