@@ -142,7 +142,7 @@ class ModelDownloader:
       - State for each model_id is stored in self._states (dict access under
         self._states_lock).
       - Progress emit is throttled (≥_PROGRESS_THROTTLE_S or ≥1% change).
-      - Cancel via self._cancel (threading.Event); also used for stall detection.
+      - Cancel via per-model Event (self._cancels); also used for stall detection.
 
     Fixes shipped (wave2):
       F1-MED: Added cancel() + stall watchdog — _dl_lock always released via
@@ -167,7 +167,9 @@ class ModelDownloader:
         # Progress throttle per model_id: {model_id: (last_emit_time, last_pct)}
         self._throttle: dict[str, tuple[float, float]] = {}
         # Cancel / stall coordination.
-        self._cancel = threading.Event()
+        # KE05D-09: отмена изолирована по модели — общий Event на все загрузки давал
+        # cancel(B) → abort(A) и start_download(C) → сброс отмены B. Под _states_lock.
+        self._cancels: dict[str, threading.Event] = {}
         # Last progress byte count per model_id (for stall detection).
         self._last_progress_bytes: dict[str, tuple[int, float]] = {}  # {mid: (bytes, ts)}
         self._stall_timeout_sec: float = max(0.1, float(stall_timeout_sec))
@@ -200,10 +202,10 @@ class ModelDownloader:
             state.pct = 0.0
             state.error_msg = ""
 
-        # Clear cancel flag before starting a new download.
-        self._cancel.clear()
+        # Fresh cancel flag for THIS model only (other models' cancels stay intact).
         # Reset stall tracker.
         with self._states_lock:
+            self._cancels[model_id] = threading.Event()
             self._last_progress_bytes[model_id] = (0, time.monotonic())
 
         t = threading.Thread(
@@ -226,7 +228,7 @@ class ModelDownloader:
         with state._lock:
             if state.status != "downloading":
                 return False
-        self._cancel.set()
+        self._cancel_event(model_id).set()
         logger.info("ModelDownloader: сигнал отмены загрузки %s", model_id)
         return True
 
@@ -260,6 +262,13 @@ class ModelDownloader:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _cancel_event(self, model_id: str) -> threading.Event:
+        with self._states_lock:
+            ev = self._cancels.get(model_id)
+            if ev is None:
+                ev = self._cancels[model_id] = threading.Event()
+            return ev
 
     def _get_or_create_state(self, model_id: str) -> _DownloadState:
         with self._states_lock:
@@ -310,7 +319,7 @@ class ModelDownloader:
         when either condition is met, which propagates out of snapshot_download.
         """
         # --- Cancel check ---
-        if self._cancel.is_set():
+        if self._cancel_event(model_id).is_set():
             raise _DownloadCancelled("cancel signalled")
 
         # --- Stall watchdog (F1-MED) ---
@@ -381,12 +390,29 @@ class ModelDownloader:
 
         self._dl_lock.acquire()
         try:
+            # KE05D-10: сбой проверки кэша не должен оставлять статус «downloading».
+            try:
+                already_cached = self._is_cached(model_id)
+            except Exception as exc:
+                msg = f"cache check failed: {type(exc).__name__}"
+                logger.error("ModelDownloader: %s: %s", model_id, msg)
+                state.update(status="error", error_msg=msg)
+                self._emit(model_id, "error", 0.0, error_msg=msg)
+                return
             # Double-check after acquiring the lock (another thread may have finished).
-            if self._is_cached(model_id):
+            if already_cached:
                 logger.info("ModelDownloader: %s уже кэширован после получения блокировки", model_id)
                 cache_path = self._model_cache_path(model_id)
                 state.update(status="done", pct=100.0, cache_path=str(cache_path))
                 self._emit(model_id, "done", 100.0)
+                return
+
+            # Отмена, пришедшая пока загрузка стояла в очереди на _dl_lock.
+            if self._cancel_event(model_id).is_set():
+                msg = "Отменено: cancelled before start"
+                logger.info("ModelDownloader: загрузка %s отменена до старта", model_id)
+                state.update(status="cancelled", error_msg=msg)
+                self._emit(model_id, "cancelled", state.pct, error_msg=msg)
                 return
 
             # Emit initial progress.
