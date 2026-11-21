@@ -2,14 +2,20 @@
 # ------------------------------------------------------------------
 # Smoke-check релизного контура Krab Ear Agent:
 # 1) старт агента;
-# 2) базовые control-команды;
+# 2) запрос штатного завершения СВОЕГО агента (по PID, не рассылкой);
 # 3) корректное завершение и отсутствие висящих процессов.
 #
-# Владение процессами (G2 Ear 02a F01 / W6-B): скрипт НЕ останавливает ничего по
-# шаблону. Перед стартом он требует, чтобы в этом каталоге не было ни агента, ни
-# backend (иначе отказ без единого kill), а очистка завершает только те PID, которые
-# появились после этой проверки (и сам фоновый старт). Живые процессы владельца под
-# шаблон «убить всё совпавшее» больше не попадают.
+# Владение процессами (G2 Ear 02a F01 / W6-B, ревью ChatGPT):
+# - перед стартом скрипт требует, чтобы на машине не было ни одного агента Ear
+#   (по имени исполняемого файла, в любом каталоге/бандле), ни backend этого
+#   каталога, ни его штатного сокета; иначе отказ без единого kill и без запросов;
+# - очистка и запрос завершения касаются только PID, появившихся после этой
+#   проверки, и только пока их командная строка совпадает с шаблоном. Никакого
+#   pkill по шаблону и никакой рассылки control-уведомлений (quit через
+#   NSDistributedNotificationCenter получили бы ВСЕ агенты на машине).
+# - Известный остаток: процесс, который чужой launchd поднял в окне между проверкой и
+#   нашим стартом, неотличим от нашего (агент запускается через LaunchServices и не
+#   наш потомок). Устранить можно только токеном запуска, который принимает агент.
 # ------------------------------------------------------------------
 
 set -euo pipefail
@@ -20,13 +26,17 @@ TS="$(date +%Y%m%d_%H%M%S)"
 REPORT_PATH="$REPORT_DIR/smoke_release_${TS}.md"
 START_LOG="$REPORT_DIR/smoke_release_${TS}.start.log"
 
-AGENT_PATTERN="$ROOT_DIR/native/runtime/KrabEarAgent --project-root $ROOT_DIR"
+# Агент: по имени исполняемого файла, где бы он ни лежал (бандл Krab Ear.app, native/runtime,
+# другой checkout). Живой агент запускается как .../Krab Ear.app/Contents/MacOS/KrabEarAgent
+# БЕЗ --project-root, поэтому шаблон с путём этого каталога его не видел.
+AGENT_PATTERN="${KRAB_SMOKE_AGENT_PATTERN_OVERRIDE:-(^|/)KrabEarAgent( |$)}"
 # S3/Р9: standalone active-режим (BackendSupervisor.swift) теперь спавнит
 # main.py, а не backend/service.py напрямую — но старый launchd-плист/старая
 # установка могли ещё гонять backend/service.py. ERE-альтернация (pgrep на
 # macOS = ERE, не BRE — см. test_ensure_agent_running_contract.py) матчит оба,
 # иначе смок сочтёт живой backend отсутствующим.
 BACKEND_PATTERN="$ROOT_DIR/KrabEar/(backend/service|main)\.py"
+SOCKET_PATH="${KRAB_EAR_SOCKET:-$HOME/Library/Application Support/KrabEar/krabear.sock}"
 
 # Таймауты ожидания; переопределяются в тестах на заглушках.
 WAIT_START="${KRAB_SMOKE_WAIT_START:-15}"
@@ -51,28 +61,35 @@ foreign_present() {
   fi
 }
 
-if foreign_present "$AGENT_PATTERN" || foreign_present "$BACKEND_PATTERN"; then
-  echo "Ошибка: в $ROOT_DIR уже запущен агент или backend Krab Ear (или pgrep недоступен)."
+if foreign_present "$AGENT_PATTERN" || foreign_present "$BACKEND_PATTERN" || [ -e "$SOCKET_PATH" ]; then
+  echo "Ошибка: на машине уже есть агент Krab Ear, backend этого каталога или его сокет (или pgrep недоступен)."
   echo "Smoke-check не стартует и ничего не останавливает: остановите экземпляр сами."
   exit 1
 fi
 
 mkdir -p "$REPORT_DIR"
 
-send_control_action() {
-  local action="$1"
-  "$ROOT_DIR/.venv_krab_ear/bin/python" - "$action" <<'PY'
-import sys
-from Foundation import NSDistributedNotificationCenter
+# Всегда код 0: при set -e «нет совпадений» (pgrep=1) не должно обрывать скрипт.
+pids_of() {
+  pgrep -f "$1" 2>/dev/null || true
+}
 
-action = sys.argv[1]
-NSDistributedNotificationCenter.defaultCenter().postNotificationName_object_userInfo_deliverImmediately_(
-    "com.krabear.agent.control",
-    None,
-    {"action": action},
-    True,
-)
+# Запрос штатного завершения (как Cmd+Q) КАЖДОМУ нашему агенту по PID. Без рассылки.
+terminate_own_agents() {
+  local pid sent=1
+  for pid in $(pids_of "$AGENT_PATTERN"); do
+    if "$ROOT_DIR/.venv_krab_ear/bin/python" - "$pid" <<'PY'
+import sys
+from AppKit import NSRunningApplication
+
+app = NSRunningApplication.runningApplicationWithProcessIdentifier_(int(sys.argv[1]))
+sys.exit(0 if app is not None and app.terminate() else 1)
 PY
+    then
+      sent=0
+    fi
+  done
+  return "$sent"
 }
 
 wait_for_pattern() {
@@ -114,13 +131,10 @@ wait_until_stopped() {
 }
 
 # PID, принадлежащие этому запуску: фоновый старт и всё, что совпало с шаблонами ПОСЛЕ
-# preflight (до него совпадений не было, значит это наши процессы).
+# preflight (до него совпадений не было, значит это наши процессы; см. известный остаток выше).
 OWN_PIDS=""
 START_PID=""
-# Всегда код 0: при set -e «нет совпадений» (pgrep=1) не должно обрывать очистку.
-pids_of() {
-  pgrep -f "$1" 2>/dev/null || true
-}
+CLEANED_UP="no"
 remember_own_pids() {
   local pid
   for pid in $(pids_of "$AGENT_PATTERN") $(pids_of "$BACKEND_PATTERN"); do
@@ -132,6 +146,9 @@ remember_own_pids() {
 }
 
 cleanup() {
+  # Однократно: EXIT срабатывает и после обработчика сигнала.
+  [ "$CLEANED_UP" = "yes" ] && return 0
+  CLEANED_UP="yes"
   # Только штатный TERM и только по запомненным PID: никакого pkill по шаблону.
   # PID мог умереть и быть выдан другому процессу, поэтому убиваем лишь тех, кто
   # всё ещё совпадает с шаблоном (или фоновый старт, пока его командная строка наша).
@@ -154,6 +171,10 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+# В zsh необработанные INT/TERM/HUP завершают оболочку без EXIT-ловушки: превращаем их в exit.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 set +e
 "$ROOT_DIR/scripts/start_agent.command" --launched-by-launchd >"$START_LOG" 2>&1 &
@@ -164,8 +185,9 @@ START_OK="no"
 BACKEND_OK="no"
 CONTROL_OK="no"
 SHUTDOWN_OK="no"
-BASE_AGENT_COUNT="$(count_pattern "$AGENT_PATTERN")"
-BASE_BACKEND_COUNT="$(count_pattern "$BACKEND_PATTERN")"
+# Preflight гарантировал нулевой baseline: честное сравнение «после завершения должно быть 0».
+BASE_AGENT_COUNT=0
+BASE_BACKEND_COUNT=0
 
 if wait_for_pattern "$AGENT_PATTERN" "$WAIT_START"; then
   START_OK="yes"
@@ -176,28 +198,18 @@ if wait_for_pattern "$BACKEND_PATTERN" "$WAIT_BACKEND"; then
 fi
 
 if [ "$START_OK" = "yes" ] && [ "$BACKEND_OK" = "yes" ]; then
-  send_control_action "show_history" || true
-  sleep 1
-  send_control_action "quit" || true
-  sleep 1
-  send_control_action "quit" || true
-  CONTROL_OK="yes"
+  if terminate_own_agents; then
+    CONTROL_OK="yes"
+  fi
 fi
 
 if wait_until_stopped "$AGENT_PATTERN" "$WAIT_STOP" && wait_until_stopped "$BACKEND_PATTERN" "$WAIT_STOP"; then
   SHUTDOWN_OK="yes"
 else
-  # Мягкий fallback: повторно посылаем quit и ждём ещё немного.
-  send_control_action "quit" || true
+  # Мягкий повтор запроса завершения и ещё немного ожидания; без fallback «не хуже baseline».
+  terminate_own_agents || true
   if wait_until_stopped "$AGENT_PATTERN" "$WAIT_STOP_RETRY" && wait_until_stopped "$BACKEND_PATTERN" "$WAIT_STOP_RETRY"; then
     SHUTDOWN_OK="yes"
-  else
-    # Preflight гарантировал нулевой baseline, но оставляем сравнение как защиту.
-    CUR_AGENT_COUNT="$(count_pattern "$AGENT_PATTERN")"
-    CUR_BACKEND_COUNT="$(count_pattern "$BACKEND_PATTERN")"
-    if [ "$CUR_AGENT_COUNT" -le "$BASE_AGENT_COUNT" ] && [ "$CUR_BACKEND_COUNT" -le "$BASE_BACKEND_COUNT" ]; then
-      SHUTDOWN_OK="yes"
-    fi
   fi
 fi
 
