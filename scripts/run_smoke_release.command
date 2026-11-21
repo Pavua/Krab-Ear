@@ -19,9 +19,14 @@
 #   в одной и той же проверке;
 # - фоновый старт убирается, пока он наш ПОТОМОК (проверка по ppid, а не по командной
 #   строке: start_agent.command делает exec open -W и строка меняется).
-# - Известный остаток: процесс, который чужой launchd поднял в окне между проверкой и нашим
-#   стартом, неотличим от нашего (агент запускается через LaunchServices и не наш потомок).
-#   Устранить можно только токеном запуска, который принимает агент.
+# - backend определяется по структуре командной строки (интерпретатор Python + скрипт этого
+#   каталога), а не по подстроке пути: `vim .../KrabEar/main.py` backend не считается;
+# - запомненные PID перед TERM перепроверяются через ps (имя процесса/командная строка), а не
+#   через pgrep: сбой перечисления не мешает убрать свои процессы и не заставляет трогать чужие.
+# - Известные остатки (безопасная граница, не гарантия): (1) процесс, который чужой launchd поднял
+#   в окне между проверкой и нашим стартом, неотличим от нашего; (2) запрос запуска, уже принятый
+#   LaunchServices, может завершиться после окна settle (KRAB_SMOKE_SETTLE, по умолчанию 2 с).
+#   Оба устранимы только токеном запуска, который принимает агент.
 # ------------------------------------------------------------------
 
 set -euo pipefail
@@ -40,9 +45,12 @@ AGENT_PATTERN_OVERRIDE="${KRAB_SMOKE_AGENT_PATTERN_OVERRIDE:-}"
 # macOS = ERE, не BRE — см. test_ensure_agent_running_contract.py) матчит оба,
 # иначе смок сочтёт живой backend отсутствующим.
 BACKEND_PATTERN="$ROOT_DIR/KrabEar/(backend/service|main)\.py( |$)"
+# Backend = интерпретатор Python (python, python3.14, Python.app/.../Python) + необязательные опции
+# + скрипт: редактор или отладчик с путём к скрипту под это не подпадают.
+BACKEND_INTERPRETER='(^|/)[Pp]ython[0-9.]*( -[^ ]+)* '
 # Путь каталога попадает в регулярное выражение: экранируем метасимволы ERE (скобки, точку...).
 ROOT_RE="$(printf '%s' "$ROOT_DIR" | sed -E 's/[][\\.^$*+?(){}|]/\\&/g')"
-BACKEND_MATCH="${ROOT_RE}${BACKEND_PATTERN#"$ROOT_DIR"}"
+BACKEND_MATCH="${BACKEND_INTERPRETER}${ROOT_RE}${BACKEND_PATTERN#"$ROOT_DIR"}"
 SOCKET_PATH="${KRAB_EAR_SOCKET:-$HOME/Library/Application Support/KrabEar/krabear.sock}"
 
 # Таймауты ожидания; переопределяются в тестах на заглушках.
@@ -170,32 +178,54 @@ count_kind() {
   esac
 }
 
-# PID, принадлежащие этому запуску: всё, что совпало после preflight (до него совпадений
-# не было, значит это наши процессы; см. известный остаток выше).
+# Записи «вид:PID» (agent:123 backend:124), появившиеся после preflight (до него совпадений
+# не было, значит это наши процессы; см. известные остатки выше).
 OWN_PIDS=""
 START_PID=""
+START_OK="no"
 CLEANED_UP="no"
 remember_own_pids() {
   local pid
-  for pid in $(pids_of agent) $(pids_of backend); do
+  for pid in $(pids_of agent); do
     case " $OWN_PIDS " in
-      *" $pid "*) ;;
-      *) OWN_PIDS="$OWN_PIDS $pid" ;;
+      *" agent:$pid "*) ;;
+      *) OWN_PIDS="$OWN_PIDS agent:$pid" ;;
+    esac
+  done
+  for pid in $(pids_of backend); do
+    case " $OWN_PIDS " in
+      *" backend:$pid "*) ;;
+      *) OWN_PIDS="$OWN_PIDS backend:$pid" ;;
     esac
   done
 }
 
-# TERM только тем запомненным PID, которые всё ещё совпадают по имени/шаблону (PID мог быть
-# выдан другому процессу).
+# Перепроверка идентичности PID через ps, НЕЗАВИСИМО от pgrep: PID мог умереть и быть выдан
+# другому процессу, а pgrep мог сломаться. Код 0 только если процесс жив и по-прежнему наш.
+pid_is_ours() {
+  local kind="$1" pid="$2" comm cmd
+  cmd="$(ps -p "$pid" -o command= 2>/dev/null || true)"
+  [ -n "$cmd" ] || return 1
+  if [ "$kind" = "agent" ]; then
+    if [ -n "$AGENT_PATTERN_OVERRIDE" ]; then
+      grep -Eq -e "$AGENT_PATTERN_OVERRIDE" <<<"$cmd"
+    else
+      comm="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+      [ "${comm##*/}" = "KrabEarAgent" ]
+    fi
+  else
+    grep -Eq -e "$BACKEND_MATCH" <<<"$cmd"
+  fi
+}
+
+# TERM только запомненным процессам, которые по ps всё ещё наши.
 terminate_remembered() {
-  local pid current
-  current=" $(pids_of agent) $(pids_of backend) "
-  current="${current//$'\n'/ }"
+  local entry
   # zsh не делит неэкранированную переменную на слова: разбиение явное, через ${=...}.
-  for pid in ${=OWN_PIDS}; do
-    case "$current" in
-      *" $pid "*) kill "$pid" >/dev/null 2>&1 || true ;;
-    esac
+  for entry in ${=OWN_PIDS}; do
+    if pid_is_ours "${entry%%:*}" "${entry##*:}"; then
+      kill "${entry##*:}" >/dev/null 2>&1 || true
+    fi
   done
 }
 
@@ -215,9 +245,9 @@ cleanup() {
       killed_launcher="yes"
     fi
   fi
-  if [ "$killed_launcher" = "yes" ]; then
-    # Запрос запуска мог быть уже отправлен в LaunchServices: короткое окно, чтобы
-    # завершить то, что он успеет поднять.
+  if [ -n "$START_PID" ] && { [ "$killed_launcher" = "yes" ] || [ "$START_OK" != "yes" ]; }; then
+    # Запрос запуска мог быть уже отправлен в LaunchServices (и лаунчер мог успеть выйти):
+    # короткое окно, чтобы завершить то, что он успеет поднять.
     sleep "$SETTLE_SEC"
     remember_own_pids
     terminate_remembered
@@ -234,7 +264,6 @@ set +e
 START_PID=$!
 set -e
 
-START_OK="no"
 BACKEND_OK="no"
 CONTROL_OK="no"
 SHUTDOWN_OK="no"

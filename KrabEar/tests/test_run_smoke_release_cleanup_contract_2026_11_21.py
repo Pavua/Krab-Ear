@@ -35,7 +35,7 @@ def _write(path: Path, text: str, mode: int = 0o755) -> Path:
 FAKE_AGENT = """#!/bin/sh
 # Заглушка агента: публикует свой PID, ждёт флаг quit, backend поднимает как свой дочерний процесс.
 echo $$ > "$ROOT/agent.pid"
-sh "$ROOT/KrabEar/main.py" &
+"$PYTHON" "$ROOT/KrabEar/main.py" &
 BACKEND=$!
 if [ -n "$IGNORE_QUIT" ]; then
   while true; do sleep 1; done
@@ -86,6 +86,22 @@ exec /usr/bin/pgrep "$@"
 """
 
 
+PY_LOOP = "import time\nwhile True:\n    time.sleep(1)\n"
+
+# Лаунчер, чей запрос «уже принят LaunchServices»: агент появится позже, из отдельной сессии.
+START_AGENT_LATE = """#!/bin/sh
+touch "$ROOT/start_agent.ran"
+ROOT="$ROOT" IGNORE_QUIT="$IGNORE_QUIT" "$PYTHON" -c "
+import os, subprocess
+subprocess.Popen(
+    ['/bin/sh', '-c', 'sleep 1.5; exec ' + os.environ['ROOT'] + '/native/runtime/KrabEarAgent --project-root ' + os.environ['ROOT']],
+    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+)
+"
+while true; do sleep 1; done
+"""
+
+
 def re_escape(root: Path) -> str:
     return re.escape(str(root))
 
@@ -94,7 +110,7 @@ def _make_tree(root: Path) -> Path:
     _write(root / "scripts" / "run_smoke_release.command", SCRIPT.read_text(encoding="utf-8"))
     _write(root / "scripts" / "start_agent.command", START_AGENT)
     _write(root / "native" / "runtime" / "KrabEarAgent", FAKE_AGENT)
-    _write(root / "KrabEar" / "main.py", "while true; do sleep 1; done\n")
+    _write(root / "KrabEar" / "main.py", PY_LOOP)
     return root
 
 
@@ -142,16 +158,27 @@ def _run_smoke(root: Path, extra_env: dict | None = None):
     )
 
 
+def _decoy_argv(mentioned_path: Path) -> list[str]:
+    """Процесс, в командной строке которого есть путь (как у редактора/отладчика), но это не агент и не backend.
+
+    ``sh -c "sleep N" path`` не годится: sh делает exec sleep и путь из командной строки пропадает.
+    """
+    return ["/usr/bin/awk", 'BEGIN { while (1) system("sleep 5") }', str(mentioned_path)]
+
+
 def _bystander(root: Path, spawned: list, kind: str) -> subprocess.Popen:
     """Чужой процесс владельца, совпадающий с шаблоном агента или backend."""
     if kind == "agent":
         argv = [str(root / "native" / "runtime" / "KrabEarAgent"), "--project-root", str(root)]
         env = {**os.environ, "IGNORE_QUIT": "1"}
     elif kind == "backend":
-        argv = ["/bin/sh", str(root / "KrabEar" / "main.py")]
+        argv = [sys.executable, str(root / "KrabEar" / "main.py")]
+        env = os.environ.copy()
+    elif kind == "editor":  # командная строка содержит путь backend, но это не backend
+        argv = _decoy_argv(root / "KrabEar" / "main.py")
         env = os.environ.copy()
     elif kind == "debugger":  # командная строка содержит путь агента, но это не агент
-        argv = ["/bin/sh", "-c", "sleep 300", str(root / "native" / "runtime" / "KrabEarAgent")]
+        argv = _decoy_argv(root / "native" / "runtime" / "KrabEarAgent")
         env = os.environ.copy()
     else:
         argv = ["/bin/sleep", "300"]
@@ -262,7 +289,7 @@ def test_checkout_path_with_regex_metacharacters_is_matched_literally(tmp_path, 
         "KRAB_SMOKE_AGENT_PATTERN_OVERRIDE", "^/bin/sh " + re_escape(root) + "/native/runtime/KrabEarAgent( |$)"
     )
     proc = subprocess.Popen(
-        ["/bin/sh", str(root / "KrabEar" / "main.py")],
+        [sys.executable, str(root / "KrabEar" / "main.py")],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -281,9 +308,9 @@ def test_checkout_path_with_regex_metacharacters_is_matched_literally(tmp_path, 
 def test_backend_script_with_a_longer_name_is_not_a_backend(tree, tmp_path, spawned_name="main.py.backup"):
     root, spawned = tree
     _with_venv(root)
-    other = _write(root / "KrabEar" / spawned_name, "while true; do sleep 1; done\n")
+    other = _write(root / "KrabEar" / spawned_name, PY_LOOP)
     proc = subprocess.Popen(
-        ["/bin/sh", str(other)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        [sys.executable, str(other)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
     )
     spawned.append(proc)
     time.sleep(0.5)
@@ -353,6 +380,9 @@ def test_process_enumeration_failure_is_not_reported_as_a_clean_shutdown(tree, t
     text = reports[0].read_text()
     assert "status: **FAILED**" in text and "shutdown_ok: no" in text
     assert "current_agent_count: unknown" in text
+    # Очистка идентифицирует свои PID через ps, а не через сломанный pgrep: ничего не остаётся.
+    leftovers = _settle(root)
+    assert leftovers == [], f"при сбое pgrep очистка оставила свои процессы: {leftovers}"
 
 
 def test_exec_transition_of_the_launcher_does_not_hide_it_from_cleanup(tree):
@@ -395,3 +425,51 @@ def test_sigterm_on_the_script_still_cleans_up_its_own_processes(tree):
     assert proc.wait(timeout=30) == 143
     leftovers = _settle(root)
     assert leftovers == [], f"после SIGTERM остались процессы smoke: {leftovers}"
+
+
+def test_unrelated_process_mentioning_the_backend_path_survives_cleanup(tree):
+    root, spawned = tree
+    _with_venv(root)
+    editor = _bystander(root, spawned, "editor")
+    result = _run_smoke(root)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _alive(editor), "очистка убила редактор/отладчик, лишь упоминающий путь backend"
+
+
+def test_agent_started_late_by_launch_services_is_still_cleaned_within_settle(tree):
+    root, spawned = tree
+    _with_venv(root)
+    _write(root / "scripts" / "start_agent.command", START_AGENT_LATE)
+    env = {**os.environ, "KRAB_SMOKE_SETTLE": "4", "KRAB_SMOKE_WAIT_START": "30", "KRAB_SMOKE_WAIT_BACKEND": "30"}
+    proc = subprocess.Popen(
+        ["/bin/zsh", str(root / "scripts" / "run_smoke_release.command")],
+        env=env,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    spawned.append(proc)
+    deadline = time.monotonic() + 15
+    while not (root / "start_agent.ran").exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    time.sleep(0.3)  # лаунчер уже отправил запрос, агента ещё нет
+    proc.send_signal(signal.SIGTERM)
+    assert proc.wait(timeout=40) == 143
+    leftovers = _settle(root)
+    assert leftovers == [], f"поздно поднятый агент остался после очистки: {leftovers}"
+
+
+def test_native_executable_is_found_by_process_name(tmp_path):
+    """pgrep -x KrabEarAgent находит НАСТОЯЩИЙ исполняемый файл с таким именем (не скрипт-заглушку)."""
+    native = tmp_path / "KrabEarAgent"
+    shutil.copy("/bin/sleep", native)
+    proc = subprocess.Popen([str(native), "300"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        time.sleep(0.7)
+        if proc.poll() is not None:
+            pytest.skip("копия системного бинарника не запускается (code signing)")
+        out = subprocess.run(["pgrep", "-x", "KrabEarAgent"], capture_output=True, text=True)
+        assert str(proc.pid) in out.stdout.split()
+    finally:
+        proc.kill()
+        proc.wait(timeout=10)
