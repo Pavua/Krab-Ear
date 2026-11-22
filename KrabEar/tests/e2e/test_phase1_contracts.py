@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import time
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -36,7 +37,7 @@ def mock_voice_gateway_app() -> FastAPI:
     @app.post("/v1/sessions")
     async def create_session(payload=None):
         """Mock session creation."""
-        session_id = "test-session-" + str(int(time.time() * 1000))
+        session_id = "test-session-" + uuid.uuid4().hex
         ACTIVE_SESSIONS[session_id] = {
             "state": "init",
             "events": [],
@@ -54,6 +55,7 @@ def mock_voice_gateway_app() -> FastAPI:
             engine_event = {
                 "type": "engine.loaded",
                 "engine": "moshi-mlx-mock",
+                "session_id": session_id,
                 "elapsed_sec": 0.1,
                 "timestamp": elapsed,
             }
@@ -257,6 +259,10 @@ class TestPhase1Contracts:
                 ev1 = ws1.receive_json()
                 assert ev0["type"] == "engine.loaded"
                 assert ev1["type"] == "engine.loaded"
+                # G2-KET10-T10-07: сессии различимы, события не смешиваются
+                assert sessions[0] != sessions[1]
+                assert ev0["session_id"] == sessions[0]
+                assert ev1["session_id"] == sessions[1]
 
     def test_9_binary_and_json_coexistence(self, mock_voice_gateway_client: TestClient):
         """9. WebSocket handles both binary (audio) and JSON (control) frames."""

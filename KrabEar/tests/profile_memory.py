@@ -1,8 +1,6 @@
 """Профилирование памяти Krab Ear — замер накладных расходов фреймворка без ML-моделей."""
 
 from __future__ import annotations
-from backend.translator import TranslationResult
-import numpy as np
 
 import sys
 import tempfile
@@ -13,6 +11,10 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+import numpy as np  # noqa: E402
+
+from backend.translator import TranslationResult  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
