@@ -636,15 +636,20 @@ extension HistoryPanelController {
             do {
                 let resp = try ipc.call(method: "add_stt_hotword", params: ["word": word])
                 let result = resp["result"] as? [String: Any]
+                // G3-MEM-07 (M07-12): требуем подтверждённого добавления в список.
+                if result?["ok"] as? Bool != true { throw NSError(domain: "KrabEar", code: -1) }
                 truncated = result?["truncated"] as? Bool ?? false
             } catch {
+                DispatchQueue.main.async {
+                    BackendToast.shared.show("Не удалось добавить термин в словарь STT", duration: 3.5)
+                }
                 return
             }
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
 
-                // Очищаем поле ввода.
+                // Очищаем поле ввода только после подтверждённой записи.
                 if isClaudeDesign {
                     if let field = objc_getAssociatedObject(
                         self, &STTVocabAssocKeys.cdAddTextField

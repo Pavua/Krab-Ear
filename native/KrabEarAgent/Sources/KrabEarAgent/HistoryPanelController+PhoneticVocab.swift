@@ -229,12 +229,22 @@ extension HistoryPanelController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
-                _ = try ipc.call(method: "add_phonetic_entry", params: ["canonical": c, "variants": variants])
+                let resp = try ipc.call(method: "add_phonetic_entry", params: ["canonical": c, "variants": variants])
+                // G3-MEM-07 (M07-08): сохраняем ввод до подтверждения записи.
+                let ok = (resp["result"] as? [String: Any])?["ok"] as? Bool == true
+                if !ok { throw NSError(domain: "KrabEar", code: -1) }
             } catch {
-                print("[Agent] add_phonetic_entry failed: \(error)")
+                // Лог — без содержимого полей и сообщения ошибки (IPC может содержать пользовательские данные).
+                NSLog("[KrabEar] add_phonetic_entry failed")
+                DispatchQueue.main.async {
+                    self.showInfoAlert(title: "Пользовательский словарь", body: "Не удалось добавить термин, проверьте ввод.")
+                    self.fetchAndRebuildPhoneticVocabList(isClaudeDesign: isClaudeDesign)
+                }
+                return
             }
-            DispatchQueue.main.async {
-                // Clear fields
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                // Подтверждена запись — чистим поля.
                 if isClaudeDesign {
                     if let tf = objc_getAssociatedObject(self, &PhoneticVocabAssocKeys.cdAddCanonicalField) as? NSTextField { tf.stringValue = "" }
                     if let tf = objc_getAssociatedObject(self, &PhoneticVocabAssocKeys.cdAddVariantsField) as? NSTextField { tf.stringValue = "" }
@@ -268,16 +278,24 @@ extension HistoryPanelController {
             guard let self else { return }
 
             let entries: [[String: Any]]
+            var loadError: Bool = false
             do {
                 let resp = try ipc.call(method: "list_phonetic_entries", params: [:])
                 let result = resp["result"] as? [String: Any]
                 entries = result?["entries"] as? [[String: Any]] ?? []
+                // G3-MEM-07 (M07-08): при отказе загрузки не выглядим «пустым словарём».
+                loadError = resp["error"] != nil || result?["ok"] as? Bool == false
             } catch {
                 entries = []
+                loadError = true
             }
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                if loadError {
+                    self.showInfoAlert(title: "Пользовательский словарь", body: "Не удалось загрузить словарь (ошибка чтения).")
+                    return
+                }
                 if isClaudeDesign {
                     self.rebuildCDPhoneticVocabList(entries: entries)
                 } else {
