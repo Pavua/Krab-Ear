@@ -179,14 +179,27 @@ class HfTokenPropagationTestCase(unittest.TestCase):
                 captured_messages.append(self.format(record))
 
         handler = _CapHandler()
+        handler.setLevel(logging.DEBUG)
         root_logger = logging.getLogger()
+        service_logger = logging.getLogger("backend.service")
+        old_levels = (root_logger.level, service_logger.level)
         root_logger.addHandler(handler)
+        # DEBUG/INFO включены на время теста (раньше при уровне WARNING захват был пуст и
+        # возможное логирование токена на этих уровнях не проверялось); уровни возвращаются в finally.
+        root_logger.setLevel(logging.DEBUG)
+        service_logger.setLevel(logging.DEBUG)
         try:
+            # контрольная запись доказывает, что захват работает на DEBUG
+            service_logger.debug("capture-control-record")
             svc = _StubService({"hf_token": "hf_SECRET_VALUE"})
             svc._propagate_hf_token_to_env()
         finally:
             root_logger.removeHandler(handler)
+            root_logger.setLevel(old_levels[0])
+            service_logger.setLevel(old_levels[1])
 
+        self.assertTrue(any("capture-control-record" in m for m in captured_messages),
+                        "захват логов не работает — проверка отсутствия токена ничего бы не доказывала")
         # Ни одна лог-запись не должна содержать сам токен
         for line in captured_messages:
             self.assertNotIn("hf_SECRET_VALUE", line,
@@ -223,6 +236,45 @@ class HfTokenAfterSaveHookTestCase(unittest.TestCase):
 
         for k in _ENV_KEYS:
             self.assertEqual(os.environ.get(k), "hf_NEW")
+
+
+class HfTokenRealSavePathTestCase(unittest.TestCase):
+    """E07-06: смена токена через НАСТОЯЩИЙ SettingsService.handle_set_settings → зарегистрированный
+    after_save hook → _propagate_hf_token_to_env(overwrite=True). Прямые вызовы helper в классах
+    выше не замечали потерю регистрации callback или overwrite=True у вызывающего кода."""
+
+    def setUp(self):
+        self._env_snapshot = _save_env()
+        for k in _ENV_KEYS:
+            os.environ.pop(k, None)
+
+    def tearDown(self):
+        _restore_env(self._env_snapshot)
+
+    def test_token_change_via_set_settings_updates_env_with_overwrite(self):
+        import tempfile
+        from unittest.mock import patch
+        from _settings_test_helpers import safe_backend_for_settings
+        from backend.state_store import StateStore
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        store = StateStore(Path(tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        store.save_settings({"hf_token": "hf_TOKEN_A"})
+        svc = safe_backend_for_settings(self, store)
+        # старт: токен A из settings уже в env
+        for k in _ENV_KEYS:
+            self.assertEqual(os.environ.get(k), "hf_TOKEN_A", f"{k} после init")
+
+        with patch.object(svc, "_propagate_hf_token_to_env",
+                          wraps=svc._propagate_hf_token_to_env) as spy, \
+                patch("core.config.reload_settings_from_json", return_value=0, create=True):
+            svc._settings_svc.handle_set_settings({"hf_token": "hf_TOKEN_B"})
+
+        spy.assert_called_once_with(overwrite=True)
+        for k in _ENV_KEYS:
+            self.assertEqual(os.environ.get(k), "hf_TOKEN_B", f"{k} после смены токена")
 
 
 class HfTokenOverwriteTestCase(unittest.TestCase):
@@ -332,34 +384,70 @@ class HfTokenOverwriteTestCase(unittest.TestCase):
         self.assertIsNone(engine._diarization_load_error)
 
     def test_invalidation_waits_until_active_inference_releases_run_lock(self):
-        """Hot reload не должен обнулить pipeline во время активного инференса."""
+        """Hot reload не должен обнулить pipeline во время активного инференса.
+
+        Lock оборачивается объектом с Event, который выставляется ВНУТРИ acquire() worker'а:
+        тест не считает «finished не наступил за 50 мс» ожиданием, пока не подтверждена сама
+        попытка захвата (иначе реализация без lock проходила при позднем старте потока).
+        """
+        inner = threading.Lock()
+        attempted = threading.Event()
+        main_thread = threading.current_thread()
+
+        class _SignalLock:
+            def acquire(self, *a, **k):
+                if threading.current_thread() is not main_thread:
+                    attempted.set()
+                return inner.acquire(*a, **k)
+
+            def release(self):
+                inner.release()
+
+            def __enter__(self):
+                self.acquire()
+                return self
+
+            def __exit__(self, *exc):
+                self.release()
+                return False
+
         engine = SimpleNamespace(
             _diarization_pipeline=object(),
             _diarization_load_error="старый 401",
-            _diarization_run_lock=threading.Lock(),
+            _diarization_run_lock=_SignalLock(),
             _diarization_load_lock=threading.RLock(),
         )
         svc = _StubService({"hf_token": "hf_AFTER_INFERENCE"})
         svc.transcriber = SimpleNamespace(engine=engine)
         finished = threading.Event()
+        errors: list = []
 
-        engine._diarization_run_lock.acquire()
-        worker = threading.Thread(
-            target=lambda: (
-                svc._propagate_hf_token_to_env(overwrite=True),
-                finished.set(),
-            ),
-            daemon=True,
-        )
+        def _work():
+            try:
+                svc._propagate_hf_token_to_env(overwrite=True)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        inner.acquire()  # «активный инференс» держит run lock
+        worker = threading.Thread(target=_work, daemon=True)
         worker.start()
+        released = False
         try:
-            self.assertFalse(finished.wait(0.05))
+            self.assertTrue(attempted.wait(2.0), "worker не дошёл до захвата run lock")
+            self.assertFalse(finished.wait(0.05), "invalidation прошла мимо run lock")
             self.assertIsNotNone(engine._diarization_pipeline)
             self.assertEqual(engine._diarization_load_error, "старый 401")
+            inner.release()
+            released = True
+            self.assertTrue(finished.wait(1.0))
         finally:
-            engine._diarization_run_lock.release()
-        self.assertTrue(finished.wait(1.0))
-        worker.join(timeout=1.0)
+            if not released:
+                inner.release()
+            worker.join(timeout=2.0)
+        self.assertEqual(errors, [], f"исключение в worker: {errors}")
+        self.assertFalse(worker.is_alive())
         self.assertIsNone(engine._diarization_pipeline)
         self.assertIsNone(engine._diarization_load_error)
 
