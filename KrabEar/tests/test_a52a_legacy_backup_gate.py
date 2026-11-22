@@ -822,7 +822,13 @@ class TestUnarchiveAvailability:
         with patch.object(store, "_lock", tracking_lock):
             result = mgr.unarchive_items(["seed"])
         assert result["unarchived_count"] == 1
-        assert spy.calls == [{"item_id": "seed", "depth": 0}]
+        # G3-MEM-04: индекс получает id ФАКТИЧЕСКИ созданной записи (настоящий
+        # StateStore генерирует новый id), вне store-lock, и такая запись существует.
+        assert len(spy.calls) == 1 and spy.calls[0]["depth"] == 0
+        indexed_id = spy.calls[0]["item_id"]
+        assert indexed_id != "seed"
+        restored = store.get_history_item_by_id(indexed_id)
+        assert restored is not None and restored.text == "semantic text"
 
 
 class TestPolicyReaderFallback:

@@ -42,6 +42,28 @@ _MAX_UNARCHIVE_BATCH = 100      # макс. item_ids за один unarchive_ite
 _MAX_ARCHIVE_LOAD = 50_000      # выше — warn + truncate (защита памяти)
 
 
+# Поля HistoryItem, которые принимает StateStore.add_history_item (кроме text).
+_RESTORABLE_FIELDS = (
+    "paste_status", "source_text", "translated_text", "translation_mode", "source_lang",
+    "target_lang", "translation_status", "translation_engine", "chat_id", "message_id",
+    "cleaned_text", "llm_applied", "llm_latency_ms", "diarization", "audio_duration_sec",
+    "confidence", "emotion", "word_timestamps", "speaker_turns", "tags", "favorite",
+    "audio_path", "is_protected", "reasoning", "action_items", "decisions", "questions",
+    "privacy_mode",
+)
+_RESTORE_DEFAULTS = {
+    "paste_status": "failed", "translation_mode": "off", "translation_status": "not_requested",
+}
+
+
+def _restorable_fields(restore_dict: dict) -> dict:
+    """Известные поля архивной записи для add_history_item (G3-MEM-04)."""
+    out = {k: restore_dict[k] for k in _RESTORABLE_FIELDS if k in restore_dict}
+    for key, default in _RESTORE_DEFAULTS.items():
+        out.setdefault(key, default)
+    return out
+
+
 @dataclass
 class ArchiveResult:
     """Результат операции архивирования."""
@@ -529,26 +551,27 @@ class ArchiveManager:
                     # роняла 10+ полей метаданных и генерировала новый UUID.
                     restore_dict = {k: v for k, v in item.items() if k != "archived_at"}
                     try:
+                        # G3-MEM-04: id для индекса — ФАКТИЧЕСКИ созданной записи.
+                        restored_id = item_id
                         if hasattr(_store, "restore_history_item_raw"):
                             # Предпочтительный путь: сохранить все поля + оригинальный id.
                             # При коллизии id со существующей активной записью store
                             # добавляет суффикс '-restored' (новый UUID не генерируется).
-                            _store.restore_history_item_raw(restore_dict)
+                            raw_result = _store.restore_history_item_raw(restore_dict)
+                            if isinstance(raw_result, str) and raw_result:
+                                restored_id = raw_result
                         else:
-                            # Фоллбэк для FakeStore-стабов в тестах без restore_history_item_raw.
-                            # ВНИМАНИЕ: эта ветка теряет 10+ полей метаданных — используется
-                            # только для обратной совместимости с устаревшими тестовыми двойниками.
-                            _store.add_history_item(
+                            # Путь прода: StateStore.restore_history_item_raw не существует,
+                            # поэтому запись создаётся через add_history_item с НОВЫМ id.
+                            # Передаём все известные поля (теги, избранное, диаризация, …) —
+                            # раньше терялись 10+ полей. ts и id add_history_item не принимает.
+                            created = _store.add_history_item(
                                 text=restore_dict.get("text", ""),
-                                paste_status=restore_dict.get("paste_status", "failed"),
-                                source_text=restore_dict.get("source_text", ""),
-                                translated_text=restore_dict.get("translated_text", ""),
-                                translation_mode=restore_dict.get("translation_mode", "off"),
-                                source_lang=restore_dict.get("source_lang", ""),
-                                target_lang=restore_dict.get("target_lang", ""),
-                                translation_status=restore_dict.get("translation_status", "not_requested"),
-                                translation_engine=restore_dict.get("translation_engine", ""),
+                                **_restorable_fields(restore_dict),
                             )
+                            created_id = getattr(created, "id", None)
+                            if isinstance(created_id, str) and created_id:
+                                restored_id = created_id
                         unarchived_count += 1
                         if self._semantic_searcher is not None:
                             restore_text = restore_dict.get("text", "")
@@ -556,7 +579,7 @@ class ArchiveManager:
                                 # Индексация выполняется ПОСЛЕ store-flock (ниже):
                                 # index_item → синхронный ML _encode не должен
                                 # держать глобальный history.lock.
-                                to_index.append((item_id, restore_text))
+                                to_index.append((restored_id, restore_text))
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
                         remaining.append(item)
