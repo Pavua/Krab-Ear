@@ -241,6 +241,11 @@ extension HistoryPanelController {
 
         section.contentStackView.addArrangedSubview(card)
 
+        // G3-MEM-07 (M07-04): подключаем реальный статус encryption + миграционную
+        // строку (CD-вариант не читал статус и не показывал миграцию).
+        loadEncryptionStatus()
+        refreshMigrationStatus()
+
         return section
     }
 

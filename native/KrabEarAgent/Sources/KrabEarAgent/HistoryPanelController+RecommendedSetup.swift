@@ -192,13 +192,20 @@ extension HistoryPanelController {
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var ok = false
+            var snapshotId: String?
             do {
                 let resp = try ipc.call(method: "apply_recommended_setup", params: ["dry_run": false])
+                let result = resp["result"] as? [String: Any]
                 // M07-05: ok==true обязателен.
-                ok = (resp["result"] as? [String: Any])?["ok"] as? Bool == true
+                ok = result?["ok"] as? Bool == true
+                if ok {
+                    snapshotId = result?["snapshot_id"] as? String
+                }
             } catch {
                 ok = false
             }
+            // G3-MEM-07 (M07-14): привязываем snapshot конкретного применения.
+            self.lastRecommendedSetupSnapshotId = snapshotId
             DispatchQueue.main.async { [weak self] in
                 sender.isEnabled = true
                 self?.recommendedSetupShowToast(ok ? "Рекомендованная настройка применена" : "Не удалось применить")
@@ -214,20 +221,33 @@ extension HistoryPanelController {
             guard let self else { return }
             defer { sender.isEnabled = true }
             var message = "Нет сохранённого снимка для отмены"
-            do {
-                let resp = try await ipcClient.callAsync(method: "list_settings_backups", params: ["limit": 10])
-                let backups = (resp["result"] as? [String: Any])?["backups"] as? [[String: Any]] ?? []
-                if let last = backups.first(where: { ($0["reason"] as? String) == "before_recommended_setup" }),
-                   let backupId = last["backup_id"] as? String {
-                    if let delegate = NSApp.delegate as? AgentAppDelegate {
-                        let operation = delegate.performSettingsMutation("restore_settings_backup",
-                                                                          params: ["backup_id": backupId])
-                        message = await operation.value
-                            ? "Настройки возвращены к состоянию до применения"
-                            : "Не удалось подтвердить восстановление настроек"
-                    } else {
-                        message = "Не удалось восстановить настройки"
+            // G3-MEM-07 (M07-14): Undo привязан к snapshot_id конкретного применения,
+            // а не к последнему backup по reason (мог откатить более поздние настройки).
+            var targetId = self.lastRecommendedSetupSnapshotId
+            if targetId == nil {
+                do {
+                    let resp = try await ipcClient.callAsync(method: "list_settings_backups", params: ["limit": 10])
+                    let backups = (resp["result"] as? [String: Any])?["backups"] as? [[String: Any]] ?? []
+                    if let last = backups.first(where: { ($0["reason"] as? String) == "before_recommended_setup" }),
+                       let backupId = last["backup_id"] as? String {
+                        targetId = backupId
                     }
+                } catch {
+                    targetId = nil
+                }
+            }
+            do {
+                if let backupId = targetId,
+                   let delegate = NSApp.delegate as? AgentAppDelegate {
+                    let operation = delegate.performSettingsMutation("restore_settings_backup",
+                                                                      params: ["backup_id": backupId])
+                    message = await operation.value
+                        ? "Настройки возвращены к состоянию до применения"
+                        : "Не удалось подтвердить восстановление настроек"
+                } else if targetId == nil {
+                    message = "Нет сохранённого снимка для отмены"
+                } else {
+                    message = "Не удалось восстановить настройки"
                 }
             } catch {
                 message = "Не удалось отменить: \(error.localizedDescription)"
