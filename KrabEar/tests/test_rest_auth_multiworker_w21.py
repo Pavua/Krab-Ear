@@ -147,19 +147,25 @@ class TestFlockConcurrentWrites(unittest.TestCase):
     """Two 'workers' calling _save concurrently must not corrupt the file."""
 
     def setUp(self):
-        self._tmp = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_td.cleanup)
+        self._tmp = _td.name
 
     def test_concurrent_creates_no_corruption(self):
-        """Create tokens from N threads (simulating N workers) — final file valid JSON."""
+        """N потоков (воркеров) создают токены — НИ ОДИН не потерян, каждый проходит проверку."""
         n_workers = 4
         n_tokens_each = 5
         errors: list[Exception] = []
+        issued: list[tuple[str, str]] = []  # (raw, id) всех успешных созданий
+        issued_lock = threading.Lock()
 
         def worker_fn(worker_id: int) -> None:
-            auth = _make_auth(self._tmp)
             try:
+                auth = _make_auth(self._tmp)  # конструктор внутри try: его ошибки попадают в errors
                 for i in range(n_tokens_each):
-                    auth.create_token(f"worker-{worker_id}-token-{i}")
+                    raw, meta = auth.create_token(f"worker-{worker_id}-token-{i}")
+                    with issued_lock:
+                        issued.append((raw, meta["id"]))
             except Exception as exc:
                 errors.append(exc)
 
@@ -167,20 +173,27 @@ class TestFlockConcurrentWrites(unittest.TestCase):
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=30)
+        self.assertFalse([t for t in threads if t.is_alive()], "worker threads did not finish")
 
         self.assertEqual(errors, [], f"Worker errors: {errors}")
 
-        # Final file must be valid JSON and contain all tokens.
+        # Точное множество: ровно n_workers * n_tokens_each УНИКАЛЬНЫХ записей (раньше хватало
+        # len(data) > 0 — потеря 19 из 20 токенов проходила).
+        expected = n_workers * n_tokens_each
+        self.assertEqual(len(issued), expected)
         data = json.loads((Path(self._tmp) / "api_tokens.json").read_text())
         self.assertIsInstance(data, list)
-        # At least some tokens should be there (exact count depends on race order
-        # but file must never be corrupt).
-        self.assertGreater(len(data), 0)
+        self.assertEqual({t["id"] for t in data}, {tid for _, tid in issued},
+                         "в файле не все выданные токены (потерянная запись)")
+        # каждый выданный токен проверяется НОВЫМ экземпляром RestAuth
+        fresh = _make_auth(self._tmp)
+        for raw, tid in issued:
+            meta = fresh.verify_token(raw)
+            self.assertIsNotNone(meta, f"выданный токен {tid} не проходит проверку")
 
     def test_file_remains_valid_json_after_concurrent_revokes(self):
-        """Concurrent revokes from multiple 'workers' on the same file — no corruption."""
-        # Pre-create tokens from worker-A.
+        """Конкурентные отзывы: каждый успешен, файл валиден, отозванные токены недействительны."""
         auth_a = _make_auth(self._tmp)
         token_ids = []
         raw_tokens = []
@@ -188,13 +201,18 @@ class TestFlockConcurrentWrites(unittest.TestCase):
             raw, meta = auth_a.create_token(f"token-{i}")
             token_ids.append(meta["id"])
             raw_tokens.append(raw)
+        raw_keep, meta_keep = auth_a.create_token("keep-me")  # не отзываемый контроль
 
         errors: list[Exception] = []
+        results: dict[str, bool] = {}
+        results_lock = threading.Lock()
 
         def revoke_fn(tid: str) -> None:
-            auth = _make_auth(self._tmp)
             try:
-                auth.revoke_token(tid)
+                auth = _make_auth(self._tmp)
+                ok = auth.revoke_token(tid)
+                with results_lock:
+                    results[tid] = ok
             except Exception as exc:
                 errors.append(exc)
 
@@ -202,12 +220,19 @@ class TestFlockConcurrentWrites(unittest.TestCase):
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=30)
+        self.assertFalse([t for t in threads if t.is_alive()], "revoke threads did not finish")
 
         self.assertEqual(errors, [], f"Revoke errors: {errors}")
+        self.assertEqual(results, {tid: True for tid in token_ids}, "не каждый revoke_token вернул True")
 
         data = json.loads((Path(self._tmp) / "api_tokens.json").read_text())
         self.assertIsInstance(data, list)
+        self.assertEqual({t["id"] for t in data}, {meta_keep["id"]}, "остались отозванные токены")
+        fresh = _make_auth(self._tmp)
+        for raw in raw_tokens:
+            self.assertIsNone(fresh.verify_token(raw), "отозванный токен всё ещё действителен")
+        self.assertIsNotNone(fresh.verify_token(raw_keep), "неотозванный токен потерян")
 
 
 class TestMtimeReloadIntegration(unittest.TestCase):
