@@ -252,15 +252,17 @@ extension HistoryPanelController {
                 }
                 let chatTitle = chatPopUp.selectedItem?.title ?? "Telegram"
 
-                // 3. Отправить на background thread
+                // 3. Отправить на background thread.
+                // G3-MEM-06 (M06-01): ответ сохраняется один раз — ошибка читается из
+                // того же ответа, повторная отправка исключена (иначе двойная доставка).
                 DispatchQueue.global(qos: .userInitiated).async {
                     let params: [String: Any] = [
                         "chat_id": selectedChatID,
                         "text": body,
                     ]
-                    if let response = try? ipcClient.call(method: "send_to_telegram", params: params),
-                       let result = response["result"] as? [String: Any],
-                       result["message_id"] != nil {
+                    let response = try? ipcClient.call(method: "send_to_telegram", params: params)
+                    let result = response?["result"] as? [String: Any]
+                    if let response = response, result?["message_id"] != nil {
                         DispatchQueue.main.async {
                             let successAlert = NSAlert()
                             successAlert.messageText = "Отправлено в \(chatTitle)"
@@ -270,9 +272,8 @@ extension HistoryPanelController {
                             presentAlertSheet(successAlert, for: parentWindow) { _ in }
                         }
                     } else {
-                        // Попробуем извлечь ошибку
                         let errMsg: String
-                        if let response = try? ipcClient.call(method: "send_to_telegram", params: params),
+                        if let response = response,
                            let errDict = response["error"] as? [String: Any],
                            let msg = errDict["message"] as? String {
                             errMsg = msg

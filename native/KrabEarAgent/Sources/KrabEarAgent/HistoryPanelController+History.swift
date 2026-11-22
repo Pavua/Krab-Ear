@@ -22,12 +22,13 @@ extension HistoryPanelController {
             appendPageAsync(
                 method: "get_history_page",
                 params: buildHistoryQueryParams(cursor: cursor, limit: pageSize),
+                generation: historyLoadGeneration,
                 completion: nil
             )
         } else {
             var params = buildHistoryQueryParams(cursor: cursor, limit: pageSize)
             params["query"] = currentQuery
-            appendPageAsync(method: "search_history", params: params, completion: nil)
+            appendPageAsync(method: "search_history", params: params, generation: historyLoadGeneration, completion: nil)
         }
     }
 
@@ -61,7 +62,7 @@ extension HistoryPanelController {
             method = "search_history"
             params = p
         }
-        appendPageAsync(method: method, params: params) { [weak self] _ in
+        appendPageAsync(method: method, params: params, generation: historyLoadGeneration) { [weak self] _ in
             guard let self = self else { return }
             // Если есть ещё страницы — продолжаем chain; остановка по cursor=nil или counter=0.
             if self.nextCursor != nil {
@@ -691,6 +692,9 @@ extension HistoryPanelController {
     func loadInitial() {
         items = []
         nextCursor = nil
+        // M06-03: инвалидируем предыдущие ответы — они не должны мешать новой выборке.
+        historyLoadGeneration += 1
+        let generation = historyLoadGeneration
         tableView.reloadData()
         jumpToLatestButton.isEnabled = false
         updateHistoryStatusLabel()
@@ -715,7 +719,7 @@ extension HistoryPanelController {
         // recoverHistoryIfFiltersHideAllRows должен сработать ПОСЛЕ загрузки
         // первой страницы (раньше работал sync — race condition был скрыт).
         // Теперь зовём из completion callback после async appendPage.
-        appendPageAsync(method: method, params: params) { [weak self] _ in
+        appendPageAsync(method: method, params: params, generation: generation) { [weak self] _ in
             self?.recoverHistoryIfFiltersHideAllRows(limit: pageSize, hadActiveFilters: hadActiveFilters)
         }
     }
@@ -726,7 +730,7 @@ extension HistoryPanelController {
     /// PR — все основные UI flow non-blocking.
     ///
     /// `completion` вызывается на main thread с success-flag. Nil completion = no-op.
-    func appendPageAsync(method: String, params: [String: Any], completion: (@MainActor @Sendable (Bool) -> Void)?) {
+    func appendPageAsync(method: String, params: [String: Any], generation: Int, completion: (@MainActor @Sendable (Bool) -> Void)?) {
         let ipcClient = self.ipcClient
         let methodCopy = method
         nonisolated(unsafe) let paramsCopy = params
@@ -753,6 +757,12 @@ extension HistoryPanelController {
 
             DispatchQueue.main.async {
                 guard let self = self else {
+                    completion?(false)
+                    return
+                }
+                guard self.historyLoadGeneration == generation else {
+                    // Новый loadInitial уже загружает свою выборку — устаревший
+                    // ответ игнорируем, не мешаем ей смешать строки.
                     completion?(false)
                     return
                 }
@@ -824,7 +834,7 @@ extension HistoryPanelController {
             self.tableView.reloadData()
 
             let params = self.buildHistoryQueryParams(cursor: NSNull(), limit: limit)
-            self.appendPageAsync(method: "get_history_page", params: params) { [weak self] _ in
+            self.appendPageAsync(method: "get_history_page", params: params, generation: self.historyLoadGeneration) { [weak self] _ in
                 guard let self = self else { return }
                 self.isRecoveringHistoryFromFilters = false
                 if !self.items.isEmpty {

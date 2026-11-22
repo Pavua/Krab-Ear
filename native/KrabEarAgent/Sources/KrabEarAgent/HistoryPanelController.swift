@@ -87,6 +87,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         didSet { rowHeightCache.removeAll() }
     }
     var nextCursor: String?
+    /// G3-MEM-06 (M06-03): generation token — ответ старой loadInitial не может
+    /// фиксироваться в новую выборку после смены фильтра/запроса.
+    var historyLoadGeneration = 0
     /// A5.2b2: backend сообщает, что восстановление истории не завершено и
     /// журналы могут быть смесью состояний до/после снимка. Показываем
     /// предупреждение в строке статуса, данные НЕ прячем — просмотр истории
