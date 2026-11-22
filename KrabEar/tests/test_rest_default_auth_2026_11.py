@@ -108,31 +108,43 @@ def test_unreadable_key_file_fails_closed_without_touching_it(tmp_path, fresh_se
     assert (tmp_path / KEY_FILENAME).read_text(encoding="utf-8").strip() == original
 
 
-def test_concurrent_starts_agree_on_one_key(tmp_path, monkeypatch):
-    """backend (in-process) и standalone REST стартуют одновременно: один ключ."""
-    import backend.rest_api_key as mod
+def test_concurrent_starts_agree_on_one_key(tmp_path):
+    """backend (in-process) и standalone REST стартуют одновременно: один ключ.
 
-    class _S:  # у каждого «процесса» (потока) пустой ключ: все идут в файл
-        REST_API_KEY = ""
-        REST_API_AUTH_ENABLED = False
-        REST_API_ALLOW_ANONYMOUS = False
+    Настоящие процессы (spawn): у каждого СВОИ settings (раньше шесть потоков делили один объект:
+    после установки ключа первым остальные видели его заполненным и честно возвращали None —
+    ложный FAIL и неверная модель независимой памяти процессов). Barrier — перед provisioning."""
+    import multiprocessing
 
-    monkeypatch.setattr(mod, "settings", _S())
-    results: list[str | None] = []
-    barrier = threading.Barrier(6)
+    from _rest_key_child import provision
 
-    def worker():
-        barrier.wait(5.0)
-        results.append(ensure_rest_api_key(tmp_path))
+    ctx = multiprocessing.get_context("spawn")
+    n = 6
+    barrier = ctx.Barrier(n)
+    queue = ctx.Queue()
+    procs = [ctx.Process(target=provision, args=(str(tmp_path), barrier, queue)) for _ in range(n)]
+    started = []
+    try:
+        for proc in procs:
+            proc.start()
+            started.append(proc)
+        results = [queue.get(timeout=120) for _ in range(n)]
+        for proc in started:
+            proc.join(timeout=60)
+            assert not proc.is_alive(), "дочерний процесс завис"
+            assert proc.exitcode == 0, f"дочерний процесс упал: {proc.exitcode}"
+    finally:
+        for proc in started:
+            if proc.is_alive():
+                proc.terminate()
+            proc.join(timeout=10)
+            proc.close()
 
-    threads = [threading.Thread(target=worker) for _ in range(6)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(10.0)
-
-    assert len(results) == 6 and all(results)
-    assert len(set(results)) == 1, "гонка запусков выдала разные ключи"
+    assert all(kind == "ok" for kind, _ in results), results
+    keys = [value for _, value in results]
+    assert all(keys), keys
+    assert len(set(keys)) == 1, "гонка запусков выдала разные ключи"
+    assert (tmp_path / KEY_FILENAME).read_text(encoding="utf-8").strip() == keys[0]
 
 
 @pytest.fixture
@@ -162,24 +174,80 @@ def test_health_stays_open(client_with_key):
     assert client.get("/health").status_code == 200
 
 
-def _calls(path: Path, name: str) -> list[ast.Call]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    return [
-        n for n in ast.walk(tree)
-        if isinstance(n, ast.Call)
-        and (getattr(n.func, "id", None) == name or getattr(n.func, "attr", None) == name)
-    ]
+def _is_call_to(node: ast.AST, name: str) -> bool:
+    return isinstance(node, ast.Call) and (
+        getattr(node.func, "id", None) == name or getattr(node.func, "attr", None) == name
+    )
+
+
+def _stmt_has_call(stmt: ast.stmt, names: tuple[str, ...]) -> bool:
+    return any(_is_call_to(n, name) for n in ast.walk(stmt) for name in names)
+
+
+def _provisioned_before_start(body: list[ast.stmt], start_names: tuple[str, ...]) -> bool:
+    """В ОДНОМ списке операторов ensure_rest_api_key (отдельным оператором, достижимо) стоит строго
+    раньше оператора, запускающего сервер. Вызов в неиспользуемой функции или после запуска не
+    засчитывается (раньше принимался любой вызов где угодно в файле)."""
+    ensure_idx = next((i for i, st in enumerate(body)
+                       if isinstance(st, ast.Expr) and _is_call_to(st.value, "ensure_rest_api_key")), None)
+    start_idx = next((i for i, st in enumerate(body) if _stmt_has_call(st, start_names)), None)
+    return ensure_idx is not None and start_idx is not None and ensure_idx < start_idx
+
+
+def _bodies(tree: ast.AST):
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list) and block and isinstance(block[0], ast.stmt):
+                yield node, block
+
+
+def _has_provision_before_start(source: str, container, start_names) -> bool:
+    tree = ast.parse(source)
+    for node, block in _bodies(tree):
+        if container(node) and _provisioned_before_start(block, start_names):
+            return True
+    return False
+
+
+def _is_main_guard(node) -> bool:
+    return (isinstance(node, ast.If) and isinstance(node.test, ast.Compare)
+            and getattr(node.test.left, "id", None) == "__name__")
+
+
+def _is_try_with_inprocess(node) -> bool:
+    return isinstance(node, ast.Try) and any(
+        isinstance(n, ast.Name) and n.id == "InProcessRestServer" for st in node.body for n in ast.walk(st))
+
+
+class TestStartupOrderCheckers:
+    """Сами проверки обязаны отвергать вызов в неиспользуемой функции и вызов после запуска."""
+
+    GOOD = "if __name__ == '__main__':\n    ensure_rest_api_key(d)\n    app.run()\n"
+
+    def test_accepts_provision_before_run(self):
+        assert _has_provision_before_start(self.GOOD, _is_main_guard, ("run",))
+
+    def test_rejects_provision_after_run(self):
+        src = "if __name__ == '__main__':\n    app.run()\n    ensure_rest_api_key(d)\n"
+        assert not _has_provision_before_start(src, _is_main_guard, ("run",))
+
+    def test_rejects_call_only_in_unused_function(self):
+        src = "def unused():\n    ensure_rest_api_key(d)\nif __name__ == '__main__':\n    app.run()\n"
+        assert not _has_provision_before_start(src, _is_main_guard, ("run",))
 
 
 def test_in_process_start_provisions_key():
-    assert _calls(BACKEND / "service.py", "ensure_rest_api_key"), (
-        "service.py обязан выдавать ключ перед стартом in-process REST"
+    source = (BACKEND / "service.py").read_text(encoding="utf-8")
+    assert _has_provision_before_start(source, _is_try_with_inprocess, ("InProcessRestServer",)), (
+        "service.py обязан выдавать ключ ДО создания/старта in-process REST (в том же try-блоке)"
     )
 
 
 def test_standalone_main_provisions_key():
-    assert _calls(BACKEND / "rest_server.py", "ensure_rest_api_key"), (
-        "rest_server.py __main__ обязан выдавать ключ перед app.run"
+    source = (BACKEND / "rest_server.py").read_text(encoding="utf-8")
+    assert _has_provision_before_start(source, _is_main_guard, ("run",)), (
+        "rest_server.py __main__ обязан выдавать ключ ДО app.run"
     )
 
 
