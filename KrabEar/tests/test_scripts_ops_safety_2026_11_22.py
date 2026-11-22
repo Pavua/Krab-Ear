@@ -1422,6 +1422,9 @@ def _smoke_tree(tmp_path: Path) -> Path:
 def _run_smokes(tmp_path: Path, **env_extra: str) -> subprocess.CompletedProcess:
     root = _smoke_tree(tmp_path)
     ctx = _stubs(tmp_path)
+    # настоящий sleep: скрипт ждёт появления сокета циклом «sleep 0.5» — со стабом-пустышкой
+    # 40 итераций пролетали за миллисекунды раньше запуска python-заглушки (флейк).
+    (tmp_path / "stubbin" / "sleep").unlink()
     env = dict(ctx["env"], **env_extra)
     return subprocess.run(["/bin/bash", str(root / "scripts" / "run_e2e_smokes.command")], env=env,
                           capture_output=True, text=True, timeout=120)
@@ -1446,6 +1449,7 @@ class TestE2eSmokesRunner:
     def test_sigint_stops_the_run_instead_of_continuing_to_next_phase(self, tmp_path):
         root = _smoke_tree(tmp_path)
         ctx = _stubs(tmp_path)
+        (tmp_path / "stubbin" / "sleep").unlink()
         env = dict(ctx["env"], FAKE_IPC_SLEEP="6")
         proc = subprocess.Popen(["/bin/bash", str(root / "scripts" / "run_e2e_smokes.command")], env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -1709,3 +1713,135 @@ class TestValidateC1:
         assert "INCONCLUSIVE" in report, report[-600:]
         assert "H1 hypothesis confirmed" not in report
         assert "H1 not primary" not in report
+
+
+# ═══ Пачка 6: G2-KE02a-F11, KEG2-16, KEG2-18 ═══════════════════════════════════
+
+# ── F11 smoke_test_d10a: ответ IPC читается целиком ──────────────────────
+
+
+def _ipc_call_via_script(tmp_path: Path, payload: bytes, method: str = "llm_status") -> subprocess.CompletedProcess:
+    body = _function_source("smoke_test_d10a.command", "ipc_call")
+    with tempfile.TemporaryDirectory(prefix="ke-d10-", dir="/tmp") as short:
+        sock = Path(short) / "t.sock"
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(sock))
+        srv.listen(1)
+        srv.settimeout(10)
+        done = threading.Event()
+
+        def serve():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(2)
+                try:
+                    conn.recv(4096)
+                    for pos in range(0, len(payload), 7):  # мелкие куски, в т.ч. внутри UTF-8 символа
+                        conn.sendall(payload[pos:pos + 7])
+                        time.sleep(0.0005)
+                except OSError:
+                    pass
+            done.set()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            return subprocess.run(["/bin/bash", "-c", f'SOCKET="{sock}"\n{body}\nipc_call {method}'],
+                                  capture_output=True, text=True, timeout=30)
+        finally:
+            srv.close()
+            thread.join(timeout=2)
+
+
+class TestD10aIpcCall:
+    def test_large_fragmented_utf8_response_is_read_completely(self, tmp_path):
+        reply = {"id": "x", "ok": True, "result": {"model": "модель-" + "я" * 12000, "circuit_state": "closed"}}
+        payload = (json.dumps(reply, ensure_ascii=False) + "\n").encode()
+        assert len(payload) > 8192
+        res = _ipc_call_via_script(tmp_path, payload)
+        assert res.returncode == 0, res.stderr
+        assert json.loads(res.stdout) == reply
+
+    def test_truncated_response_without_newline_fails(self, tmp_path):
+        res = _ipc_call_via_script(tmp_path, b'{"id": "x", "ok": tr')
+        assert res.returncode != 0
+
+
+# ── KEG2-16: soak/профилирование не притворяются нагрузкой транскрипции ──
+
+
+@needs_zsh
+class TestSoakHonesty:
+    def test_memory_soak_test_states_it_sends_no_transcription(self, tmp_path):
+        root = tmp_path / "soak_proj"
+        (root / "scripts").mkdir(parents=True)
+        shutil.copy2(SCRIPTS / "memory_soak_test.command", root / "scripts")
+        (root / "scripts" / "memory_baseline.py").write_text("")
+        _stubs(tmp_path)
+        stub = tmp_path / "stubbin"
+        _exe(stub / "python3", "exit 0\n")
+        env = dict(os.environ, PATH=f"{stub}{os.pathsep}{os.environ['PATH']}", CYCLES="2", INTERVAL="0",
+                   OUTPUT=str(tmp_path / "out.csv"))
+        res = subprocess.run([ZSH, str(root / "scripts" / "memory_soak_test.command")], env=env, capture_output=True,
+                             text=True, timeout=60)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "NO transcription" in res.stdout, res.stdout
+
+    def test_profile_gigaam_worker_states_it_sends_no_transcription(self, tmp_path):
+        ctx = _profile_ctx(tmp_path, gate_rc=0)
+        res = _run_profile(tmp_path, ctx)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "NO transcription" in res.stdout, res.stdout
+
+
+# ── KEG2-18 cleanup_worktree_builds: проверка пути перед rm -rf — по канонической файловой идентичности ──
+
+
+def _verify_build_dir(worktrees_dir: Path, candidate: Path) -> subprocess.CompletedProcess:
+    body = _function_source("cleanup_worktree_builds.command", "verify_build_dir")
+    code = (f'WORKTREES_DIR="{worktrees_dir}"\nWORKTREES_REAL="$(cd "$WORKTREES_DIR" && pwd -P)"\n'
+            f'{body}\nverify_build_dir "{candidate}"')
+    return subprocess.run([ZSH, "-c", code], capture_output=True, text=True, timeout=30)
+
+
+@needs_zsh
+class TestVerifyBuildDir:
+    def _tree(self, tmp_path: Path) -> Path:
+        wts = tmp_path / "worktrees"
+        (wts / "wt1" / "native" / "KrabEarAgent" / ".build").mkdir(parents=True)
+        return wts
+
+    def test_real_build_dir_is_accepted_and_canonical_path_returned(self, tmp_path):
+        wts = self._tree(tmp_path)
+        res = _verify_build_dir(wts, wts / "wt1" / "native" / "KrabEarAgent" / ".build")
+        assert res.returncode == 0, res.stderr
+        assert res.stdout.strip().endswith("wt1/native/KrabEarAgent/.build")
+
+    def test_symlinked_parent_swapped_after_discovery_is_refused(self, tmp_path):
+        wts = self._tree(tmp_path)
+        outside = tmp_path / "outside" / "native" / "KrabEarAgent" / ".build"
+        outside.mkdir(parents=True)
+        (outside / "precious").write_text("p")
+        # подмена после find: каталог native заменён симлинком наружу
+        shutil.rmtree(wts / "wt1" / "native")
+        (wts / "wt1" / "native").symlink_to(tmp_path / "outside" / "native")
+        res = _verify_build_dir(wts, wts / "wt1" / "native" / "KrabEarAgent" / ".build")
+        assert res.returncode != 0, "подменённый родитель принят"
+        assert (outside / "precious").exists()
+
+    def test_symlinked_build_dir_itself_is_refused(self, tmp_path):
+        wts = self._tree(tmp_path)
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        shutil.rmtree(wts / "wt1" / "native" / "KrabEarAgent" / ".build")
+        (wts / "wt1" / "native" / "KrabEarAgent" / ".build").symlink_to(target)
+        assert _verify_build_dir(wts, wts / "wt1" / "native" / "KrabEarAgent" / ".build").returncode != 0
+
+    def test_path_outside_worktrees_is_refused(self, tmp_path):
+        wts = self._tree(tmp_path)
+        stray = tmp_path / "stray" / "native" / "KrabEarAgent" / ".build"
+        stray.mkdir(parents=True)
+        assert _verify_build_dir(wts, stray).returncode != 0

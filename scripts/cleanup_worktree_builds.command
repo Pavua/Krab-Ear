@@ -100,6 +100,23 @@ echo "  ${DIM}Current wt    : $CURRENT_WORKTREE${RESET}"
 echo "  ${DIM}Age threshold : ${DAYS} days${RESET}"
 echo ""
 
+# Каноническая проверка перед удалением: возвращает РЕАЛЬНЫЙ путь или код 1.
+# Строковое сравнение глоба не видит подмену (между `find` и `rm -rf` родитель мог стать
+# симлинком наружу); здесь: сам .build не симлинк, реальный путь лежит под реальным каталогом
+# worktrees и ТЕКСТУАЛЬНО совпадает с найденным (т.е. в цепочке нет симлинков).
+verify_build_dir() {
+  local d="$1" real rel
+  [[ ! -L "$d" ]] || return 1
+  [[ -d "$d" ]] || return 1
+  real="$(cd "$d" && pwd -P)" || return 1
+  [[ "$real" == "$WORKTREES_REAL"/*/native/KrabEarAgent/.build ]] || return 1
+  rel="${d#$WORKTREES_DIR/}"
+  [[ "$real" == "$WORKTREES_REAL/$rel" ]] || return 1
+  print -r -- "$real"
+}
+
+WORKTREES_REAL="$(cd "$WORKTREES_DIR" && pwd -P)"
+
 # ── Gather candidates ────────────────────────────────────────────────
 # Cutoff epoch seconds
 NOW_EPOCH=$(date +%s)
@@ -240,7 +257,13 @@ for (( idx=1; idx<=${#BUILD_DIRS}; idx++ )); do
     continue
   fi
 
-  if rm -rf "$build_dir" 2>/dev/null; then
+  real_build_dir="$(verify_build_dir "$build_dir")" || {
+    echo "  ${RED}REFUSED${RESET} (путь изменился/не прошёл каноническую проверку): $build_dir" >&2
+    FAILED_COUNT=$(( FAILED_COUNT + 1 ))
+    continue
+  }
+
+  if rm -rf "$real_build_dir" 2>/dev/null; then
     DELETED_COUNT=$(( DELETED_COUNT + 1 ))
     DELETED_KB=$(( DELETED_KB + ${size_kb:-0} ))
     DELETED_MB=$(( ${size_kb:-0} / 1024 ))
