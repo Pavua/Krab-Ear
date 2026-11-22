@@ -147,8 +147,15 @@ class TestHistoryPrivacyGates(unittest.TestCase):
         self.assertEqual(res["reason"], "privacy_mode_active")
 
     def test_b4_find_duplicates_ok_false(self):
+        from unittest.mock import patch
+
         svc = _make_service(privacy_on=True)
-        res = svc.handle_find_duplicates({})
+        # get_history_page_filtered разрешён и при privacy ON (не tripwire) — следим за ним
+        # снаружи обработчика, чтобы перехват исключения внутри не скрыл обращение к store.
+        with patch.object(svc.store, "get_history_page_filtered",
+                          wraps=svc.store.get_history_page_filtered) as spy:
+            res = svc.handle_find_duplicates({})
+        spy.assert_not_called()
         self.assertFalse(res["ok"])
         self.assertEqual(res["reason"], "privacy_mode_active")
 
