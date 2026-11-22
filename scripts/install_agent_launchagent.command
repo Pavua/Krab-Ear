@@ -32,39 +32,45 @@ fail() { printf '[install-agent] ❌ %s\n' "$*" >&2; exit 1; }
 mkdir -p "$ROOT_DIR/logs"
 mkdir -p "$HOME/Library/LaunchAgents"
 
-# 1. Bootout старой версии (если загружена)
-if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
-  log "bootout gui/$UID_NUM/$LABEL (была загружена старая версия)"
-  launchctl bootout "gui/$UID_NUM/$LABEL" 2>&1 || true
-  sleep 1
-fi
-
-# 2. Render template. Используем python для безопасного replace (пути могут
-# содержать пробелы — например "Krab Ear.app").
-log "render template → $TARGET"
+# 1. Render template во ВРЕМЕННЫЙ файл в каталоге установки (тот же ФС → атомарный mv).
+# Python — для безопасного replace (пути могут содержать пробелы, например "Krab Ear.app").
+STAGED="$(mktemp "$(dirname "$TARGET")/.ai.krab.ear.agent.XXXXXX")"
+trap 'rm -f "$STAGED"' EXIT
+log "render template → $STAGED"
 python3 -c "
 import pathlib, sys
 src = pathlib.Path(sys.argv[1]).read_text()
 src = src.replace('__PROJECT_ROOT__', sys.argv[2])
 src = src.replace('__AGENT_BINARY__', sys.argv[3])
 pathlib.Path(sys.argv[4]).write_text(src)
-" "$TEMPLATE" "$ROOT_DIR" "$AGENT_BINARY" "$TARGET"
+" "$TEMPLATE" "$ROOT_DIR" "$AGENT_BINARY" "$STAGED"
+chmod 644 "$STAGED"
 
-chmod 644 "$TARGET"
-
-# 3. Валидация
-if ! plutil -lint "$TARGET" >/dev/null; then
-  fail "plutil lint failed для $TARGET"
+# 2. Валидация ДО любых изменений: невалидный plist не должен ни выгрузить рабочий юнит,
+# ни затереть установленный файл.
+if ! plutil -lint "$STAGED" >/dev/null; then
+  fail "plutil lint failed для нового plist — установленный юнит не тронут"
 fi
+
+# 3. Bootout старой версии (если загружена), затем атомарная подмена файла.
+if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
+  log "bootout gui/$UID_NUM/$LABEL (была загружена старая версия)"
+  launchctl bootout "gui/$UID_NUM/$LABEL" 2>&1 || true
+  sleep 1
+fi
+mv -f "$STAGED" "$TARGET"
+STAGED=""
 
 # 4. Bootstrap
 log "bootstrap gui/$UID_NUM $TARGET"
 launchctl bootstrap "gui/$UID_NUM" "$TARGET" || fail "bootstrap failed"
 
-# 5. Smoke test: ждём process в pgrep до 10 секунд
-log "ждём процесс KrabEarAgent..."
+# 5. Smoke test: ждём, что ИМЕННО этот launchd-юнит получил pid (до 10 секунд).
+# pgrep по пути бинаря принимал за запуск любой подходящий процесс (например, открытый
+# вручную через Dock), хотя юнит мог не стартовать.
+log "ждём запуск launchd-юнита $LABEL..."
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  if pgrep -f "/Krab Ear.app/Contents/MacOS/KrabEarAgent" >/dev/null 2>&1; then
+  if launchctl print "gui/$UID_NUM/$LABEL" 2>/dev/null | grep -q 'pid = [0-9]'; then
     log "✅ agent запущен через launchd"
     log "   status:  launchctl print gui/$UID_NUM/$LABEL"
     log "   stop:    launchctl bootout gui/$UID_NUM/$LABEL"
@@ -77,4 +83,4 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
 done
 
-fail "agent не появился за 10 сек. Смотри $ROOT_DIR/logs/krab-ear-agent.err.log"
+fail "юнит $LABEL не получил pid за 10 сек. Смотри $ROOT_DIR/logs/krab-ear-agent.err.log"

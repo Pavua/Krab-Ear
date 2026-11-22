@@ -1567,3 +1567,170 @@ class TestTccCurrentClientStatus:
     def test_only_path_based_grant_is_reported_as_such(self, tmp_path):
         summary = _tcc_summary(tmp_path, [("kTCCServiceMicrophone", "/old/build/KrabEarAgent", 2)])
         assert "GRANTED" in summary["Microphone"] and "path" in summary["Microphone"].lower(), summary
+
+
+# ═══ Пачка 5: KEG2-11 install_agent_launchagent ═══════════════════════════════
+
+PLUTIL = shutil.which("plutil")
+
+
+def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_pid: bool = True):
+    root = tmp_path / "agent_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "install_agent_launchagent.command", root / "scripts")
+    tpl_dir = root / "KrabEar" / "launchagents"
+    tpl_dir.mkdir(parents=True)
+    template = (ROOT / "KrabEar" / "launchagents" / "ai.krab.ear.agent.plist.template").read_text()
+    (tpl_dir / "ai.krab.ear.agent.plist.template").write_text(template[: len(template) // 2] if broken_template
+                                                              else template)
+    binary = root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n")
+    binary.chmod(0o755)
+    pid_line = 'echo "pid = 4242"' if job_gets_pid else 'echo "state = spawn scheduled"'
+    ctx = _stubs(
+        tmp_path,
+        'case "$1" in\n'
+        f'  print) if [ -e "$STUB_LOG.boot" ]; then {pid_line}; fi; exit 0;;\n'
+        '  bootout) rm -f "$STUB_LOG.boot";;\n'
+        '  bootstrap) touch "$STUB_LOG.boot";;\n'
+        'esac\nexit 0\n',
+    )
+    # любой подходящий процесс «найден» — старая проверка через pgrep это принимала за запуск
+    _exe(tmp_path / "stubbin" / "pgrep", "exit 0\n")
+    target = ctx["home"] / "Library" / "LaunchAgents" / "ai.krab.ear.agent.plist"
+    target.write_text("OLD-PLIST")
+    res = subprocess.run(["/bin/bash", str(root / "scripts" / "install_agent_launchagent.command")],
+                         env=ctx["env"], capture_output=True, text=True, timeout=60)
+    return res, ctx, target
+
+
+@pytest.mark.skipif(PLUTIL is None, reason="plutil доступен только на macOS")
+class TestInstallAgentLaunchagent:
+    def test_invalid_plist_leaves_loaded_job_and_old_file_untouched(self, tmp_path):
+        res, ctx, target = _agent_installer(tmp_path, broken_template=True)
+        assert res.returncode != 0, res.stdout + res.stderr
+        assert target.read_text() == "OLD-PLIST", "рабочий plist затёрт невалидным"
+        assert not any("bootout" in c for c in _calls(ctx)), "юнит выгружен до проверки нового plist"
+
+    def test_any_matching_process_is_not_proof_of_launchd_start(self, tmp_path):
+        res, _, _ = _agent_installer(tmp_path, job_gets_pid=False)
+        assert res.returncode != 0, "pgrep по любому процессу выдан за запуск launchd-юнита"
+        assert "agent запущен через launchd" not in res.stdout
+
+    def test_job_with_pid_succeeds_and_installs_new_plist(self, tmp_path):
+        res, ctx, target = _agent_installer(tmp_path)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "OLD-PLIST" not in target.read_text()
+        assert str(tmp_path) in target.read_text()
+        assert not list(target.parent.glob(".ai.krab.ear.agent*")), "остались временные файлы"
+
+
+# ── G2-KE02a-F08 run_release_checklist: git-состояние и в linked worktree ─
+
+
+def _git_state(root: Path) -> str:
+    body = _function_source("run_release_checklist.command", "git_worktree_state")
+    res = subprocess.run([ZSH, "-c", f'ROOT_DIR="{root}"\n{body}\ngit_worktree_state'], capture_output=True,
+                         text=True, timeout=30)
+    return res.stdout.strip()
+
+
+@needs_zsh
+class TestReleaseChecklistGitState:
+    def _repo(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "main"
+        repo.mkdir()
+        _git(repo, "init", "-q", "-b", "main")
+        (repo / "a.txt").write_text("a")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "init")
+        return repo
+
+    def test_clean_clone(self, tmp_path):
+        assert _git_state(self._repo(tmp_path)) == "clean"
+
+    def test_dirty_tracked_change(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / "a.txt").write_text("changed")
+        assert _git_state(repo) == "dirty"
+
+    def test_linked_worktree_is_checked_not_skipped(self, tmp_path):
+        repo = self._repo(tmp_path)
+        wt = tmp_path / "linked"
+        _git(repo, "worktree", "add", "-q", "-b", "side", str(wt))
+        assert (wt / ".git").is_file(), "предусловие: .git в linked worktree — файл"
+        assert _git_state(wt) == "clean"
+        (wt / "a.txt").write_text("changed in worktree")
+        assert _git_state(wt) == "dirty", "изменения в linked worktree не замечены"
+
+    def test_non_git_directory_is_unknown_not_clean(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        assert _git_state(plain) == "unknown"
+
+
+# ── G2-KE02a-F06/F09 validate_c1_mps_fix ────────────────────────────────────
+
+ENV_NAME = "KRAB_EAR_DISABLE_MPS_POOL_FREE"
+
+
+def _c1_run(tmp_path: Path, *, previous: str | None, restart_rc: int):
+    root = tmp_path / "c1_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "validate_c1_mps_fix.command", root / "scripts")
+    _exe(root / "scripts" / "safe_backend_restart.command", f'echo "$*" >> "$STUB_LOG.restart"\nexit {restart_rc}\n')
+    getenv = f'echo "{previous}"' if previous is not None else "true"
+    ctx = _stubs(tmp_path, f'case "$1" in getenv) {getenv};; esac\nexit 0\n')
+    _exe(tmp_path / "stubbin" / "ps", "exit 0\n")  # gigaam_worker нет → RSS 0 во всех замерах
+    env = dict(ctx["env"], CYCLES="1", SLEEP_BETWEEN="0", SOCK=str(tmp_path / "no.sock"))
+    res = subprocess.run([ZSH, str(root / "scripts" / "validate_c1_mps_fix.command")], env=env,
+                         capture_output=True, text=True, timeout=120)
+    return res, ctx, root
+
+
+@needs_zsh
+@pytest.mark.skipif(shutil.which("bc") is None, reason="нужен bc")
+class TestValidateC1:
+    def test_env_is_restored_when_restart_refused(self, tmp_path):
+        res, ctx, _ = _c1_run(tmp_path, previous="keepme", restart_rc=1)
+        assert res.returncode != 0
+        assert _calls(ctx)[-1] == f"launchctl setenv {ENV_NAME} keepme", _calls(ctx)
+
+    def test_previously_unset_env_is_unset_again(self, tmp_path):
+        res, ctx, _ = _c1_run(tmp_path, previous=None, restart_rc=1)
+        assert res.returncode != 0
+        assert _calls(ctx)[-1] == f"launchctl unsetenv {ENV_NAME}", _calls(ctx)
+
+    def test_restart_goes_through_the_safe_script_not_blind_kickstart(self, tmp_path):
+        res, ctx, _ = _c1_run(tmp_path, previous=None, restart_rc=0)
+        assert Path(str(ctx["log"]) + ".restart").exists(), "рестарт не через safe_backend_restart"
+        assert not any("kickstart" in c for c in _calls(ctx)), _calls(ctx)
+
+    def test_zero_rss_and_failed_ipc_give_inconclusive_verdict_not_a_causal_claim(self, tmp_path):
+        res, ctx, root = _c1_run(tmp_path, previous=None, restart_rc=0)
+        assert res.returncode == 0, res.stdout + res.stderr
+        report = next((root / "docs" / "measurements").glob("c1-validation-*.md")).read_text()
+        assert "INCONCLUSIVE" in report, report[-600:]
+        assert "H1 hypothesis confirmed" not in report
+        assert "H1 not primary" not in report
+
+
+# ── Codex review #2224: нестандартный BACKEND_LABEL — отказ до любых изменений ──
+
+
+@needs_zsh
+@pytest.mark.skipif(shutil.which("bc") is None, reason="нужен bc")
+def test_validate_c1_rejects_nondefault_backend_label_before_touching_anything(tmp_path):
+    root = tmp_path / "c1_label_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "validate_c1_mps_fix.command", root / "scripts")
+    _exe(root / "scripts" / "safe_backend_restart.command", 'echo "$*" >> "$STUB_LOG.restart"\nexit 0\n')
+    ctx = _stubs(tmp_path)
+    env = dict(ctx["env"], BACKEND_LABEL="com.example.other-backend", CYCLES="1", SLEEP_BETWEEN="0")
+    res = subprocess.run([ZSH, str(root / "scripts" / "validate_c1_mps_fix.command")], env=env, capture_output=True,
+                         text=True, timeout=60)
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert "BACKEND_LABEL" in (res.stdout + res.stderr)
+    assert not Path(str(ctx["log"]) + ".restart").exists(), "рестарт запущен для чужого label"
+    assert not any("setenv" in c for c in _calls(ctx)), "launchctl env изменён до отказа"
