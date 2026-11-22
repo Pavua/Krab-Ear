@@ -841,11 +841,13 @@ class TestPolicyReaderFallback:
         data_dir = _data_dir(tmp_path)
         assert store_policy_reader(_ProxyStore(data_dir))() is False
 
-    def test_store_without_data_dir_is_off(self):
+    def test_store_without_data_dir_is_fail_closed(self):
         class _NoDir:
             pass
 
-        assert store_policy_reader(_NoDir())() is False
+        # G3-MEM-03 (R01): непонятный store — reader возвращает True (блокируем),
+        # не None/False.
+        assert store_policy_reader(_NoDir())() is True
 
 
 class TestDataMigratorGate:

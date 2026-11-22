@@ -72,21 +72,36 @@ def store_policy_reader(store: Any) -> Callable[[], bool]:
     if callable(class_reader):
         bound = getattr(store, "_read_encryption_flag_unlocked", None)
         if callable(bound):
-            return lambda: bool(bound())
+            return lambda: bound()
     data_dir = getattr(store, "data_dir", None)
     if isinstance(data_dir, (str, Path)):
         return data_dir_policy_reader(data_dir)
-    return lambda: False
+    # G3-MEM-03 (R01): отсутствующий читатель — не отключаем гейты молча.
+    return lambda: True
 
 
 def policy_blocks(policy_read: Callable[[], bool] | None) -> bool:
-    """Fail-closed: ошибка чтения политики означает «считаем ON» (отказ)."""
+    """Fail-closed: ошибка или небулевой ответ чтения — «считаем ON» (отказ).
+
+    Ранее отсутствующий reader (None) и не-bool-значение от reader'а
+    трактовались как encryption OFF — bypass гейта на неизвестном store.
+    """
     if policy_read is None:
-        return False
+        logger.warning(
+            "history_encryption_policy: отсутствует reader политики — считаем ON"
+        )
+        return True
     try:
-        return bool(policy_read())
+        value = policy_read()
     except Exception:  # noqa: BLE001
         logger.exception(
             "history_encryption_policy: ошибка чтения политики — считаем ON"
         )
         return True
+    if type(value) is not bool:
+        logger.error(
+            "history_encryption_policy: invalid policy value type=%r — считаем ON",
+            type(value).__name__,
+        )
+        return True
+    return value
