@@ -96,6 +96,26 @@ _BASE_SETTINGS: dict = {
 }
 
 
+# НЕЗАВИСИМЫЙ обязательный перечень credential-полей. Раньше тесты перебирали импортированный
+# SENSITIVE_FIELDS: исчезновение поля из production-списка одновременно исчезало из проверки,
+# а `if _BASE_SETTINGS.get(field)` молча пропускал поля без непустой fixture.
+_REQUIRED_CREDENTIAL_FIELDS = frozenset({
+    "telnyx_api_key", "twilio_auth_token", "twilio_account_sid", "voice_gateway_api_key",
+    "smtp_password", "ipc_signing_secret", "sentry_dsn", "hf_token", "lm_studio_api_key",
+    "rest_api_key", "stt_gigaam_hf_token", "llm_api_key",
+})
+
+
+class TestRequiredCredentialListIntegrity(unittest.TestCase):
+    def test_required_credentials_are_in_production_sensitive_fields(self):
+        missing = _REQUIRED_CREDENTIAL_FIELDS - set(SENSITIVE_FIELDS)
+        self.assertEqual(missing, set(), f"поля выпали из SENSITIVE_FIELDS: {sorted(missing)}")
+
+    def test_fixture_has_nonempty_value_for_every_required_field(self):
+        empty = [f for f in sorted(_REQUIRED_CREDENTIAL_FIELDS) if not _BASE_SETTINGS.get(f)]
+        self.assertEqual(empty, [], f"нет непустого синтетического значения в fixture: {empty}")
+
+
 def _make_store(settings: dict | None = None) -> MagicMock:
     s = dict(settings or _BASE_SETTINGS)
     store = MagicMock()
@@ -154,12 +174,11 @@ class TestGetSettingsRedactsSecrets(unittest.TestCase):
     def test_all_sensitive_fields_are_redacted(self):
         """Все поля из SENSITIVE_FIELDS (которые непустые) должны стать REDACTED."""
         result = self.svc.handle_get_settings({})
-        for field in SENSITIVE_FIELDS:
-            if _BASE_SETTINGS.get(field):
-                self.assertEqual(
-                    result[field], "REDACTED",
-                    f"Поле {field!r} должно быть REDACTED в ответе get_settings",
-                )
+        for field in sorted(_REQUIRED_CREDENTIAL_FIELDS):
+            self.assertEqual(
+                result[field], "REDACTED",
+                f"Поле {field!r} должно быть REDACTED в ответе get_settings",
+            )
 
     def test_non_sensitive_field_is_unchanged(self):
         """Обычные поля не должны изменяться."""
@@ -185,13 +204,18 @@ class TestGetSettingsRedactsSecrets(unittest.TestCase):
         Повторный вызов handle_get_settings должен по-прежнему возвращать REDACTED
         (не пустую строку и не сбитый кэш).
         """
+        import copy
+        cache_before = copy.deepcopy(self.svc.cached_settings())
         result1 = self.svc.handle_get_settings({})
         self.assertEqual(result1["telnyx_api_key"], "REDACTED")
+        # сам кэш не изменён (раньше проверялись только внешние ответы)
+        self.assertEqual(self.svc.cached_settings(), cache_before, "get_settings мутировал внутренний кэш")
 
         # Если кэш был мутирован, второй вызов вернёт "" (falsy) и не заредактирует
         result2 = self.svc.handle_get_settings({})
         self.assertEqual(result2["telnyx_api_key"], "REDACTED",
                          "Второй вызов должен также возвращать REDACTED — кэш не должен мутироваться")
+        self.assertEqual(self.svc.cached_settings(), cache_before, "кэш изменён после второго get_settings")
 
 
 class TestRestoreSettingsBackupRedactsResponse(unittest.TestCase):
@@ -266,12 +290,11 @@ class TestSetSettingsWritePathRedaction(unittest.TestCase):
     def test_set_settings_response_redacts_all_sensitive_fields(self):
         """handle_set_settings response must not echo credentials back."""
         result = self.svc.handle_set_settings({"language": "ru"})
-        for field in SENSITIVE_FIELDS:
-            if _BASE_SETTINGS.get(field):
-                self.assertEqual(
-                    result.get(field), "REDACTED",
-                    f"set_settings response: {field!r} должен быть REDACTED",
-                )
+        for field in sorted(_REQUIRED_CREDENTIAL_FIELDS):
+            self.assertEqual(
+                result.get(field), "REDACTED",
+                f"set_settings response: {field!r} должен быть REDACTED",
+            )
 
     def test_set_settings_response_leaves_non_sensitive_unchanged(self):
         result = self.svc.handle_set_settings({"language": "ru"})
@@ -313,12 +336,11 @@ class TestSetSettingsWritePathRedaction(unittest.TestCase):
     def test_apply_profile_preset_response_redacts_secrets(self):
         """handle_apply_profile_preset response must not contain plaintext credentials."""
         result = self.svc.handle_apply_profile_preset({"profile": "default"})
-        for field in SENSITIVE_FIELDS:
-            if _BASE_SETTINGS.get(field):
-                self.assertEqual(
-                    result.get(field), "REDACTED",
-                    f"apply_profile_preset response: {field!r} должен быть REDACTED",
-                )
+        for field in sorted(_REQUIRED_CREDENTIAL_FIELDS):
+            self.assertEqual(
+                result.get(field), "REDACTED",
+                f"apply_profile_preset response: {field!r} должен быть REDACTED",
+            )
 
     def test_apply_profile_preset_non_sensitive_unchanged(self):
         result = self.svc.handle_apply_profile_preset({"profile": "meeting"})
@@ -333,12 +355,11 @@ class TestSetSettingsWritePathRedaction(unittest.TestCase):
         result = self.svc.handle_set_notification_preferences(
             {"notifications_enabled": True, "notify_sound_enabled": False}
         )
-        for field in SENSITIVE_FIELDS:
-            if _BASE_SETTINGS.get(field):
-                self.assertEqual(
-                    result.get(field), "REDACTED",
-                    f"set_notification_preferences response: {field!r} должен быть REDACTED",
-                )
+        for field in sorted(_REQUIRED_CREDENTIAL_FIELDS):
+            self.assertEqual(
+                result.get(field), "REDACTED",
+                f"set_notification_preferences response: {field!r} должен быть REDACTED",
+            )
 
     def test_set_notification_preferences_non_sensitive_unchanged(self):
         result = self.svc.handle_set_notification_preferences({"notifications_enabled": True})
