@@ -57,6 +57,12 @@ pass() {
   echo -e "${GREEN}✓${NC} $check"
 }
 
+# clean | dirty | unknown — работает и в обычном clone, и в linked worktree.
+git_worktree_state() {
+  git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo unknown; return 0; }
+  if git -C "$ROOT_DIR" diff-index --quiet HEAD -- 2>/dev/null; then echo clean; else echo dirty; fi
+}
+
 print_section() {
   echo ""
   echo -e "${YELLOW}▶${NC} $1"
@@ -102,13 +108,15 @@ if [ "$DISK_AVAIL" -lt 2097152 ]; then
 fi
 pass "disk space $(($DISK_AVAIL / 1048576)) GB available (>= 2 GB)"
 
-# Check git status clean
-if [ -d "$ROOT_DIR/.git" ]; then
-  if ! git -C "$ROOT_DIR" diff-index --quiet HEAD --; then
-    fail "git_status" "Uncommitted changes detected; run: git status"
-  fi
-  pass "git status clean"
-fi
+# Check git status clean. Состояние берём через `git rev-parse --is-inside-work-tree`:
+# в linked worktree `.git` — ФАЙЛ, а не каталог (проверка `-d .git` молча пропускалась),
+# и отчёт при этом писал «clean». Не git-дерево = unknown, а не clean.
+GIT_STATE="$(git_worktree_state)"
+case "$GIT_STATE" in
+  dirty) fail "git_status" "Uncommitted changes detected; run: git status" ;;
+  clean) pass "git status clean" ;;
+  *) echo "  ⚠ git status: unknown (не git work tree)" ;;
+esac
 
 # =====================================================================
 # Build checks
@@ -182,7 +190,10 @@ print_section "FINAL REPORT"
   echo "| python version | ✓ $PY_VERSION |"
   echo "| pip dependencies | ✓ |"
   echo "| disk space | ✓ $(($DISK_AVAIL / 1048576)) GB |"
-  echo "| git status | ✓ clean |"
+  case "$GIT_STATE" in
+    clean) echo "| git status | ✓ clean |" ;;
+    *) echo "| git status | ⚠ unknown (не git work tree) |" ;;
+  esac
   echo "| shell scripts | ✓ |"
   echo "| swift build | ✓ |"
   if [ "$QUICK_MODE" = "--quick" ]; then
