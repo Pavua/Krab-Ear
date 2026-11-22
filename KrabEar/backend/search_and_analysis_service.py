@@ -138,6 +138,9 @@ class SearchAndAnalysisService:
             return {"results": [], "mode": "disabled"}
 
         results = self._semantic_searcher.search(query, top_k=top_k)
+        # G3-MEM-02: сбой remove_item при удалении/архивации молча оставляет id в
+        # индексе — выдача не вправе раскрывать id записей, которых в истории нет.
+        results = self._only_active_ids(results)
         if not results and use_fallback:
             items = [{"id": it.id, "text": it.text}
                      for it in self._store._load_active_items_with_lock()]
@@ -145,6 +148,21 @@ class SearchAndAnalysisService:
             return {"results": results, "mode": "keyword", "reason": "model_unavailable"}
 
         return {"results": results, "mode": "semantic"}
+
+    def _only_active_ids(self, results: list[dict]) -> list[dict]:
+        """Оставляет только результаты, чьи id есть среди активных записей истории.
+
+        Fail-closed: если активные записи не удалось прочитать (нет ключа,
+        ошибка лока), выдача пустая — id нельзя проверить, а раскрывать их нельзя.
+        """
+        if not results:
+            return results
+        try:
+            active_ids = {str(it.id) for it in self._store._load_active_items_with_lock()}
+        except Exception:  # noqa: BLE001
+            logger.warning("semantic_search: активные записи недоступны — выдача скрыта", exc_info=True)
+            return []
+        return [r for r in results if str(r.get("id", "")) in active_ids]
 
     def handle_semantic_search_status(self, params: dict) -> dict:
         """IPC: semantic_search_status — возвращает статус семантического поиска.
