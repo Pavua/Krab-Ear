@@ -656,7 +656,34 @@ class TestH3StderrDrainThread(unittest.TestCase):
         self.assertIn("out of memory", args[2])
 
     def test_h3_oom_detection_fallback_to_stderr_read_when_ring_empty(self) -> None:
-        """When ring is empty, _check_proc_oom_on_exit falls back to proc.stderr.read()."""
+        """Ring пуст → _check_proc_oom_on_exit читает proc.stderr.read(); OOM берётся ТОЛЬКО из него.
+
+        Код 1 (не сигнал): без чтения stderr OOM определить нечем, поэтому удаление fallback
+        делает тест красным (раньше код -6 срабатывал независимо от stderr).
+        """
+        from unittest.mock import MagicMock
+
+        session = self._make_session()
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1
+        mock_proc.stderr.read.return_value = "RuntimeError: out of memory\n"
+        session._proc = mock_proc
+        session._stderr_ring.clear()  # ring пуст — путь fallback
+
+        callback = MagicMock()
+        session.oom_callback = callback
+
+        session._check_proc_oom_on_exit()
+
+        mock_proc.stderr.read.assert_called_once()
+        callback.assert_called_once()
+        args = callback.call_args[0]
+        self.assertEqual(args[1], 1)
+        self.assertIn("out of memory", args[2])
+
+    def test_h3_sigabrt_triggers_oom_even_with_empty_stderr(self) -> None:
+        """Код -6 (SIGABRT) — OOM независимо от содержимого stderr."""
         from unittest.mock import MagicMock
 
         session = self._make_session()
