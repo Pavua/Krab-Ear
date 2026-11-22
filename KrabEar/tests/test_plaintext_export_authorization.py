@@ -2164,24 +2164,65 @@ def module_state_off():
 class TestAuthorizerSerializationHygiene(_AuthorizerFixture):
     """Контракт п.15b (authorizer-сторона): capability/receipt/session — только RAM."""
 
+    def _assert_no_secrets_in_profile(self, stage, secrets):
+        """Все обычные файлы профиля (рекурсивно, без следования symlink): ни имён, ни содержимого
+        с секретами. В сообщении — только stage и относительный путь, без значений секретов."""
+        root = Path(self.data_dir)
+        for path in sorted(root.rglob("*")):
+            rel = str(path.relative_to(root))
+            for secret in secrets:
+                self.assertNotIn(secret, rel, f"[{stage}] секрет в имени файла {rel}")
+            if path.is_file() and not path.is_symlink():
+                blob = path.read_bytes()
+                for secret in secrets:
+                    self.assertNotIn(secret.encode("utf-8"), blob,
+                                     f"[{stage}] секрет в содержимом {rel}")
+
     def test_settings_and_profile_contain_only_internal_revision(self):
+        import logging
+
         module = self.authorizer_module()
+        # Перехват ВСЕХ записей логов на время сценария (раньше проверялся только settings.json)
+        log_lines: list[str] = []
+
+        class _Cap(logging.Handler):
+            def emit(self, record):  # noqa: D401
+                log_lines.append(record.getMessage() + " " + repr(getattr(record, "args", "")))
+
+        cap = _Cap()
+        cap.setLevel(logging.DEBUG)
+        root_logger = logging.getLogger()
+        old_level = root_logger.level
+        root_logger.addHandler(cap)
+        root_logger.setLevel(logging.DEBUG)
+        self.addCleanup(lambda: (root_logger.removeHandler(cap), root_logger.setLevel(old_level)))
+
         authorizer, grant = self.issue_on()
+        # стадия 1: после issue (до consume — временное сохранение capability тоже ловится)
+        self._assert_no_secrets_in_profile("issue", (grant.capability, self.SESSION_A))
         validated = authorizer.validate(
             self.SESSION_A, authorizer.epoch, grant.capability,
             grant.policy_generation, 1, self.SINK_MD,
         )
         self.assertTrue(validated.ok, validated)
+        all_secrets = (grant.capability, validated.receipt, self.SESSION_A)
+        self._assert_no_secrets_in_profile("validate", all_secrets)
         self.assertTrue(authorizer.consume_receipt(validated.receipt))
+        self._assert_no_secrets_in_profile("consume", all_secrets)
+
         settings_text = (self.data_dir / "settings.json").read_text(encoding="utf-8")
         parsed = json.loads(settings_text)
-        for secret in (grant.capability, validated.receipt, self.SESSION_A):
+        for secret in all_secrets:
             self.assertNotIn(secret, settings_text)
             self.assertNotIn(secret, json.dumps(parsed))
         # Персистентна только internal revision — НЕ secret/capability.
         self.assertIn(module.POLICY_REVISION_KEY, parsed)
         for name in os.listdir(self.data_dir):
             self.assertNotIn(self.SESSION_A, name)
+        # логи не содержат секретов (маркер проверяется по всем записям и уровням)
+        for line in log_lines:
+            for secret in all_secrets:
+                self.assertNotIn(secret, line, "секрет просочился в лог")
         # repr'ы и сериализации НЕ содержат capability/secret.
         for obj in (
             authorizer,
