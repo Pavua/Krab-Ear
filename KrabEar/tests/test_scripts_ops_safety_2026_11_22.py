@@ -1927,8 +1927,10 @@ class TestBuildAndDeployTransaction:
     def test_dry_run_changes_nothing_and_succeeds(self, tmp_path):
         root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
         env = dict(ctx["env"])
-        res = subprocess.run(["/bin/bash", str(root / "scripts" / "build_and_deploy.command"), "--dry-run"], env=env,
-                             capture_output=True, text=True, timeout=60)
+        # --no-sentry: тест герметичен — без него исход зависел от наличия sentry-cli в PATH
+        # (на dev-Mac он есть, на Linux-раннере нет → код 4)
+        res = subprocess.run(["/bin/bash", str(root / "scripts" / "build_and_deploy.command"), "--dry-run",
+                              "--no-sentry"], env=env, capture_output=True, text=True, timeout=60)
         assert res.returncode == 0, res.stdout + res.stderr
         assert runtime.read_text() == "OLD-RUNTIME"
         assert app_bin.read_text() == "OLD-APP"
