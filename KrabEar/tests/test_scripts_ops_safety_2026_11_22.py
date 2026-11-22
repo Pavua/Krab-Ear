@@ -1033,3 +1033,134 @@ class TestE2ePrivacyGates:
     def test_invisible_canary_fails(self):
         res, _ = _run_gates("{SOCK}", canary_visible=False)
         assert res.returncode != 0
+
+
+# ── W6-B V06 pre_merge_py312_check: HARNESS_VENV не удаляется вслепую ─────
+# 🔴 Скрипт запускается ТОЛЬКО как копия в tmp_path (REPO_ROOT = tmp-дерево): красная фаза
+# исполняет баг по-настоящему, и опасные значения не должны указывать на реальный репозиторий.
+
+
+def _harness_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "harness_proj"
+    (root / "scripts").mkdir(parents=True, exist_ok=True)
+    shutil.copy2(SCRIPTS / "pre_merge_py312_check.sh", root / "scripts")
+    (root / "KrabEar").mkdir(exist_ok=True)
+    (root / "KrabEar" / "requirements.txt").write_text("")
+    stub = tmp_path / "stubbin"
+    _exe(stub / "python3.12", 'echo "Python 3.12.0"\nexit 1\n')  # создание venv всё равно не удастся
+    return root
+
+
+def _harness(tmp_path: Path, harness_venv: Path, **extra_env: str) -> subprocess.CompletedProcess:
+    root = _harness_tree(tmp_path)
+    stub = tmp_path / "stubbin"
+    env = dict(os.environ, PATH=f"{stub}{os.pathsep}{os.environ['PATH']}", PY312=str(stub / "python3.12"),
+               HARNESS_VENV=str(harness_venv), HOME=str(tmp_path / "fakehome"), **extra_env)
+    return subprocess.run(["/bin/bash", str(root / "scripts" / "pre_merge_py312_check.sh")], env=env,
+                          capture_output=True, text=True, timeout=60, cwd=root)
+
+
+class TestHarnessVenvGuard:
+    def test_foreign_nonempty_dir_without_bin_python_is_not_deleted(self, tmp_path):
+        target = tmp_path / "not_a_venv"
+        target.mkdir()
+        (target / "precious.txt").write_text("мои файлы")
+        res = _harness(tmp_path, target)
+        assert (target / "precious.txt").read_text() == "мои файлы", res.stdout + res.stderr
+        assert res.returncode == 2
+
+    def test_rebuild_does_not_delete_foreign_dir_either(self, tmp_path):
+        target = tmp_path / "not_a_venv2"
+        target.mkdir()
+        (target / "precious.txt").write_text("x")
+        _harness(tmp_path, target, REBUILD="1")
+        assert (target / "precious.txt").exists()
+
+    def test_fake_home_is_refused(self, tmp_path):
+        home = tmp_path / "fakehome"
+        home.mkdir()
+        (home / "keep.txt").write_text("k")
+        res = _harness(tmp_path, home, REBUILD="1")
+        assert (home / "keep.txt").exists(), res.stdout + res.stderr
+        assert res.returncode == 2
+
+    def test_project_root_is_refused(self, tmp_path):
+        root = _harness_tree(tmp_path)
+        res = _harness(tmp_path, root, REBUILD="1")
+        assert (root / "scripts" / "pre_merge_py312_check.sh").exists(), res.stdout + res.stderr
+        assert res.returncode == 2
+
+    def test_symlink_harness_dir_is_refused(self, tmp_path):
+        real = tmp_path / "real_dir"
+        real.mkdir()
+        (real / "keep.txt").write_text("k")
+        link = tmp_path / "link_venv"
+        link.symlink_to(real)
+        _harness(tmp_path, link, REBUILD="1")
+        assert (real / "keep.txt").exists()
+
+    def test_real_venv_dir_is_still_rebuilt(self, tmp_path):
+        venv = tmp_path / "old_venv"
+        venv.mkdir()
+        (venv / "pyvenv.cfg").write_text("home = /usr/bin\n")
+        (venv / "stale.txt").write_text("старое содержимое")
+        _harness(tmp_path, venv)
+        assert not (venv / "stale.txt").exists(), "настоящий venv должен пересоздаваться"
+
+    def test_missing_dir_is_created_path(self, tmp_path):
+        res = _harness(tmp_path, tmp_path / "does_not_exist_yet")
+        # venv-сборка заглушкой падает (код 2), но отказ по валидации здесь неуместен
+        assert "refus" not in res.stderr.lower()
+
+
+# ── W6-B V13 update_agent: агент не останавливается до успешной сборки ────
+
+
+def _update_agent_tree(tmp_path: Path, swift_ok: bool):
+    root = tmp_path / "proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "update_agent.command", root / "scripts")
+    (root / "scripts" / "agent_signing_identity.sh").write_text(
+        'resolve_agent_signing_identity() { echo "TEST-IDENTITY"; }\n')
+    _exe(root / ".venv_krab_ear" / "bin" / "python", "exit 0\n")
+    (root / "native" / "runtime").mkdir(parents=True)
+    (root / "native" / "runtime" / "KrabEarAgent").write_text("OLD-RUNTIME")
+    macos = root / "Krab Ear.app" / "Contents" / "MacOS"
+    macos.mkdir(parents=True)
+    (macos / "KrabEarAgent").write_text("OLD-BUNDLE")
+    (root / "native" / "KrabEarAgent").mkdir(parents=True)
+    ctx = _stubs(tmp_path)
+    stub = tmp_path / "stubbin"
+    build_out = f"{root}/native/KrabEarAgent/.build/release"
+    build_cmd = (f'mkdir -p "{build_out}"; echo NEW-BUILD > "{build_out}/KrabEarAgent"; '
+                 f'chmod +x "{build_out}/KrabEarAgent"; exit 0') if swift_ok else "exit 1"
+    _exe(stub / "swift", 'echo "swift $*" >> "$STUB_LOG"\n' + build_cmd + "\n")
+    _exe(stub / "pgrep", "exit 1\n")
+    _exe(stub / "codesign", "exit 0\n")
+    _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
+    return root, ctx
+
+
+@needs_zsh
+class TestUpdateAgentOrdering:
+    def _run(self, root, ctx):
+        return subprocess.run([ZSH, str(root / "scripts" / "update_agent.command")], env=ctx["env"],
+                              capture_output=True, text=True, timeout=60)
+
+    def test_failed_build_leaves_running_agent_and_binaries_untouched(self, tmp_path):
+        root, ctx = _update_agent_tree(tmp_path, swift_ok=False)
+        res = self._run(root, ctx)
+        assert res.returncode != 0
+        assert not any(c.startswith("pkill") for c in _calls(ctx)), _calls(ctx)
+        assert (root / "native" / "runtime" / "KrabEarAgent").read_text() == "OLD-RUNTIME"
+        assert (root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent").read_text() == "OLD-BUNDLE"
+
+    def test_successful_build_precedes_stopping_the_agent(self, tmp_path):
+        root, ctx = _update_agent_tree(tmp_path, swift_ok=True)
+        res = self._run(root, ctx)
+        assert res.returncode == 0, res.stdout + res.stderr
+        calls = _calls(ctx)
+        build_at = next(i for i, c in enumerate(calls) if c.startswith("swift"))
+        stop_at = next(i for i, c in enumerate(calls) if c.startswith("pkill"))
+        assert build_at < stop_at, calls
+        assert (root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent").read_text().strip() == "NEW-BUILD"

@@ -68,6 +68,26 @@ fi
 command -v "$PY312" >/dev/null 2>&1 || { err "python3.12 not found (set PY312=...)"; exit 2; }
 
 # --- 2. build / reuse venv ------------------------------------------------
+# 🔴 HARNESS_VENV приходит из окружения, а ниже стоит `rm -rf`. Удаляем только то, что
+# заведомо наш venv: отсутствующий путь, пустой каталог либо каталог с pyvenv.cfg.
+# Симлинк, "/", $HOME, корень проекта и любой их предок — отказ (код 2).
+safe_to_remove_venv() {
+  local p="$1" rp rhome rroot
+  [ -n "$p" ] || return 1
+  [ ! -L "$p" ] || return 1
+  [ -e "$p" ] || return 0
+  [ -d "$p" ] || return 1
+  rp="$(cd "$p" && pwd -P)" || return 1
+  rhome="$(cd "$HOME" 2>/dev/null && pwd -P)" || rhome=""
+  rroot="$(pwd -P)"
+  [ "$rp" != "/" ] || return 1
+  [ -z "$rhome" ] || [ "$rp" != "$rhome" ] || return 1
+  case "$rroot/" in "$rp"/*) return 1 ;; esac
+  [ -z "$rhome" ] || case "$rhome/" in "$rp"/*) return 1 ;; esac
+  [ -f "$p/pyvenv.cfg" ] && return 0
+  [ -z "$(ls -A "$p")" ]
+}
+
 needs_build=0
 if [ "${REBUILD:-0}" = "1" ] || [ ! -x "$HARNESS_VENV/bin/python" ]; then
   needs_build=1
@@ -85,6 +105,8 @@ fi
 
 if [ "$needs_build" = "1" ]; then
   log "building ubuntu-parity venv at $HARNESS_VENV ($($PY312 --version 2>&1)) ..."
+  safe_to_remove_venv "$HARNESS_VENV" \
+    || { err "REFUSED: HARNESS_VENV=$HARNESS_VENV не похож на наш venv (нет pyvenv.cfg / симлинк / HOME / корень проекта) — не удаляю"; exit 2; }
   rm -rf "$HARNESS_VENV"
   "$PY312" -m venv "$HARNESS_VENV" || { err "venv create failed"; exit 2; }
   "$HARNESS_VENV/bin/pip" install -q --upgrade pip wheel >/dev/null 2>&1 || true
