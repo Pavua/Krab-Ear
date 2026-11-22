@@ -33,8 +33,9 @@ class TestPrivacyAuditClear(unittest.TestCase):
         # Сбрасываем singleton перед каждым тестом
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def tearDown(self) -> None:
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()

@@ -181,7 +181,9 @@ class RecordingChainPrivacyGateFailsClosedTests(unittest.TestCase):
     """RecordingChainManager: сбой чтения settings не должен отдавать транскрипты."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
         self._store = _FakeStore(self._tmpdir)
 
     def _make_mgr(self, settings_fn):
