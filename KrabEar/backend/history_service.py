@@ -1190,6 +1190,17 @@ class HistoryService:
 
     def handle_get_history_stats(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает состояние журналов истории и оценку размера."""
+        # G3-PRIV-04 / sibling-gate: счётчики записей и размеры журналов раскрывают
+        # паттерны использования так же, как get_history_overview (wave-39), который
+        # уже закрыт. Тот же нулевой ответ с reason; признак restore_pending в
+        # privacy-режиме не раскрывается (как у страницы истории).
+        if self._is_privacy_mode():
+            return {
+                "active_count": 0, "history_lines": 0, "tombstones_lines": 0,
+                "status_lines": 0, "history_bytes": 0, "tombstones_bytes": 0,
+                "status_bytes": 0, "total_bytes": 0,
+                "reason": "privacy_mode_active",
+            }
         stats = dict(self.store.get_history_stats())
         # A5.2b2 (tracked risk M1): тот же признак, что и в странице истории —
         # статистика про окно pending тоже не должна выглядеть как «счётчик

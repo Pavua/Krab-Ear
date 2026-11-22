@@ -3880,3 +3880,26 @@ class TestReaderPendingSignal:
         assert page["reason"] == "privacy_mode_active"
         assert "restore_pending" not in page
 
+
+    def test_privacy_mode_hides_history_stats_counts(self, tmp_path):
+        """G3-PRIV-04 + sibling-gate: статистика журналов не раскрывает счётчики в privacy.
+
+        `get_history_overview` закрыт гейтом (wave-39: счётчики раскрывают паттерны
+        использования); `get_history_stats` отдавал `active_count` и размеры без него.
+        """
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _settings_on(data_dir)
+        store = _store_with_crypto(data_dir, crypto)
+        _seed_items(store, ["секрет-один", "секрет-два"])
+        open_svc = HistoryService(store=store, cached_settings=lambda: {"privacy_mode_enabled": False})
+        assert open_svc.handle_get_history_stats({})["active_count"] > 0  # контроль: данные есть
+
+        svc = HistoryService(store=store, cached_settings=lambda: {"privacy_mode_enabled": True})
+        stats = svc.handle_get_history_stats({})
+
+        assert stats["reason"] == "privacy_mode_active"
+        for key in ("active_count", "history_lines", "tombstones_lines", "status_lines",
+                    "history_bytes", "tombstones_bytes", "status_bytes", "total_bytes"):
+            assert stats[key] == 0, (key, stats)
+        assert "restore_pending" not in stats

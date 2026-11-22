@@ -437,7 +437,8 @@ Returns: `{total, recent: [...], oldest_ts, newest_ts, avg_duration_sec}`
 *(history_service.py)*  
 Возвращает состояние журналов истории и оценку размера.  
 Нет params.  
-Returns: `{active_count, deleted_count, file_size_bytes, ...}`
+Returns: `{active_count, deleted_count, file_size_bytes, ...}`  
+Privacy mode: все счётчики и размеры = 0, `reason: "privacy_mode_active"` (как у `get_history_overview`).
 
 ### `get_history_statistics`
 *(history_service.py)*  
