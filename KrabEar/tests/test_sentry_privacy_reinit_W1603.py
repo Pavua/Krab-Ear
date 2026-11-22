@@ -251,60 +251,52 @@ class TestSentryReinitWhenPrivacyOff(unittest.TestCase):
                 fake_sdk.init.assert_not_called()
 
     # -----------------------------------------------------------------------
-    # Test 5: Unit-level hook logic (pure, no BackendService)
+    # Test 5: Хук вызывается ЧЕРЕЗ настоящую регистрацию (без копии тела в тесте)
     # -----------------------------------------------------------------------
 
-    def test_hook_logic_unit_toggle_on_to_off_with_dsn(self):
-        """W1603: _on_privacy_mode_off hook logic in isolation — calls init_sentry when transitioning OFF."""
+    def _fire_registered_hooks(self, old: dict, new: dict, fake_sdk) -> None:
+        """Переход гонится через реальный SettingsService._fire_after_save_hooks настоящего
+        BackendService: проверяются и тело зарегистрированного хука, и его подключение
+        (раньше тест вызывал локальную копию — изменение/удаление реального хука его не краснило)."""
+        from _settings_test_helpers import safe_backend_for_settings  # noqa: PLC0415
+        from contextlib import closing  # noqa: PLC0415
+        from backend.state_store import StateStore  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            store = StateStore(data_dir=Path(tmpdir))
+            store.initialize_startup_plaintext_policy(new_profile=True)
+            with closing(safe_backend_for_settings(self, store)) as svc:
+                with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
+                    svc._settings_svc._fire_after_save_hooks(old, new)
+
+    def test_registered_hook_toggle_on_to_off_with_dsn_inits_sentry(self):
+        """W1603: переход privacy ON→OFF с DSN → зарегистрированный хук вызывает init_sentry."""
         import backend.observability as obs  # noqa: PLC0415
 
         obs._sentry_initialized = False
         fake_sdk = _make_fake_sentry_sdk()
-
-        # Simulate the hook directly.
-        def _on_privacy_mode_off(old: dict, new: dict) -> None:
-            old_privacy = bool(old.get("privacy_mode_enabled", False))
-            new_privacy = bool(new.get("privacy_mode_enabled", False))
-            if old_privacy and not new_privacy:
-                from backend.observability import init_sentry, is_sentry_initialized  # noqa: PLC0415
-                if not is_sentry_initialized():
-                    dsn = str(new.get("sentry_dsn", "")).strip()
-                    if dsn:
-                        init_sentry(dsn=dsn, settings=new)
-
-        old_settings = {"privacy_mode_enabled": True, "sentry_dsn": "https://fake@sentry.io/1"}
-        new_settings = {"privacy_mode_enabled": False, "sentry_dsn": "https://fake@sentry.io/1"}
-
-        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
-            _on_privacy_mode_off(old_settings, new_settings)
-
+        dsn = "https://fake@sentry.io/1"
+        self._fire_registered_hooks(
+            {"privacy_mode_enabled": True, "sentry_dsn": dsn},
+            {"privacy_mode_enabled": False, "sentry_dsn": dsn},
+            fake_sdk,
+        )
         fake_sdk.init.assert_called_once()
         self.assertTrue(obs._sentry_initialized)
 
-    def test_hook_logic_unit_toggle_off_to_on_no_init(self):
-        """W1603: Hook must NOT call init_sentry when transitioning ON (privacy enabling)."""
+    def test_registered_hook_toggle_off_to_on_no_init(self):
+        """W1603: переход privacy OFF→ON (включение приватности) НЕ вызывает init_sentry."""
         import backend.observability as obs  # noqa: PLC0415
 
         obs._sentry_initialized = False
         fake_sdk = _make_fake_sentry_sdk()
-
-        def _on_privacy_mode_off(old: dict, new: dict) -> None:
-            old_privacy = bool(old.get("privacy_mode_enabled", False))
-            new_privacy = bool(new.get("privacy_mode_enabled", False))
-            if old_privacy and not new_privacy:
-                from backend.observability import init_sentry, is_sentry_initialized  # noqa: PLC0415
-                if not is_sentry_initialized():
-                    dsn = str(new.get("sentry_dsn", "")).strip()
-                    if dsn:
-                        init_sentry(dsn=dsn, settings=new)
-
-        # Transition is OFF → ON (privacy enabling), not ON → OFF.
-        old_settings = {"privacy_mode_enabled": False, "sentry_dsn": "https://fake@sentry.io/1"}
-        new_settings = {"privacy_mode_enabled": True, "sentry_dsn": "https://fake@sentry.io/1"}
-
-        with patch.dict(sys.modules, {"sentry_sdk": fake_sdk}):
-            _on_privacy_mode_off(old_settings, new_settings)
-
+        dsn = "https://fake@sentry.io/1"
+        self._fire_registered_hooks(
+            {"privacy_mode_enabled": False, "sentry_dsn": dsn},
+            {"privacy_mode_enabled": True, "sentry_dsn": dsn},
+            fake_sdk,
+        )
         fake_sdk.init.assert_not_called()
         self.assertFalse(obs._sentry_initialized)
 
