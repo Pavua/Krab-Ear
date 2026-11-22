@@ -310,10 +310,9 @@ def _scan_enc1(data_dir: Path) -> list[tuple[str, int]]:
     for path in sorted(data_dir.rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
+        # G3-P02-03: нечитаемый файл — НЕ «шифротекста нет»: OSError валит проверку;
+        # не-UTF-8 файл читается с заменой (ENC1-префикс ASCII и находится всё равно).
+        text = path.read_bytes().decode("utf-8", errors="replace")
         count = sum(1 for line in text.splitlines() if line.strip().startswith("ENC1:"))
         if count:
             found.append((str(path.relative_to(data_dir)), count))
@@ -439,28 +438,35 @@ class TestPurgeLeavesNoUndestroyableCiphertext:
 
         Не «должны по документации», а эмпирически: `_append_ndjson` кодирует
         строку через `_maybe_encrypt`, поэтому шаг 1 обязан звать
-        `_append_ndjson_raw` с уже готовым plaintext. Проверяем на живой матрице
-        (rc/regex), иначе «открытая» запись — миф.
+        `_append_ndjson_raw` с уже готовым plaintext.
+
+        G3-P02-06: к концу purge файл томбестонов УДАЛЁН, поэтому проверка
+        «если файл есть, в нём нет ENC1» не выполнялась вообще (подтверждено:
+        файла после purge нет). Проверяем сами записи purge через шпиона над
+        `_append_ndjson_raw` — записи были, для активной записи, открытым текстом.
         """
         data_dir = _data_dir(tmp_path)
         _settings_on(data_dir)
         store = StateStore(data_dir)
-        removed_id = store.add_history_item(text="секрет владельца").id
-        store.delete_history_item(removed_id)
-        # Компактирование НЕ вызываем: томбестон остаётся на диске, и его видно.
-        assert removed_id in {
-            str(p.get("id", "")) for p in store._read_history_ndjson_unlocked(store.tombstones_path)
-        }
+        item_id = store.add_history_item(text="секрет владельца").id
+        calls: list[tuple[Path, str]] = []
+        real_raw = store._append_ndjson_raw
+
+        def spy(path, line, *args, **kwargs):
+            calls.append((Path(path), line))
+            return real_raw(path, line, *args, **kwargs)
+
+        store._append_ndjson_raw = spy
 
         HistoryService(store=store).handle_purge_all_data({"confirm": "PURGE_ALL"})
 
-        tomb = data_dir / "history_tombstones.ndjson"
-        if tomb.is_file():
-            raw = tomb.read_text(encoding="utf-8")
-            assert "ENC1:" not in raw, (
-                "томбестоны purge обязаны быть открытыми — иначе после shred'а ключа "
-                "они становятся нечитаемым мусором (B1‴)"
-            )
+        tomb_lines = [line for path, line in calls if path == store.tombstones_path]
+        assert tomb_lines, "purge не записал собственных томбестонов — проверка пуста"
+        assert any(json.loads(line)["id"] == item_id for line in tomb_lines)
+        assert all("ENC1:" not in line for line in tomb_lines), (
+            "томбестоны purge обязаны быть открытыми — иначе после shred'а ключа "
+            "они становятся нечитаемым мусором (B1‴)"
+        )
 
     def test_append_ndjson_raw_really_does_not_encrypt(self, tmp_path, fake_keychain):
         """(д) Проверка живой матрицы: `_append_ndjson_raw` не шифрует.

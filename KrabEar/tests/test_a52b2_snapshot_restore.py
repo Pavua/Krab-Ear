@@ -61,6 +61,16 @@ CANARY_PLAINTEXT = '{"id":"canary-a52b2","text":"kolya skazal sekret"}'
 KEYCHAIN_ATTEMPTS = {"attempts": 0, "deletions": 0}
 
 
+def _assert_key_revocation_reported_failed(result: dict) -> None:
+    """G3-PRIV-01: в b2-тестах Keychain недоступен (fault-injection), и purge обязан
+    ЧЕСТНО это сообщить: ключ не уничтожен, шаг ``encryption_key`` в errors.
+    Отсутствие ошибки restore_staging не доказывает, что приватность соблюдена —
+    очистка файлов и уничтожение возможности расшифровки разные свойства."""
+    assert result.get("encryption_key_shredded") is False, result
+    assert "encryption_key" in (result.get("errors") or []), result
+    assert result.get("complete") is False, result
+
+
 def _key() -> bytes:
     return os.urandom(32)
 
@@ -2000,6 +2010,7 @@ class TestPurgeCoversRestoreStaging:
         result = svc.handle_purge_all_data({"confirm": True})
 
         assert "restore_staging" not in (result.get("errors") or [])
+        _assert_key_revocation_reported_failed(result)
         assert not markers[0].exists()
         assert has_pending_restore(data_dir) is False
         # Данные действительно стёрты, а staging не остался источником утечки.
@@ -2353,17 +2364,21 @@ def _decryptable_text_hits(data_dir: Path, crypto, needle: str) -> list[str]:
     """Файлы в data_dir, из которых этим ключом читается строковый текст.
 
     Честная проверка приватности: ищем не «ENC1 есть», а «история читается».
-    Не-JSON строки (ID-only ledger) пропускаем — их наличие законно.
+    G3-PRIV-02: нечитаемый файл — НЕ «безопасно»: OSError валит проверку, а
+    нетекстовые (не-UTF-8) файлы сканируются по байтам. Строки ENC1 чужого ключа
+    пропускаются (их нельзя расшифровать этим ключом — это единственное законное
+    исключение); ID-only ledger содержит только ID.
     """
     hits: list[str] = []
+    needle_bytes = needle.encode("utf-8")
     for path in sorted(Path(data_dir).rglob("*")):
         if not path.is_file():
             continue
-        try:
-            text = path.read_text("utf-8")
-        except (OSError, UnicodeDecodeError):
+        raw = path.read_bytes()  # OSError — провал проверки, не пропуск
+        if needle_bytes in raw:
+            hits.append(f"{path.name}: raw bytes")
             continue
-        for line in text.split("\n"):
+        for line in raw.decode("utf-8", errors="replace").split("\n"):
             if not line.strip():
                 continue
             if line.startswith(SENTINEL):
@@ -2395,6 +2410,7 @@ class TestPurgeRemovesRestoreFragments:
         result = svc.handle_purge_all_data({"confirm": True})
 
         assert "restore_staging" not in (result.get("errors") or [])
+        _assert_key_revocation_reported_failed(result)
         for fragment in fragments:
             assert not fragment.exists(), f"{fragment.name} пережил purge"
         # Ни одного tmp-фрагмента любого транзакционного id.
@@ -2402,6 +2418,24 @@ class TestPurgeRemovesRestoreFragments:
         # Проверка СОДЕРЖИМОГО, а не наличия ENC1: постоянный ledger
         # purged-IDs переживает purge законно (ID-only, allowlist) — но текста
         # истории в нём быть не должно ни в одном файле data_dir.
+        assert _decryptable_text_hits(data_dir, crypto, CANARY_PLAINTEXT) == []
+
+    def test_purge_reports_key_revocation_when_delete_succeeds(self, tmp_path, monkeypatch):
+        """Парный к fault-injection тест: подтверждённое удаление ключа отражено в ответе."""
+        import backend.crypto_keystore as ks
+
+        monkeypatch.setattr(ks, "delete_history_key", lambda: True)
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        _make_snapshot(data_dir, crypto)
+        svc = _svc(data_dir, crypto)
+
+        result = svc.handle_purge_all_data({"confirm": True})
+
+        assert result.get("encryption_key_shredded") is True, result
+        assert "encryption_key" not in (result.get("errors") or []), result
         assert _decryptable_text_hits(data_dir, crypto, CANARY_PLAINTEXT) == []
 
     def test_purge_removes_tmp_fragments_even_without_marker(self, tmp_path):
@@ -2416,6 +2450,7 @@ class TestPurgeRemovesRestoreFragments:
         result = svc.handle_purge_all_data({"confirm": True})
 
         assert "restore_staging" not in (result.get("errors") or [])
+        _assert_key_revocation_reported_failed(result)
         assert [p.name for p in data_dir.glob(f"*{RESTORE_TMP_SUFFIX}*")] == []
 
     def test_purge_helper_covers_fragments_directly(self, tmp_path):
@@ -2656,6 +2691,7 @@ class TestRestoreCountDegradation:
         _seed_items(store, ["после-снимка запись"])
         store.count_active_items()  # прогреваем кэш
         store._ensure_active_ids_unlocked()
+        late_ids = {i.id for i in store._load_active_items_unlocked() if "после-снимка" in (i.text or "")}
 
         result = svc.handle_restore_history({"backup_path": str(snapshot_dir)})
 
@@ -2665,7 +2701,11 @@ class TestRestoreCountDegradation:
         # прежнего содержимого) — ленивая инициализация допустима, «остался
         # прежним» — нет.
         assert store._active_ids is None or store._active_ids == restored_ids
-        assert store._active_ids != {i.id for i in []} or True
+        # G3-PRIV-06: вместо тавтологии — запись, существовавшая ТОЛЬКО до restore,
+        # не должна остаться ни в кэше id, ни среди восстановленных.
+        assert late_ids, "сид «после-снимка» не создал запись"
+        assert late_ids.isdisjoint(restored_ids)
+        assert store._active_ids is None or late_ids.isdisjoint(store._active_ids)
         # Поисковые индексы прежнего содержимого очищены (cleartext до-restore).
         assert store._recent_search_index == []
         assert store._recent_search_index_signature is None
@@ -2753,25 +2793,26 @@ class TestRecoveryRefusesSubstitutedTarget:
 
 
 # ---------------------------------------------------------------------------
-# Итоговая проверка Keychain. Стоит ПОСЛЕДНИМ в модуле намеренно: pytest
-# выполняет тесты в порядке файла, поэтому к этому моменту пройдена вся сессия.
+# Контроль Keychain, не зависящий от порядка тестов (G3-PRIV-03). Раньше итоговый
+# тест «стоял последним», но за ним шли десятки тестов и произвольная выборка
+# pytest обходила проверку. Теперь: счётчик чтения/создания ключа проверяется
+# ПОСЛЕ КАЖДОГО теста, лимит удалений — на teardown модуля.
 # ---------------------------------------------------------------------------
 
 
-def test_zz_keychain_untouched_across_whole_session():
-    """Ни одного чтения/создания ключа за ВСЮ сессию b2 (а не только к моменту).
-
-    Отдельно фиксируется, что низкоуровневый ``_run_security`` мог быть достигнут
-    только из ``handle_purge_all_data`` — там удаление ключа является ПРЕДНАМЕРЕННЫМ
-    поведением (волна 0afc3ff9): выживший AES-ключ расшифровывает pre-purge
-    бэкап. К b2 (restore/recovery/backup) это отношения не имеет, но замалчивать
-    его нельзя — поэтому счётчика два, а не один.
-    """
+@pytest.fixture(autouse=True)
+def _keychain_never_read_or_created_per_test():
+    yield
     assert KEYCHAIN_ATTEMPTS["attempts"] == 0, (
         "A5.2b2 не имеет права читать или создавать ключ истории: "
         f"{KEYCHAIN_ATTEMPTS['attempts']} обращений"
     )
-    # Удалений ключа столько, сколько тестов дёрнули purge (каждый — максимум одна).
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _keychain_deletions_bounded_for_module():
+    """Удалений ключа — только из purge-тестов (каждый максимум одно)."""
+    yield
     assert KEYCHAIN_ATTEMPTS["deletions"] <= 3, KEYCHAIN_ATTEMPTS
 
 
