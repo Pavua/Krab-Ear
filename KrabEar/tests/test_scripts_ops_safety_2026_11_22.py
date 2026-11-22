@@ -654,3 +654,53 @@ class TestPrefetchCacheDetection:
     def test_empty_snapshot_dir_is_a_miss(self, tmp_path):
         (tmp_path / "hub" / "models--mlx-community--whisper-large" / "snapshots" / "abc123").mkdir(parents=True)
         assert _is_cached(tmp_path, "mlx-community/whisper-large") == "MISS"
+
+
+# ═══ Пачка 3 ══════════════════════════════════════════════════════════════════
+# ── KEG2-02 observe_production: содержимое диктовок и логов — только по явному флагу ──
+
+TRANSCRIPT_MARK = "СЕКРЕТНАЯ-ДИКТОВКА-777"
+LOG_MARK = "SECRET-LOG-LINE-888"
+BROKEN_MARK = "BROKEN-LINE-PAYLOAD-999"
+
+
+def _observe(tmp_path: Path, *args: str, settings: str | None = '{"privacy_mode_enabled": false}') -> str:
+    data = tmp_path / "data"
+    (data / "logs").mkdir(parents=True)
+    (data / "logs" / "krab_ear_backend.log").write_text(f"INFO start\nINFO {LOG_MARK}\n")
+    (data / "history.ndjson").write_text(
+        json.dumps({"ts": "2026-11-22T10:00:00", "language": "ru", "duration_s": 3, "text": TRANSCRIPT_MARK}) + "\n"
+        + f"{{not json {BROKEN_MARK}\n"
+    )
+    if settings is not None:
+        (data / "settings.json").write_text(settings)
+    root = tmp_path / "proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "observe_production.command", root / "scripts")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = dict(os.environ, HOME=str(home), KRAB_EAR_DATA_DIR=str(data))
+    res = subprocess.run([ZSH, str(root / "scripts" / "observe_production.command"), *args], env=env,
+                         capture_output=True, text=True, timeout=120)
+    return res.stdout + res.stderr
+
+
+@needs_zsh
+class TestObserveProductionPrivacy:
+    def test_default_run_prints_no_transcript_or_log_content(self, tmp_path):
+        out = _observe(tmp_path)
+        for mark in (TRANSCRIPT_MARK, LOG_MARK, BROKEN_MARK):
+            assert mark not in out, f"{mark} просочился в вывод по умолчанию"
+        assert "history.ndjson" in out  # метаданные по-прежнему показываются
+
+    def test_flag_with_privacy_off_shows_content(self, tmp_path):
+        out = _observe(tmp_path, "--show-content")
+        assert TRANSCRIPT_MARK in out
+        assert LOG_MARK in out
+        assert BROKEN_MARK not in out, "содержимое битой строки не должно печататься даже с флагом"
+
+    @pytest.mark.parametrize("settings", ['{"privacy_mode_enabled": true}', "{broken json", "[]", "{}", None])
+    def test_flag_never_overrides_privacy_on_or_unknown(self, tmp_path, settings):
+        out = _observe(tmp_path, "--show-content", settings=settings)
+        assert TRANSCRIPT_MARK not in out
+        assert LOG_MARK not in out
