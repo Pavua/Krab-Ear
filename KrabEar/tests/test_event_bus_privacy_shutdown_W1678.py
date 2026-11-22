@@ -13,6 +13,7 @@ from __future__ import annotations
 import queue
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -247,75 +248,63 @@ class TestSttPartialPrivacyGate(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
 
-    def test_stt_partial_not_emitted_in_privacy_mode(self):
-        """stt.partial (STT_PARTIAL) must NOT be emitted when privacy_mode_enabled=True.
+    def _run_real_preview_iteration(self, privacy_mode: bool, text: str):
+        """Одна НАСТОЯЩАЯ итерация RecordingCoreService._preview_loop с синтетической речью.
 
-        We unit-test this by verifying that the privacy check in _preview_loop
-        gates the emit_typed call. We call the underlying method directly with
-        a controlled settings service.
+        Раньше оба теста сами вычисляли _should_emit и сами публиковали событие —
+        production-цикл не вызывался. Здесь рекордер «пишет» 5 с аудио, transcribe_preview
+        возвращает text и гасит запись (is_recording=False), поэтому цикл делает ровно одну
+        транскрипцию, доходит до публикации STT_PARTIAL и выходит.
+        Возвращает (события stt.partial, число вызовов transcribe_preview).
         """
+        import numpy as np
         from backend.event_bus import bus as global_bus
-        from contracts.registry import EventType
-        from contracts.stt_events import SttPartial
+
+        recorder = MagicMock()
+        recorder.is_recording = True
+        recorder.sample_rate = 16000
+        recorder.overflow_count = 0
+        recorder.get_duration_sec.return_value = 5.0
+        recorder.snapshot_range.return_value = np.ones(16000 * 5, dtype=np.float32)
+
+        calls: list[int] = []
+
+        def _transcribe_preview(audio, **kwargs):
+            calls.append(1)
+            recorder.is_recording = False  # следующая итерация цикла завершится
+            return {"text": text}
+
+        svc = _make_recording_service(self._tmp, privacy_mode=privacy_mode, recorder=recorder)
+        svc.transcriber = MagicMock()
+        svc.transcriber.transcribe_preview.side_effect = _transcribe_preview
 
         received: list = []
         q = global_bus.subscribe()
         try:
-            svc = _make_recording_service(self._tmp, privacy_mode=True)
-            # Directly call the gate that wraps emit_typed in _preview_loop
-            # by simulating the privacy check inline.
-            _preview_settings = svc._settings_svc.cached_settings()
-            _should_emit = not bool(_preview_settings.get("privacy_mode_enabled", False))
-            if _should_emit:
-                global_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
-                    text="leaked text",
-                    duration_sec=1.0,
-                ))
+            svc._preview_loop("balanced", stop_event=threading.Event())
         finally:
             try:
                 while True:
-                    event = q.get_nowait()
-                    received.append(event)
+                    received.append(q.get_nowait())
             except queue.Empty:
                 pass
             global_bus.unsubscribe(q)
+        partial = [e for e in received if e and e.get("type") == "stt.partial"]
+        return partial, len(calls)
 
-        stt_partial_events = [e for e in received if e and e.get("type") == "stt.partial"]
-        self.assertEqual(
-            stt_partial_events,
-            [],
-            "stt.partial must NOT be emitted when privacy_mode_enabled=True",
-        )
+    def test_stt_partial_not_emitted_in_privacy_mode(self):
+        """stt.partial НЕ публикуется настоящим _preview_loop при privacy_mode_enabled=True."""
+        partial, transcribe_calls = self._run_real_preview_iteration(True, "leaked text")
+        # итерация реально дошла до публикации (иначе пустой список ничего не доказывает)
+        self.assertEqual(transcribe_calls, 1)
+        self.assertEqual(partial, [], "stt.partial must NOT be emitted when privacy_mode_enabled=True")
 
     def test_stt_partial_emitted_when_privacy_off(self):
-        """stt.partial IS emitted when privacy_mode_enabled=False."""
-        from backend.event_bus import bus as global_bus
-        from contracts.registry import EventType
-        from contracts.stt_events import SttPartial
-
-        received: list = []
-        q = global_bus.subscribe()
-        try:
-            svc = _make_recording_service(self._tmp, privacy_mode=False)
-            _preview_settings = svc._settings_svc.cached_settings()
-            _should_emit = not bool(_preview_settings.get("privacy_mode_enabled", False))
-            if _should_emit:
-                global_bus.emit_typed(EventType.STT_PARTIAL, SttPartial(
-                    text="normal text",
-                    duration_sec=1.0,
-                ))
-        finally:
-            try:
-                while True:
-                    event = q.get_nowait()
-                    received.append(event)
-            except queue.Empty:
-                pass
-            global_bus.unsubscribe(q)
-
-        stt_partial_events = [e for e in received if e and e.get("type") == "stt.partial"]
-        self.assertEqual(len(stt_partial_events), 1)
-        self.assertEqual(stt_partial_events[0]["data"]["text"], "normal text")
+        """stt.partial публикуется настоящим _preview_loop при privacy_mode_enabled=False."""
+        partial, transcribe_calls = self._run_real_preview_iteration(False, "normal text")
+        self.assertEqual(transcribe_calls, 1)
+        self.assertEqual(len(partial), 1)
+        self.assertEqual(partial[0]["data"]["text"], "normal text")
 
 
 # ===========================================================================
