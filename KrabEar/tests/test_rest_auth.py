@@ -365,11 +365,13 @@ class TestAuthEnabledCorrectKey(unittest.TestCase):
 
     def test_metrics_with_correct_key(self):
         resp = self.client.get("/metrics", headers=self._auth_headers())
-        self.assertNotEqual(resp.status_code, 401)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True)[:200])
+        self.assertIn("status", resp.get_json())
 
     def test_readiness_with_correct_key(self):
         resp = self.client.get("/v1/readiness", headers=self._auth_headers())
-        self.assertNotEqual(resp.status_code, 401)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True)[:200])
+        self.assertIs(resp.get_json().get("overall_ready"), True)
 
 
 class TestRequireApiKeyDecorator(unittest.TestCase):
@@ -398,13 +400,37 @@ class TestRequireApiKeyDecorator(unittest.TestCase):
         orig = settings.REST_API_KEY
         settings.REST_API_KEY = "mykey"
         try:
+            called = []
+
             @require_api_key
             def view():
+                called.append(True)  # защищённый обработчик не должен выполниться при отказе
                 return "ok", 200
 
             with app.test_request_context("/metrics"):
                 resp, code = view()
             self.assertEqual(code, 401)
+            self.assertEqual(called, [], "view() выполнен до отказа 401")
+        finally:
+            settings.REST_API_KEY = orig
+
+    def test_rejects_wrong_and_malformed_headers(self):
+        """Неверный ключ / не-Bearer схема / пустой Bearer → 401 и обработчик НЕ вызывается."""
+        orig = settings.REST_API_KEY
+        settings.REST_API_KEY = "mykey"
+        try:
+            for header in ("Bearer wrongkey", "Basic mykey", "Bearer ", "mykey", "bearer"):
+                called = []
+
+                @require_api_key
+                def view():
+                    called.append(True)
+                    return "ok", 200
+
+                with app.test_request_context("/metrics", headers={"Authorization": header}):
+                    resp, code = view()
+                self.assertEqual(code, 401, header)
+                self.assertEqual(called, [], f"view() выполнен при заголовке {header!r}")
         finally:
             settings.REST_API_KEY = orig
 
@@ -421,8 +447,9 @@ class TestRequireApiKeyDecorator(unittest.TestCase):
                 return "ok", 200
 
             with app.test_request_context("/metrics", headers={"Authorization": "Bearer mykey"}):
-                view()
+                result = view()
             self.assertTrue(called)
+            self.assertEqual(result, ("ok", 200))
         finally:
             settings.REST_API_KEY = orig
 
@@ -439,7 +466,7 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
         try:
             # Correct token
             good = client.get("/metrics", headers={"Authorization": "Bearer test-fake-key-32ch-aabbccddeeff"})
-            self.assertNotEqual(good.status_code, 401)
+            self.assertEqual(good.status_code, 200, good.get_data(as_text=True)[:200])
             # Wrong token of identical length (would leak timing with plain ==)
             bad = client.get("/metrics", headers={"Authorization": "Bearer test-WRONG-key-32ch-aabbccddee"})
             self.assertEqual(bad.status_code, 401)
@@ -478,14 +505,18 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
         orig = settings.REST_API_KEY
         settings.REST_API_KEY = "somekey"
         try:
+            called = []
+
             @require_api_key
             def view():
+                called.append(True)
                 return "ok", 200
 
             # No Authorization header → empty token path via missing Bearer prefix
             with app.test_request_context("/metrics"):
                 resp, code = view()
             self.assertEqual(code, 401)
+            self.assertEqual(called, [])
         finally:
             settings.REST_API_KEY = orig
 
@@ -494,8 +525,11 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
         orig = settings.REST_API_KEY
         settings.REST_API_KEY = "unicode-key-тест"
         try:
+            called = []
+
             @require_api_key
             def view():
+                called.append(True)
                 return "ok", 200
 
             # Correct unicode key must pass
@@ -504,12 +538,14 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
                 headers={"Authorization": "Bearer unicode-key-тест"},
             ):
                 result = view()
-            # Must not raise; correct key passes through
-            self.assertIsNotNone(result)
+            # Must not raise; точный успешный результат и факт вызова (не непустой отказ)
+            self.assertEqual(result, ("ok", 200))
+            self.assertEqual(called, [True])
 
             # Wrong unicode key must return 401
             @require_api_key
             def view2():
+                called.append("view2")
                 return "ok", 200
 
             with app.test_request_context(
@@ -518,6 +554,7 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
             ):
                 resp, code = view2()
             self.assertEqual(code, 401)
+            self.assertNotIn("view2", called)
         finally:
             settings.REST_API_KEY = orig
 
