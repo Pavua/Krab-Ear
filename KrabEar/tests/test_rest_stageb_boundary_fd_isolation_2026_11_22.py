@@ -57,6 +57,9 @@ _CHILD = textwrap.dedent(
     attempt("mkdir", lambda: os.mkdir("sub", dir_fd=ext_fd))
     attempt("chmod_fd", lambda: os.chmod(ext_fd, 0o700))
     attempt("utime_fd", lambda: os.utime(ext_fd, (1, 1)))
+    # Легальный путь (rest_api_key): дескриптор файла ВНУТРИ scratch — разрешён.
+    own_fd = os.open(os.path.join(scratch, "own.txt"), os.O_WRONLY | os.O_CREAT, 0o600)
+    attempt("chmod_scratch_fd", lambda: os.chmod(own_fd, 0o600))
     print(json.dumps({"results": results, "violations": boundary.violations}))
     """
 )
@@ -83,7 +86,8 @@ class StageBBoundaryFdIsolationTest(unittest.TestCase):
             self.assertEqual(external.stat().st_mode, before_mode)
             self.assertEqual(external.stat().st_mtime_ns, before_mtime)
             for name, outcome in payload["results"].items():
-                self.assertEqual(outcome, "denied", f"{name}: {payload}")
+                expected = "allowed" if name == "chmod_scratch_fd" else "denied"
+                self.assertEqual(outcome, expected, f"{name}: {payload}")
             self.assertTrue(payload["violations"], "нарушения не зафиксированы")
 
 

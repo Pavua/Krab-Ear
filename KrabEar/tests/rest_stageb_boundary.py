@@ -90,13 +90,31 @@ class Boundary:
         "os.mkfifo", "os.mknod",
     })
 
+    @staticmethod
+    def fd_path(fd):
+        """Путь объекта дескриптора (Linux /proc, macOS F_GETPATH) или None."""
+        try:
+            return os.readlink("/proc/self/fd/%d" % fd)
+        except OSError:
+            pass
+        try:
+            import fcntl
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+            return os.fsdecode(raw.split(b"\0", 1)[0]) or None
+        except (OSError, AttributeError, ImportError):
+            return None
+
     def audit(self, event, args):
         if event in self.MUTATING:
             for index in self.DIR_FD_ARGS.get(event, ()):
                 if len(args) > index and args[index] not in (None, -1):
                     self.deny("dir_fd mutation: " + event)
             if args and isinstance(args[0], int):
-                self.deny("descriptor mutation: " + event)
+                # Дескриптор допустим, только если он указывает на объект scratch;
+                # путь не определился — отказ (fail-closed).
+                fd_path = self.fd_path(args[0])
+                if fd_path is None or not self.inside(fd_path, [self.scratch]):
+                    self.deny("descriptor mutation: " + event)
             if args and isinstance(args[0], (str, bytes, os.PathLike)) and not self.inside(args[0], [self.scratch]):
                 self.deny("non-scratch mutation")
         if event in {"os.rename", "os.link", "os.symlink"}:
