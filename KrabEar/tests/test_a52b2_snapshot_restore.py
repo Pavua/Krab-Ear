@@ -239,7 +239,15 @@ def _forbid_keychain(monkeypatch):
         KEYCHAIN_ATTEMPTS["deletions"] += 1
         raise AssertionError("Keychain недоступен в тестах (счётчик удалений)")
 
+    def _counted_delete_history_key():
+        # G3-PRIV-01: исход удаления ключа детерминирован и не зависит от ОС (на Linux
+        # нет `security`, и настоящая delete_history_key вернула бы True): fault-injection
+        # = «удалить не удалось». Парный успех — отдельный тест с патчем на True.
+        KEYCHAIN_ATTEMPTS["deletions"] += 1
+        return False
+
     monkeypatch.setattr(ks, "_run_security", _counted_deletion)
+    monkeypatch.setattr(ks, "delete_history_key", _counted_delete_history_key)
     monkeypatch.setattr(ks, "get_or_create_history_key", _counted)
     monkeypatch.setattr(hc, "build_history_crypto", _counted)
     yield
