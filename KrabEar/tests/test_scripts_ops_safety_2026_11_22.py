@@ -836,3 +836,53 @@ class TestRestorePreview:
                              if line.startswith("Preview dir:")))
         assert dirs[0] != dirs[1], "повторный preview смешался с предыдущим каталогом"
         assert all(Path(d).is_dir() for d in dirs)
+
+
+# ── W6-B V03: разбор worktree через --porcelain (пути с пробелами), main пропускается ──
+
+
+def _dry_and_exec(repo: Path, execute: bool) -> subprocess.CompletedProcess:
+    args = ["--execute"] if execute else []
+    return subprocess.run(["/bin/bash", str(repo / "scripts" / "cleanup_merged_worktrees.command"), *args],
+                          cwd=repo, capture_output=True, text=True, timeout=60)
+
+
+def _space_worktree(repo: Path, branch: str) -> Path:
+    path = repo.parent / "dir with spaces" / branch
+    path.parent.mkdir(exist_ok=True)
+    _git(repo, "worktree", "add", "-b", branch, str(path), "codex/krab-ear-v2")
+    return path
+
+
+class TestCleanupWorktreesPathsWithSpaces:
+    def test_clean_merged_worktree_with_spaces_in_path_is_removed(self, repo):
+        wt = _space_worktree(repo, "spaced-clean")
+        res = _dry_and_exec(repo, True)
+        assert not wt.exists(), res.stdout + res.stderr
+
+    def test_dirty_worktree_with_spaces_in_path_survives(self, repo):
+        wt = _space_worktree(repo, "spaced-dirty")
+        (wt / "wip.txt").write_text("работа")
+        _dry_and_exec(repo, True)
+        assert (wt / "wip.txt").read_text() == "работа"
+
+    def test_dry_run_marks_dirty_as_kept_not_candidate(self, repo):
+        wt = _space_worktree(repo, "spaced-dry")
+        (wt / "wip.txt").write_text("x")
+        res = _dry_and_exec(repo, False)
+        assert wt.exists()
+        assert "KEEP (dirty)" in res.stdout, res.stdout
+        assert "Candidates for removal  : 0" in res.stdout, res.stdout
+
+    def test_fresh_branch_without_commits_but_dirty_is_preserved_with_every_flag(self, repo):
+        wt = _add_merged_worktree(repo, "fresh-agent")
+        (wt / "agent_output.md").write_text("несохранённый результат агента")
+        for execute in (False, True):
+            _dry_and_exec(repo, execute)
+        assert (wt / "agent_output.md").exists()
+        assert "fresh-agent" in _git(repo, "branch", "--list", "fresh-agent")
+
+    def test_main_worktree_is_never_touched(self, repo):
+        _dry_and_exec(repo, True)
+        assert (repo / "a.txt").exists()
+        assert "codex/krab-ear-v2" in _git(repo, "branch", "--list", "codex/krab-ear-v2")

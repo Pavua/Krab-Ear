@@ -8,7 +8,7 @@
 #   ./scripts/cleanup_merged_worktrees.command --execute   # actually delete
 
 set -uo pipefail
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd -P)"
 cd "$REPO_ROOT"
 
 DRY_RUN=true
@@ -30,22 +30,36 @@ preserved=0
 locked_count=0
 prunable_count=0
 
-while IFS= read -r line; do
-    # Parse path (first field)
-    path=$(echo "$line" | awk '{print $1}')
+# Записи берём из `git worktree list --porcelain` (строки «worktree <путь целиком>»):
+# разбор человекочитаемого списка по пробелу резал пути с пробелами. Поля через TAB,
+# пустая ветка = "-". Первая запись porcelain — всегда основной worktree.
+worktree_records() {
+    git worktree list --porcelain | awk 'BEGIN { RS = ""; FS = "\n" } {
+        path = ""; br = "-"; lk = 0; pr = 0
+        for (i = 1; i <= NF; i++) {
+            if ($i ~ /^worktree /) path = substr($i, 10)
+            else if ($i ~ /^branch /) { br = substr($i, 8); sub("^refs/heads/", "", br) }
+            else if ($i ~ /^locked/) lk = 1
+            else if ($i ~ /^prunable/) pr = 1
+        }
+        printf "%s\t%s\t%d\t%d\n", path, br, lk, pr
+    }'
+}
 
-    # Parse branch from [branch-name]
-    branch_raw=$(echo "$line" | grep -oE '\[[^]]+\]' | tr -d '[]')
+record_idx=0
+while IFS=$'\t' read -r path branch_raw locked_flag prunable_flag; do
+    record_idx=$((record_idx + 1))
+    [ "$branch_raw" != "-" ] || branch_raw=""
 
-    # Skip main repo root
-    if [ "$path" = "$REPO_ROOT" ]; then
+    # Skip main repo root (первая запись porcelain либо совпадение пути)
+    if [ "$record_idx" -eq 1 ] || [ "$path" = "$REPO_ROOT" ]; then
         echo "  KEEP (main): $path  [$branch_raw]"
         preserved=$((preserved + 1))
         continue
     fi
 
     # Mark prunable worktrees (git worktree list marks them as "prunable")
-    if echo "$line" | grep -q 'prunable'; then
+    if [ "$prunable_flag" = "1" ]; then
         echo "  PRUNABLE (stale path): $path  [$branch_raw]"
         prunable_count=$((prunable_count + 1))
         candidates=$((candidates + 1))
@@ -63,7 +77,7 @@ while IFS= read -r line; do
     fi
 
     # Skip locked worktrees (active agent sessions)
-    if echo "$line" | grep -q 'locked'; then
+    if [ "$locked_flag" = "1" ]; then
         locked_count=$((locked_count + 1))
         preserved=$((preserved + 1))
         # Only print first 10 locked to avoid flooding output
@@ -77,16 +91,18 @@ while IFS= read -r line; do
 
     # Check if branch is fully merged into main
     if git merge-base --is-ancestor "$branch_raw" "origin/$main_branch" 2>/dev/null; then
+        # «Предок main» не значит «работа сохранена»: свежий agent-worktree без коммитов
+        # тоже предок. Грязное дерево (изменённое/неотслеживаемое) НИКОГДА не кандидат —
+        # ни в dry-run, ни с --execute, и никакого флага, который это обходит, нет.
+        if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then
+            echo "  KEEP (dirty): $path  [$branch_raw]"
+            preserved=$((preserved + 1))
+            continue
+        fi
         echo "  MERGED → candidate: $path  [$branch_raw]"
         candidates=$((candidates + 1))
         if [ "$DRY_RUN" = false ]; then
-            # Без --force: git сам откажется удалять worktree с незакоммиченными
-            # или неотслеживаемыми файлами (там чужой WIP). Ветку — только безопасным -d.
-            if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then
-                echo "    SKIP (есть незакоммиченные изменения): $path"
-                preserved=$((preserved + 1))
-                continue
-            fi
+            # Без --force; ветку — только безопасным -d.
             echo "    Removing worktree: $path"
             remove_out=$(git worktree remove "$path" 2>&1); remove_rc=$?
             [ -n "$remove_out" ] && printf '%s\n' "$remove_out" | head -2
@@ -104,7 +120,7 @@ while IFS= read -r line; do
         preserved=$((preserved + 1))
     fi
 
-done < <(git worktree list)
+done < <(worktree_records)
 
 echo ""
 echo "=== Summary ==="
