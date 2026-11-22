@@ -722,6 +722,14 @@ class PurgeAllDataE2EW1767TestCase(unittest.TestCase):
         _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(_tmp_dir.cleanup)
         self._tmpdir = _tmp_dir.name
+        # Герметичность: legacy_ownership_ambiguous смотрит в РЕАЛЬНЫЙ ~/Library/Application Support/
+        # KrabEar/settings_backups. На dev-Mac владельца он существует → purge честно отвечает
+        # «неоднозначно» и E2E краснел, на чистом CI — нет. Дом подменяется временным каталогом.
+        from unittest.mock import patch as _patch
+        _home = _patch.object(Path, "home", return_value=Path(self._tmpdir) / "fake_home")
+        _home.start()
+        self.addCleanup(_home.stop)
+
     def test_e2e_all_six_gaps_closed(self) -> None:
         """E2E: backups + shares + translation_cache + glossary + vocabulary + settings_backups."""
         tmpdir = Path(self._tmpdir)
