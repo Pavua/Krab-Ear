@@ -90,7 +90,9 @@ class TempUploadsPurgeTest(unittest.TestCase):
     """temp_uploads/ (сырое аудио POST /v1/stt/transcribe) стирается при purge."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self._tmpdir = _td.name
         self._dir = Path(self._tmpdir)
 
     def _purge(self) -> dict:

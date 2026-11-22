@@ -173,6 +173,21 @@ class TestConfigureVaultPathAuditLog(unittest.TestCase):
         self.assertIn(str(self.vault_dir.resolve()), combined,
                       "WARNING must include the resolved vault path")
 
+    def test_configure_warning_does_not_leak_home_directory_name(self) -> None:
+        """G3-P02-01: аудит-лог сохраняет путь, но без домашнего каталога (имя пользователя)."""
+        home = self.vault_dir.parent  # синтетический «домашний» каталог с приватным именем
+        private_home = home / "private-user-canary"
+        private_home.mkdir()
+        vault = private_home / "MyVault"
+        vault.mkdir()
+        with patch.object(Path, "home", classmethod(lambda cls: private_home)):
+            with self.assertLogs("KrabEar.Backend.ObsidianSync", level=logging.WARNING) as cm:
+                self.mgr.configure(str(vault))
+
+        combined = "\n".join(cm.output)
+        self.assertNotIn("private-user-canary", combined)
+        self.assertIn("~/MyVault", combined, "путь остаётся проверяемым: домашний каталог заменён на ~")
+
     def test_configure_warning_includes_folder(self) -> None:
         """WARNING log must also mention the folder name."""
         with self.assertLogs("KrabEar.Backend.ObsidianSync", level=logging.WARNING) as cm:

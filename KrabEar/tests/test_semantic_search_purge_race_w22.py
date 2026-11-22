@@ -25,6 +25,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent
@@ -160,7 +161,9 @@ class TestMaxItemsEviction(unittest.TestCase):
     """LOW: SEMANTIC_SEARCH_MAX_ITEMS caps the index with FIFO eviction."""
 
     def test_index_item_evicts_oldest_over_cap(self):
-        tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        tmpdir = _td.name
         searcher = _make_searcher(tmpdir, max_items=3)
         searcher._encode = lambda model, text: _fake_vec()
 
@@ -173,7 +176,9 @@ class TestMaxItemsEviction(unittest.TestCase):
             self.assertEqual(searcher._embeddings.shape[0], 3)
 
     def test_index_all_respects_cap(self):
-        tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        tmpdir = _td.name
         searcher = _make_searcher(tmpdir, max_items=2)
         import numpy as np
         searcher._encode_batch = lambda model, texts: np.stack(
@@ -187,7 +192,9 @@ class TestMaxItemsEviction(unittest.TestCase):
             self.assertEqual(searcher._embeddings.shape[0], 2)
 
     def test_cap_zero_is_unbounded(self):
-        tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        tmpdir = _td.name
         searcher = _make_searcher(tmpdir, max_items=0)
         searcher._encode = lambda model, text: _fake_vec()
         for i in range(10):
@@ -196,7 +203,9 @@ class TestMaxItemsEviction(unittest.TestCase):
             self.assertEqual(len(searcher._index), 10)
 
     def test_invalid_cap_falls_back_to_unbounded(self):
-        tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        tmpdir = _td.name
         searcher = SemanticSearcher(
             data_dir=Path(tmpdir),
             model_name="test-model",
@@ -210,7 +219,9 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
     """LOW: _save_locked persistence failure is surfaced via _error_bus."""
 
     def test_save_failure_pushes_error(self):
-        tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        tmpdir = _td.name
         searcher = _make_searcher(tmpdir)
         searcher._encode = lambda model, text: _fake_vec()
 
@@ -224,17 +235,9 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
 
         # Force _save_locked to raise — monkeypatch np.save to blow up. We patch
         # the module-level numpy import path used inside _save_locked.
-        import numpy as np
-        orig_save = np.save
-
-        def _boom(*a, **k):
-            raise OSError("disk full (simulated)")
-
-        np.save = _boom
-        try:
+        # G3-P03-09: patch() вместо ручной глобальной подмены np.save (откат гарантирован).
+        with patch("numpy.save", side_effect=OSError("disk full (simulated)")):
             ok = searcher.index_item("id1", "текст")
-        finally:
-            np.save = orig_save
 
         # G3-P03-01: отказ записи индекса на диск — НЕ успех: index_item
         # возвращает False (запись в памяти остаётся, но не долговечна), а
@@ -246,22 +249,15 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
     def test_save_failure_no_bus_is_silent(self):
         """When no _error_bus is wired, save failure stays a silent no-op (warning
         only) — no crash."""
-        tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        tmpdir = _td.name
         searcher = _make_searcher(tmpdir)
         searcher._encode = lambda model, text: _fake_vec()
         self.assertIsNone(searcher._error_bus)
 
-        import numpy as np
-        orig_save = np.save
-
-        def _boom(*a, **k):
-            raise OSError("disk full (simulated)")
-
-        np.save = _boom
-        try:
+        with patch("numpy.save", side_effect=OSError("disk full (simulated)")):
             ok = searcher.index_item("id1", "текст")  # must not raise
-        finally:
-            np.save = orig_save
         self.assertFalse(ok)  # G3-P03-01: нет подтверждённой записи на диск
         self.assertFalse(searcher._embeddings_path.exists())
 

@@ -99,7 +99,9 @@ class RescueForensicsPurgeTest(unittest.TestCase):
     """R1: rescue/, forensics/ и runtime_alive.marker очищаются при purge."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self._tmpdir = _td.name
         self._dir = Path(self._tmpdir)
 
     def _purge(self) -> dict:

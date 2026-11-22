@@ -115,7 +115,9 @@ class DirectStorePurgeTestCase(unittest.TestCase):
     """W1770: каждое прямое файловое/директорное PII-хранилище удаляется при purge."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self._tmpdir = _td.name
         self._dir = Path(self._tmpdir)
 
     def _purge(self) -> dict:
@@ -279,7 +281,9 @@ class CollaboratorStorePurgeTestCase(unittest.TestCase):
     очищаются через коллабораторов (in-memory) + физически с диска."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self._tmpdir = _td.name
         self._dir = Path(self._tmpdir)
 
     def test_sessions_cleared_via_session_tracker(self) -> None:
@@ -379,7 +383,9 @@ class PurgeAllDataE2EW1770TestCase(unittest.TestCase):
     одного purge с confirm=True ВСЕ PII-stores исчезли."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self._tmpdir = _td.name
         self._dir = Path(self._tmpdir)
 
     def test_e2e_all_new_pii_stores_gone(self) -> None:
@@ -477,7 +483,9 @@ class BackendServiceW1770WiringTestCase(unittest.TestCase):
     (ранее None → мёртвый), _collection_manager, _session_tracker в _history."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self._tmpdir = _td.name
 
     def _make_backend(self):
         from backend.state_store import StateStore
@@ -547,7 +555,9 @@ class PurgeW1771GapTestCase(unittest.TestCase):
     clear версий, in-memory clear-хуки (event_replay/live_subs)."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory()
+        self.addCleanup(_td.cleanup)
+        self._tmpdir = _td.name
         self._dir = Path(self._tmpdir)
 
     def test_export_report_html_removed(self) -> None:
