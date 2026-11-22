@@ -19,6 +19,7 @@ import os
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -886,3 +887,149 @@ class TestCleanupWorktreesPathsWithSpaces:
         _dry_and_exec(repo, True)
         assert (repo / "a.txt").exists()
         assert "codex/krab-ear-v2" in _git(repo, "branch", "--list", "codex/krab-ear-v2")
+
+
+# ── W6-B V34/V35 e2e_privacy_gates.py ───────────────────────────────────────
+
+GATES = SCRIPTS / "e2e_privacy_gates.py"
+
+
+class _FakeBackend:
+    """Фейковый IPC-backend: настройки, история, подсчёт обращений."""
+
+    def __init__(self, path: str, *, privacy_sticks: bool = True, drop_second_get_settings: bool = False,
+                 leak_when_private: bool = False, canary_visible: bool = True,
+                 stale_settings_read: bool = False) -> None:
+        self.privacy = False
+        self.requests: list[str] = []
+        self.items: dict[str, str] = {}
+        self.privacy_sticks = privacy_sticks
+        self.drop_second_get_settings = drop_second_get_settings
+        self.leak_when_private = leak_when_private
+        self.canary_visible = canary_visible
+        self.stale_settings_read = stale_settings_read
+        self._get_settings_calls = 0
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.srv.bind(path)
+        self.srv.listen(16)
+        self.srv.settimeout(0.1)
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _handle(self, req: dict) -> dict | None:
+        method, params = req["method"], req.get("params") or {}
+        self.requests.append(method)
+        if method == "add_history_item":
+            item_id = f"id{len(self.items)}"
+            self.items[item_id] = params.get("text", "")
+            return {"ok": True, "result": {"id": item_id}}
+        if method == "get_settings":
+            self._get_settings_calls += 1
+            if self.drop_second_get_settings and self._get_settings_calls == 2:
+                return None
+            reported = False if self.stale_settings_read else self.privacy
+            return {"ok": True, "result": {"privacy_mode_enabled": reported}}
+        if method == "set_settings":
+            if self.privacy_sticks and "privacy_mode_enabled" in params:
+                self.privacy = bool(params["privacy_mode_enabled"])
+            return {"ok": True, "result": {}}
+        if method == "delete_history_item":
+            self.items.pop(params.get("id"), None)
+            return {"ok": True, "result": {}}
+        if method == "search_history":
+            if self.privacy and not self.leak_when_private:
+                return {"ok": True, "result": {"items": []}}
+            if not self.privacy and not self.canary_visible:
+                return {"ok": True, "result": {"items": []}}
+            return {"ok": True, "result": {"items": list(self.items.values())}}
+        return {"ok": True, "result": {}}
+
+    def _serve(self) -> None:
+        while not self.stop.is_set():
+            try:
+                conn, _ = self.srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(2)
+                    data = b""
+                    while b"\n" not in data:
+                        chunk = conn.recv(65536)
+                        if not chunk:
+                            break
+                        data += chunk
+                    resp = self._handle(json.loads(data))
+                    if resp is not None:
+                        conn.sendall((json.dumps(resp, ensure_ascii=False) + "\n").encode())
+                except (OSError, ValueError):
+                    pass
+
+    def close(self) -> None:
+        self.stop.set()
+        self.srv.close()
+        self.thread.join(timeout=2)
+
+
+def _run_gates(*args: str, home: str | None = None, **backend_kwargs):
+    """Запуск скрипта против фейкового backend. Возвращает (результат, backend)."""
+    with tempfile.TemporaryDirectory(prefix="ke-pg-", dir="/tmp") as short:
+        sock_path = str(Path(short) / "t.sock")
+        backend = _FakeBackend(sock_path, **backend_kwargs)
+        try:
+            argv = [sys.executable, str(GATES), *(a.replace("{SOCK}", sock_path) for a in args)]
+            env = dict(os.environ, HOME=home or short)
+            res = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120)
+        finally:
+            backend.close()
+        return res, backend
+
+
+class TestE2ePrivacyGates:
+    def test_healthy_backend_passes_restores_privacy_and_cleans_seed(self):
+        res, backend = _run_gates("{SOCK}")
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert backend.privacy is False
+        assert backend.items == {}, "канареечные записи остались в истории"
+
+    def test_no_socket_argument_refuses_without_touching_anything(self, tmp_path):
+        res = subprocess.run([sys.executable, str(GATES)], env=dict(os.environ, HOME=str(tmp_path)),
+                             capture_output=True, text=True, timeout=30)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert "socket" in (res.stdout + res.stderr).lower()
+
+    def test_production_default_socket_is_refused(self):
+        with tempfile.TemporaryDirectory(prefix="ke-pg-", dir="/tmp") as short:
+            prod = Path(short) / "Library" / "Application Support" / "KrabEar"
+            prod.mkdir(parents=True)
+            backend = _FakeBackend(str(prod / "krabear.sock"))
+            try:
+                res = subprocess.run([sys.executable, str(GATES), str(prod / "krabear.sock")],
+                                     env=dict(os.environ, HOME=short), capture_output=True, text=True, timeout=30)
+            finally:
+                backend.close()
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert backend.requests == [], "скрипт обратился к боевому сокету"
+
+    def test_privacy_restored_when_script_crashes_midway(self):
+        # второй get_settings (проверка, что privacy включилась) рвёт соединение → исключение вне try/except
+        res, backend = _run_gates("{SOCK}", drop_second_get_settings=True)
+        assert res.returncode != 0
+        assert backend.privacy is False, "privacy осталась включённой после сбоя скрипта"
+
+    def test_unconfirmed_privacy_switch_is_a_failure_not_a_pass(self):
+        # backend не подтверждает включение privacy (устаревшее чтение), утечек нет — но проверка
+        # не вправе выдавать PASS: need() раньше не попадал в results.
+        res, _ = _run_gates("{SOCK}", stale_settings_read=True)
+        assert res.returncode != 0, "включение privacy не подтверждено, а проверка прошла ложно"
+
+    def test_leak_under_privacy_fails(self):
+        res, _ = _run_gates("{SOCK}", leak_when_private=True)
+        assert res.returncode != 0
+
+    def test_invisible_canary_fails(self):
+        res, _ = _run_gates("{SOCK}", canary_visible=False)
+        assert res.returncode != 0
