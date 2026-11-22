@@ -390,6 +390,44 @@ def _ledger_holds_no_ciphertext(ledger_path: Path) -> bool:
         return False
 
 
+def _purge_directory_entries(root: Path) -> int:
+    """G3-MEM-04 (M04-03): рекурсивно удаляет содержимое `root`, не следуя символическим
+    ссылкам. Все разрешения (opendir/open) привязаны к FD каталога (dir_fd),
+    и проверки stat делаются без следования ссылкам — целевая папка, до которой может
+    «сбежать» замена, не может быть изменена через относительный путь.
+
+    Возвращает число удалённых записей (файлов + файлов вложенных каталогов).
+    При OSError оставляет оставшиеся записи и бросает — вызывающая сторона ведёт
+    ошибку каскада.
+    """
+    def wipe(fd: int) -> int:
+        removed = 0
+        for name in os.listdir(fd):
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
+                )
+                try:
+                    removed += wipe(child_fd)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(name, dir_fd=fd)
+            else:
+                os.unlink(name, dir_fd=fd)
+                removed += 1
+        if os.listdir(fd):
+            raise OSError("directory purge incomplete")
+        os.fsync(fd)
+        return removed
+
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return wipe(fd)
+    finally:
+        os.close(fd)
+
+
 class HistoryService:
     """Обработчики IPC-команд для истории транскрипций."""
 
@@ -483,10 +521,45 @@ class HistoryService:
         self._search_history_mgr: Any = None  # SearchHistoryManager — in-memory query list (user search PII)
 
     def _write_plaintext_file(self, params: dict[str, Any], path: Path, content: str) -> None:
-        """Одна фиксированная запись; mkdir входит в ту же fresh authorization."""
+        """Одна фиксированная запись; mkdir входит в ту же fresh authorization.
+
+        G3-MEM-04 (M04-02): атомарный temp→fsync→os.replace через dir_fd — не
+        перезаписываем чужой inode (symlink/hardlink на цель) и не оставляем
+        частичный файл при сбое записи.
+        """
         def write() -> None:
+            import secrets
+
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            dfd = os.open(
+                path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            )
+            try:
+                tmp = f".{path.name}.{secrets.token_hex(12)}.tmp"
+                try:
+                    fd = os.open(
+                        tmp,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=dfd,
+                    )
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(content)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(
+                        tmp, path.name,
+                        src_dir_fd=dfd, dst_dir_fd=dfd,
+                    )
+                    os.fsync(dfd)
+                except BaseException:
+                    try:
+                        os.unlink(tmp, dir_fd=dfd)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                os.close(dfd)
 
         run_export_write(
             self._plaintext_export_authorizer, export_context(params), BackendSink.HISTORY, write,
@@ -529,10 +602,9 @@ class HistoryService:
             value = settings["privacy_mode_enabled"]
             # Не-bool (None, 0, "") — тоже «неизвестно»: ON (как StateStore.load_settings).
             return value if isinstance(value, bool) else True
-        except AttributeError:
-            # Частично сконструированный инстанс (__new__ без __init__ в unit-тестах).
-            return False
         except Exception:  # noqa: BLE001
+            # AttributeError (частично сконструированный инстанс в unit-тестах)
+            # и все IO/lock ошибки — состояние приватности неизвестно: ON (fail-closed).
             logger.warning(
                 "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
                 exc_info=True,
@@ -2471,7 +2543,9 @@ class HistoryService:
         limit = params.get("limit")
         from_ts = params.get("from_ts")
         to_ts = params.get("to_ts")
-        copy_to_clipboard = params.get("copy_to_clipboard", True)
+        # G3-MEM-04 (M04-07): clipboard — OPT-IN (privacy consent; full transcript
+        # goes to the system clipboard otherwise).
+        copy_to_clipboard = self._coerce_bool(params.get("copy_to_clipboard"), default=False)
         save_path = params.get("save_to_file")
 
         items = [i.to_dict() if hasattr(i, 'to_dict') else i
@@ -3189,7 +3263,14 @@ class HistoryService:
         transcripts_deleted = 0
         try:
             transcripts_dir = Path(self.store.data_dir) / "transcripts"
-            if transcripts_dir.is_dir():
+            if transcripts_dir.is_symlink():
+                # G3-MEM-04 (M04-03): симлинк на чужой каталог — отклоняем; не чистим цель.
+                try:
+                    transcripts_dir.unlink()
+                except OSError:
+                    logger.warning("purge_all_data: could not unlink transcripts symlink", exc_info=True)
+                    secondary_errors.append("transcripts")
+            elif transcripts_dir.is_dir():
                 # Явные glob-семейства экспортных артефактов (покрывают каждое расширение
                 # явно для статического guard-а) + полный обход каталога (страховка).
                 export_files = set(transcripts_dir.glob("*.md"))
@@ -4123,15 +4204,16 @@ class HistoryService:
         if directory is None:
             _flag_step_error(errors, "purge_verification")
             return
+        # G3-MEM-04 (M04-04): проверяем файловые артефакты НЕЗАВИСИМО от наличия
+        # collaborator — clear() не обязан сглаживать неудачную очистку, а
+        # complete=True допускает «успех при оставленном артефакте».
         checks = (
-            (self._semantic_searcher, ("embeddings.npy", "embeddings_index.json")),
-            (self._vocabulary_store, ("vocabulary.json",)),
-            (self._webhook_manager, ("webhooks.json",)),
-            (self._translation_cache, ("translation_cache.json",)),
+            ("embeddings.npy", "embeddings_index.json"),
+            ("vocabulary.json",),
+            ("webhooks.json",),
+            ("translation_cache.json",),
         )
-        for owner, names in checks:
-            if owner is None:
-                continue
+        for names in checks:
             for name in names:
                 try:
                     os.lstat(directory / name)
@@ -4798,6 +4880,9 @@ class HistoryService:
         custom_title: str | None = params.get("title")
         output_dir_param: str | None = params.get("output_dir")
         extra_tags: list[str] = list(params.get("tags") or [])
+        # G3-MEM-04 (M04-11): LLM-резюме — OPT-IN. По умолчанию не отправляем
+        # данные транскриптов внешним LLM-сервисам без явного согласия.
+        include_llm_summary = self._coerce_bool(params.get("include_llm_summary"), default=False)
 
         # --- Загружаем записи ---
         from backend.models import HistoryItem as _HI
@@ -4913,7 +4998,7 @@ class HistoryService:
         summary_text: str | None = None
         key_points: list[str] = []
 
-        if self._llm_rewriter is not None:
+        if include_llm_summary and self._llm_rewriter is not None:
             circuit_state = (
                 self._llm_rewriter._circuit.state
                 if hasattr(self._llm_rewriter, "_circuit")
@@ -5870,6 +5955,11 @@ class HistoryService:
                 # Уже держим store EX-lock, нового flock FD здесь нет.
                 self.store._commit_prepared_settings_unlocked(*settings_to_restore)
 
+            # G3-MEM-04 (M04-06): legacy restore пересоздал журналы — сброс
+            # инвалидируемых RAM-кэшей ПОД store-lock сразу после commit.
+            self.store._active_ids = None
+            self.store.reset_search_caches()
+
         restored_entries = self.store.count_active_items()
         logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)
         return {
@@ -6221,13 +6311,22 @@ class HistoryService:
                 segs = diar.get("speaker_segments", [])
                 speaker_set = {s.get("speaker", "") for s in segs if isinstance(s, dict)}
                 speakers = ", ".join(sorted(speaker_set))
+            # G3-MEM-04 (M04-08): formula-injection neutralization + те же ключи
+            # основного экспорта (source_lang / audio_duration_sec).
+            raw_text = item.get("text", "") or ""
+            raw_translation = translation or ""
+            lang_val = item.get("source_lang", "") or item.get("lang", "") or ""
+            dur_raw = item.get("audio_duration_sec")
+            if dur_raw is None:
+                dur_raw = item.get("duration", "")
+            duration_val = str(dur_raw) if dur_raw not in (None, "") else ""
             writer.writerow([
                 item.get("ts", ""),
-                item.get("text", ""),
-                translation,
-                item.get("lang", ""),
+                self._neutralize_csv(raw_text),
+                self._neutralize_csv(raw_translation),
+                lang_val,
                 item.get("confidence", ""),
-                item.get("duration", ""),
+                duration_val,
                 item.get("paste_status", ""),
                 speakers,
             ])
