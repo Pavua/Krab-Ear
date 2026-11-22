@@ -77,15 +77,12 @@ extension HistoryPanelController {
         addButton.setContentHuggingPriority(.required, for: .horizontal)
         addButton.setAccessibilityLabel("Добавить термин в словарь STT")
 
-        let addRow = makeSettingRow(label: "Добавить термин", control: addField)
-
-        // Складываем строку с кнопкой вручную (makeSettingRow поддерживает один control справа,
-        // а нам нужны поле + кнопка). Используем горизонтальный NSStackView.
+        // G3-MEM-07 (M07-15): убран dead `addRow` — строка строится напрямую через
+        // makeSettingRow с составным control (поле + кнопка).
         let addFieldStack = NSStackView(views: [addField, addButton])
         addFieldStack.orientation = .horizontal
         addFieldStack.spacing = KrabEarTheme.Metrics.tight
         addFieldStack.alignment = .centerY
-        _ = addRow // Unused — строим напрямую через makeSettingRow с составным control.
 
         let addCompositeRow = makeSettingRow(
             label: "Добавить термин",
