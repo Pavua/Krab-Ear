@@ -56,11 +56,15 @@ def _make_service(privacy_enabled: bool = False, settings_get=None):
     mock_bus = MagicMock()
     mod.event_bus = mock_bus
 
-    svc = LiveSubsService(
-        transcriber=_FakeTranscriber(),
-        translator=_FakeTranslator(),
-        settings_get=settings_get,
-    )
+    try:
+        svc = LiveSubsService(
+            transcriber=_FakeTranscriber(),
+            translator=_FakeTranslator(),
+            settings_get=settings_get,
+        )
+    except BaseException:
+        mod.event_bus = original_bus  # сбой конструктора не оставляет подставной EventBus
+        raise
     svc._mock_bus = mock_bus
     svc._original_bus = original_bus
     svc._mod = mod

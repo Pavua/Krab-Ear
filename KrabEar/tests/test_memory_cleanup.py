@@ -92,6 +92,10 @@ class TestAudioLanguageIDCacheBounded(unittest.TestCase):
         # install so tearDown can restore them precisely.
         self._pre_mlx_whisper = sys.modules.get("mlx_whisper")
         self._pre_mlx_whisper_load = sys.modules.get("mlx_whisper.load_models")
+        self._pre_audio_lang_id = sys.modules.get("core.audio_lang_id")
+        # Откат регистрируется ДО первой подмены: ошибка в setUp иначе оставляла бы
+        # заглушки в sys.modules (tearDown при сбое setUp не вызывается).
+        self.addCleanup(self._restore_modules)
 
         # Provide stub mlx_whisper so AudioLanguageID can be imported.
         # Use setdefault only for mlx_whisper — always force our stubs in so
@@ -112,21 +116,23 @@ class TestAudioLanguageIDCacheBounded(unittest.TestCase):
         # Reset class-level cache before each test
         self.AudioLanguageID._model_cache.clear()
 
-    def tearDown(self):
-        # W1752: restore sys.modules for every key we installed in setUp so
-        # MagicMock / bare-ModuleType stubs do not outlive this test class
-        # and pollute sibling test files in the same xdist worker.
-        self.AudioLanguageID._model_cache.clear()
-        # Remove the reimported core.audio_lang_id so next file gets a clean slate.
-        sys.modules.pop("core.audio_lang_id", None)
+    def _restore_modules(self):
+        """Возвращает ВСЕ затронутые записи sys.modules, включая прежний core.audio_lang_id."""
         for key, orig in (
             ("mlx_whisper", self._pre_mlx_whisper),
             ("mlx_whisper.load_models", self._pre_mlx_whisper_load),
+            ("core.audio_lang_id", self._pre_audio_lang_id),
         ):
             if orig is None:
                 sys.modules.pop(key, None)
             else:
                 sys.modules[key] = orig
+
+    def tearDown(self):
+        # W1752: кэш очищается здесь, модули возвращает addCleanup (_restore_modules).
+        cls = getattr(self, "AudioLanguageID", None)
+        if cls is not None:
+            cls._model_cache.clear()
 
     def _inject_model(self, path: str):
         """Simulate cache population via the bounded insertion logic."""
