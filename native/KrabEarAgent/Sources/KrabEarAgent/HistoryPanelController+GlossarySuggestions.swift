@@ -408,8 +408,9 @@ extension HistoryPanelController {
         if let w = window {
             alert.beginSheetModal(for: w, completionHandler: nil)
         } else {
-            // Без окна runModal() → AppHang (KRAB-EAR-AGENT-E). Тихо логируем.
-            NSLog("[KrabEar] showGlossaryToast bail (no window): %@", message)
+            // Без окна runModal() → AppHang (KRAB-EAR-AGENT-E). Тихо логируем —
+            // без содержимого сообщения (M06-10: IPC-текст может содержать пользовательские данные).
+            NSLog("[KrabEar] showGlossaryToast bail (no window)")
         }
     }
 
@@ -423,8 +424,9 @@ extension HistoryPanelController {
         if let w = window {
             alert.beginSheetModal(for: w, completionHandler: nil)
         } else {
-            // Без окна runModal() → AppHang (KRAB-EAR-AGENT-E). Тихо логируем.
-            NSLog("[KrabEar] showGlossaryError bail (no window): %@", message)
+            // Без окна runModal() → AppHang (KRAB-EAR-AGENT-E). Тихо логируем —
+            // без содержимого сообщения (M06-10: IPC-текст может содержать пользовательские данные).
+            NSLog("[KrabEar] showGlossaryError bail (no window)")
         }
     }
 }

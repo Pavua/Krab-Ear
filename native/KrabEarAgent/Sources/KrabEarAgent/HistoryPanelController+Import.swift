@@ -97,6 +97,10 @@ extension HistoryPanelController {
             return
         }
 
+        // G3-MEM-06 (M06-13): резервируем signature ДО IPC preview — пока preview
+        // идёт (1+ сек), другой поток не может дублировать ту же задачу.
+        importJobSignatures.insert(signature)
+
         // Wave 59: preview IPC moved off-main to avoid AppHang (5 s timeout).
         // Show interim status immediately; enqueue job after background fetch completes.
         importStatusLabel.stringValue = "Импорт: проверяем файлы..."
@@ -141,8 +145,17 @@ extension HistoryPanelController {
         preview: ImportPreview
     ) {
         if preview.audioCount == 0 {
+            // M06-13: ничего не откладываем — освобождаем зарезервированный signature.
+            importJobSignatures.remove(signature)
             importStatusLabel.stringValue = "Импорт: готов"
             showInfoAlert(title: "Импорт аудио", body: "Не найдено поддерживаемых аудиофайлов.")
+            return
+        }
+
+        // M06-13: перепроверка перед enqueue — preview мог меняться пока шёл.
+        if importQueue.count >= 30 {
+            importJobSignatures.remove(signature)
+            showInfoAlert(title: "Импорт аудио", body: "Очередь переполнена (макс. 30 задач). Дождитесь завершения текущих задач.")
             return
         }
 

@@ -625,7 +625,8 @@ extension HistoryPanelController {
         presentPanelSheet(panel, for: self.window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
             do {
-                try json.write(to: url, atomically: true, encoding: .utf8)
+                // G3-MEM-06 (M06-12): запись с правами 0600 (PrivateFileWriter), атомарная.
+                try PrivateFileWriter.write(json, to: url)
                 self?.showInfoAlert(
                     title: "Экспорт пресета",
                     body: "Пресет «\(name)» сохранён:\n\(url.path)"

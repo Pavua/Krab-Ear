@@ -829,15 +829,10 @@ extension HistoryPanelController {
             guard let stats = stats, stats.activeCount > 0 else { return }
             guard !self.isRecoveringHistoryFromFilters else { return }
 
-            self.isRecoveringHistoryFromFilters = true
-
-            self.currentQuery = ""
-            self.searchField.stringValue = ""
-            self.historyPasteStatusFilter.selectItem(at: 0)
-            self.historyTranslationModeFilter.selectItem(at: 0)
-            self.historyTranslationStatusFilter.selectItem(at: 0)
-            self.historyFromDateField.stringValue = ""
-            self.historyToDateField.stringValue = ""
+            // G3-MEM-06 (M06-04): не автосбрасываем фильтры — записи, которые пользователь
+            // исключил, не должны «просыпаться» без его явного действия.
+            self.historyStatusLabel.stringValue =
+                "Фильтры ничего не нашли (записей: \(stats.activeCount)). Сбросьте фильтры вручную."
 
             self.items = []
             self.nextCursor = nil
