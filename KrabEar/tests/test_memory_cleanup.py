@@ -40,45 +40,56 @@ def _make_mlx_stub(has_clear_cache: bool = True):
 
 
 # ---------------------------------------------------------------------------
-# H2 — mx.clear_cache called after transcribe
+# H2 — mx.clear_cache вызывается НАСТОЯЩИМ кодом очистки (AudioLanguageID.clear_model_cache)
 # ---------------------------------------------------------------------------
 class TestMxClearCacheAfterTranscribe(unittest.TestCase):
-    """Ensure the post-STT cleanup block in engine.py calls mx.clear_cache()."""
+    """mx.clear_cache() зовётся production-методом очистки, а не копией блока в тесте
+    (раньше тест гонял собственную копию — удаление очистки из кода его не краснило)."""
 
-    def _run_cleanup_block(self, mlx_module):
-        """Execute the exact cleanup snippet copy-pasted from engine.py."""
-        import gc as _gc
-        _gc.collect()
-        try:
-            _mx = mlx_module.core
-            _mx.clear_cache()
-        except (ImportError, AttributeError):
-            pass
+    def _clear_with(self, mlx, has_mlx=True):
+        from unittest.mock import patch
+        import core.audio_lang_id as mod
+
+        with patch.dict(sys.modules, {"mlx": mlx, "mlx.core": mlx.core}), \
+                patch.object(mod, "_HAS_MLX", has_mlx):
+            mod.AudioLanguageID._model_cache["stale-model"] = object()
+            try:
+                mod.AudioLanguageID.clear_model_cache()
+            finally:
+                mod.AudioLanguageID._model_cache.clear()
 
     def test_clear_cache_called_when_mlx_available(self):
         mlx, core = _make_mlx_stub(has_clear_cache=True)
-        self._run_cleanup_block(mlx)
+        self._clear_with(mlx)
         core.clear_cache.assert_called_once()
 
-    def test_clear_cache_not_called_when_attribute_missing(self):
-        """AttributeError (older MLX without clear_cache) must be swallowed."""
+    def test_clear_cache_not_called_without_mlx(self):
+        mlx, core = _make_mlx_stub(has_clear_cache=True)
+        self._clear_with(mlx, has_mlx=False)
+        core.clear_cache.assert_not_called()
+
+    def test_clear_cache_evicts_cached_model(self):
+        import core.audio_lang_id as mod
+        mlx, _core = _make_mlx_stub()
+        from unittest.mock import patch
+        with patch.dict(sys.modules, {"mlx": mlx, "mlx.core": mlx.core}), \
+                patch.object(mod, "_HAS_MLX", True):
+            mod.AudioLanguageID._model_cache["stale-model"] = object()
+            mod.AudioLanguageID.clear_model_cache()
+            self.assertEqual(mod.AudioLanguageID._model_cache, {})
+
+    def test_attribute_error_swallowed(self):
+        """Старый MLX без clear_cache: исключение подавляется (деградация, не падение)."""
         mlx, core = _make_mlx_stub(has_clear_cache=False)
-        # Should not raise
-        self._run_cleanup_block(mlx)
+        self._clear_with(mlx)  # не должно бросить
 
     def test_import_error_swallowed(self):
-        """ImportError (MLX not installed) must be swallowed silently."""
-        # Simulate import failure by making the attribute access raise ImportError
-        class _FakeCore:
-            @property
-            def clear_cache(self):
-                raise ImportError("mlx not installed")
-
-        class _FakeMlx:
-            core = _FakeCore()
-
-        # Should not raise
-        self._run_cleanup_block(_FakeMlx())
+        """clear_cache бросает ImportError: подавляется, кэш модели всё равно очищен."""
+        import core.audio_lang_id as mod
+        mlx, core = _make_mlx_stub()
+        core.clear_cache = MagicMock(side_effect=ImportError("mlx not installed"))
+        self._clear_with(mlx)
+        self.assertEqual(mod.AudioLanguageID._model_cache, {})
 
 
 # ---------------------------------------------------------------------------
@@ -134,42 +145,50 @@ class TestAudioLanguageIDCacheBounded(unittest.TestCase):
         if cls is not None:
             cls._model_cache.clear()
 
-    def _inject_model(self, path: str):
-        """Simulate cache population via the bounded insertion logic."""
-        cls = self.AudioLanguageID
-        if len(cls._model_cache) >= 1:
-            cls._model_cache.clear()
-        cls._model_cache[path] = {"model": path}
+    def _whisper_double(self):
+        """Двойник mlx_whisper, который понимает настоящий _detect_with_mlx (загрузка + LID)."""
+        import numpy as np
+
+        whisper = MagicMock()
+        whisper.load_models.load_model = MagicMock(side_effect=lambda p: {"model": p})
+        whisper.audio.log_mel_spectrogram = MagicMock(return_value=np.zeros((1, 1)))
+        whisper.decoding.detect_language = MagicMock(return_value=("ru", {"ru": 0.99}))
+        return whisper
+
+    def _detect(self, whisper, path: str):
+        """Настоящий AudioLanguageID._detect_with_mlx с моделью по пути path."""
+        import numpy as np
+
+        lid = self.AudioLanguageID(model_path=path)
+        return lid._detect_with_mlx(whisper, np.ones(16000, dtype=np.float32) * 0.1)
 
     def test_single_model_stored(self):
-        self._inject_model("model-a")
-        self.assertEqual(len(self.AudioLanguageID._model_cache), 1)
+        whisper = self._whisper_double()
+        self.assertEqual(self._detect(whisper, "model-a"), "ru")
+        self.assertEqual(list(self.AudioLanguageID._model_cache), ["model-a"])
 
     def test_second_model_evicts_first(self):
-        self._inject_model("model-a")
-        self._inject_model("model-b")
-        self.assertEqual(len(self.AudioLanguageID._model_cache), 1)
-        self.assertIn("model-b", self.AudioLanguageID._model_cache)
-        self.assertNotIn("model-a", self.AudioLanguageID._model_cache)
+        whisper = self._whisper_double()
+        self._detect(whisper, "model-a")
+        self._detect(whisper, "model-b")
+        self.assertEqual(list(self.AudioLanguageID._model_cache), ["model-b"])
 
     def test_cache_never_exceeds_one(self):
+        whisper = self._whisper_double()
         for i in range(10):
-            self._inject_model(f"model-{i}")
+            self._detect(whisper, f"model-{i}")
             self.assertLessEqual(len(self.AudioLanguageID._model_cache), 1)
+        self.assertEqual(whisper.load_models.load_model.call_count, 10)
 
-    def test_same_model_path_no_eviction(self):
-        """Loading the same model twice should NOT evict and re-insert."""
-        self._inject_model("model-a")
-        # Simulate the guard: if already present, no eviction
-        cls = self.AudioLanguageID
-        path = "model-a"
-        if path not in cls._model_cache:
-            if len(cls._model_cache) >= 1:
-                cls._model_cache.clear()
-            cls._model_cache[path] = {"model": path}
-        # Still exactly 1 entry with same key
-        self.assertEqual(len(cls._model_cache), 1)
-        self.assertIn("model-a", cls._model_cache)
+    def test_same_model_path_no_eviction_no_reload(self):
+        """Тот же путь дважды: модель НЕ перегружается и не вытесняется."""
+        whisper = self._whisper_double()
+        self._detect(whisper, "model-a")
+        first = self.AudioLanguageID._model_cache["model-a"]
+        self._detect(whisper, "model-a")
+        whisper.load_models.load_model.assert_called_once_with("model-a")
+        self.assertIs(self.AudioLanguageID._model_cache["model-a"], first)
+        self.assertEqual(len(self.AudioLanguageID._model_cache), 1)
 
 
 if __name__ == "__main__":
