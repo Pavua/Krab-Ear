@@ -183,6 +183,13 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             record_violation("process")
             raise AssertionError("fixture forbids child process spawning")
         elif event in {"os.mkdir", "os.remove", "os.rmdir", "os.rename", "os.link", "os.symlink"}:
+            # Descriptor-relative операции: проверка пути через cwd не доказывает, какой объект
+            # будет изменён — любой dir_fd запрещается (аргументы dir_fd идут после путей).
+            dir_fd_args = {"os.mkdir": args[2:3], "os.remove": args[1:2], "os.rmdir": args[1:2],
+                           "os.rename": args[2:4], "os.link": args[2:4], "os.symlink": args[2:3]}[event]
+            if any(isinstance(fd, int) and fd != -1 for fd in dir_fd_args):
+                record_violation("filesystem")
+                raise AssertionError("fixture forbids descriptor-relative filesystem mutation")
             targets = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]
             for target in targets:
                 if isinstance(target, (str, bytes, os.PathLike)) and not Path(os.fsdecode(target)).resolve().is_relative_to(fixture_root):
@@ -190,6 +197,15 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                     raise AssertionError("fixture forbids external filesystem mutation")
 
     sys.addaudithook(audit_isolation)
+    original_os_open = os.open
+
+    def checked_os_open(path, flags, mode=0o777, *, dir_fd=None):
+        # Audit-событие "open" не содержит dir_fd, поэтому descriptor-relative open перехватывается
+        # здесь: путь относительно чужого directory FD не проверить через cwd.
+        if dir_fd is not None:
+            record_violation("filesystem")
+            raise AssertionError("fixture forbids descriptor-relative open")
+        return original_os_open(path, flags, mode)
 
     def isolated_expanduser(value):
         text = os.fsdecode(value)
@@ -233,6 +249,7 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             redirect_stdout(log_file), redirect_stderr(log_file), ExitStack() as stack:
         stack.enter_context(mock.patch.object(Path, "home", return_value=home))
         stack.enter_context(mock.patch("os.path.expanduser", side_effect=isolated_expanduser))
+        stack.enter_context(mock.patch.object(os, "open", checked_os_open))
         stack.enter_context(mock.patch.object(socket.socket, "connect", lambda sock, address: checked_socket(sock, address, original_connect)))
         stack.enter_context(mock.patch.object(socket.socket, "connect_ex", lambda sock, address: checked_socket(sock, address, original_connect_ex)))
         stack.enter_context(mock.patch.object(socket.socket, "bind", lambda sock, address: checked_socket(sock, address, original_bind)))
@@ -447,13 +464,20 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             def inspect_state():
                 leaked_files = 0
                 marker_paths = []
-                for path in root.rglob("*"):
-                    if not path.is_file() or path.is_symlink():
-                        continue
-                    data = path.read_bytes()
-                    leaked_files += contains_secret(data)
-                    if MARKER.encode() in data:
-                        marker_paths.append(str(path.relative_to(root)))
+                def _walk_failed(exc):
+                    # Недоступный каталог — НЕ «утечек нет»: обход обязан завершиться ошибкой
+                    # (раньше rglob молча пропускал содержимое и инспекция сообщала чистый результат).
+                    raise exc
+
+                for dirpath, _dirnames, filenames in os.walk(root, onerror=_walk_failed, followlinks=False):
+                    for filename in filenames:
+                        path = Path(dirpath) / filename
+                        if path.is_symlink() or not path.is_file():
+                            continue
+                        data = path.read_bytes()
+                        leaked_files += contains_secret(data)
+                        if MARKER.encode() in data:
+                            marker_paths.append(str(path.relative_to(root)))
                 audit = service._audit_logger.get_audit_log()
                 # Structured fields до json.dumps: escaped repr(key) не может
                 # исчезнуть из проверки LocalTransport/audit/logging extras.
@@ -601,7 +625,9 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                 if target is not None and path.is_relative_to(target):
                     state["writes"] += 1
                     if state["revoke_after_first"] and state["writes"] == 1:
-                        revoke(state["context"])
+                        revoked = revoke(state["context"])
+                        if (revoked.get("result") or {}).get("ok") is not True:
+                            raise AssertionError("отзыв после первой записи не подтверждён")
                 return result
             stack.enter_context(mock.patch.object(Path, "write_text", observed_write))
             claim = SocketOwnershipClaim(socket_path)
@@ -665,9 +691,12 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                     reply = reached.wait(15)
                 elif name == "revoke_release":
                     assert state["context"] is not None
-                    revoke(state["context"])
-                    release.set()
-                    reply = True
+                    try:
+                        confirmed = (revoke(state["context"]).get("result") or {}).get("ok") is True
+                    except Exception:  # noqa: BLE001
+                        confirmed = False
+                    release.set()  # барьер снимается всегда (аварийный cleanup), но успех — только при подтверждённом отзыве
+                    reply = confirmed
                 elif name == "revoke_current":
                     assert state["context"] is not None
                     reply = revoke(state["context"])["result"]["ok"] is True
