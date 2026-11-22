@@ -111,7 +111,10 @@ cleanup() {
   done
   rm -rf "$DATADIR"
 }
-trap cleanup EXIT INT TERM
+# Сигналы завершают скрипт (см. run_e2e_smokes.command): cleanup — по EXIT.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 start_ipc() {
   # ФИКС (обнаружено при живом прогоне T6): без PYTHONUNBUFFERED=1 stdout/stderr,
@@ -247,8 +250,12 @@ else
   echo "============================================================"
   echo "  EVENT BRIDGE E2E: FAILURE — см. вывод выше; логи в $DATADIR"
   echo "============================================================"
-  cp "$DATADIR/ipc.log" "/tmp/krab_ear_bridge_e2e_ipc_last_failure.log" 2>/dev/null
-  cp "$DATADIR/rest.log" "/tmp/krab_ear_bridge_e2e_rest_last_failure.log" 2>/dev/null
-  cp "$DATADIR/backend.log" "/tmp/krab_ear_bridge_e2e_backend_last_failure.log" 2>/dev/null
+  # Логи — в приватный уникальный каталог (mktemp -d, 0700), не в фиксированные имена /tmp.
+  FAIL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/krab_ear_bridge_e2e_failure.XXXXXX")" && {
+    for _name in ipc rest backend; do
+      cp "$DATADIR/$_name.log" "$FAIL_DIR/$_name.log" 2>/dev/null
+    done
+    echo "  (логи сбоя скопированы в $FAIL_DIR)"
+  }
 fi
 exit "$rc"

@@ -1382,3 +1382,188 @@ def test_tcc_audit_does_not_chmod_existing_output_dir(tmp_path):
     _run_tcc(tmp_path, "com.antigravity.krab-ear", out_dir / "audit.json")
     assert stat.S_IMODE(out_dir.stat().st_mode) == 0o755
     assert (out_dir / "audit.json").exists()
+
+
+# ═══ Пачка 4: G2-KE02a-F02/F05/F10, KEG2-12 ═══════════════════════════════════
+
+import time  # noqa: E402
+
+_STUB_PY = '''#!/usr/bin/env python3
+import os, socket, sys, time
+args = sys.argv[1:]
+log = os.environ["STUB_LOG"]
+def note(text):
+    with open(log, "a") as fh:
+        fh.write(text + "\\n")
+if args and args[0].endswith("main.py"):
+    data_dir = args[args.index("--data-dir") + 1]
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.bind(os.path.join(data_dir, "krabear.sock"))
+    s.listen(1)
+    time.sleep(60)
+elif args and args[0].endswith("e2e_ipc_smoke.py"):
+    note("phase:ipc")
+    time.sleep(float(os.environ.get("FAKE_IPC_SLEEP", "0")))
+    sys.exit(int(os.environ.get("FAKE_IPC_RC", "0")))
+elif args and args[0].endswith("e2e_privacy_gates.py"):
+    note("phase:gates")
+    sys.exit(int(os.environ.get("FAKE_PG_RC", "0")))
+'''
+
+
+def _smoke_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "smoke_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "run_e2e_smokes.command", root / "scripts")
+    (root / "KrabEar").mkdir()
+    (root / "KrabEar" / "main.py").write_text("")
+    py = root / ".venv_krab_ear" / "bin" / "python"
+    py.parent.mkdir(parents=True)
+    py.write_text(_STUB_PY)
+    py.chmod(0o755)
+    return root
+
+
+def _run_smokes(tmp_path: Path, **env_extra: str) -> subprocess.CompletedProcess:
+    root = _smoke_tree(tmp_path)
+    ctx = _stubs(tmp_path)
+    env = dict(ctx["env"], **env_extra)
+    return subprocess.run(["/bin/bash", str(root / "scripts" / "run_e2e_smokes.command")], env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+class TestE2eSmokesRunner:
+    def test_failure_log_goes_to_a_unique_private_file_not_a_fixed_tmp_name(self, tmp_path):
+        paths = []
+        for i in range(2):
+            run_dir = tmp_path / f"run{i}"
+            run_dir.mkdir()
+            res = _run_smokes(run_dir, FAKE_IPC_RC="1")
+            assert res.returncode != 0
+            line = next((ln for ln in res.stdout.splitlines() if "backend log copied to" in ln), None)
+            assert line, res.stdout + res.stderr
+            paths.append(line.split("copied to ", 1)[1].rstrip(")").strip())
+        assert paths[0] != paths[1], "оба сбоя пишут в один фиксированный путь в /tmp"
+        for p in paths:
+            assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+            os.unlink(p)
+
+    def test_sigint_stops_the_run_instead_of_continuing_to_next_phase(self, tmp_path):
+        root = _smoke_tree(tmp_path)
+        ctx = _stubs(tmp_path)
+        env = dict(ctx["env"], FAKE_IPC_SLEEP="6")
+        proc = subprocess.Popen(["/bin/bash", str(root / "scripts" / "run_e2e_smokes.command")], env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        deadline = time.time() + 30
+        while time.time() < deadline and "phase:ipc" not in (ctx["log"].read_text() if ctx["log"].exists() else ""):
+            time.sleep(0.2)
+        assert "phase:ipc" in ctx["log"].read_text(), "первая фаза не стартовала"
+        proc.send_signal(__import__("signal").SIGINT)
+        out, _ = proc.communicate(timeout=60)
+        assert "phase:gates" not in ctx["log"].read_text(), "после SIGINT скрипт пошёл в следующую фазу: " + out
+        assert proc.returncode != 0
+
+
+# ── F05 run_soak_backend: «latest» публикуется атомарно и согласованно ──────
+
+
+def _soak_tree(tmp_path: Path, write_md: bool) -> Path:
+    root = tmp_path / "soak_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "run_soak_backend.command", root / "scripts")
+    (root / "KrabEar" / "tests").mkdir(parents=True)
+    (root / "KrabEar" / "tests" / "soak_backend.py").write_text("")
+    venv_bin = root / ".venv_krab_ear" / "bin"
+    venv_bin.mkdir(parents=True)
+    stub = root / "stubpy"
+    stub.mkdir()
+    md_line = 'open(report[:-5] + ".md", "w").write("NEW-MD")' if write_md else "pass"
+    body = (
+        '#!/usr/bin/env python3\n'
+        'import sys\n'
+        'report = sys.argv[sys.argv.index("--report") + 1]\n'
+        'open(report, "w").write("NEW-JSON")\n'
+        f'{md_line}\n'
+    )
+    (stub / "python").write_text(body)
+    (stub / "python").chmod(0o755)
+    (venv_bin / "activate").write_text(f'export PATH="{stub}:$PATH"\n')
+    (venv_bin / "python").write_text("#!/bin/sh\nexit 0\n")
+    (venv_bin / "python").chmod(0o755)
+    reports = root / "docs" / "reports"
+    reports.mkdir(parents=True)
+    (reports / "soak_backend_latest.json").write_text("OLD-JSON")
+    (reports / "soak_backend_latest.md").write_text("OLD-MD")
+    return root
+
+
+@needs_zsh
+class TestSoakPublish:
+    def _run(self, root):
+        return subprocess.run([ZSH, str(root / "scripts" / "run_soak_backend.command"), "3"], capture_output=True,
+                              text=True, timeout=60)
+
+    def test_missing_markdown_leaves_previous_latest_pair_untouched(self, tmp_path):
+        root = _soak_tree(tmp_path, write_md=False)
+        res = self._run(root)
+        assert res.returncode != 0
+        reports = root / "docs" / "reports"
+        assert (reports / "soak_backend_latest.json").read_text() == "OLD-JSON", "latest.json обновлён без пары .md"
+        assert (reports / "soak_backend_latest.md").read_text() == "OLD-MD"
+
+    def test_success_publishes_both(self, tmp_path):
+        root = _soak_tree(tmp_path, write_md=True)
+        res = self._run(root)
+        assert res.returncode == 0, res.stdout + res.stderr
+        reports = root / "docs" / "reports"
+        assert (reports / "soak_backend_latest.json").read_text() == "NEW-JSON"
+        assert (reports / "soak_backend_latest.md").read_text() == "NEW-MD"
+        assert not list(reports.glob(".latest*")), "временные файлы публикации остались"
+
+
+# ── KEG2-12 audit_tcc_permissions: статус текущего приложения, а не максимум по всем клиентам ──
+
+
+def _tcc_rows(tmp_path: Path, rows: list[tuple[str, str, int]]) -> Path:
+    home = tmp_path / "home"
+    db_dir = home / "Library" / "Application Support" / "com.apple.TCC"
+    db_dir.mkdir(parents=True)
+    con = sqlite3.connect(db_dir / "TCC.db")
+    con.execute("CREATE TABLE access (service TEXT, client TEXT, client_type INT, auth_value INT, last_modified INT)")
+    for service, client, auth in rows:
+        con.execute("INSERT INTO access VALUES (?, ?, 0, ?, 1700000000)", (service, client, auth))
+    con.commit()
+    con.close()
+    return home
+
+
+def _tcc_summary(tmp_path: Path, rows) -> dict:
+    root = tmp_path / "proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "audit_tcc_permissions.command", root / "scripts")
+    home = _tcc_rows(tmp_path, rows)
+    out = tmp_path / "audit.json"
+    env = dict(os.environ, HOME=str(home), KRAB_TCC_AUDIT_OUT=str(out))
+    subprocess.run(["/bin/bash", str(root / "scripts" / "audit_tcc_permissions.command")], env=env,
+                   capture_output=True, text=True, timeout=60, check=True)
+    return json.loads(out.read_text())["key_services"]
+
+
+class TestTccCurrentClientStatus:
+    def test_current_bundle_denial_is_not_hidden_by_old_path_grant(self, tmp_path):
+        summary = _tcc_summary(tmp_path, [
+            ("kTCCServiceMicrophone", "com.antigravity.krab-ear", 0),
+            ("kTCCServiceMicrophone", "/old/build/KrabEarAgent", 2),
+        ])
+        assert summary["Microphone"] == "DENIED", summary
+
+    def test_current_bundle_grant_wins_over_old_denial(self, tmp_path):
+        summary = _tcc_summary(tmp_path, [
+            ("kTCCServiceMicrophone", "com.antigravity.krab-ear", 2),
+            ("kTCCServiceMicrophone", "/old/build/KrabEarAgent", 0),
+        ])
+        assert summary["Microphone"] == "GRANTED", summary
+
+    def test_only_path_based_grant_is_reported_as_such(self, tmp_path):
+        summary = _tcc_summary(tmp_path, [("kTCCServiceMicrophone", "/old/build/KrabEarAgent", 2)])
+        assert "GRANTED" in summary["Microphone"] and "path" in summary["Microphone"].lower(), summary
