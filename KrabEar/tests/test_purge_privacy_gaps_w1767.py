@@ -429,9 +429,14 @@ class TranslationGlossaryPurgeTestCase(unittest.TestCase):
         store = self._make_store_with_glossary(glossary)
         svc = HistoryService(store=store)
 
+        # Контроль: json.dumps по умолчанию экранирует кириллицу (\\uXXXX), и поиск исходной
+        # строки находил бы «ничего» даже без purge. ensure_ascii=False + проверка до purge.
+        before = json.dumps(store.load_settings(), ensure_ascii=False)
+        self.assertIn(secret_term, before, "предусловие: термин должен быть в настройках до purge")
+
         svc.handle_purge_all_data({"confirm": True})
 
-        saved = json.dumps(store.load_settings())
+        saved = json.dumps(store.load_settings(), ensure_ascii=False)
         self.assertNotIn(
             secret_term, saved,
             "Термин глоссария найден в настройках после purge"
