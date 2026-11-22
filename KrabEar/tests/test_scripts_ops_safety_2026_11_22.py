@@ -1714,3 +1714,23 @@ class TestValidateC1:
         assert "INCONCLUSIVE" in report, report[-600:]
         assert "H1 hypothesis confirmed" not in report
         assert "H1 not primary" not in report
+
+
+# ── Codex review #2224: нестандартный BACKEND_LABEL — отказ до любых изменений ──
+
+
+@needs_zsh
+@pytest.mark.skipif(shutil.which("bc") is None, reason="нужен bc")
+def test_validate_c1_rejects_nondefault_backend_label_before_touching_anything(tmp_path):
+    root = tmp_path / "c1_label_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "validate_c1_mps_fix.command", root / "scripts")
+    _exe(root / "scripts" / "safe_backend_restart.command", 'echo "$*" >> "$STUB_LOG.restart"\nexit 0\n')
+    ctx = _stubs(tmp_path)
+    env = dict(ctx["env"], BACKEND_LABEL="com.example.other-backend", CYCLES="1", SLEEP_BETWEEN="0")
+    res = subprocess.run([ZSH, str(root / "scripts" / "validate_c1_mps_fix.command")], env=env, capture_output=True,
+                         text=True, timeout=60)
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert "BACKEND_LABEL" in (res.stdout + res.stderr)
+    assert not Path(str(ctx["log"]) + ".restart").exists(), "рестарт запущен для чужого label"
+    assert not any("setenv" in c for c in _calls(ctx)), "launchctl env изменён до отказа"

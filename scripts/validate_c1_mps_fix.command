@@ -28,6 +28,13 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CYCLES="${CYCLES:-20}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-2}"
 BACKEND_LABEL="${BACKEND_LABEL:-ai.krab.ear.backend}"
+# safe_backend_restart.command перезапускает ТОЛЬКО ai.krab.ear.backend и label не принимает:
+# при другом BACKEND_LABEL эксперимент перезапускал бы боевой backend, а отчёт называл бы
+# нетронутый чужой job. Отказ — до любых изменений (env, рестарты, отчёт).
+if [ "$BACKEND_LABEL" != "ai.krab.ear.backend" ]; then
+    echo "ERROR: BACKEND_LABEL=$BACKEND_LABEL не поддерживается: рестарт идёт через safe_backend_restart.command, он управляет только ai.krab.ear.backend." >&2
+    exit 2
+fi
 SOCK="${SOCK:-$HOME/Library/Application Support/KrabEar/krabear.sock}"
 DATE=$(date +%Y-%m-%d-%H%M)
 OUT_DIR="$ROOT_DIR/docs/measurements"
