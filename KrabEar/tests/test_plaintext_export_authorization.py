@@ -531,7 +531,27 @@ class TestCentralSettingsCommit(_PolicySnapshotFixture):
     def test_commit_uses_atomic_replace_without_shared_tmp_name(self):
         """Единственная запись settings.json — atomic replace, без .json.tmp гонки."""
         self.seed_known_profile()
-        self.store.save_settings({ENCRYPTION_KEY: False, PRIVACY_KEY: False})
+        settings_path = self.data_dir / "settings.json"
+        # Старый открытый дескриптор: при atomic replace он продолжает видеть ПРЕЖНИЕ байты (другой
+        # inode), при перезаписи на месте — увидел бы новые. «Нет *.tmp» этого не отличало.
+        with settings_path.open("rb") as old_fh:
+            old_bytes = old_fh.read()
+            old_ino = os.fstat(old_fh.fileno()).st_ino
+            from unittest.mock import patch as _patch
+            with _patch("os.replace", wraps=os.replace) as replace_spy:
+                self.store.save_settings({ENCRYPTION_KEY: False, PRIVACY_KEY: False})
+            old_fh.seek(0)
+            self.assertEqual(old_fh.read(), old_bytes, "старый дескриптор увидел новые байты: запись на месте")
+        # замена действительно вызвана: tmp → settings.json, имя временного файла не общее/не целевое
+        targets = [(Path(c.args[0]), Path(c.args[1])) for c in replace_spy.call_args_list
+                   if Path(c.args[1]) == settings_path]
+        self.assertEqual(len(targets), 1, replace_spy.call_args_list)
+        self.assertNotEqual(targets[0][0], settings_path)
+        self.assertNotEqual(targets[0][0].name, "settings.json.tmp", "общее имя tmp — гонка между процессами")
+        # путь теперь указывает на НОВЫЙ inode с корректным JSON
+        self.assertNotEqual(settings_path.stat().st_ino, old_ino)
+        import json as _json
+        self.assertIsInstance(_json.loads(settings_path.read_text(encoding="utf-8")), dict)
         leftovers = sorted(p.name for p in self.data_dir.iterdir() if p.name.endswith(".tmp"))
         self.assertEqual(leftovers, [], leftovers)
 
@@ -2178,6 +2198,28 @@ class TestAuthorizerSerializationHygiene(_AuthorizerFixture):
 # ── Cross-process fixtures 5a/5b/5c (multiprocessing spawn, без sleep) ──
 
 
+def _tree_snapshot(root) -> dict:
+    """Рекурсивный снимок: относительный путь → (sha256 содержимого, ino, size, mtime_ns, ctime_ns)."""
+    import hashlib
+
+    out = {}
+    root = Path(root)
+    for path in sorted(root.rglob("*")):
+        rel = str(path.relative_to(root))
+        if path.is_file() and not path.is_symlink():
+            st = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if path.suffix == ".lock":
+                # пустой flock-файл: open/flock обновляет его mtime/ctime без записи данных —
+                # сравниваются содержимое, inode и размер (подмена/запись содержимого видна)
+                out[rel] = (digest, st.st_ino, st.st_size)
+            else:
+                out[rel] = (digest, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        else:
+            out[rel] = None
+    return out
+
+
 def _worker_5a_granter(data_dir_s, ready_evt, done_evt, result_q):
     """5a/A: явная инициализация профиля, ON, issue; validation после B."""
     from pathlib import Path
@@ -2206,16 +2248,19 @@ def _worker_5a_granter(data_dir_s, ready_evt, done_evt, result_q):
             result_q.put({"error": "issue_failed"})
             return
         generation_then = grant.policy_generation
-        before = sorted(path.name for path in data_dir.iterdir())
         ready_evt.set()
         if not done_evt.wait(timeout=30.0):
             result_q.put({"error": "b_timeout"})
             return
+        # Снимок берётся ПОСЛЕ завершения разрешённых записей процесса B и ровно перед validate:
+        # «0 writes» относится к самой validation, а не к записям B. Сравниваются пути, байты (sha256)
+        # и метаданные (inode/size/mtime_ns/ctime_ns; atime исключён — меняется от чтения).
+        before = _tree_snapshot(data_dir)
         validated = authorizer.validate(
             "5a-session", authorizer.epoch, grant.capability,
             generation_then, 1, "history-md",
         )
-        after = sorted(path.name for path in data_dir.iterdir())
+        after = _tree_snapshot(data_dir)
         result_q.put({
             "denied": not validated.ok,
             "reason": validated.reason,
@@ -2418,11 +2463,15 @@ class TestCrossProcessAuthorizerFixtures(unittest.TestCase):
 
     def _run_pair(self, target_a, args_a, target_b, args_b):
         ctx = multiprocessing.get_context("spawn")
-        proc_a = ctx.Process(target=target_a, args=args_a)
-        proc_b = ctx.Process(target=target_b, args=args_b)
-        proc_a.start()
-        proc_b.start()
+        started: list = []  # только УСПЕШНО запущенные процессы
         try:
+            # Процесс регистрируется сразу после успешного start(): отказ запуска второго не
+            # оставляет первый без terminate/join/close (раньше оба start() были вне try/finally).
+            for target, args in ((target_a, args_a), (target_b, args_b)):
+                proc = ctx.Process(target=target, args=args)
+                proc.start()
+                started.append(proc)
+            proc_a, proc_b = started
             proc_a.join(timeout=self.JOIN_SEC)
             proc_b.join(timeout=self.JOIN_SEC)
             self.assertFalse(proc_a.is_alive(), "worker A завис (join timeout)")
@@ -2430,11 +2479,18 @@ class TestCrossProcessAuthorizerFixtures(unittest.TestCase):
             self.assertEqual(proc_a.exitcode, 0, "worker A упал")
             self.assertEqual(proc_b.exitcode, 0, "worker B упал")
         finally:
-            for proc in (proc_a, proc_b):
-                if proc.is_alive():
-                    proc.terminate()
-                proc.join(timeout=10.0)
-                proc.close()
+            for proc in started:
+                # ошибка cleanup одного процесса не прерывает cleanup другого
+                try:
+                    if proc.is_alive():
+                        proc.terminate()
+                    proc.join(timeout=10.0)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    proc.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def test_5a_cross_process_supported_off_on_revokes_grant(self):
         """5a: A issue при ON; B supported OFF→ON; первая validation A →
