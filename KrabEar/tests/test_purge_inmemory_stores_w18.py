@@ -48,7 +48,9 @@ class PurgeInMemoryStoresTestCase(unittest.TestCase):
     """Wave-18: purge стирает context_memory + clipboard + StateStore поисковые кэши."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="krabear_purge_w18_")
+        _tmp_dir = tempfile.TemporaryDirectory(prefix="krabear_purge_w18_", ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
         self.store = StateStore(data_dir=Path(self._tmpdir))
 
         # --- наполняем историю реальными PII-записями ---
@@ -190,7 +192,9 @@ class StateStoreResetSearchCachesTestCase(unittest.TestCase):
     """Юнит-тест низкоуровневого хука StateStore.reset_search_caches()."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp(prefix="krabear_reset_caches_w18_")
+        _tmp_dir = tempfile.TemporaryDirectory(prefix="krabear_reset_caches_w18_", ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
         self.store = StateStore(data_dir=Path(self._tmpdir))
         for text in _PII_TEXTS:
             self.store.add_history_item(text=text, paste_status="ok")
