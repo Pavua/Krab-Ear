@@ -154,11 +154,25 @@ def test_no_provider_means_no_reconcile(tmp_path):
 
 
 def test_privacy_mode_still_reconciles_but_scrubs_the_answer(tmp_path):
+    import json
+
     privacy = [False]
     service, _client = _service(tmp_path, _gw("stopped"), privacy=privacy)
     sid = _start(service)  # call_start в приватном режиме запрещён: включаем после набора
+    # Расшифровка с уникальным маркером ДО включения privacy: без неё пустая история после
+    # запроса ничего не доказывала бы (очистка поля могла быть удалена незамеченной).
+    marker = "TRANSCRIPT-MARKER-3f9a"
+    service._store.add_transcript(sid, "them", marker)
+    assert service._store.get(sid).transcript_history, "предусловие: расшифровка записана"
     privacy[0] = True
     got = service.handle_call_session_get({"id": sid})
     assert got["status"] == "completed"
-    assert got["phone_number"] != "+10000000000"
     assert got["transcript_history"] == []
+    assert got["phone_number"] == "REDACTED"  # точная маска по контракту, не «любое отличие»
+    raw = json.dumps(got, ensure_ascii=False)
+    for secret in ("+10000000000", marker):
+        assert secret not in raw, f"{secret!r} просочился в privacy-ответ"
+    # ВНИМАНИЕ (решение владельца, не баг теста): goal_text («цель звонка») в privacy-ответе
+    # СОХРАНЯЕТСЯ — _scrub_session по контракту маскирует только phone_number и transcript_history
+    # (схема ключей сохраняется, см. test_wave31_call_session_privacy). Если владелец решит
+    # скрывать и цель — добавить "goal_text" в _scrub_session и сюда в secrets.
