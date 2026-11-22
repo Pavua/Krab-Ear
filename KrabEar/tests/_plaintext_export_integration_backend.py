@@ -111,6 +111,37 @@ def scan_synthetic_secrets(value, secrets, raw_keys=()):
         return True
 
 
+def descriptor_path(fd):
+    """Путь объекта дескриптора (Linux /proc, macOS F_GETPATH) или None."""
+    try:
+        return os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        pass
+    try:
+        import fcntl
+        raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+        return os.fsdecode(raw.split(b"\0", 1)[0]) or None
+    except (OSError, AttributeError, ImportError):
+        return None
+
+
+def resolve_mutation_target(target, dir_fd):
+    """Реальный объект операции: путь с учётом dir_fd; None — определить нельзя (отказ).
+
+    shutil.rmtree идёт через dir_fd, поэтому безусловный запрет ломал purge, а
+    безусловное разрешение открывало обход: относительное имя трактуется
+    относительно ЧУЖОГО каталога. Решает объект дескриптора.
+    """
+    text = os.fsdecode(target)
+    if isinstance(dir_fd, int) and dir_fd != -1:
+        base = descriptor_path(dir_fd)
+        if base is None:
+            return None
+        if not os.path.isabs(text):
+            text = os.path.join(base, text)
+    return Path(os.path.normpath(text)).resolve()
+
+
 def run_child(connection, root_string, source_string, crypto_key=None, crypto_key_missing=False):
     """Настоящий IPCServer; control Pipe не пишет auth context в stdout/файлы."""
     root = Path(root_string).resolve()
@@ -183,16 +214,19 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             record_violation("process")
             raise AssertionError("fixture forbids child process spawning")
         elif event in {"os.mkdir", "os.remove", "os.rmdir", "os.rename", "os.link", "os.symlink"}:
-            # Descriptor-relative операции: проверка пути через cwd не доказывает, какой объект
-            # будет изменён — любой dir_fd запрещается (аргументы dir_fd идут после путей).
-            dir_fd_args = {"os.mkdir": args[2:3], "os.remove": args[1:2], "os.rmdir": args[1:2],
-                           "os.rename": args[2:4], "os.link": args[2:4], "os.symlink": args[2:3]}[event]
-            if any(isinstance(fd, int) and fd != -1 for fd in dir_fd_args):
-                record_violation("filesystem")
-                raise AssertionError("fixture forbids descriptor-relative filesystem mutation")
-            targets = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]
-            for target in targets:
-                if isinstance(target, (str, bytes, os.PathLike)) and not Path(os.fsdecode(target)).resolve().is_relative_to(fixture_root):
+            # Путь из аргументов не определяет объект операции при dir_fd: объект —
+            # (каталог дескриптора + относительное имя). Разрешаем только внутри fixture.
+            fd_slots = {"os.mkdir": {0: 2}, "os.remove": {0: 1}, "os.rmdir": {0: 1},
+                        "os.rename": {0: 2, 1: 3}, "os.link": {0: 2, 1: 3}, "os.symlink": {1: 2}}[event]
+            count = 2 if event in {"os.rename", "os.link", "os.symlink"} else 1
+            for index in range(count):
+                target = args[index]
+                if not isinstance(target, (str, bytes, os.PathLike)):
+                    continue
+                slot = fd_slots.get(index)
+                fd = args[slot] if slot is not None and len(args) > slot else None
+                resolved = resolve_mutation_target(target, fd)
+                if resolved is None or not resolved.is_relative_to(fixture_root):
                     record_violation("filesystem")
                     raise AssertionError("fixture forbids external filesystem mutation")
 
@@ -200,11 +234,14 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
     original_os_open = os.open
 
     def checked_os_open(path, flags, mode=0o777, *, dir_fd=None):
-        # Audit-событие "open" не содержит dir_fd, поэтому descriptor-relative open перехватывается
-        # здесь: путь относительно чужого directory FD не проверить через cwd.
+        # Audit-событие "open" не содержит dir_fd, поэтому descriptor-relative open
+        # проверяется здесь по объекту дескриптора (путь относительно чужого FD — отказ).
         if dir_fd is not None:
-            record_violation("filesystem")
-            raise AssertionError("fixture forbids descriptor-relative open")
+            resolved = resolve_mutation_target(path, dir_fd)
+            if resolved is None or not resolved.is_relative_to(fixture_root):
+                record_violation("filesystem")
+                raise AssertionError("fixture forbids descriptor-relative open outside fixture")
+            return original_os_open(path, flags, mode, dir_fd=dir_fd)
         return original_os_open(path, flags, mode)
 
     def isolated_expanduser(value):
