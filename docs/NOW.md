@@ -1,5 +1,14 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## Оперативный срез — 2026-11-22
+
+- Влито в `codex/krab-ear-v2`: #2222–#2225, #2226 (срезы ревью `tests-01…10`), #2227 (`CLAUDE.md` 109→29 КБ, подробности в `docs/claude/*.md`).
+- Открыто: #2228 — продакшн-правки приватности по G3-privacy-01…03 (гейт `get_history_stats`, честный статус `index_item` и purge-аудита, лог vault без `$HOME`); #2207 — журнал звонков (шифрование, `goal_text` скрыт в privacy).
+- Следующее по очереди: остатки G3-privacy-01…03, G3-memory-01…08, G3-audio-01…06, сверка «не сверено», Swift-пункты (E06-04/07, F08, F12, P03-02).
+- **Карта исправлений по ревью** (общая для всех проектов, вне git): `/Users/pablito/Antigravity_AGENTS/.coordination/review-map/` — `README.md` (правила), `KARTA_<проект>.md`, `rollup.py` → `KARTA_ALL.md` с процентами. Каждая сессия правит только свой файл; ЗАКРЫТО — только с номером PR/коммита.
+- Подробный handoff для следующей сессии: `.remember/HANDOFF_2026-11-22_ear_claude.md` (локально, не в git).
+- Ниже — прежние записи; они не отражают состояние на 22.11.
+
 ## Source update — 2026-11-05: warning batch provenance
 
 ErrorBus retains original warning timestamps in reserved Sentry extras
