@@ -223,7 +223,7 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
 
         pushed = []
 
@@ -233,10 +233,9 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
 
         searcher._error_bus = _FakeBus()
 
-        # Force _save_locked to raise — monkeypatch np.save to blow up. We patch
-        # the module-level numpy import path used inside _save_locked.
-        # G3-P03-09: patch() вместо ручной глобальной подмены np.save (откат гарантирован).
-        with patch("numpy.save", side_effect=OSError("disk full (simulated)")):
+        # Force _save_locked to raise — monkeypatch np.savez to blow up (M05-04
+        # snapshot format). patch() вместо ручной глобальной подмены (G3-P03-09).
+        with patch("numpy.savez", side_effect=OSError("disk full (simulated)")):
             ok = searcher.index_item("id1", "текст")
 
         # G3-P03-01: отказ записи индекса на диск — НЕ успех: index_item
@@ -245,6 +244,7 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(len(pushed), 1)
         self.assertEqual(pushed[0].code, "history.write_fail")
+        self.assertFalse(searcher._snapshot_path.exists())
 
     def test_save_failure_no_bus_is_silent(self):
         """When no _error_bus is wired, save failure stays a silent no-op (warning
@@ -253,13 +253,13 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         self.assertIsNone(searcher._error_bus)
 
-        with patch("numpy.save", side_effect=OSError("disk full (simulated)")):
+        with patch("numpy.savez", side_effect=OSError("disk full (simulated)")):
             ok = searcher.index_item("id1", "текст")  # must not raise
         self.assertFalse(ok)  # G3-P03-01: нет подтверждённой записи на диск
-        self.assertFalse(searcher._embeddings_path.exists())
+        self.assertFalse(searcher._snapshot_path.exists())
 
 
 if __name__ == "__main__":

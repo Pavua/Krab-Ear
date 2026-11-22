@@ -286,17 +286,14 @@ class TestLoadFromDiskShapeGuard(unittest.TestCase):
         self.assertEqual(results, [], "Поиск на пустом индексе должен вернуть []")
 
     def test_consistent_pair_loads_correctly(self):
-        """Согласованная пара (N embeddings + N ids) загружается нормально."""
+        """Согласованный снимок NPZ (N embeddings + N ids) загружается нормально (M05-04)."""
         n = 3
         dim = 4
         embeddings = np.random.rand(n, dim).astype(np.float32)
-        index = [f"id{i}" for i in range(n)]
+        index = np.array([f"id{i}" for i in range(n)], dtype=np.str_)
 
-        emb_path = Path(self.tmpdir) / "embeddings.npy"
-        idx_path = Path(self.tmpdir) / "embeddings_index.json"
-        np.save(str(emb_path), embeddings)
-        with open(idx_path, "w", encoding="utf-8") as f:
-            json.dump(index, f)
+        snap_path = Path(self.tmpdir) / "embeddings_snapshot.npz"
+        np.savez(snap_path, vectors=embeddings, ids=index, version=1)
 
         searcher = SemanticSearcher(
             data_dir=Path(self.tmpdir),

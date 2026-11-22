@@ -453,22 +453,20 @@ class TestResetModelErrorScopeInvariant(unittest.TestCase):
                                  "reset_model_error must NOT clear _embeddings")
 
     def test_reset_does_not_delete_disk_files(self):
-        """After reset_model_error(), embeddings.npy / embeddings_index.json must persist."""
+        """After reset_model_error(), embeddings_snapshot.npz must persist (M05-04)."""
         searcher = _make_searcher(self.tmpdir)
         searcher.index_item("disk_item", "should stay on disk")
 
-        self.assertTrue(searcher._embeddings_path.exists(),
-                        "embeddings.npy should exist before reset")
-        self.assertTrue(searcher._index_path.exists(),
-                        "embeddings_index.json should exist before reset")
+        self.assertTrue(searcher._snapshot_path.exists(),
+                        "embeddings_snapshot.npz should exist before reset")
 
         searcher._model_error = "network_timeout"
         searcher.reset_model_error()
 
-        self.assertTrue(searcher._embeddings_path.exists(),
-                        "reset_model_error must NOT delete embeddings.npy")
-        self.assertTrue(searcher._index_path.exists(),
-                        "reset_model_error must NOT delete embeddings_index.json")
+        self.assertTrue(searcher._snapshot_path.exists(),
+                        "reset_model_error must NOT delete embeddings_snapshot.npz")
+        with searcher._index_lock:
+            self.assertIn("disk_item", searcher._index)
 
     def test_reset_returns_expected_shape(self):
         """reset_model_error returns {'reset': True, 'previous_error': <str or None>}."""
