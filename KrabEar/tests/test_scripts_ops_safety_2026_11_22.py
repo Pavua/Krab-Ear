@@ -27,7 +27,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 UID = str(os.getuid())
-ZSH = shutil.which("zsh")
+# KE_SIMULATE_CI=1 имитирует Linux-раннер (нет zsh/plutil): так локально ловятся платформенные падения.
+ZSH = None if os.environ.get("KE_SIMULATE_CI") else shutil.which("zsh")
 needs_zsh = pytest.mark.skipif(ZSH is None, reason="zsh не установлен (shebang скриптов #!/bin/zsh)")
 
 
@@ -732,6 +733,9 @@ def _rest_installer(tmp_path: Path, gate_rc: int, launchctl_body: str, *args: st
     (root / ".venv_krab_ear").mkdir()
     _exe(root / "scripts" / "safe_backend_restart.command", f'echo "$*" >> "$STUB_LOG.gate"\nexit {gate_rc}\n')
     ctx = _stubs(tmp_path, launchctl_body)
+    # plutil есть только на macOS; здесь важна логика гейта, а не валидатор plist (его проверяет
+    # TestInstallAgentLaunchagent на macOS), поэтому заглушка делает тест платформонезависимым.
+    _exe(tmp_path / "stubbin" / "plutil", "exit 0\n")
     env = dict(ctx["env"], HF_TOKEN="hf_test_token_not_real")
     res = subprocess.run(["/bin/bash", str(root / "scripts" / "install_rest_launchagent.command"), *args],
                          env=env, capture_output=True, text=True, timeout=60)
@@ -1206,6 +1210,7 @@ class TestCleanupKeepsIgnoredWork:
 
 
 # F2/F8/F9: границы файлового отбора бэкапа
+@needs_zsh
 class TestBackupSelection:
     def _tree(self, tmp_path: Path) -> Path:
         root = _backup_tree(tmp_path)
