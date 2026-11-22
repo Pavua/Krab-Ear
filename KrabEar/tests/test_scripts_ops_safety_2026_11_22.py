@@ -2122,3 +2122,117 @@ class TestBuildAndDeployRollbackCompleteness:
         assert not runtime.exists(), "созданный поставкой runtime-бинарь остался после отката"
         assert not (root / "native" / "Frameworks" / "Sparkle.framework").exists(), \
             "созданный поставкой native/Frameworks/Sparkle остался после отката"
+
+
+# ── W6-B V11 / EAR-W6B: приёмка run_smoke_release на заглушках процессов ────
+
+_PGREP = r'''#!/bin/sh
+mode=""; pat=""
+while [ $# -gt 0 ]; do
+  case "$1" in -a) shift;; -x) mode=x; pat="$2"; shift 2;; -f) mode=f; pat="$2"; shift 2;; *) shift;; esac
+done
+found=1
+while IFS='|' read -r pid ucomm ppid cmd; do
+  [ -n "$pid" ] || continue
+  if [ "$mode" = x ]; then [ "$ucomm" = "$pat" ] || continue
+  else printf '%s' "$cmd" | grep -Eq -e "$pat" || continue; fi
+  echo "$pid"; found=0
+done < "$PROCS"
+exit $found
+'''
+_PS = r'''#!/bin/sh
+if [ "$1" = "-p" ]; then
+  pid="$2"; field="$4"
+  line=$(grep "^$pid|" "$PROCS" | head -1); [ -n "$line" ] || exit 1
+  ucomm=$(echo "$line" | cut -d'|' -f2); ppid=$(echo "$line" | cut -d'|' -f3); cmd=$(echo "$line" | cut -d'|' -f4-)
+  case "$field" in command=) echo "$cmd";; ucomm=) echo "$ucomm";; ppid=) echo "$ppid";; esac
+  exit 0
+fi
+cut -d'|' -f1,3 "$PROCS" | tr '|' ' '
+'''
+_KILL = r'''#!/bin/sh
+case "$1" in
+  -0) grep -q "^$2|" "$PROCS"; exit $?;;
+  *) echo "kill $*" >> "$STUB_LOG"
+     pid="${2:-$1}"; case "$1" in -*) pid="$2";; *) pid="$1";; esac
+     grep -v "^$pid|" "$PROCS" > "$PROCS.new"; mv "$PROCS.new" "$PROCS";;
+esac
+'''
+
+
+def _smoke_release_tree(tmp_path: Path, *, preexisting: list[str], socket_exists: bool = False):
+    root = tmp_path / "rel_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "run_smoke_release.command", root / "scripts")
+    _exe(root / ".venv_krab_ear" / "bin" / "python", 'echo "terminate $2" >> "$STUB_LOG"\ngrep -Ev "^$2\\||^[0-9]+\\|[^|]*\\|$2\\|" "$PROCS" > "$PROCS.new"; mv "$PROCS.new" "$PROCS"\nexit 0\n')
+    procs = tmp_path / "procs.txt"
+    procs.write_text("\n".join(preexisting) + ("\n" if preexisting else ""))
+    # старт агента: поднимает агент (41200) и его backend-ребёнка (41201) для ЭТОГО ROOT_DIR
+    _exe(root / "scripts" / "start_agent.command",
+         'echo "start_agent $*" >> "$STUB_LOG"\n'
+         'echo "41200|KrabEarAgent|1|/x/Krab Ear.app/Contents/MacOS/KrabEarAgent" >> "$PROCS"\n'
+         f'echo "41201|python3|41200|python3 {root}/KrabEar/main.py --data-dir /tmp/d" >> "$PROCS"\n')
+    ctx = _stubs(tmp_path)
+    stub = tmp_path / "stubbin"
+    (stub / "sleep").unlink()  # настоящий sleep: фоновый старт должен успеть записать процессы
+    for name, body in (("pgrep", _PGREP), ("ps", _PS), ("kill", _KILL)):
+        (stub / name).write_text(body)
+        (stub / name).chmod(0o755)
+    sock = tmp_path / "krabear.sock"
+    if socket_exists:
+        sock.write_text("")
+    env = dict(ctx["env"], PROCS=str(procs), KRAB_EAR_SOCKET=str(sock), KRAB_SMOKE_WAIT_START="8",
+               KRAB_SMOKE_WAIT_BACKEND="8", KRAB_SMOKE_WAIT_STOP="6", KRAB_SMOKE_WAIT_STOP_RETRY="2",
+               KRAB_SMOKE_SETTLE="0")
+    return root, ctx, procs, env
+
+
+def _run_smoke_release(root: Path, env: dict) -> subprocess.CompletedProcess:
+    # 🔴 Встроенный kill zsh перекрывает заглушку в PATH, а PID — выдуманные: `disable kill` +
+    # source гарантирует, что скрипт вызывает ТОЛЬКО заглушку и ни один настоящий процесс не получит сигнал.
+    return subprocess.run([ZSH, "-c", 'disable kill; source "$1"', "smoke", str(root / "scripts" / "run_smoke_release.command")],
+                          env=env, capture_output=True, text=True, timeout=90)
+
+
+FOREIGN_BACKEND = "41300|python3|1|python3 /somewhere/else/KrabEar/main.py --data-dir /tmp/other"
+
+
+@needs_zsh
+class TestSmokeReleaseAcceptance:
+    def test_preflight_refusal_touches_no_process_and_starts_nothing(self, tmp_path):
+        existing_agent = "41100|KrabEarAgent|1|/Applications/Krab Ear.app/Contents/MacOS/KrabEarAgent"
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[existing_agent, FOREIGN_BACKEND])
+        before = procs.read_text()
+        res = _run_smoke_release(root, env)
+        assert res.returncode == 1, res.stdout + res.stderr
+        calls = _calls(ctx)
+        assert not any(c.startswith(("kill", "terminate", "start_agent", "pkill")) for c in calls), calls
+        assert procs.read_text() == before, "preflight изменил таблицу процессов"
+
+    def test_existing_socket_also_refuses_before_any_side_effect(self, tmp_path):
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[FOREIGN_BACKEND], socket_exists=True)
+        res = _run_smoke_release(root, env)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert not any(c.startswith(("kill", "terminate", "start_agent")) for c in _calls(ctx)), _calls(ctx)
+
+    def test_success_terminates_only_own_agent_and_leaves_foreign_backend(self, tmp_path):
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[FOREIGN_BACKEND])
+        res = _run_smoke_release(root, env)
+        calls = _calls(ctx)
+        assert res.returncode == 0, res.stdout + res.stderr + str(calls)
+        assert "terminate 41200" in calls, calls
+        assert not any(" 41300" in c or c.endswith("41300") for c in calls), "тронут чужой процесс 41300"
+        assert "41300|" in procs.read_text(), "чужой backend другого ROOT_DIR остановлен"
+
+    def test_cleanup_after_failed_control_stops_only_own_processes(self, tmp_path):
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[FOREIGN_BACKEND])
+        # «мягкое завершение» агента не срабатывает (AppKit недоступен) → прогон FAILED, cleanup обязан
+        # погасить свои 41200/41201 и НЕ трогать 41300
+        _exe(root / ".venv_krab_ear" / "bin" / "python", 'echo "terminate-failed $2" >> "$STUB_LOG"\nexit 1\n')
+        res = _run_smoke_release(root, env)
+        assert res.returncode == 1, res.stdout + res.stderr
+        killed = [c for c in _calls(ctx) if c.startswith("kill")]
+        assert any("41200" in c for c in killed), _calls(ctx)
+        assert not any("41300" in c for c in killed), killed
+        remaining = procs.read_text()
+        assert "41300|" in remaining and "41200|" not in remaining
