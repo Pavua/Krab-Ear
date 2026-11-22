@@ -333,6 +333,19 @@ extension HistoryPanelController {
                 }
             }
         }
+
+        // G3-MEM-07 (M07-03): переключатель авто-словаря — повторно при каждом
+        // rebuild (не допускаем потерю строки при перестроек карточки).
+        if let toggle = objc_getAssociatedObject(
+            self, &STTVocabAssocKeys.autoLearnToggle
+        ) as? NSButton {
+            card.contentStackView.addArrangedSubview(sttVocabMakeSeparator())
+            card.contentStackView.addArrangedSubview(makeSettingRow(
+                label: "Авто-словарь из правок",
+                description: "Когда вы исправляете неверно распознанное слово, оно автоматически добавляется в словарь STT",
+                control: toggle
+            ))
+        }
     }
 
     // MARK: - Перестройка карточки (Claude Design)
@@ -406,6 +419,16 @@ extension HistoryPanelController {
                     card.contentStackView.addArrangedSubview(row)
                 }
             }
+        }
+
+        // G3-MEM-07 (M07-03): переключатель авто-словаря — повторно при rebuild.
+        if let toggle = objc_getAssociatedObject(
+            self, &STTVocabAssocKeys.cdAutoLearnToggle
+        ) as? NSButton {
+            card.contentStackView.addArrangedSubview(cdMakeSeparator())
+            card.contentStackView.addArrangedSubview(
+                cdMakeRow(label: "", control: toggle)
+            )
         }
     }
 

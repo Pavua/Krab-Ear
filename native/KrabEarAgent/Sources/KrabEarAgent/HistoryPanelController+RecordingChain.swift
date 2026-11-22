@@ -292,7 +292,9 @@ extension HistoryPanelController {
         let endedAt = result["ended_at"] as? String
         let totalDuration = result["total_duration_sec"] as? Double ?? 0.0
         let totalWords = result["total_word_count"] as? Int ?? 0
-        let isPrivacyMode = result["privacy_mode"] as? Bool ?? false
+        // G3-MEM-07 (M07-02): неизвестное/отсутствующее значение считаем privacy ON
+        // (fail-closed) — выдача текста цепочки при неизвестном состоянии нельзя.
+        let isPrivacyMode = result["privacy_mode"] as? Bool != false
 
         let vc = RecordingChainDetailViewController(
             chainId: chainId,
@@ -631,6 +633,8 @@ final class RecordingChainDetailViewController: NSViewController {
 
         let copyBtn = ThemeSecondaryButton(title: "Копировать объединённый текст", target: self, action: #selector(onCopyMergedText))
         copyBtn.applyThemeSecondary()
+        // G3-MEM-07 (M07-02): при privacy ON — копирование текста запрещено.
+        copyBtn.isEnabled = !isPrivacyMode
         buttonRow.addArrangedSubview(copyBtn)
 
         let spacer = NSView()
