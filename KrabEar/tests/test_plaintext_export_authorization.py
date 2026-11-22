@@ -145,12 +145,24 @@ class _PolicySnapshotFixture(unittest.TestCase):
     """Общий fixtures: временный профиль без шифрования и без реальной истории."""
 
     def setUp(self) -> None:
+        self._services: list = []
         self._tmp = tempfile.TemporaryDirectory(prefix="a53-policy-")
         self.data_dir = Path(self._tmp.name)
         self.store = StateStore(self.data_dir)
 
+    def track_service(self, service):
+        """Сервис закрывается в tearDown ДО удаления каталога профиля (раньше addCleanup(close)
+        выполнялся после tearDown — close() видел уже удалённый профиль)."""
+        self._services.append(service)
+        return service
+
+    def _close_services(self) -> None:
+        while self._services:
+            self._services.pop().close()
+
     def tearDown(self) -> None:
         self.store = None
+        self._close_services()
         self._tmp.cleanup()
 
     # ── helpers ────────────────────────────────────────────────────────────
@@ -635,16 +647,29 @@ class _StartupPolicyFixture(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        self._services: list = []
         self._tmp = tempfile.TemporaryDirectory(prefix="a53-startup-")
         self.data_dir = Path(self._tmp.name) / "data"
 
+    def track_service(self, service):
+        self._services.append(service)
+        return service
+
+    def _close_services(self) -> None:
+        while self._services:
+            self._services.pop().close()
+
     def tearDown(self) -> None:
+        self._close_services()
         self._tmp.cleanup()
 
     # ── disk-state helpers ─────────────────────────────────────────────────
 
     def reset_profile(self, *, prefix: str = "a53-startup-") -> None:
-        """Чистый профиль на КАЖДЫЙ subtest (без вложенных TemporaryDirectory)."""
+        """Чистый профиль на КАЖДЫЙ subtest (без вложенных TemporaryDirectory).
+
+        Предыдущий сервис закрывается ДО удаления его профиля и создания следующего."""
+        self._close_services()
         self._tmp.cleanup()
         self._tmp = tempfile.TemporaryDirectory(prefix=prefix)
         self.data_dir = Path(self._tmp.name) / "data"
@@ -1369,8 +1394,7 @@ class TestHotwordsAutoSeedPolicyGate(_StartupPolicyFixture):
 
     def _build(self):
         service = _build_service_without_audio(self.data_dir)
-        self.addCleanup(service.close)
-        return service
+        return self.track_service(service)
 
     def test_auto_seed_is_skipped_on_unknown_profile(self):
         self.seed_settings({"foo": 1})
@@ -2095,8 +2119,7 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
     def _build(self, name):
         target = Path(self._tmp.name) / name
         service = _build_service_without_audio(target)
-        self.addCleanup(service.close)
-        return service
+        return self.track_service(service)
 
     def test_two_fresh_backend_services_have_different_epochs(self):
         module = self.authorizer_module()
@@ -2122,8 +2145,7 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
         payload["stt_hotwords"] = ["seeded"]
         self.write_settings(payload)
         before = (self.data_dir / "settings.json").read_bytes()
-        service = _build_service_without_audio(self.data_dir)
-        self.addCleanup(service.close)
+        service = self.track_service(_build_service_without_audio(self.data_dir))
         self.assertEqual((self.data_dir / "settings.json").read_bytes(), before)
         snapshot = self.store.read_plaintext_policy_snapshot()
         self.assertIs(snapshot.state, module_state_off())
@@ -2131,8 +2153,7 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
     def test_read_history_show_settings_status_create_no_grants(self):
         """Read/show/settings-status НЕ создают grants и НЕ мешают живому grant."""
         self.seed_on()
-        service = _build_service_without_audio(self.data_dir)
-        self.addCleanup(service.close)
+        service = self.track_service(_build_service_without_audio(self.data_dir))
         authorizer = service._plaintext_export_authorizer
         grant = authorizer.issue_grant(self.SESSION_A)
         self.assertTrue(grant.ok, grant)
