@@ -98,13 +98,14 @@ def _tagged_item_then_privacy_on(tmp_path: Path):
 def test_red_add_tag_does_not_disclose_existing_tags_in_privacy(tmp_path: Path) -> None:
     svc, item = _tagged_item_then_privacy_on(tmp_path)
     out = svc.handle_add_tag({"id": item.id, "tag": "reviewed"})
-    assert "medical" not in (out.get("tags") or []), out
+    # ни одна из исходных меток записи не должна раскрываться (раньше проверялась только первая)
+    assert {"medical", "family"}.isdisjoint(out.get("tags") or []), out
 
 
 def test_red_remove_tag_does_not_disclose_existing_tags_in_privacy(tmp_path: Path) -> None:
     svc, item = _tagged_item_then_privacy_on(tmp_path)
     out = svc.handle_remove_tag({"id": item.id, "tag": "nonexistent"})
-    assert "family" not in (out.get("tags") or []), out
+    assert {"medical", "family"}.isdisjoint(out.get("tags") or []), out
 
 
 # ------------------------------- RED: privacy asymmetry, recording core

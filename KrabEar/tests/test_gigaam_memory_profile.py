@@ -307,15 +307,19 @@ class TestGigaAMMemoryHygiene(unittest.TestCase):
             collect_calls.append(1)
             return 0
 
+        # mod.gc и gc — один и тот же модуль: одна подмена и одно восстановление
+        # (раньше оригинал «модульной» ссылки снимался ПОСЛЕ первой подмены и в finally
+        # возвращалась заглушка — gc.collect оставался подменённым для всех следующих тестов).
         _gc_real.collect = _mock_collect  # type: ignore[assignment]
-        # Also patch in the module's own gc reference (it imports gc at top-level)
-        original_mod_gc_collect = mod.gc.collect
-        mod.gc.collect = _mock_collect  # type: ignore[assignment]
         try:
             mod._free_mps_pool()
         finally:
             _gc_real.collect = original_collect
-            mod.gc.collect = original_mod_gc_collect
+        self.assertIs(
+            _gc_real.collect,
+            original_collect,
+            "gc.collect must be restored after the test, not left as a stub",
+        )
 
         self.assertGreaterEqual(
             len(collect_calls),
