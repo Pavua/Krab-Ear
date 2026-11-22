@@ -56,6 +56,9 @@ class TestConcurrentLogEventChainValid(unittest.TestCase):
             t.start()
         for t in threads:
             t.join(timeout=10)
+        # join(timeout) не доказывает завершения: зависшая запись не должна давать PASS
+        alive = [t for t in threads if t.is_alive()]
+        self.assertFalse(alive, f"{len(alive)} потоков не завершились за таймаут")
 
         self.assertFalse(errors, f"Потоки бросили исключения: {errors}")
 

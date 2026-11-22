@@ -123,6 +123,10 @@ class TestPrivacyAuditClearRaceW1768(unittest.TestCase):
             t.start()
         for t in threads:
             t.join(timeout=15)
+        # Пустая валидная цепочка удовлетворяла бы итоговым проверкам, пока writers ещё
+        # ждут: сначала доказываем, что ВСЕ потоки завершились.
+        alive = [t for t in threads if t.is_alive()]
+        self.assertFalse(alive, f"{len(alive)} потоков не завершились (взаимная блокировка?)")
 
         self.assertFalse(errors, f"Потоки бросили исключения при гонке: {errors}")
 

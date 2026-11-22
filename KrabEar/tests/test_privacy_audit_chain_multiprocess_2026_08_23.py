@@ -78,20 +78,33 @@ class PrivacyAuditChainMultiprocessTest(unittest.TestCase):
         )
         env = dict(os.environ)
         env["PYTHONPATH"] = str(PROJECT_ROOT / "KrabEar")
-        procs = [
-            subprocess.Popen(
-                [sys.executable, "-c", source, f"w{idx}"],
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            for idx in range(_WRITERS)
-        ]
-        for proc in procs:
-            _, err = proc.communicate(timeout=180)
-            self.assertEqual(
-                proc.returncode, 0, f"писатель упал: {err.decode('utf-8', 'replace')[-500:]}"
-            )
+        procs: list[subprocess.Popen] = []
+        try:
+            # Дочерние процессы регистрируются сразу после успешного Popen: таймаут,
+            # ненулевой код первого или сбой следующего Popen не оставляют детей жить.
+            for idx in range(_WRITERS):
+                procs.append(subprocess.Popen(
+                    [sys.executable, "-c", source, f"w{idx}"],
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                ))
+            for proc in procs:
+                _, err = proc.communicate(timeout=180)
+                self.assertEqual(
+                    proc.returncode, 0, f"писатель упал: {err.decode('utf-8', 'replace')[-500:]}"
+                )
+        finally:
+            for proc in procs:
+                if proc.poll() is None:
+                    proc.kill()
+                try:
+                    proc.wait(timeout=10)
+                except Exception:  # pragma: no cover - last resort
+                    pass
+                for stream in (proc.stdout, proc.stderr):
+                    if stream is not None:
+                        stream.close()
 
     def test_chain_survives_concurrent_processes(self):
         self._spawn_writers()
