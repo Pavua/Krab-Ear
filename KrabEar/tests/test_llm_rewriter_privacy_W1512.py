@@ -258,5 +258,36 @@ class W1755WiringRegressionTestCase(unittest.TestCase):
             mock_post.assert_not_called()
 
 
+class TestRewriterGetterWiredByRealBackendConstructor(unittest.TestCase):
+    """_settings_getter присваивает рабочий BackendService.__init__; фикстуры выше присваивают его
+    вручную, поэтому удаление присвоения в конструкторе ими не ловится."""
+
+    def test_backend_init_wires_runtime_getter_into_rewriter(self):
+        import tempfile
+        from pathlib import Path
+        from backend.service import BackendService
+        from backend.state_store import StateStore
+        from test_backend_service import FakeRecorder, FakeTranscriber, FakeTranslator
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        store = StateStore(Path(tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        rewriter = MagicMock()
+        rewriter._settings_getter = None
+        with patch.object(BackendService, "_init_llm_rewriter", return_value=rewriter):
+            service = BackendService(
+                store=store,
+                recorder=FakeRecorder(),
+                transcriber=FakeTranscriber(),
+                translator=FakeTranslator(),
+            )
+        self.addCleanup(service.close)
+        getter = rewriter._settings_getter
+        self.assertIsNotNone(getter, "BackendService.__init__ не подключил _settings_getter к rewriter")
+        self.assertIs(getattr(getter, "__func__", None), BackendService._get_runtime_setting)
+        self.assertIs(getattr(getter, "__self__", None), service)
+
+
 if __name__ == "__main__":
     unittest.main()
