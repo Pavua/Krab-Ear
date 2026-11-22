@@ -18,7 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import patch, MagicMock
 
 # Настройка PYTHONPATH для standalone запуска
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -139,40 +139,52 @@ class TestPrivacyAuditClear(unittest.TestCase):
         проверяем И его, И handle_request на всякий случай. Комментарии с именем
         метода допустимы — проверяется именно dict-key pattern.
         """
+        import tempfile
         from backend.service import BackendService
-        import re
-        import inspect
+        from backend.state_store import StateStore
+        from test_backend_service import FakeRecorder, FakeTranscriber, FakeTranslator
 
-        # W1769: dispatch dict живёт в _build_dispatch_table; handle_request
-        # включаем для defence-in-depth (если паттерн вернётся куда угодно).
-        source = (
-            inspect.getsource(BackendService._build_dispatch_table)
-            + "\n"
-            + inspect.getsource(BackendService.handle_request)
+        # Проверяем ФАКТИЧЕСКИ построенную таблицу, а не оформление исходника
+        # (прежний regex видел только ключи в двойных кавычках — одинарные пропускал).
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        store = StateStore(Path(tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        service = BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
         )
+        self.addCleanup(service.close)
 
-        # Sanity: убеждаемся, что мы реально читаем таблицу (anchor-ключ есть),
-        # иначе gate бессмысленно «зелёный» из-за пустого/неверного source.
-        self.assertIn(
-            '"get_privacy_audit_log"', source,
-            "Sanity: source таблицы диспетчеризации не содержит ожидаемый anchor-ключ "
-            "'get_privacy_audit_log' — тест читает не тот метод (W1769 регрессия).",
-        )
-
-        # Ищем паттерн dict-key registration: "clear_privacy_audit_log": <callable>
-        # Комментарии не вызывают false positives — они не содержат ": self._handle" рядом
-        match = re.search(
-            r'"clear_privacy_audit_log"\s*:\s*\S',
-            source,
-        )
-
-        self.assertIsNone(
-            match,
+        table = service._dispatch_table
+        # Sanity: таблица реально построена (anchor-метод на месте), иначе тест бессмыслен.
+        self.assertIn("get_privacy_audit_log", table,
+                      "Sanity: dispatch table пуста/неверна — тест читает не ту таблицу (W1769).")
+        self.assertNotIn(
+            "clear_privacy_audit_log", table,
             "SECURITY (W957): 'clear_privacy_audit_log' НЕ должен быть зарегистрирован "
-            "в IPC dispatch table (dict-key pattern). "
-            "Это compliance audit trail — удалять его через неавторизованный IPC запрещено. "
-            "Если ты видишь этот fail — W952 CRITICAL finding F-1 снова открыт.",
+            "в IPC dispatch table. Это compliance audit trail — удалять его через "
+            "неавторизованный IPC запрещено. Если ты видишь этот fail — W952 CRITICAL F-1 снова открыт.",
         )
+
+        # Поведение: публичный вызов отклоняется, журнал не затронут.
+        audit_path = Path(tmp.name) / "audit.log"
+        from backend.privacy_audit import PrivacyAuditLogger
+        PrivacyAuditLogger.reset_instance()
+        self.addCleanup(PrivacyAuditLogger.reset_instance)
+        audit = PrivacyAuditLogger(log_path=audit_path)
+        audit.log_event("test", "must-survive")
+        before = audit_path.read_text(encoding="utf-8")
+        with patch("backend.service.get_privacy_audit_logger", return_value=audit):
+            resp = service.handle_request(
+                {"id": "x", "method": "clear_privacy_audit_log", "params": {}}
+            )
+        self.assertIsNot(resp.get("ok"), True, f"публичный clear не должен выполняться: {resp}")
+        self.assertTrue(audit_path.exists())
+        self.assertEqual(audit_path.read_text(encoding="utf-8"), before,
+                         "журнал аудита изменён отклонённым вызовом")
 
 
 if __name__ == "__main__":
