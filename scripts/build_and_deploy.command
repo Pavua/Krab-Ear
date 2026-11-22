@@ -183,6 +183,63 @@ fi
 # ── Step 2: Copy to both delivery points ─────────────────────────
 section "Step 2/5 — Sync Binaries"
 
+# 🔴 Поставка транзакционна: бинарники и Sparkle заменяются ДО подписи и проверки; сбой
+# посередине оставлял смешанную поставку (новый бинарь + старый framework / неподписанный
+# бандл). Снимаем копию ЦЕЛОГО .app (бинарь, Sparkle, _CodeSignature/CodeResources — подпись
+# бандла переписывается при codesign), runtime-бинаря и native/Frameworks, а также запоминаем,
+# чего до поставки НЕ было. При выходе до успешной верификации подписи возвращаем всё как было.
+DELIVERY_OK=0
+ROLLBACK_DIR=""
+SPARKLE_NATIVE="$ROOT_DIR/native/Frameworks/Sparkle.framework"
+RUNTIME_EXISTED=0
+SPARKLE_NATIVE_EXISTED=0
+if [ "$DRY_RUN" -eq 0 ]; then
+  ROLLBACK_DIR="$(mktemp -d)"
+  if [ -e "$RUNTIME_BIN" ]; then cp -p "$RUNTIME_BIN" "$ROLLBACK_DIR/runtime"; RUNTIME_EXISTED=1; fi
+  ditto "$APP_BUNDLE" "$ROLLBACK_DIR/app_bundle"
+  if [ -d "$SPARKLE_NATIVE" ]; then ditto "$SPARKLE_NATIVE" "$ROLLBACK_DIR/sparkle_native"; SPARKLE_NATIVE_EXISTED=1; fi
+fi
+
+# Восстановление каталога через staged-копию рядом с целью: удаляем оригинал только после
+# успешного ditto; сбой (диск, I/O) оставляет оригинал нетронутым.
+restore_dir() {
+  local backup="$1" dest="$2" staged="$2.restore.$$"
+  rm -rf "$staged"
+  ditto "$backup" "$staged" || { rm -rf "$staged"; return 1; }
+  rm -rf "$dest" && mv "$staged" "$dest"
+}
+
+delivery_rollback_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ -n "$ROLLBACK_DIR" ] && [ -d "$ROLLBACK_DIR" ]; then
+    if [ "$DELIVERY_OK" -ne 1 ]; then
+      warn "Поставка не завершена (код $rc) — возвращаю прежнее состояние .app, runtime и Sparkle"
+      local rb_ok=1
+      if [ "$RUNTIME_EXISTED" -eq 1 ]; then
+        cp -p "$ROLLBACK_DIR/runtime" "$RUNTIME_BIN" || rb_ok=0
+      else
+        rm -f "$RUNTIME_BIN"
+      fi
+      restore_dir "$ROLLBACK_DIR/app_bundle" "$APP_BUNDLE" || rb_ok=0
+      if [ "$SPARKLE_NATIVE_EXISTED" -eq 1 ]; then
+        restore_dir "$ROLLBACK_DIR/sparkle_native" "$SPARKLE_NATIVE" || rb_ok=0
+      else
+        rm -rf "$SPARKLE_NATIVE"
+      fi
+      if [ "$rb_ok" -ne 1 ]; then
+        warn "ОТКАТ НЕ ЗАВЕРШЁН: резервная копия сохранена в $ROLLBACK_DIR — восстановите вручную"
+        exit "$rc"
+      fi
+    fi
+    rm -rf "$ROLLBACK_DIR"
+  fi
+  exit "$rc"
+}
+trap delivery_rollback_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 log "→ native/runtime/KrabEarAgent"
 if [ "$DRY_RUN" -eq 0 ]; then
   mkdir -p "$(dirname "$RUNTIME_BIN")"
@@ -249,6 +306,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
   # Verify
   if codesign --verify --strict "$RUNTIME_BIN" \
      && codesign --verify --strict "$APP_BUNDLE"; then
+    DELIVERY_OK=1
     ok "Signature verified"
   else
     fail "Signature verification failed"

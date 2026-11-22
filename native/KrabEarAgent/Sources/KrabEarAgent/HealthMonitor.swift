@@ -374,6 +374,7 @@ final class ProbeSSEBox {
         guard !Task.isCancelled else { return }
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
         let gate = ProbeSSECancellationGate()
         await withTaskCancellationHandler {
             transport.start(request: request, isCancelled: { gate.cancelled },

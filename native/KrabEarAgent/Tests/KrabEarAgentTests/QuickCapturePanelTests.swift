@@ -72,6 +72,15 @@ final class QuickCapturePanelTests: XCTestCase {
         XCTAssertTrue(c._testLiveText.contains("привет мир"))
     }
 
+    @MainActor func test_stale_sse_line_cannot_replace_current_recording_text() {
+        let c = QuickCapturePanelController()
+        c._testSetRecording(true)
+        c._testHandleSSELine("event: realtime.partial_transcript")
+        c._testHandleSSELine(#"data: {"text":"текущая запись"}"#)
+        c._testHandleSSELine(#"data: {"text":"старая запись"}"#, generation: UInt64.max)
+        XCTAssertEqual(c._testLiveText, "текущая запись")
+    }
+
     @MainActor func test_sse_final_event_ingests_into_live_text() {
         let c = QuickCapturePanelController()
         c._testSetRecording(true)

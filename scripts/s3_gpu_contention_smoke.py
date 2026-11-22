@@ -273,8 +273,12 @@ def _live_subs_lag_once(sock: Path, chunk_bytes: bytes, chunk_sample_rate: int) 
     и есть лаг по определению волны (ingest -> появление текста синхронно
     в этом же ответе, см. LiveSubsService._flush — emit ДО return)."""
     # 2 неполных чанка (буфер копится) + финальный, который триггерит flush.
+    epoch = _result(_call(sock, "get_settings", {})).get("live_subs_policy_epoch")
+    if not epoch:
+        raise RuntimeError("Live Subs: нет подтверждённого разрешения на захват")
     for _ in range(2):
         _call(sock, "live_subs_ingest", {
+            "live_subs_policy_epoch": epoch,
             "audio_chunk": base64.b64encode(chunk_bytes).decode("ascii"),
             "sample_rate": chunk_sample_rate,
             "target_lang": "off",
@@ -282,13 +286,14 @@ def _live_subs_lag_once(sock: Path, chunk_bytes: bytes, chunk_sample_rate: int) 
         }, timeout=30.0)
     t0 = time.monotonic()
     resp = _call(sock, "live_subs_ingest", {
+        "live_subs_policy_epoch": epoch,
         "audio_chunk": base64.b64encode(chunk_bytes).decode("ascii"),
         "sample_rate": chunk_sample_rate,
         "target_lang": "off",
         "is_final": True,
     }, timeout=180.0)
     dt = time.monotonic() - t0
-    if not resp.get("ok"):
+    if not resp.get("ok") or _result(resp).get("status") != "flushed":
         raise RuntimeError(f"live_subs_ingest провалился: {resp}")
     return dt
 

@@ -34,6 +34,16 @@ MIN_USEFUL_ATTEMPT_SEC = 5.0
 # брошенный subprocess осиротеет с ~1.5 ГБ модели на GPU.
 ADAPTER_MIN_BUDGET_SEC = 200.0
 
+DEADLINE_EXCEEDED = "stt_deadline_exceeded"
+
+
+class STTDeadlineExceeded(RuntimeError):
+    """Явный дедлайн запроса исчерпан без подтверждённого сбоя модели."""
+
+    def as_transcribe_result(self) -> dict[str, str]:
+        return {"text": "", "error": str(self), "status": "error", "error_code": DEADLINE_EXCEEDED}
+
+
 # Единственный источник границ (min, max, default); settings_validator
 # дублирует литералы в _RANGE_FIELDS, а тест волны сверяет равенство —
 # синхронизация тестом вместо прод-импорта backend← core.
@@ -58,6 +68,8 @@ class STTBudget:
     batch_factor: float
     interactive_max_sec: float
     batch_max_sec: float
+    allow_diarization: bool = True
+    explicit_rest_deadline: bool = False  # файловый POST с явным deadline_sec
 
 
 _current: ContextVar[STTBudget | None] = ContextVar("stt_budget", default=None)
@@ -128,12 +140,16 @@ def stt_budget_scope(
     settings_get: Callable[[str, Any], Any] | None = None,
     audio_duration_sec: float | None = None,
     deadline_sec: float | None = None,
+    deadline_monotonic: float | None = None,
+    allow_diarization: bool = True,
+    explicit_rest_deadline: bool = False,
     quiet: bool = False,
 ) -> Iterator[STTBudget]:
     """Открыть бюджет-контекст одного STT-запроса В ТЕКУЩЕМ ТРЕДЕ.
 
-    deadline_sec не задан → вычисляется как attempt_budget × request_attempts
-    (§4.6); задан явно (REST deadline_sec, W2c) — используется как есть.
+    deadline_monotonic задаёт уже отсчитываемый срок (REST executor).
+    Иначе deadline_sec отсчитывается от открытия scope. Если оба отсутствуют,
+    срок вычисляется как attempt_budget × request_attempts (§4.6).
 
     quiet=True — для потребителей с высокочастотными короткими окнами
     (живые субтитры открывают scope ~раз в 3 с, ~1200/час); та же строка
@@ -141,12 +157,18 @@ def stt_budget_scope(
     """
     base = _build_budget(profile, settings_get)
     attempt_sec = _attempt_budget(base, audio_duration_sec)
-    if deadline_sec is None:
-        deadline_sec = attempt_sec * _read_knob(
-            settings_get, "stt_timeout_request_attempts"
-        )
+    now = time.monotonic()
+    if deadline_monotonic is None:
+        if deadline_sec is None:
+            deadline_sec = attempt_sec * _read_knob(
+                settings_get, "stt_timeout_request_attempts"
+            )
+        deadline_monotonic = now + float(deadline_sec)
     budget = replace(
-        base, deadline_monotonic=time.monotonic() + float(deadline_sec)
+        base,
+        deadline_monotonic=deadline_monotonic,
+        allow_diarization=allow_diarization,
+        explicit_rest_deadline=explicit_rest_deadline,
     )
     log = logger.debug if quiet else logger.info
     log(
@@ -155,7 +177,7 @@ def stt_budget_scope(
             "profile": budget.profile,
             "audio_duration_sec": audio_duration_sec,
             "attempt_budget_sec": round(attempt_sec, 1),
-            "deadline_sec": round(float(deadline_sec), 1),
+            "deadline_sec": round(deadline_monotonic - now, 1),
         },
     )
     token = _current.set(budget)
@@ -168,6 +190,17 @@ def stt_budget_scope(
 def current_profile() -> str:
     budget = _current.get()
     return budget.profile if budget is not None else INTERACTIVE
+
+
+def diarization_allowed() -> bool:
+    """Разрешена ли разметка спикеров для текущего запроса."""
+    budget = _current.get()
+    return budget is None or budget.allow_diarization
+
+
+def has_explicit_rest_deadline() -> bool:
+    budget = _current.get()
+    return budget is not None and budget.explicit_rest_deadline
 
 
 def remaining_sec() -> float | None:
@@ -213,6 +246,9 @@ def call_in_scope(
     settings_snapshot: dict[str, Any] | None = None,
     audio_duration_sec: float | None = None,
     deadline_sec: float | None = None,
+    deadline_monotonic: float | None = None,
+    allow_diarization: bool = True,
+    explicit_rest_deadline: bool = False,
     quiet: bool = False,
     **kwargs: Any,
 ) -> Any:
@@ -231,6 +267,9 @@ def call_in_scope(
         settings_get=snap.get if snap else None,
         audio_duration_sec=audio_duration_sec,
         deadline_sec=deadline_sec,
+        deadline_monotonic=deadline_monotonic,
+        allow_diarization=allow_diarization,
+        explicit_rest_deadline=explicit_rest_deadline,
         quiet=quiet,
     ):
         return fn(*args, **kwargs)

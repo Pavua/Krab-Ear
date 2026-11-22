@@ -13,6 +13,7 @@ Privacy: все хендлеры гейтятся privacy_mode_enabled; вклю
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import uuid
@@ -43,6 +44,7 @@ _ITEMS_MIN_GROWTH = 200    # симв.: минимальный прирост т
 # (allow_request/record_failure, экспоненциальный откат до 600с) — здесь
 # лечится не он, а потеря обновлений.
 _ITEMS_WINDOW_CHARS = 12000
+_ITEMS_CONTEXT_CHARS = 1000  # контекст слева при проходе по приросту, не влезающему в окно
 _LEASE_RENEW_SEC = 15.0    # период продления brain-lease
 _LEASE_TTL_SEC = 45.0      # TTL lease (перекрывает период продления с запасом)
 _WORKER_WAIT_SEC = 0.5     # шаг ожидания воркера
@@ -380,6 +382,7 @@ class MeetingSessionService:
             # Worker — последний потенциально падающий setup-шаг ДО физического
             # recorder.start/promote. Так ошибка не оставляет скрытый захват
             # микрофона после сообщения UI «встреча не запущена».
+            self._sweep_stale_diar_wavs()
             self._start_worker()
             self._raise_if_closed()
             # ``start_request_id`` создаёт клиент до IPC и должен дойти до
@@ -1220,6 +1223,12 @@ class MeetingSessionService:
         if self._settings_get("privacy_mode_enabled", False):
             with self._lock:
                 s.privacy_stopped = True
+                # Накопленные live-тексты не переживают включение приватности (RAM-буфер).
+                s.chunks.clear()
+                s.transcript_len = 0
+                s.items = []
+                s.decisions = []
+                s.questions = []
             self._release_lease()
             logger.info("meeting: privacy включён посреди встречи — live-обработка остановлена")
             return None
@@ -1275,8 +1284,18 @@ class MeetingSessionService:
         bump_stt_activity()
         payload = self._transcriber.transcribe_preview(
             audio_data=audio, quality_profile="balanced")
+        # KE05C-10: превью при занятом GPU/сбое отвечает пустым текстом с маркером пропуска.
+        # Это НЕ тишина: курсор остаётся, и следующий тик заново снимет тот же диапазон
+        # (иначе кусок встречи терялся бы навсегда).
+        if isinstance(payload, dict) and (payload.get("skipped") or payload.get("error")):
+            return
         text = payload.get("text") if isinstance(payload, dict) else str(payload or "")
         text = (text or "").strip()
+        # Распознавание длится секунды: приватность могли включить за это время. Текст,
+        # родившийся после включения, не копится и не публикуется; живую обработку глушит
+        # обычный путь `_run_due_job_once` на следующем тике.
+        if text and self._settings_get("privacy_mode_enabled", False):
+            return
         with self._lock:
             if self._session is not s:  # протухший тик после stop (см. _job_diar_window)
                 return
@@ -1305,7 +1324,18 @@ class MeetingSessionService:
         # В модель уходит ХВОСТ, а не вся встреча: полный транскрипт растёт
         # неограниченно и однажды перестаёт помещаться в контекст. Ранее
         # названные пункты не теряются — они накапливаются ниже (_merge_*).
-        window_text = full_text[-_ITEMS_WINDOW_CHARS:]
+        # KE05C-07: если прирост не влезает в окно, идём по необработанной части вперёд
+        # окнами (с небольшим контекстом слева), а не отбрасываем середину. В обычном
+        # случае (прирост меньше окна) — прежний хвост из последних _ITEMS_WINDOW_CHARS.
+        total = len(full_text)
+        unprocessed_from = max(0, s.last_extract_len - _ITEMS_CONTEXT_CHARS)
+        if total - unprocessed_from > _ITEMS_WINDOW_CHARS:
+            win_start = unprocessed_from
+            win_end = win_start + _ITEMS_WINDOW_CHARS
+        else:
+            win_start = max(0, total - _ITEMS_WINDOW_CHARS)
+            win_end = total
+        window_text = full_text[win_start:win_end]
         self._recording_core.pause_realtime_partials()
         try:
             result = self._extractor.extract(window_text, language=s.language)
@@ -1325,7 +1355,7 @@ class MeetingSessionService:
                 s.items = _merge_items(s.items, fresh)
                 s.decisions = _merge_texts(s.decisions, result.decisions)
                 s.questions = _merge_texts(s.questions, result.questions)
-                s.last_extract_len = len(full_text)
+                s.last_extract_len = win_end
                 s.last_updated_ts = time.time()
         if result.ok:
             self._emit("meeting.items_updated", {
@@ -1365,9 +1395,12 @@ class MeetingSessionService:
             audio = self._recorder.snapshot_range(start, upto)
             if getattr(audio, "size", 0) == 0:
                 return
-            tmp_dir = self._data_dir / "tmp_meeting"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
+            tmp_dir = self._tmp_meeting_dir()
             wav_path = tmp_dir / f"diar_{uuid.uuid4().hex}.wav"
+            # KE05C-03: файл с аудио встречи создаём сами (0600, O_EXCL|O_NOFOLLOW), а не
+            # правами по umask; soundfile затем открывает уже существующий inode.
+            fd = os.open(wav_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            os.close(fd)
             try:
                 _sf.write(str(wav_path), audio,
                           int(getattr(self._recorder, "sample_rate", 16000)))
@@ -1401,6 +1434,27 @@ class MeetingSessionService:
             logger.warning("meeting: DIAR_WINDOW-тик упал", exc_info=True)
             with self._lock:
                 s.degraded_diarization = True
+
+    def _tmp_meeting_dir(self) -> Path:
+        """<data_dir>/tmp_meeting с правами 0700 (создаётся/подтягивается к 0700)."""
+        tmp_dir = self._data_dir / "tmp_meeting"
+        tmp_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(tmp_dir, 0o700)
+        return tmp_dir
+
+    def _sweep_stale_diar_wavs(self) -> None:
+        """KE05C-27: удалить diar_*.wav, оставшиеся от прошлой жизни процесса (best-effort).
+
+        Вызывается только на свежем старте, до запуска воркера: in-flight WAV текущего
+        процесса в этот момент существовать не может (старый воркер → gpu_slot_busy).
+        """
+        if self._data_dir is None:
+            return
+        try:
+            for stale in (self._data_dir / "tmp_meeting").glob("diar_*.wav"):
+                stale.unlink(missing_ok=True)
+        except OSError:
+            logger.warning("meeting: не удалось очистить старые tmp_meeting/diar_*.wav", exc_info=True)
 
     # ------------------------------------------------------------ intervals
 

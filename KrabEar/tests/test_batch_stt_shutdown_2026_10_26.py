@@ -94,6 +94,8 @@ class BatchShutdownTests(unittest.TestCase):
                 "handle_transcribe_paths_async", "_transcribe_paths_core",
                 "close_background_workers", "_ensure_recording_lifecycle_state",
                 "_safe_callback", "_is_path_allowed", "_collect_audio_paths",
+                # handle_transcribe_paths_async помечает задачу приватностью на старте (E6).
+                "_privacy_mode_enabled",
             }, self.namespace,
         )
         self.core = core_type.__new__(core_type)

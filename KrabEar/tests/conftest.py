@@ -33,6 +33,7 @@ import pytest
 # RuntimeError. Escape: marker `live`/`acceptance` или env
 # KRAB_ALLOW_TEST_NETWORK=1 (integration-прогон).
 # ---------------------------------------------------------------------------
+import ipaddress  # noqa: E402
 import os  # noqa: E402
 import socket  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
@@ -76,8 +77,17 @@ def _is_loopback_address(address: Any) -> bool:
         return True  # Unix domain socket — всегда локальный
     if isinstance(address, tuple) and address:
         host = address[0]
-        if isinstance(host, str):
-            return host in _LOOPBACK_HOSTS or host.startswith("127.")
+        if not isinstance(host, str):
+            return False  # bytes/None внутри кортежа — не доверяем
+        if host in _LOOPBACK_HOSTS:
+            return True
+        # IP разбираем как IP, а не по строковому префиксу: «127.evil.example» — имя хоста.
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        mapped = getattr(ip, "ipv4_mapped", None)
+        return ip.is_loopback or bool(mapped is not None and mapped.is_loopback)
     return True
 
 
@@ -795,11 +805,31 @@ def _purge_leaked_module_stubs():
             del sys.modules["sounddevice"]
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _memory_ledger_session_tmp_path(tmp_path_factory):
+    """Подмена пути ledger на ВСЮ сессию (G2-KET10-T10-01).
+
+    Session-финализатор `_close_backend_services_at_session_end` закрывает
+    долгоживущие BackendService уже после function-фикстур; `close()` →
+    `conductor.stop()` → `remove_own()` без подмены ушёл бы в реальный
+    ~/.openclaw/memory_ledger.json владельца. Финализатор зависит от этой
+    фикстуры, поэтому подмена снимается только после закрытия служб.
+    """
+    from backend import memory_ledger as _ml
+    prev = _ml._TEST_PATH_OVERRIDE
+    _ml._TEST_PATH_OVERRIDE = tmp_path_factory.mktemp("memory_ledger_session")
+    try:
+        yield
+    finally:
+        _ml._TEST_PATH_OVERRIDE = prev
+
+
 @pytest.fixture(autouse=True)
-def _memory_ledger_tmp_path(tmp_path):
+def _memory_ledger_tmp_path(tmp_path, _memory_ledger_session_tmp_path):
     """🔴 Финальный гейт волны Memory Conductor (HIGH-3): без подмены каждый тест
     с BackendService писал/стирал записи в РЕАЛЬНОМ ~/.openclaw/memory_ledger.json
-    владельца (conductor.stop() -> remove_own()). Обратимо в finally."""
+    владельца (conductor.stop() -> remove_own()). Обратимо в finally; возвращает
+    путь сессии, а не None (закрытие служб идёт после этой фикстуры)."""
     from backend import memory_ledger as _ml
     prev = _ml._TEST_PATH_OVERRIDE
     _ml._TEST_PATH_OVERRIDE = tmp_path
@@ -807,6 +837,29 @@ def _memory_ledger_tmp_path(tmp_path):
         yield
     finally:
         _ml._TEST_PATH_OVERRIDE = prev
+
+
+# ---------------------------------------------------------------------------
+# 2026-11-15: REST по умолчанию с ключом. Старт in-process REST в BackendService
+# зовёт ensure_rest_api_key и ПИШЕТ settings.REST_API_KEY в глобальный синглтон.
+# Без возврата значения защищённые маршруты в следующих тестах процесса
+# отвечали бы 401 (тот же класс загрязнения, что stub-ы sys.modules).
+# ---------------------------------------------------------------------------
+@pytest.fixture(autouse=True)
+def _restore_rest_api_key_after_test():
+    try:
+        from core.config import settings as _settings
+    except Exception:
+        yield  # конфиг не импортируется — фикстура пассивна
+        return
+    before = getattr(_settings, "REST_API_KEY", "")
+    try:
+        yield
+    finally:
+        try:
+            _settings.REST_API_KEY = before
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -819,7 +872,7 @@ def _memory_ledger_tmp_path(tmp_path):
 # таймаут. Реестр — backend.service._LIVE_INSTANCES (WeakSet, прод не меняет).
 # ---------------------------------------------------------------------------
 @pytest.fixture(autouse=True)
-def _close_backend_services_created_in_test():
+def _close_backend_services_created_in_test(_memory_ledger_tmp_path):
     """Закрывает BackendService, созданные ВНУТРИ теста и не закрытые им.
 
     🔴 Снимок «до» обязателен: test_full_workflow и test_handler_dispatch_perf
@@ -846,7 +899,7 @@ def _close_backend_services_created_in_test():
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _close_backend_services_at_session_end():
+def _close_backend_services_at_session_end(_memory_ledger_session_tmp_path):
     """Добирает сервисы уровня класса/модуля (setUpClass) в конце сессии."""
     yield
     try:

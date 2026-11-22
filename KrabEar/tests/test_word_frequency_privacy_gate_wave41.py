@@ -28,15 +28,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    from backend.history_service import HistoryService
-    from backend.state_store import StateStore
-    _SKIP = False
-except ImportError:
-    _SKIP = True
+# Обязательные модули репозитория: ошибка импорта должна быть видимой, а не пропуском тестов.
+from backend.history_service import HistoryService
+from backend.state_store import StateStore
 
 
-@unittest.skipIf(_SKIP, "HistoryService or StateStore not available")
 class WordFrequencyPrivacyGateTestCase(unittest.TestCase):
     """handle_word_frequency_analysis privacy gate must fire via _is_privacy_mode()."""
 

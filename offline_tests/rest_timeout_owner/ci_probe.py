@@ -169,14 +169,8 @@ def _backend(rest, scratch, *, setup_failure=False, mutation=None):
         assert fake_other is not rest
         mark = patch.object(rest, "_mark_backend_process", lambda: setattr(fake_other, "marker", True))
     elif mutation == "bypass_guard":
-        from core import mlx_whisper_session
-
-        def bypass(code):
-            mlx_whisper_session.kill_mlx_whisper_session()
-            rest._flush_logs_before_exit()
-            rest.os._exit(code)
-
-        mark = patch.object(rest, "_exit_poisoned_rest_process", bypass)
+        # Общий предикат используется при постановке и при исполнении exit.
+        mark = patch.object(rest, "_rest_may_exit_on_timeout", return_value=True)
     with ExitStack() as stack:
         stack.enter_context(patch.object(rest, "adopt_external_singletons", side_effect=adopt))
         stack.enter_context(patch("backend.rest_inprocess.InProcessRestServer", return_value=server))

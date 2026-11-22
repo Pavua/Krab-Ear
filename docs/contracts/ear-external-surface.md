@@ -20,7 +20,11 @@
 | `POST /v1/stt/transcribe` | Краб: голосовые заметки, video studio; VG: STT звонков (`request_profile=voice_gateway_call`) | `text`, `segments` |
 | `POST /v1/tts/synthesize` | VG: локальный TTS | `wav_bytes_b64` |
 
-Аутентификация REST: опциональный Bearer (`REST_API_AUTH_ENABLED`); VG передаёт `KRAB_EAR_REST_API_KEY`.
+Явный `deadline_sec` для `POST /v1/stt/transcribe` включает подготовку аудио, очередь STT и транскрибацию. Обычный запрос с явным `deadline_sec` до 25 секунд включительно возвращает текст без разметки спикеров. Если диаризация запрошена явно или включена настройками, в успешном ответе есть `diarization.enabled=false` и `diarization.skipped="request_deadline"`. Для файловой транскрипции с разметкой можно опустить дедлайн или указать больше 25 секунд. Профиль `voice_gateway_call` всегда работает без диаризации.
+
+Аутентификация REST (с 2026-11-15, по умолчанию ВКЛЮЧЕНА): защищённые маршруты требуют `Authorization: Bearer <ключ>`. Ключ выдаёт backend в `~/Library/Application Support/KrabEar/rest_api_key` (0600) либо задаётся явно (`KRAB_EAR_REST_API_KEY`, `REST_API_AUTH_ENABLED`); VG читает `KRAB_EAR_REST_API_KEY`. Без ключа `401`. Открыты: `GET /health`, `/info`, `/api/docs`. Опт-аут: env `KRAB_EAR_REST_API_ALLOW_ANONYMOUS=true`. Чужой заголовок `Host` (не loopback и не из `REST_ALLOWED_HOSTS`) даёт `403`. Бриф потребителям: `krab-handoffs/2026-11-15/EAR_REST_AUTH_BRIEF_FOR_VG_AND_KRAB.md`.
+
+REST использует один слот STT на процесс. RU-профиль `voice_gateway_call` слот не занимает: ход идёт по IPC к владельцу GigaAM и не зависит от файловой транскрипции, поэтому длинный файловый STT не даёт `503 stt_busy` на ходе звонка. Fail-fast выход standalone REST ждёт завершения ходов звонка в полёте (до 30 с); после постановки fail-fast новый ход звонка получает `503 stt_busy`. Native WebSocket использует тот же слот для распознавания. Облачный `/v1/stream` при финализации `end` или `audio.is_final=true` либо занимает слот на время обращения к провайдеру, либо выдаёт WS-ошибку `stt_busy`. Отказ по приватности имеет приоритет. Если standalone REST уже поставил fail-fast после локального STT-таймаута, новая работа STT в этом процессе не допускается.
 
 ## Общие файлы-замки (не API, но стык)
 

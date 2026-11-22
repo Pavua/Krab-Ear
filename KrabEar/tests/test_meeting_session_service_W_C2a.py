@@ -48,7 +48,9 @@ class _FakeExtractorResult:
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
         self.action_items = []
-        self.decisions = ["решение"]
+        # Неуспешное извлечение возвращает ДРУГОЕ непустое значение: безусловная замена прежних
+        # решений результатом ok=False теперь отличима от их сохранения.
+        self.decisions = ["решение"] if ok else ["ОШИБОЧНОЕ-решение-из-неуспешного-извлечения"]
         self.questions = []
         self.fallback_reason = None if ok else "llm_error"
         self.latency_ms = 5
@@ -390,6 +392,9 @@ class ItemsLlmJobTestCase(unittest.TestCase):
         state = svc.handle_get_meeting_live_state({})
         self.assertTrue(state["degraded"]["llm"])
         self.assertEqual(state["decisions"], ["решение"], "старые items сохраняются")
+        self.assertNotIn("ОШИБОЧНОЕ-решение-из-неуспешного-извлечения", str(state))
+        self.assertEqual(state["items"], [])
+        self.assertEqual(state["questions"], [])
         svc.close()
 
 
@@ -429,12 +434,22 @@ class MeetingStopTestCase(unittest.TestCase):
                   "meeting_items_language": "ru",
                   "llm_brain_lease_enabled": False}.get(k, d))
         svc.handle_meeting_start({})
+        # Счётчики берутся ДО включения privacy: однократная обработка на первом privacy-тике
+        # (STT-вызов + публикация текста) раньше оставалась незамеченной.
+        stt_before = len(svc._transcriber.calls)
+        events_before = len(bus.events)
         settings_box["privacy"] = True
         ran = svc._run_due_job_once(now=svc._next_due[MeetingJob.CHUNK_STT] + 0.1)
         self.assertIsNone(ran)
+        self.assertEqual(len(svc._transcriber.calls), stt_before, "STT вызван на privacy-тике")
+        content_events = [t for t, _ in bus.events[events_before:]
+                          if t in ("meeting.transcript_appended", "meeting.items_updated",
+                                   "meeting.speakers_updated")]
+        self.assertEqual(content_events, [], "события с содержимым после включения privacy")
         events_after = len(bus.events)
         svc._run_due_job_once(now=svc._next_due[MeetingJob.CHUNK_STT] + 99.0)
         self.assertEqual(len(bus.events), events_after, "после privacy событий нет")
+        self.assertEqual(len(svc._transcriber.calls), stt_before, "STT вызван после privacy")
         state = svc.handle_get_meeting_live_state({})
         self.assertFalse(state["active"])
         svc.close()
@@ -692,25 +707,18 @@ class MeetingRecordingOwnershipTestCase(unittest.TestCase):
                 svc._job_items_llm(session)
                 svc._job_diar_window(session)
 
-                payloads = {
-                    kind: payload
-                    for kind, payload in bus.events
-                    if kind in {
-                        "meeting.transcript_appended",
-                        "meeting.items_updated",
-                        "meeting.speakers_updated",
-                    }
+                stream_kinds = {
+                    "meeting.transcript_appended",
+                    "meeting.items_updated",
+                    "meeting.speakers_updated",
                 }
-                self.assertEqual(
-                    set(payloads),
-                    {
-                        "meeting.transcript_appended",
-                        "meeting.items_updated",
-                        "meeting.speakers_updated",
-                    },
-                )
-                for payload in payloads.values():
-                    self.assertEqual(payload["generation_token"], token)
+                # Список событий БЕЗ сведения в словарь kind→payload: устаревший payload не
+                # может быть скрыт последующим корректным событием того же типа.
+                stream = [(kind, payload) for kind, payload in bus.events if kind in stream_kinds]
+                self.assertEqual({kind for kind, _ in stream}, stream_kinds)
+                for kind, payload in stream:
+                    self.assertEqual(payload["generation_token"], token,
+                                     f"{kind}: событие чужого поколения")
             finally:
                 mss._sf = original_sf
                 svc.close()

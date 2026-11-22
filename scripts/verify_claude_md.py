@@ -349,6 +349,10 @@ def main() -> int:
         return 2
 
     content = CLAUDE_MD.read_text(encoding="utf-8")
+    # Подробности архитектуры/паттернов вынесены из CLAUDE.md (2026-11-22) в docs/claude/*.md —
+    # проверяем их ссылки теми же правилами, иначе дрейф в перенесённом тексте стал бы невидим.
+    for extra in sorted((REPO_ROOT / "docs" / "claude").glob("*.md")):
+        content += "\n" + extra.read_text(encoding="utf-8")
 
     # ── Original check: file existence ──────────────────────────────────────
     paths = extract_paths(content)

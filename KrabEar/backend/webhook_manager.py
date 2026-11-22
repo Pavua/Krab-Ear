@@ -187,6 +187,11 @@ def _resolve_and_check_host(host: str, strict: bool = False) -> tuple[bool, str 
                      "fire-time" if strict else "registration")
         return False, reason
 
+    if not infos:
+        # Пустой ответ без исключения: проверять нечего, а «безопасно» по
+        # умолчанию — fail-open. Хост без единого адреса отвергаем.
+        return False, f"DNS resolution returned no addresses for {host!r}"
+
     for _family, _type, _proto, _canonname, sockaddr in infos:
         ip_str = sockaddr[0]  # (ip, port[, flow[, scope]])
         safe, reason = _is_ip_safe(ip_str)

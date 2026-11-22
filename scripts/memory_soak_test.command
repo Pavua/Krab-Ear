@@ -1,10 +1,10 @@
 #!/bin/zsh
-# Krab Ear memory soak test — fires N transcribe IPC calls, captures
-# RSS/VSZ deltas before/after, reports growth.
+# Krab Ear memory soak test — IDLE drift only: captures RSS/VSZ snapshots every 10 cycles
+# while sleeping between them and reports growth.
 #
-# Designed to surface memory leaks in transcription pipeline. Each cycle
-# is a small audio array (np.zeros 1s @16kHz) — minimal MLX load but
-# exercises the full backend pipeline.
+# 🔴 ЧЕСТНО: скрипт НЕ отправляет запросов транскрипции (раньше заголовок обещал «N transcribe
+# IPC calls», а цикл только спал). Для реального сигнала об утечке запускайте его ВО ВРЕМЯ
+# диктовки/нагрузки либо используйте нагрузочный тест с настоящим STT.
 
 set -e
 
@@ -17,6 +17,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 echo "=== Krab Ear memory soak test ==="
 echo "Cycles: $CYCLES"
 echo "Interval: ${INTERVAL}s"
+echo "NOTICE: NO transcription requests are sent — this run measures IDLE memory drift only (sleep between snapshots). For a real leak signal run it DURING dictation."
 echo ""
 
 # Pre-snapshot

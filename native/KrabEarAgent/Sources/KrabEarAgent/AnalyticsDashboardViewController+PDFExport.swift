@@ -118,7 +118,7 @@ extension AnalyticsDashboardViewController {
                     Task { @MainActor in
                         do {
                             try await self.plaintextExportCoordinator.perform(ticket) {
-                                try data.write(to: url, options: .atomic)
+                                try PrivateFileWriter.write(data, to: url)
                             }
                             self.statusLabel.stringValue = "PDF готов"
                             NSWorkspace.shared.open(url)

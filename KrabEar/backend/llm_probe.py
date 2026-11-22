@@ -26,6 +26,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from datetime import datetime, timezone
@@ -34,6 +35,10 @@ from typing import Callable
 from backend.error_bus import KrabError
 
 logger = logging.getLogger("KrabEar.Backend.LLMHttpProbe")
+
+# Границы интервала зонда — совпадают с settings_validator._RANGE_FIELDS["llm_probe_interval_sec"].
+_MIN_PROBE_INTERVAL_SEC = 1.0
+_MAX_PROBE_INTERVAL_SEC = 300.0
 
 
 class LLMHttpProbe:
@@ -110,11 +115,21 @@ class LLMHttpProbe:
 
     def start(self) -> None:
         """Start the background probe thread. Idempotent — no-op if already running."""
-        if self._thread is not None and self._thread.is_alive():
-            return
-        self._stop_event.clear()
+        old = self._thread
+        if old is not None and old.is_alive():
+            if not self._stop_event.is_set():
+                return
+            # Прежний поток ещё доигрывает последнюю пробу после stop(): ждём ограниченно и
+            # НЕ запускаем второй параллельно (KE05A-09).
+            old.join(timeout=2)
+            if old.is_alive():
+                logger.warning("LLMHttpProbe: прежний поток ещё не завершился — start() пропущен")
+                return
+        # Новый Event на каждый поток: старый поток никогда не «оживёт» от clear() нового.
+        self._stop_event = threading.Event()
         self._thread = threading.Thread(
             target=self._loop,
+            args=(self._stop_event,),
             name="LLMHttpProbe",
             daemon=True,
         )
@@ -126,22 +141,28 @@ class LLMHttpProbe:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=2)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
         logger.debug("LLMHttpProbe stopped")
 
     # ------------------------------------------------------------------
     # Internal loop
     # ------------------------------------------------------------------
 
-    def _loop(self) -> None:
+    def _loop(self, stop_event: threading.Event | None = None) -> None:
         """Main probe loop — waits for interval then calls _tick().
 
         The sleep duration is re-read from ``settings_provider`` at the start of
         every iteration so that a runtime ``set_settings({"llm_probe_interval_sec":
         N})`` call takes effect on the next wake-up without a restart.
         """
-        while not self._stop_event.wait(self._effective_interval()):
-            self._tick()
+        stop = stop_event if stop_event is not None else self._stop_event
+        while not stop.wait(self._effective_interval()):
+            try:
+                self._tick()
+            except Exception:
+                # KE05A-16: сбой одного тика не должен навсегда убивать фоновый зонд.
+                logger.warning("LLMHttpProbe: тик упал — зонд продолжает работу", exc_info=True)
 
     def _effective_interval(self) -> float:
         """Return the probe interval to use for the current sleep.
@@ -153,8 +174,12 @@ class LLMHttpProbe:
         """
         try:
             val = self._settings_provider().get("llm_probe_interval_sec")
-            if val and float(val) > 0:
-                return float(val)
+            if val:
+                interval = float(val)
+                # KE05A-15: inf/NaN → Event.wait падает или интервал не ограничен;
+                # 1e-9 → probe flood. Границы те же, что в settings_validator.
+                if math.isfinite(interval) and interval > 0:
+                    return min(max(interval, _MIN_PROBE_INTERVAL_SEC), _MAX_PROBE_INTERVAL_SEC)
         except Exception:
             pass
         return self._current_interval_sec

@@ -112,13 +112,45 @@ class ExportPrivacyGateTestCase(unittest.TestCase):
         self.assertEqual(res.get("entries"), 0)
         self.assertEqual(res.get("reason"), "privacy_mode_active")
 
+    def test_no_clipboard_write_when_blocked(self) -> None:
+        """privacy ON: pbcopy не вызывается ни одним экспортом — ни с явным True, ни с умолчанием.
+
+        Раньше CSV проверялся только с copy_to_clipboard=False, и ветка записи в буфер при
+        privacy не выполнялась вовсе. Spy ставится на subprocess.run, которым пишется буфер.
+        """
+        from unittest.mock import patch
+
+        self._set_privacy(True)
+        calls = [
+            lambda: self.svc.handle_export_history_csv({}),                                  # умолчание (True)
+            lambda: self.svc.handle_export_history_csv({"copy_to_clipboard": True}),
+            lambda: self.svc.handle_export_history_csv({"copy_to_clipboard": False}),
+            lambda: self.svc.handle_export_history({"copy_to_clipboard": True}),
+            lambda: self.svc.handle_export_history_json({"copy_to_clipboard": True}),
+        ]
+        with patch("subprocess.run") as run:
+            for call in calls:
+                res = call()
+                self.assertEqual(res.get("reason"), "privacy_mode_active", res)
+        pbcopy = [c for c in run.call_args_list if c.args and c.args[0] and c.args[0][0] == "pbcopy"]
+        self.assertEqual(pbcopy, [], "pbcopy вызван при privacy ON")
+
     def test_no_transcript_file_written_when_blocked(self) -> None:
         """save_to_file=True must NOT write any artefact while privacy is on."""
         self._set_privacy(True)
+        root = Path(self.store.data_dir)
+
+        def _snapshot() -> dict:
+            return {str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None)
+                    for p in sorted(root.rglob("*"))}
+
+        before = _snapshot()
         self.svc.handle_export_history({"save_to_file": True})
         self.svc.handle_export_history_json({"save_to_file": True})
         self.svc.handle_export_html_report({"save_to_file": True})
-        transcripts_dir = Path(self.store.data_dir) / "transcripts"
+        self.svc.handle_export_history_csv({"copy_to_clipboard": False})  # CSV теперь тоже в проверке
+        self.assertEqual(_snapshot(), before, "export artefacts leaked under privacy")
+        transcripts_dir = root / "transcripts"
         files = list(transcripts_dir.glob("*")) if transcripts_dir.exists() else []
         self.assertEqual(files, [], f"export artefacts leaked under privacy: {files}")
 

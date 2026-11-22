@@ -23,6 +23,7 @@ import hashlib
 import hmac
 import json
 import os
+import shutil
 import socket
 import stat
 import sys
@@ -53,6 +54,7 @@ class TestSensitiveFieldsStrippedFromExport(unittest.TestCase):
 
         class FakeStore:
             def __init__(self):
+                self.data_dir = Path(self_tmpdir)
                 self._settings = dict(DEFAULT_SETTINGS)
                 if settings_override:
                     self._settings.update(settings_override)
@@ -64,6 +66,8 @@ class TestSensitiveFieldsStrippedFromExport(unittest.TestCase):
                 self._settings = dict(s)
                 return {"ok": True}
 
+        self_tmpdir = tempfile.mkdtemp(prefix="ear-security-store-")
+        self.addCleanup(shutil.rmtree, self_tmpdir, True)
         svc = SettingsService(store=FakeStore())
         return svc
 

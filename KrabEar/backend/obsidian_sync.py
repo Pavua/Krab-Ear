@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import re
@@ -76,7 +77,14 @@ def _yaml_scalar(value: str) -> str:
     strings that appear in transcript frontmatter.
     """
     _NEEDS_QUOTE = re.compile(r'[:{}\[\]#&*!|>\'"\n\r,]|^\s|\s$|^[-?]')
-    if _NEEDS_QUOTE.search(value) or not value:
+    # KE05D-22: значения, которые YAML читает НЕ как строку (bool/null/число/дата), тоже в кавычки:
+    # «no» — код норвежского языка, «2026» — числовой тег, «null» — тег. Любое значение, начинающееся
+    # с цифры/знака/точки+цифры, считаем потенциально числом или датой.
+    _NON_STRING = re.compile(
+        r'^(?:true|false|yes|no|on|off|y|n|null|~|nan|inf)$|^[-+.]?\d|^\.(?:inf|nan)$',
+        re.IGNORECASE,
+    )
+    if _NEEDS_QUOTE.search(value) or _NON_STRING.search(value) or not value:
         escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n").replace("\r", "\\r")
         return f'"{escaped}"'
     return value
@@ -134,6 +142,51 @@ _FORBIDDEN_HOME_SUBDIRS: tuple[str, ...] = (
     "Library/Preferences",
     "Library/Saved Application State",
 )
+
+
+def _check_vault_allowed(p: Path) -> None:
+    """Vault обязан лежать под $HOME и не внутри чувствительных подкаталогов.
+
+    wave-32 MED (vault_path confused-deputy): один инвариант для IPC-входа
+    (``handle_configure``) и загрузки state-файла (``_load_state``): файл
+    состояния доступен другим процессам, и подмена ``vault_path`` в нём иначе
+    перенаправляла бы запись транскриптов в произвольный каталог.
+
+    Containment — через ``Path.relative_to`` (не ``str.startswith``): sibling-
+    префикс ``/home/user_evil`` не должен проходить как ``/home/user``.
+
+    Raises:
+        ValueError: путь вне $HOME или в запрещённом подкаталоге.
+    """
+    home = Path.home().resolve()
+    try:
+        p.relative_to(home)
+    except ValueError:
+        raise ValueError(f"vault_path must be under the home directory: {p}") from None
+    for forbidden in _FORBIDDEN_HOME_SUBDIRS:
+        try:
+            p.relative_to(home / forbidden)
+        except ValueError:
+            continue
+        raise ValueError(
+            f"vault_path is inside a restricted directory ({forbidden}): {p}"
+        )
+
+
+def _refuse_symlink(path: Path) -> None:
+    """Отказывает в записи, если конечный файл — symlink.
+
+    Каталог vault проверяется отдельно, но конечный файл мог оказаться ссылкой
+    на чужой файл вне vault: ``write_text`` пошёл бы по ней и перезаписал бы
+    чужое. Синхронизация фиксирует ошибку записи этого элемента.
+
+    Остаточное окно: проверка и запись не атомарны. Заменить файл ссылкой
+    именно между ними может только процесс, уже пишущий в папку vault; запись
+    идёт через ``Path.write_text``, на котором держатся тесты отказов диска.
+    """
+    if path.is_symlink():
+        raise OSError(errno.ELOOP, "отказ записи через symlink", str(path))
+
 
 # W1768 (MED, path-traversal): разрешённый шаблон для имени папки внутри vault.
 # Только буквы/цифры/подчёркивания (\w), дефис, пробел и слэш — чтобы поддержать
@@ -373,7 +426,7 @@ class ObsidianSyncManager:
         # mkdir входит в fresh-authorized запись первого файла.
 
         if self._event_bus is not None:
-            self._event_bus.emit("app.status", {
+            self._emit_status({
                 "op": "obsidian_sync",
                 "stage": "started",
                 "total_files": len(items),
@@ -392,7 +445,7 @@ class ObsidianSyncManager:
                     if _ts_le(item_ts, last_sync_ts):
                         result.skipped_count += 1
                         if self._event_bus is not None:
-                            self._event_bus.emit("app.status", {
+                            self._emit_status({
                                 "op": "obsidian_sync",
                                 "stage": "syncing",
                                 "file_index": i + 1,
@@ -410,6 +463,7 @@ class ObsidianSyncManager:
 
                 def write_note():
                     target_dir.mkdir(parents=True, exist_ok=True)
+                    _refuse_symlink(md_path)
                     md_path.write_text(content, encoding="utf-8")
 
                 run_export_write(
@@ -433,7 +487,7 @@ class ObsidianSyncManager:
                 result.errors.append(f"{item_repr}: {exc}")
 
             if self._event_bus is not None:
-                self._event_bus.emit("app.status", {
+                self._emit_status({
                     "op": "obsidian_sync",
                     "stage": "syncing",
                     "file_index": i + 1,
@@ -449,10 +503,13 @@ class ObsidianSyncManager:
         if not result.errors and not truncated:
             with self._lock:
                 self._last_sync_ts = now_ts
-                self._save_state()
+                state_saved = self._save_state()
+            if not state_saved:
+                # Файлы записаны, но водяной знак не сохранён: следующий запуск пересинхронизирует.
+                result.errors.append("state_save_failed")
 
         if self._event_bus is not None:
-            self._event_bus.emit("app.status", {
+            self._emit_status({
                 "op": "idle",
                 "stage": "",
                 "progress": 1.0,
@@ -533,40 +590,7 @@ class ObsidianSyncManager:
 
         # Resolve the path once so symlinks are followed before comparison.
         p = Path(str(vault_path)).expanduser().resolve()
-        home = Path.home().resolve()
-
-        # wave-32 MED (vault_path confused-deputy): path guard.
-        #
-        # Reject paths inside well-known sensitive subdirs of $HOME (e.g.
-        # ~/.ssh/ — writing there can corrupt known_hosts and break SSH auth;
-        # ~/.gnupg/ — leaks GPG key material; Library/Keychains — macOS secrets).
-        # Also reject paths outside $HOME entirely (e.g. /etc, /var) — arbitrary
-        # system-owned directories are never valid Obsidian vault locations.
-        #
-        # We use Path.relative_to() for containment checks (not str.startswith)
-        # because a sibling-prefix path (/home/user_evil) would bypass a naive
-        # string comparison against /home/user.
-        _under_home: bool
-        try:
-            p.relative_to(home)
-            _under_home = True
-        except ValueError:
-            _under_home = False
-
-        if not _under_home:
-            raise ValueError(
-                f"vault_path must be under the home directory: {p}"
-            )
-
-        for _forbidden in _FORBIDDEN_HOME_SUBDIRS:
-            try:
-                p.relative_to(home / _forbidden)
-                raise ValueError(
-                    f"vault_path is inside a restricted directory ({_forbidden}): {p}"
-                )
-            except ValueError as _ve:
-                if "restricted directory" in str(_ve):
-                    raise
+        _check_vault_allowed(p)
 
         folder = str(params.get("folder", _DEFAULT_FOLDER))
         return self.configure(str(vault_path), folder)
@@ -751,7 +775,8 @@ class ObsidianSyncManager:
 
         Алгоритм:
         1. Если vault не настроен (_vault_path is None) — no-op (возвращает 0).
-        2. Удаляет все *.md файлы в vault_path/folder (target_dir).
+        2. Удаляет файлы ``transcript_*.md`` (созданные синхронизацией) в
+           vault_path/folder (target_dir); чужие .md не трогает.
         3. Сбрасывает _last_sync_ts и сохраняет состояние (obsidian_sync.json
            перезаписывается — last_sync_ts=null, vault_path и folder сохраняются
            как конфиг, не как PII).
@@ -765,16 +790,28 @@ class ObsidianSyncManager:
         history_service.py) оборачивает вызов в try/except и записывает
         "obsidian" в secondary_errors — таким образом частичный сбой
         не остаётся незамеченным, а PII-файлы не теряются молча.
-        Failure путь-traversal (ValueError из _validate_and_resolve_folder)
-        по-прежнему не бросает — это безопасный no-op.
+        Небезопасный folder (ValueError из _validate_and_resolve_folder): вне vault
+        ничего не удаляется, но бросается OSError — очистка не подтверждена (KE05D-05).
         """
         with self._lock:
             vault_path = self._vault_path
             folder = self._folder
 
         if vault_path is None:
-            logger.debug("ObsidianSyncManager.purge_all_synced_files: vault не настроен, no-op")
+            # Loader терпим к отсутствующему vault/битому JSON. При wipe это
+            # неизвестное состояние: нельзя забывать оставшиеся внешние копии.
+            if self._state_path is not None:
+                try:
+                    persisted = json.loads(self._state_path.read_text(encoding="utf-8"))
+                except FileNotFoundError:
+                    return 0
+                if (not isinstance(persisted, dict)
+                        or persisted.get("vault_path") not in (None, "")):
+                    raise OSError("obsidian purge: configured vault unavailable")
+                self._state_path.unlink(missing_ok=True)
             return 0
+        if not vault_path.is_dir():
+            raise OSError("obsidian purge: configured vault unavailable")
 
         # W1768 (MED, path-traversal): повторно проверяем тот же инвариант перед
         # удалением — folder перезагружается из state-файла и не является
@@ -788,13 +825,19 @@ class ObsidianSyncManager:
                 folder,
                 exc,
             )
-            return 0
+            # KE05D-05: удалять нечего и вне vault не трогаем, но «0 удалено» выглядело бы
+            # успешной очисткой. Неподтверждённый wipe виден вызывающему (secondary_errors).
+            raise OSError("obsidian purge: unsafe sync folder, cleanup unverified") from exc
 
         deleted = 0
         failed_paths: list[str] = []
 
         if target_dir.is_dir():
-            for md_path in list(target_dir.glob("*.md")):
+            # 6а (внешнее ревью E3): только файлы, названные нашим
+            # ``_make_filename`` (``transcript_*.md``). Папка синхронизации
+            # может совпасть с рабочей папкой владельца — чужие заметки
+            # purge трогать не вправе.
+            for md_path in list(target_dir.glob("transcript_*.md")):
                 try:
                     md_path.unlink(missing_ok=True)
                     deleted += 1
@@ -811,6 +854,11 @@ class ObsidianSyncManager:
                     )
                     failed_paths.append(str(md_path))
 
+        if not failed_paths and target_dir.is_dir():
+            from backend.encrypted_snapshot import _fsync_dir
+            _fsync_dir(target_dir)
+
+        # При partial failure сохраняем адрес vault для повтора после рестарта.
         # wave-32 LOW (purge-gap): delete obsidian_sync.json so vault_path and
         # last_sync_ts do not survive a privacy-wipe across restarts. The file
         # persists sync metadata (vault location + last-sync timestamp); removing
@@ -820,7 +868,7 @@ class ObsidianSyncManager:
         # not be loaded from disk on next startup (clean slate).
         with self._lock:
             self._last_sync_ts = None
-            if self._state_path is not None:
+            if self._state_path is not None and not failed_paths:
                 try:
                     self._state_path.unlink(missing_ok=True)
                     logger.info(
@@ -887,7 +935,16 @@ class ObsidianSyncManager:
             if vault_path_str:
                 p = Path(vault_path_str)
                 if p.exists() and p.is_dir():
-                    self._vault_path = p
+                    # 6г (внешнее ревью E3): state-файл доступен другим процессам,
+                    # поэтому vault из него проходит ту же проверку, что и IPC.
+                    try:
+                        _check_vault_allowed(p.resolve())
+                    except ValueError as exc:
+                        logger.warning(
+                            "ObsidianSync: vault из state-файла отвергнут: %s", exc
+                        )
+                    else:
+                        self._vault_path = p
             # W1768 (MED, path-traversal): folder из state-файла может быть подделан
             # (например внешним процессом). Валидируем при загрузке: если он выходит
             # за пределы vault (или vault ещё не настроен и folder сам по себе
@@ -898,10 +955,23 @@ class ObsidianSyncManager:
         except Exception as exc:
             logger.warning("Не удалось загрузить состояние ObsidianSync: %s", exc)
 
-    def _save_state(self) -> None:
-        """Сохранить состояние в JSON-файл. Вызывать под self._lock."""
-        if self._state_path is None:
+    def _emit_status(self, payload: dict) -> None:
+        """Статус-событие для UI. Сбой шины не должен обрывать синхронизацию (KE05D-18)."""
+        bus = self._event_bus
+        if bus is None:
             return
+        try:
+            bus.emit("app.status", payload)
+        except Exception:
+            logger.debug("ObsidianSync: статус-событие не доставлено", exc_info=True)
+
+    def _save_state(self) -> bool:
+        """Сохранить состояние в JSON-файл. Вызывать под self._lock.
+
+        True — сохранено (или хранить негде); False — запись не удалась (KE05D-14).
+        """
+        if self._state_path is None:
+            return True
         if self._data_dir is not None:
             self._data_dir.mkdir(parents=True, exist_ok=True)
         state: dict[str, Any] = {
@@ -913,5 +983,7 @@ class ObsidianSyncManager:
             tmp = self._state_path.with_suffix(".tmp")
             tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
             tmp.replace(self._state_path)
+            return True
         except Exception as exc:
             logger.error("Не удалось сохранить состояние ObsidianSync: %s", exc)
+            return False

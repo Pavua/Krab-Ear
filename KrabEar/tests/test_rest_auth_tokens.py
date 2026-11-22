@@ -266,14 +266,17 @@ class TestRequireApiKeyAuthEnabled(unittest.TestCase):
     def test_auth_enabled_missing_header_returns_401(self):
         import backend.rest_server as _rs
         _rs._rest_auth = _make_auth(self._tmp)
+        called = []
         with patch("backend.rest_server.settings", self._mock_settings(True)):
             @_require_api_key
             def view():
+                called.append(True)  # при отказе защищённый обработчик не должен выполняться
                 return "ok", 200
             with _rest_app.test_request_context("/guarded"):
                 result = view()
         _, code = result
         self.assertEqual(code, 401)
+        self.assertEqual(called, [], "view() выполнен до отказа 401")
 
     def test_auth_enabled_valid_token_passes(self):
         real_auth = _make_auth(self._tmp)
@@ -289,25 +292,27 @@ class TestRequireApiKeyAuthEnabled(unittest.TestCase):
             with _rest_app.test_request_context(
                 "/secure", headers={"Authorization": f"Bearer {raw}"}
             ):
-                view()
+                result = view()
         self.assertTrue(called)
+        self.assertEqual(result, ("ok", 200))
 
     def test_auth_enabled_invalid_token_returns_401(self):
         real_auth = _make_auth(self._tmp)
         real_auth.create_token("legit")
         import backend.rest_server as _rs
         _rs._rest_auth = real_auth
+        called = []
         with patch("backend.rest_server.settings", self._mock_settings(True)):
-            @_require_api_key
-            def view():
-                return "ok", 200
-            with _rest_app.test_request_context(
-                "/strict",
-                headers={"Authorization": "Bearer totally_wrong_token"},
-            ):
-                result = view()
-        _, code = result
-        self.assertEqual(code, 401)
+            for header in ("Bearer totally_wrong_token", "Basic totally_wrong", "Bearer ", "totally_wrong_token"):
+                @_require_api_key
+                def view():
+                    called.append(header)
+                    return "ok", 200
+                with _rest_app.test_request_context("/strict", headers={"Authorization": header}):
+                    result = view()
+                _, code = result
+                self.assertEqual(code, 401, header)
+        self.assertEqual(called, [], "view() выполнен при неверном/некорректном заголовке")
 
 
 if __name__ == "__main__":

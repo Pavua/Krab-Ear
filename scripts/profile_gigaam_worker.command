@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Profile gigaam_worker memory growth.
-# Sets KRAB_EAR_TRACE_GIGAAM_MEM=1 + restarts backend, runs N transcribe IPC calls,
-# captures memory growth deltas via memory_baseline.py snapshots.
+# Sets KRAB_EAR_TRACE_GIGAAM_MEM=1 + restarts backend, then samples memory via memory_baseline.py
+# every 10 idle cycles. NO transcription requests are sent: gigaam_worker only grows while you
+# dictate during the run, so dictate (or run real STT) while this script is sampling.
 #
 # Usage:
 #   chmod +x scripts/profile_gigaam_worker.command
@@ -41,20 +42,34 @@ if [[ ! -f "$BASELINE" ]]; then
     exit 1
 fi
 
-echo "1. Setting KRAB_EAR_TRACE_GIGAAM_MEM=1 in launchctl env..."
+echo "1. Restart backend (только при подтверждённом отсутствии записи)..."
+# Рестарт — через safe_backend_restart: он отказывает под записью/встречей и при
+# неизвестном состоянии, UID не зашит, готовность подтверждается ping.
+# Отказ → ничего не меняем (ни env, ни процессы) и профилирование не начинаем.
+if ! "$ROOT_DIR/scripts/safe_backend_restart.command" --check-only; then
+    echo "ERROR: backend занят записью/встречей или его состояние неизвестно."
+    echo "       Профилирование отменено: окружение и процессы не тронуты."
+    exit 1
+fi
+
+echo "2. Setting KRAB_EAR_TRACE_GIGAAM_MEM=1 in launchctl env..."
+# Запоминаем прежнее значение: при неудаче возвращаем его, а не стираем чужую настройку.
+PREV_TRACE="$(launchctl getenv KRAB_EAR_TRACE_GIGAAM_MEM 2>/dev/null || true)"
 launchctl setenv KRAB_EAR_TRACE_GIGAAM_MEM 1
 echo "   Done. Workers spawned after this point will enable tracemalloc."
 
-echo ""
-echo "2. Restart backend to pick up env (requires launchd-managed backend)..."
-if launchctl kickstart -k gui/501/ai.krab.ear.backend 2>/dev/null; then
-    echo "   Backend restarted via launchctl."
+if "$ROOT_DIR/scripts/safe_backend_restart.command"; then
+    echo "   Backend restarted."
     echo "   Waiting 5s for gigaam_worker to load model..."
     sleep 5
 else
-    echo "   WARNING: launchctl kickstart failed (backend may not be launchd-managed)."
-    echo "   If running backend manually, restart it with KRAB_EAR_TRACE_GIGAAM_MEM=1 set."
-    echo "   Continuing with current process state..."
+    echo "ERROR: безопасный рестарт backend не удался; возвращаю прежнее значение env."
+    if [ -n "$PREV_TRACE" ]; then
+        launchctl setenv KRAB_EAR_TRACE_GIGAAM_MEM "$PREV_TRACE"
+    else
+        launchctl unsetenv KRAB_EAR_TRACE_GIGAAM_MEM
+    fi
+    exit 1
 fi
 
 echo ""
@@ -63,6 +78,7 @@ echo "3. Baseline snapshot (before cycles)..."
 
 echo ""
 echo "4. Running $CYCLES cycles (snapshot every 10)..."
+echo "NOTICE: NO transcription requests are sent — this run measures IDLE memory drift only (sleep between snapshots). For a real leak signal run it DURING dictation."
 for i in $(seq 1 "$CYCLES"); do
     if (( i % 10 == 0 )); then
         echo "   Cycle $i — taking snapshot..."

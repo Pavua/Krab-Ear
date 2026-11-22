@@ -13,6 +13,9 @@ private final class DuckingIPC: IPCSocketProviding, @unchecked Sendable {
     var response: (([String: Any]) async throws -> [String: Any])?
     var methods: [String] { lock.withLock { calls } }
     func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
         let request = try XCTUnwrap(JSONSerialization.jsonObject(with: payload) as? [String: Any])
         let method = try XCTUnwrap(request["method"] as? String)
         lock.withLock { calls.append(method) }

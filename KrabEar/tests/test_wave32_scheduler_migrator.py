@@ -281,12 +281,10 @@ class TestRollbackMigrationConfirm(unittest.TestCase):
         self._tmpdir.cleanup()
 
     def _make_fake_backup(self) -> str:
-        """Создаёт фейковую директорию бэкапа внутри <data_dir>/backups/."""
-        backup_dir = self.data_dir / "backups" / "migration_backup_20260101_120000"
-        backup_dir.mkdir(parents=True, exist_ok=True)
-        # Добавляем фиктивный файл, чтобы restore_files был непустым
-        (backup_dir / "settings.json").write_text("{}", encoding="utf-8")
-        return str(backup_dir)
+        """Создаёт настоящий снимок миграции с синтетической историей."""
+        history = self.data_dir / "history.ndjson"
+        history.write_text('{"id":"sample","text":"fixture"}\n', encoding="utf-8")
+        return self.migrator.migrate(self.data_dir).backup_path
 
     def test_rollback_without_confirm_returns_error(self):
         """Без confirm rollback_migration возвращает {'ok': False, ...}."""

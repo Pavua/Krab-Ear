@@ -114,7 +114,7 @@ private enum ExportChecks {
     }
     static func heldContexts() async throws {
         let sinks: [PlaintextExportSink] = [.historyMarkdown, .historyNDJSON, .historySelected,
-            .historyActionItems, .historyMeetingReport, .historyStatsReport, .historyPDF]
+            .historyActionItems, .historyMeetingReport, .historyStatsReport, .historyPDF, .historyHTML]
         for sink in sinks {
             for mutation in 0..<4 {
                 let socket = ExportSocket(), coordinator = socket.make()
@@ -134,6 +134,22 @@ private enum ExportChecks {
             }
         }
     }
+    static func localPrivacyRevokesInFlightHTMLValidation() async throws {
+        for reopenBeforeReply in [false, true] {
+            let socket = ExportSocket(), coordinator = socket.make()
+            let ticket = try await coordinator.prepare(sink: .historyHTML, consent: { true })
+            socket.before = { method, _ in
+                guard method == "validate_plaintext_export" else { return }
+                // Backend ещё возвращает разрешение, выданное до записи privacy.
+                coordinator.setPrivacyRestricted(true)
+                if reopenBeforeReply { coordinator.setPrivacyRestricted(false) }
+            }
+            var wrote = false
+            try await denied { try await coordinator.perform(ticket) { wrote = true } }
+            try check(!wrote, "HTML was written using authorization from before local privacy")
+        }
+    }
+
     static func heldConsent() async throws {
         let socket = ExportSocket(), coordinator = socket.make()
         try await denied {
@@ -541,6 +557,7 @@ private enum ExportChecks {
         try await offAndRepeat()
         try await heldContexts()
         try await heldConsent()
+        try await localPrivacyRevokesInFlightHTMLValidation()
         try await repeatedReceiptAndGrantReuse()
         try await uncertainAndSanitized()
         try await malformedPolicy()
@@ -555,7 +572,7 @@ private enum ExportChecks {
         try await privacyBackendReason()
         try await timelineExports()
         try await timelineDenialsAndMalformed()
-        return 19
+        return 20
     }
 }
 
@@ -580,6 +597,9 @@ final class PlaintextExportCoordinatorTests: XCTestCase {
     func testConsentCancellation() async throws { try await ExportChecks.cancel() }
     func testOffAndRepeatedCallback() async throws { try await ExportChecks.offAndRepeat() }
     func testHeldPanelsAndRenderers() async throws { try await ExportChecks.heldContexts() }
+    func testLocalPrivacyRevokesInFlightHTMLValidation() async throws {
+        try await ExportChecks.localPrivacyRevokesInFlightHTMLValidation()
+    }
     func testHeldConsent() async throws { try await ExportChecks.heldConsent() }
     func testReceiptReplayAndGrantReuse() async throws { try await ExportChecks.repeatedReceiptAndGrantReuse() }
     func testUncertainValidationAndSanitization() async throws { try await ExportChecks.uncertainAndSanitized() }

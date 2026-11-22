@@ -63,9 +63,7 @@ import types
 # Load service module with stubs for heavy optional deps so the module parses.
 _HEAVY_STUBS = [
     "mlx_whisper", "mlx", "mlx.core",
-    "pyannote", "pyannote.audio",
     "sounddevice",
-    "torch",
     "silero",
     "kokoro",
 ]

@@ -12,6 +12,8 @@ from typing import Any
 import math
 import uuid
 
+from backend.strict_bool import parse_bool
+
 
 def _coerce_finite(value: Any, default: float) -> float | None:
     """Return finite float or *default* for None/NaN/Inf; None iff value was absent."""
@@ -19,9 +21,23 @@ def _coerce_finite(value: Any, default: float) -> float | None:
         return None
     try:
         v = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):  # float(10**500) → OverflowError
         return default
     return v if math.isfinite(v) else default
+
+
+def _coerce_int(value: Any, default: int = 0, lo: int = 0, hi: int = 2**31 - 1) -> int:
+    """int без исключений: мусор, inf/NaN и значения вне [lo, hi] → default (KE05D-20).
+
+    Исключение из from_dict молча выбрасывало всю запись истории из выдачи.
+    """
+    try:
+        if isinstance(value, bool):
+            return default
+        v = int(float(value)) if isinstance(value, str) else int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return v if lo <= v <= hi else default
 
 
 def _coerce_confidence(value: Any) -> float | None:
@@ -30,7 +46,7 @@ def _coerce_confidence(value: Any) -> float | None:
         return None
     try:
         v = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0.0
     if not math.isfinite(v):
         return 0.0
@@ -161,7 +177,9 @@ class HistoryItem:
             llm_latency_ms=int(llm_latency_ms or 0),
             diarization=diarization if isinstance(diarization, dict) else None,
             audio_duration_sec=round(float(audio_duration_sec), 3) if audio_duration_sec is not None else None,
-            confidence=round(float(confidence), 4) if confidence is not None else None,
+            confidence=(
+                round(_coerce_confidence(confidence), 4) if confidence is not None else None
+            ),
             tags=list(tags) if tags else [],
             favorite=bool(favorite),
             emotion=(str(emotion).strip().lower() or None) if emotion else None,
@@ -219,23 +237,24 @@ class HistoryItem:
             chat_id=str(payload.get("chat_id", "")).strip(),
             message_id=str(payload.get("message_id", "")).strip(),
             cleaned_text=str(payload.get("cleaned_text", "")).strip(),
-            llm_applied=bool(payload.get("llm_applied", False)),
-            llm_latency_ms=int(payload.get("llm_latency_ms", 0) or 0),
+            llm_applied=parse_bool(payload.get("llm_applied", False), False),
+            llm_latency_ms=_coerce_int(payload.get("llm_latency_ms", 0) or 0),
             diarization=payload.get("diarization") if isinstance(payload.get("diarization"), dict) else None,
             audio_duration_sec=_coerce_finite(payload.get("audio_duration_sec"), 0.0),
             confidence=_coerce_confidence(payload.get("confidence")),
             tags=[str(t) for t in payload["tags"]] if isinstance(payload.get("tags"), list) else [],
-            favorite=bool(payload.get("favorite", False)),
+            favorite=parse_bool(payload.get("favorite", False), False),
             emotion=(str(payload["emotion"]).strip().lower() or None) if payload.get("emotion") else None,
             word_timestamps=payload.get("word_timestamps") if isinstance(payload.get("word_timestamps"), list) else None,
             speaker_turns=payload.get("speaker_turns") if isinstance(payload.get("speaker_turns"), list) else None,
             reasoning=(str(payload["reasoning"]).strip() or None) if payload.get("reasoning") else None,
             audio_path=str(payload.get("audio_path", "")).strip(),
-            is_protected=bool(payload.get("is_protected", False)),
+            # Непонятное значение защитных флагов читаем в безопасную сторону (True).
+            is_protected=parse_bool(payload.get("is_protected", False), True),
             action_items=payload.get("action_items") if isinstance(payload.get("action_items"), list) else None,
             decisions=payload.get("decisions") if isinstance(payload.get("decisions"), list) else None,
             questions=payload.get("questions") if isinstance(payload.get("questions"), list) else None,
-            privacy_mode=bool(payload.get("privacy_mode", False)),
+            privacy_mode=parse_bool(payload.get("privacy_mode", False), True),
             _extra=extra,
         )
 

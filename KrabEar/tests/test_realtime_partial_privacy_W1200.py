@@ -189,13 +189,21 @@ class TestRealtimePartialPrivacyGetter(unittest.TestCase):
                 if event_type == _REALTIME_PARTIAL_TYPE and not privacy_state[0]:
                     first_allowed.set()
 
+        true_read = threading.Event()  # worker РЕАЛЬНО прочитал privacy=True после переключения
+
+        def _reading_getter():
+            value = privacy_state[0]
+            if value:
+                true_read.set()
+            return value
+
         rpt = RealtimePartialTranscriber(
             transcriber=transcriber,
             recorder=recorder,
             event_bus=_SpyBus(),
             interval_sec=0.05,
             buffer_sec=2.0,
-            privacy_getter=lambda: privacy_state[0],
+            privacy_getter=_reading_getter,
         )
         rpt.start(session_id="sess-toggle")
 
@@ -212,8 +220,9 @@ class TestRealtimePartialPrivacyGetter(unittest.TestCase):
             # Toggle privacy ON
             privacy_state[0] = True
 
-            # Wait several intervals; no new emits should appear
-            time.sleep(0.3)
+            # Ждём не времени, а события: worker прочитал True и (после него) прошёл итерацию
+            self.assertTrue(true_read.wait(timeout=3.0), "worker не прочитал privacy=True после переключения")
+            time.sleep(0.15)  # ещё несколько интервалов уже ПОСЛЕ подтверждённого чтения True
 
             emit_count_after = len(
                 [e for e in emitted_events if e[0] == _REALTIME_PARTIAL_TYPE]

@@ -14,15 +14,19 @@ from backend.plaintext_export_sinks import (
 
 import json
 import os
+import re
 import stat
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import logging
 from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
 from backend.observability import add_breadcrumb
+from backend.purge_fs import rmtree_strict
+from backend.transcript_writer import TranscriptWriter, _sanitize_md_body, history_markdown_suffix
 from core.fuzzy_search import FuzzySearcher
 from core.parsing_utils import safe_json_loads
 from core.search_highlighter import SearchHighlighter
@@ -51,6 +55,7 @@ from backend.encrypted_snapshot import (
 
 # Typed imports — only loaded during static analysis, avoid runtime circular imports
 if TYPE_CHECKING:
+    from backend.models import HistoryItem
     from backend.state_store import StateStore
     from backend.llm_rewriter import LLMRewriter
     from backend.playback_tracker import PlaybackTracker
@@ -516,7 +521,14 @@ class HistoryService:
                 settings = self._cached_settings()
             else:
                 settings = self.store.load_settings()
-            return bool(settings.get("privacy_mode_enabled", False))
+            # Настройки не словарь (битый источник) — состояние приватности неизвестно: ON.
+            if not isinstance(settings, Mapping):
+                return True
+            if "privacy_mode_enabled" not in settings:
+                return False
+            value = settings["privacy_mode_enabled"]
+            # Не-bool (None, 0, "") — тоже «неизвестно»: ON (как StateStore.load_settings).
+            return value if isinstance(value, bool) else True
         except AttributeError:
             # Частично сконструированный инстанс (__new__ без __init__ в unit-тестах).
             return False
@@ -869,50 +881,185 @@ class HistoryService:
     # Вспомогательные методы: работа с .md файлами транскриптов
     # ------------------------------------------------------------------
 
-    def _transcript_md_candidates(self, item_ts: str) -> list[Path]:
-        """Возвращает список кандидатов .md файлов для записи с заданным ts.
+    #: Верхняя граница размера .md, который читаем ради опознания по тексту.
+    _MD_MATCH_MAX_BYTES = 8 * 1024 * 1024
 
-        TranscriptWriter формирует имена файлов по схеме:
-          {date_str}-Транскрибация.md
-          {date_str}-Транскрибация-{time_str}.md
-          {date_str}-Транскрибация-{time_str}-N.md
+    def _transcript_md_dir(self) -> Path | None:
+        data_dir = self.store.data_dir
+        if data_dir is None:
+            return None
+        path = Path(data_dir) / "transcripts"
+        return path if path.is_dir() and not path.is_symlink() else None
 
-        Где date_str = YYYY-MM-DD, time_str = HHMMSS из item.ts.
-        Метод возвращает только файлы, в имени которых содержится time_str —
-        это минимизирует риск стереть соседний файл того же дня при нескольких
-        записях.  Если time_str недоступен (невалидный ts) — возвращает пустой
-        список (безопасный fallback: лучше не удалить, чем удалить лишнее).
-        """
-        if not item_ts:
+    @staticmethod
+    def _identified_transcript_md(transcripts_dir: Path, item_id: str) -> list[Path]:
+        suffix = history_markdown_suffix(item_id)
+        if not suffix:
             return []
-        transcripts_dir = Path(self.store.data_dir) / "transcripts"
-        if not transcripts_dir.is_dir():
+        return sorted(
+            path for path in transcripts_dir.glob(f"*{suffix}")
+            if not path.is_symlink() and path.is_file()
+        )
+
+    def _transcript_md_candidates(
+        self, item_ts: str, item: HistoryItem | dict[str, Any] | None = None, *,
+        item_id: str = "", siblings: list[HistoryItem] | None = None,
+    ) -> list[Path]:
+        """Сначала точная связь по ID, для старых файлов — однозначное совпадение."""
+        transcripts_dir = self._transcript_md_dir()
+        if transcripts_dir is None:
             return []
+        item_data = item.to_dict() if item is not None and not isinstance(item, dict) else item or {}
+        item_id = item_id or item_data.get("id", "")
+        identified = self._identified_transcript_md(transcripts_dir, item_id)
+        if identified:
+            return identified
         try:
             dt = datetime.fromisoformat(item_ts)
-            date_str = dt.strftime("%Y-%m-%d")
-            time_str = dt.strftime("%H%M%S")
-        except (ValueError, TypeError):
+            # У старого импорта timestamp файла локальный, у записи — UTC.
+            days = [dt.date() + timedelta(days=offset) for offset in (-1, 0, 1)]
+        except (ValueError, TypeError, OverflowError):
             return []
-        # Glob по date_str + time_str — не задевает соседние записи того же дня
-        pattern = f"{date_str}-*{time_str}*.md"
-        return list(transcripts_dir.glob(pattern))
+        native = f"{dt:%Y-%m-%d}-Транскрибация"
+        timed = f"{native}-{dt:%H%M%S}"
+        paths = [
+            path for path in transcripts_dir.glob(f"{timed}*.md")
+            if re.fullmatch(rf"{timed}(?:-\d{{1,4}})?\.md", path.name)
+        ]
+        imports = {
+            path: day for day in days for path in transcripts_dir.glob(f"{day:%Y%m%d}_*.md")
+            if re.fullmatch(r"\d{8}_\d{6}_.+\.md", path.name)
+            and not re.search(r"\.krab-ear-[0-9a-f-]{36}\.md$", path.name)
+        }
+        first = transcripts_dir / f"{native}.md"
+        if not paths and not imports and not first.is_file():
+            return []
 
-    def _erase_transcript_md(self, item_ts: str, item_id: str) -> None:
+        if siblings is None:
+            with self.store._lock(shared=True):
+                siblings = self.store._load_active_items_unlocked()
+                # RecordingMerger вызывает каскад после tombstone и передаёт ID/ts.
+                if not item_data and item_id:
+                    item_data = next(
+                        (row.to_dict() for row in self.store._iter_history_items_unlocked()
+                         if row.id == item_id), {},
+                    )
+        if not item_data:
+            return []
+
+        date_human = TranscriptWriter._format_date_human(item_ts)
+        date_header = f"\n**Дата:** {date_human}\n"
+        candidates: list[Path] = []
+        for path in [*paths, first, *imports]:
+            content = self._read_legacy_md(path)
+            import_day = imports.get(path)
+            imported = import_day is not None
+            first_of_day = path == first
+            if first_of_day and date_header not in content:
+                continue
+            body = self._legacy_md_body(content, imported=imported)
+            if not body or body not in self._legacy_md_bodies(item_data, imported=imported):
+                continue
+
+            for sibling in siblings:
+                if sibling.id == item_id:
+                    continue
+                try:
+                    sibling_dt = datetime.fromisoformat(sibling.ts)
+                except (ValueError, TypeError):
+                    continue
+                if import_day is not None:
+                    # Сосед мог получить эту локальную дату со своей UTC-даты.
+                    same_window = abs((sibling_dt.date() - import_day).days) <= 1
+                elif first_of_day:
+                    same_window = TranscriptWriter._format_date_human(sibling.ts) == date_human
+                else:
+                    same_window = f"{sibling_dt:%Y%m%d%H%M%S}" == f"{dt:%Y%m%d%H%M%S}"
+                if same_window and body in self._legacy_md_bodies(sibling.to_dict(), imported=imported):
+                    break
+            else:
+                candidates.append(path)
+        # Два старых файла с одинаковым подходящим телом тоже неоднозначны.
+        return candidates if len(candidates) == 1 else []
+
+    def _read_legacy_md(self, path: Path) -> str:
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > self._MD_MATCH_MAX_BYTES:
+                    return ""
+                with os.fdopen(fd, "rb", closefd=False) as stream:
+                    raw = stream.read(self._MD_MATCH_MAX_BYTES + 1)
+                if len(raw) > self._MD_MATCH_MAX_BYTES:
+                    return ""
+                current = path.stat(follow_symlinks=False)
+                if not os.path.samestat(info, current):
+                    return ""
+                return raw.decode("utf-8").replace("\r\n", "\n").strip()
+            finally:
+                os.close(fd)
+        except (OSError, UnicodeError):
+            return ""
+
+    @staticmethod
+    def _legacy_md_body(content: str, *, imported: bool) -> str:
+        if imported:
+            if not content.startswith("# Транскрипт: "):
+                return ""
+            section = re.split(r"\n\n## (?:Текст|Диалог)\n\n", content, maxsplit=1)
+        else:
+            section = content.split("\n---\n\n## Текст\n\n", 1)
+        if len(section) == 2:
+            return section[1].strip()
+        if content.startswith(("# Транскрипт", "# Транскрибация")):
+            return content.partition("\n\n")[2].strip()
+        return content if not imported else ""
+
+    @staticmethod
+    def _legacy_md_bodies(item: dict[str, Any], *, imported: bool) -> set[str]:
+        texts = [item.get("text"), item.get("source_text")]
+        if not imported:
+            try:
+                texts.append(TranscriptWriter._build_text_section(item))
+            except (AttributeError, TypeError):
+                # У старых строк форма вложенных полей диаризации могла отличаться.
+                pass
+        bodies = {text.strip() for text in texts if isinstance(text, str) and text.strip()}
+        if not imported:
+            bodies |= {_sanitize_md_body(body).strip() for body in bodies}
+        translation = item.get("translated_text")
+        if isinstance(translation, str) and translation.strip():
+            if imported:
+                heading = f"\n\n## Перевод ({item.get('translation_mode', 'off')})\n\n"
+            else:
+                heading = "\n\n---\n\n## Перевод\n\n"
+                translation = _sanitize_md_body(translation)
+            bodies |= {body + heading + translation.strip() for body in bodies}
+        return bodies
+
+    def _erase_transcript_md(
+        self, item_ts: str, item_id: str, item: HistoryItem | None = None, *,
+        siblings: list[HistoryItem] | None = None,
+    ) -> None:
         """Стирает .md файлы транскрипта, связанные с записью.
 
         W1762: приватная операция — ошибка стирания выводится как WARNING,
         но не прерывает удаление записи (tombstone уже записан).
         В лог попадает только имя файла (без содержимого/PII).
         """
-        candidates = self._transcript_md_candidates(item_ts)
+        candidates = self._transcript_md_candidates(item_ts, item, item_id=item_id, siblings=siblings)
         for md_path in candidates:
             try:
+                if not stat.S_ISREG(md_path.stat(follow_symlinks=False).st_mode):
+                    continue
                 md_path.unlink(missing_ok=True)
                 logger.info(
                     "W1762: transcript .md удалён при удалении записи: file=%s item_id=%s",
                     md_path.name, item_id,
                 )
+            except FileNotFoundError:
+                continue
             except OSError:
                 logger.warning(
                     "W1762: не удалось стереть transcript .md: file=%s item_id=%s",
@@ -929,11 +1076,13 @@ class HistoryService:
         # W1762: получаем ts записи ДО tombstone — нужен для поиска .md файла.
         # Загружаем только под коротким lock'ом, чтобы не держать его при удалении.
         item_ts: str = ""
+        deleted_item: Any = None
         with self.store._lock():
             active = self.store._load_active_items_unlocked()
         for _item in active:
             if _item.id == item_id:
                 item_ts = _item.ts
+                deleted_item = _item
                 break
 
         ok = self.store.delete_history_item(item_id)
@@ -944,7 +1093,7 @@ class HistoryService:
         # versions).  Вынесено в cascade_delete_artifacts, чтобы RecordingMerger мог
         # переиспользовать тот же путь после собственного атомарного tombstone'а
         # (wave1776 HIGH 1) — DRY: один источник истины для каскадного удаления.
-        self.cascade_delete_artifacts(item_id, item_ts)
+        self.cascade_delete_artifacts(item_id, item_ts, item=deleted_item, siblings=active)
 
         add_breadcrumb(
             category="history",
@@ -953,7 +1102,10 @@ class HistoryService:
         )
         return {"deleted": True}
 
-    def cascade_delete_artifacts(self, item_id: str, item_ts: str) -> None:
+    def cascade_delete_artifacts(
+        self, item_id: str, item_ts: str, item: HistoryItem | None = None, *,
+        siblings: list[HistoryItem] | None = None,
+    ) -> None:
         """Выполняет ВСЕ каскады удаления, КРОМE tombstone'а самой записи.
 
         Tombstone должен быть записан вызывающей стороной ДО этого вызова
@@ -967,7 +1119,7 @@ class HistoryService:
         (W1343), версии транскрипта (W1045 F2).  Каждый шаг отказоустойчив.
         """
         # W1762: стираем .md файл транскрипта (privacy gap — файл пережил tombstone).
-        self._erase_transcript_md(item_ts, item_id)
+        self._erase_transcript_md(item_ts, item_id, item, siblings=siblings)
 
         # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
         if self._semantic_searcher is not None:
@@ -1115,8 +1267,8 @@ class HistoryService:
                 result = item.to_dict()
                 result["text_length"] = len(item.text)
                 result["word_count"] = len(item.text.split()) if item.text else 0
-                transcripts_dir = Path(self.store.data_dir) / "transcripts"
-                matching = list(transcripts_dir.glob(f"*{item_id[:8]}*")) if transcripts_dir.exists() else []
+                transcripts_dir = self._transcript_md_dir()
+                matching = self._identified_transcript_md(transcripts_dir, item_id) if transcripts_dir else []
                 result["transcript_file"] = str(matching[0]) if matching else None
                 return result
 
@@ -1148,6 +1300,9 @@ class HistoryService:
             current_tags.append(tag)
             self.store.update_history_item_tags(item_id, current_tags)
 
+        # Имена тегов могут быть чувствительны: ответ закрыт так же, как у get_tags.
+        if self._is_privacy_mode():
+            return {"id": item_id, "tags": [], "reason": "privacy_mode_active"}
         return {"id": item_id, "tags": current_tags}
 
     def handle_remove_tag(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -1170,6 +1325,8 @@ class HistoryService:
         current_tags: list[str] = [t for t in (item.tags or []) if t != tag]
         self.store.update_history_item_tags(item_id, current_tags)
 
+        if self._is_privacy_mode():
+            return {"id": item_id, "tags": [], "reason": "privacy_mode_active"}
         return {"id": item_id, "tags": current_tags}
 
     def handle_get_tags(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -2508,7 +2665,7 @@ class HistoryService:
         # W1762: стираем .md файлы транскриптов для каждой удалённой записи.
         # Зеркалирует логику single-delete (handle_delete_history_item).
         for item in to_delete:
-            self._erase_transcript_md(item.ts, item.id)
+            self._erase_transcript_md(item.ts, item.id, item, siblings=active)
 
         add_breadcrumb(
             category="history",
@@ -2621,6 +2778,7 @@ class HistoryService:
             encryption_key_shredded,
         ) = self._purge_final_barrier(secondary_errors, _data_dir)
         self._purge_temp_uploads(secondary_errors, _data_dir)
+        self._purge_verify_cleanup(secondary_errors, _data_dir)
 
         # --- A5.2c1: пост-фактум флага шифрования (НЕ переключаем его) ---
         # Purge уничтожает данные, но политику не меняет: решение владельца
@@ -3235,11 +3393,10 @@ class HistoryService:
         # backups/ вообще»).
         backups_deleted = 0
         try:
-            import shutil as _shutil
             _backups_dir = Path(self.store.data_dir) / "backups"
             if _backups_dir.is_dir():
                 backups_deleted = sum(1 for _ in _backups_dir.iterdir() if _.is_dir())
-                _shutil.rmtree(_backups_dir, ignore_errors=True)
+                rmtree_strict(_backups_dir)
                 logger.info(
                     "purge_all_data: удалено %d migration backup директорий из %s",
                     backups_deleted,
@@ -3254,16 +3411,18 @@ class HistoryService:
         # и индекс в <data_dir>/shares/shares_index.json.  Пакеты содержат STT-текст
         # и переживают purge без этого шага.
         try:
-            import shutil as _shutil
             _shares_dir = Path(self.store.data_dir) / "shares"
-            if _shares_dir.is_dir():
-                _shutil.rmtree(_shares_dir, ignore_errors=True)
-                logger.info("purge_all_data: удалена директория shares/")
-            # wave-33 A1 (HIGH): rmtree удаляет файлы, но SharingManager._index —
-            # RAM-копия с полным текстом транскрипций — переживает purge и продолжает
-            # отдавать данные через get_shared. clear() сбрасывает in-memory индекс.
-            if self._sharing_manager is not None:
-                self._sharing_manager.clear()
+            try:
+                if _shares_dir.is_dir():
+                    rmtree_strict(_shares_dir)
+                    logger.info("purge_all_data: удалена директория shares/")
+            finally:
+                # wave-33 A1 (HIGH): rmtree удаляет файлы, но SharingManager._index —
+                # RAM-копия с полным текстом транскрипций — переживает purge и продолжает
+                # отдавать данные через get_shared. clear() сбрасывает in-memory индекс.
+                # finally: сбой удаления файлов не должен оставлять и RAM-копию.
+                if self._sharing_manager is not None:
+                    self._sharing_manager.clear()
         except Exception:
             logger.warning("purge_all_data: удаление shares/ не удалось", exc_info=True)
             secondary_errors.append("shares")
@@ -3273,10 +3432,9 @@ class HistoryService:
         # <data_dir>/tmp_meeting/ и удаляет его в finally того же тика; после
         # краха backend посреди тика файл пережил бы purge без этого шага.
         try:
-            import shutil as _shutil
             _tmp_meeting_dir = Path(self.store.data_dir) / "tmp_meeting"
             if _tmp_meeting_dir.is_dir():
-                _shutil.rmtree(_tmp_meeting_dir, ignore_errors=True)
+                rmtree_strict(_tmp_meeting_dir)
                 logger.info("purge_all_data: удалена директория tmp_meeting/")
         except Exception:
             logger.warning("purge_all_data: удаление tmp_meeting/ не удалось", exc_info=True)
@@ -3338,14 +3496,25 @@ class HistoryService:
         # Путь читается из SettingsBackup.get_backup_dir() — уважает env override.
         if self._settings_backup is not None:
             try:
-                import shutil as _shutil
+                from backend.settings_backup import SettingsBackup
+                if SettingsBackup.legacy_ownership_ambiguous(self.store):
+                    secondary_errors.append("settings_backups_legacy_ambiguous")
                 _sb_dir = self._settings_backup.get_backup_dir()
                 if _sb_dir is not None and Path(_sb_dir).is_dir():
-                    _shutil.rmtree(Path(_sb_dir), ignore_errors=True)
+                    rmtree_strict(Path(_sb_dir))
                     logger.info("purge_all_data: settings_backups/ удалён: %s", _sb_dir)
             except Exception:
                 logger.warning("purge_all_data: удаление settings_backups/ не удалось", exc_info=True)
                 secondary_errors.append("settings_backups")
+        # После включения override у профиля могли остаться копии по старому
+        # профильному пути. Он принадлежит этому data_dir независимо от override.
+        try:
+            _profile_settings_backups = Path(self.store.data_dir) / "settings_backups"
+            if _profile_settings_backups.is_dir():
+                rmtree_strict(_profile_settings_backups)
+        except Exception:
+            logger.warning("purge_all_data: удаление профильных settings_backups не удалось", exc_info=True)
+            secondary_errors.append("settings_backups_profile")
         return backups_deleted
 
     def _purge_data_dir_stores(
@@ -3360,10 +3529,9 @@ class HistoryService:
         # AudioRecorder/конвейер сохраняют сырые WAV/PCM записей под <data_dir>/audio/.
         # Сырое аудио — это голос пользователя (биометрия) и должно исчезать при wipe.
         try:
-            import shutil as _shutil
             _audio_dir = _data_dir / "audio"
             if _audio_dir.is_dir():
-                _shutil.rmtree(_audio_dir, ignore_errors=True)
+                rmtree_strict(_audio_dir)
                 logger.info("purge_all_data: удалена директория audio/")
         except Exception:
             logger.warning("purge_all_data: удаление audio/ не удалось", exc_info=True)
@@ -3373,10 +3541,9 @@ class HistoryService:
         # При сбое транскрибации сырое аудио откладывается в <data_dir>/failed_recordings/.
         # Тот же класс данных, что и audio/ — голос пользователя.
         try:
-            import shutil as _shutil
             _failed_dir = _data_dir / "failed_recordings"
             if _failed_dir.is_dir():
-                _shutil.rmtree(_failed_dir, ignore_errors=True)
+                rmtree_strict(_failed_dir)
                 logger.info("purge_all_data: удалена директория failed_recordings/")
         except Exception:
             logger.warning("purge_all_data: удаление failed_recordings/ не удалось", exc_info=True)
@@ -3386,10 +3553,9 @@ class HistoryService:
         # Тот же класс данных, что failed_recordings/ — сырой голос пользователя.
         # Имя директории литералом, чтобы audit_purge_coverage зачёл покрытие.
         try:
-            import shutil as _shutil
             _debug_wav_dir = _data_dir / "debug_duration_wav"
             if _debug_wav_dir.is_dir():
-                _shutil.rmtree(_debug_wav_dir, ignore_errors=True)
+                rmtree_strict(_debug_wav_dir)
                 logger.info("purge_all_data: удалена директория debug_duration_wav/")
         except Exception:
             logger.warning("purge_all_data: удаление debug_duration_wav/ не удалось", exc_info=True)
@@ -3401,17 +3567,15 @@ class HistoryService:
         # Имена директорий заданы литералами явно (а не циклом по переменной), чтобы
         # статический guard audit_purge_coverage мог их зачесть как покрытые.
         try:
-            import shutil as _shutil
             if (_data_dir / "exports").is_dir():
-                _shutil.rmtree(_data_dir / "exports", ignore_errors=True)
+                rmtree_strict(_data_dir / "exports")
                 logger.info("purge_all_data: удалена директория exports/")
         except Exception:
             logger.warning("purge_all_data: удаление exports/ не удалось", exc_info=True)
             secondary_errors.append("exports")
         try:
-            import shutil as _shutil
             if (_data_dir / "auto_exports").is_dir():
-                _shutil.rmtree(_data_dir / "auto_exports", ignore_errors=True)
+                rmtree_strict(_data_dir / "auto_exports")
                 logger.info("purge_all_data: удалена директория auto_exports/")
         except Exception:
             logger.warning("purge_all_data: удаление auto_exports/ не удалось", exc_info=True)
@@ -3908,6 +4072,30 @@ class HistoryService:
                     self.store._history_crypto_initialized = False
                     self.store._history_crypto_instance = None
         return deletion_ledger_purged, deletion_ledger_ids_preserved, encryption_key_shredded
+
+    def _purge_verify_cleanup(self, errors, directory):
+        """Legacy clear()-методы могут проглатывать unlink: intent нельзя снять."""
+        if directory is None:
+            _flag_step_error(errors, "purge_verification")
+            return
+        checks = (
+            (self._semantic_searcher, ("embeddings.npy", "embeddings_index.json")),
+            (self._vocabulary_store, ("vocabulary.json",)),
+            (self._webhook_manager, ("webhooks.json",)),
+            (self._translation_cache, ("translation_cache.json",)),
+        )
+        for owner, names in checks:
+            if owner is None:
+                continue
+            for name in names:
+                try:
+                    os.lstat(directory / name)
+                except FileNotFoundError:
+                    continue
+                except OSError:
+                    _flag_step_error(errors, "purge_verification")
+                else:
+                    _flag_step_error(errors, "purge_verification")
 
     def _purge_temp_uploads(
         self, secondary_errors: list[str], _data_dir: Path | None

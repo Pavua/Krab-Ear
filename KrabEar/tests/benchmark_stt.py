@@ -95,7 +95,8 @@ def benchmark_stt(iterations: int = 3) -> None:
     wav_size_kb = os.path.getsize(wav_path) / 1024
     print(f"Размер файла : {wav_size_kb:.1f} KB\n")
 
-    latencies_ms: list[float] = []
+    latencies_ms: list[float] = []  # ТОЛЬКО успешные итерации (быстрые отказы не считаются производительностью)
+    failures = 0
     results: list[dict] = []
 
     print(f"{'#':>3}  {'Latency':>10}  {'Текст (обрезан до 60 симв.)'}")
@@ -117,14 +118,18 @@ def benchmark_stt(iterations: int = 3) -> None:
                 tag = "COLD" if i == 0 else "WARM"
                 display_text = (text[:57] + "...") if len(text) > 60 else text or "(пусто)"
                 print(f"{i + 1:>3}  [{tag}] {latency_ms:>7.0f} ms  {display_text}")
+                ok = True
             except Exception as exc:
                 latency_ms = (time.monotonic() - iter_start) * 1000
                 tag = "COLD" if i == 0 else "WARM"
                 print(f"{i + 1:>3}  [{tag}] {latency_ms:>7.0f} ms  ERROR: {exc}")
                 text = f"ERROR: {exc}"
+                ok = False
+                failures += 1
 
-            latencies_ms.append(latency_ms)
-            results.append({"iter": i + 1, "latency_ms": latency_ms, "text": text})
+            if ok:
+                latencies_ms.append(latency_ms)
+            results.append({"iter": i + 1, "latency_ms": latency_ms, "text": text, "ok": ok})
 
     finally:
         try:
@@ -133,23 +138,27 @@ def benchmark_stt(iterations: int = 3) -> None:
             pass
 
     # --- Stats ---
+    print(f"\nУспешных итераций: {len(latencies_ms)} из {iterations}, отказов: {failures}")
     if not latencies_ms:
-        print("\nНет данных для статистики.")
-        return
+        # ни одной успешной транскрибации: быстрые отказы НЕ превращаются в «real-time OK»
+        print("\nНет успешных измерений — бенчмарк не пройден.")
+        sys.exit(1)
 
     sorted_lat = sorted(latencies_ms)
     avg_ms = sum(latencies_ms) / len(latencies_ms)
     p95_ms = _percentile(sorted_lat, 95)
     max_ms = max(latencies_ms)
     cold_ms = latencies_ms[0]
-    warm_latencies = latencies_ms[1:] if len(latencies_ms) > 1 else latencies_ms
-    warm_avg_ms = sum(warm_latencies) / len(warm_latencies)
+    # warm — только успешные итерации после первой ИТЕРАЦИИ; нет успешных warm → N/A (не подмена cold)
+    warm_latencies = [r["latency_ms"] for r in results[1:] if r["ok"]]
+    warm_avg_ms = (sum(warm_latencies) / len(warm_latencies)) if warm_latencies else None
 
     print(f"\n{'=' * 50}")
     print("  РЕЗУЛЬТАТЫ")
     print(f"{'=' * 50}")
     print(f"  Cold (1-я итерация)  : {cold_ms:>8.0f} ms")
-    print(f"  Warm avg (2+)        : {warm_avg_ms:>8.0f} ms")
+    print(f"  Warm avg (2+)        : {warm_avg_ms:>8.0f} ms" if warm_avg_ms is not None
+          else "  Warm avg (2+)        :      N/A")
     print(f"  Avg (все итерации)   : {avg_ms:>8.0f} ms")
     print(f"  p95                  : {p95_ms:>8.0f} ms")
     print(f"  Max                  : {max_ms:>8.0f} ms")
@@ -158,6 +167,9 @@ def benchmark_stt(iterations: int = 3) -> None:
 
     # RTF (Real-Time Factor): latency / audio_duration — <1.0 is real-time capable
     audio_duration_ms = DURATION_SEC * 1000
+    if warm_avg_ms is None:
+        print(f"\n  Real-Time Factor (warm avg / {DURATION_SEC}s audio): N/A (нет успешных warm-измерений)")
+        return
     warm_rtf = warm_avg_ms / audio_duration_ms
     print(f"\n  Real-Time Factor (warm avg / {DURATION_SEC}s audio): {warm_rtf:.2f}x")
     rtf_label = "real-time OK" if warm_rtf <= 1.0 else "SLOWER than real-time"

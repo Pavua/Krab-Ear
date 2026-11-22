@@ -58,7 +58,11 @@ final class PasteService {
     var smartFieldFormatEnabled = false
     var onSecureFieldSkipped: (() -> Void)?
     var onConcealedClipboardSkipped: (() -> Void)?
-    private let lastPastedTextKey = "KrabEar_LastPastedText"
+    /// Прежний ключ UserDefaults: до E4 п.4 последний продиктованный текст лежал там открытым
+    /// текстом (plist в ~/Library/Preferences) и переживал перезапуск. Теперь только в памяти;
+    /// ключ используется лишь для стирания остатков прежних версий.
+    private let legacyLastPastedTextKey = "KrabEar_LastPastedText"
+    private var lastPastedTextInMemory: String?
     let repasteCooldownSec: TimeInterval = 1
     private var lastPastedAt: Date?
     init(pasteboard: NSPasteboard = .general, defaults: UserDefaults = .standard,
@@ -92,10 +96,11 @@ final class PasteService {
         }
         self.focusRole = focusRole; self.focusEditable = focusEditable; self.collapseSelection = collapseSelection
         self.runner = runner; self.operationBudget = operationBudget
+        defaults.removeObject(forKey: legacyLastPastedTextKey)
     }
     var lastPastedText: String? {
-        get { defaults.string(forKey: lastPastedTextKey) }
-        set { defaults.set(newValue, forKey: lastPastedTextKey) }
+        get { lastPastedTextInMemory }
+        set { lastPastedTextInMemory = newValue }
     }
     func recordLastPaste(_ text: String) { lastPastedText = text; lastPastedAt = Date() }
     @MainActor func prepareReplay() -> PasteReplayRequest {
@@ -351,7 +356,8 @@ final class PasteService {
             &roleRef
         )
         guard roleStatus == .success, let role = roleRef as? String else { return nil }
-        return role
+        // E4 п.3: AXSecureTextField — подроль поля с ролью AXTextField.
+        return AXSecureField.effectiveRole(role: role, subrole: AXSecureField.subrole(of: focusedElement))
     }
 
     /// Преобразует текст для вставки в поле поиска/комбобокс: снимает хвостовой пробел

@@ -28,6 +28,13 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CYCLES="${CYCLES:-20}"
 SLEEP_BETWEEN="${SLEEP_BETWEEN:-2}"
 BACKEND_LABEL="${BACKEND_LABEL:-ai.krab.ear.backend}"
+# safe_backend_restart.command перезапускает ТОЛЬКО ai.krab.ear.backend и label не принимает:
+# при другом BACKEND_LABEL эксперимент перезапускал бы боевой backend, а отчёт называл бы
+# нетронутый чужой job. Отказ — до любых изменений (env, рестарты, отчёт).
+if [ "$BACKEND_LABEL" != "ai.krab.ear.backend" ]; then
+    echo "ERROR: BACKEND_LABEL=$BACKEND_LABEL не поддерживается: рестарт идёт через safe_backend_restart.command, он управляет только ai.krab.ear.backend." >&2
+    exit 2
+fi
 SOCK="${SOCK:-$HOME/Library/Application Support/KrabEar/krabear.sock}"
 DATE=$(date +%Y-%m-%d-%H%M)
 OUT_DIR="$ROOT_DIR/docs/measurements"
@@ -41,6 +48,35 @@ REPORT="$OUT_DIR/c1-validation-$DATE.md"
 _log() {
     printf '[validate_c1] %s\n' "$*" >&2
 }
+
+# 🔴 Скрипт переключает launchctl env глобально. Прежнее значение запоминаем и возвращаем
+# при ЛЮБОМ выходе (ошибка рестарта, Ctrl+C, set -e) — иначе backend навсегда остаётся
+# с выключенным исправлением, а следующий запуск вообще не знает об этом.
+ENV_NAME="KRAB_EAR_DISABLE_MPS_POOL_FREE"
+PREV_ENV="$(launchctl getenv "$ENV_NAME" 2>/dev/null || true)"
+# С каким значением ЗАПУЩЕН backend после наших рестартов (__unchanged__ — мы его не перезапускали).
+# Возврат launchctl env сам по себе работающий процесс не меняет.
+RUNNING_ENV="__unchanged__"
+restore_env() {
+    if [ -n "$PREV_ENV" ]; then
+        launchctl setenv "$ENV_NAME" "$PREV_ENV" 2>/dev/null || true
+    else
+        launchctl unsetenv "$ENV_NAME" 2>/dev/null || true
+    fi
+    if [ "$RUNNING_ENV" != "__unchanged__" ] && [ "$RUNNING_ENV" != "$PREV_ENV" ]; then
+        _log "Backend запущен с экспериментальным значением $ENV_NAME='$RUNNING_ENV' — пробую безопасно вернуть исходное..."
+        if ! "$ROOT_DIR/scripts/safe_backend_restart.command" >/dev/null 2>&1; then
+            _log "ВНИМАНИЕ: состояние backend НЕ восстановлен (идёт запись/встреча или рестарт отказал)."
+            _log "          Он продолжает работать с экспериментальной настройкой; перезапустите:"
+            _log "          scripts/safe_backend_restart.command"
+        fi
+    fi
+}
+trap restore_env EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+IPC_FAILS=0
 
 # Return gigaam_worker RSS sum in MB (integer). Returns 0 if no worker found.
 get_worker_rss_mb() {
@@ -95,22 +131,20 @@ for path in [sock_path, dev_path]:
         pass
 
 sys.exit(1)
-" 2>/dev/null || true
+" 2>/dev/null || IPC_FAILS=$((IPC_FAILS + 1))
         sleep "$SLEEP_BETWEEN"
     done
 }
 
 # Restart backend via launchd and wait for it to be ready.
 restart_backend() {
-    _log "Restarting backend ($BACKEND_LABEL)..."
-    # kickstart -k = kill existing + restart
-    launchctl kickstart -k "gui/$(id -u)/$BACKEND_LABEL" 2>/dev/null || {
-        _log "WARNING: launchctl kickstart failed — is $BACKEND_LABEL installed?"
-        _log "Install with: scripts/install_backend_launchagent.command"
+    _log "Restarting backend ($BACKEND_LABEL) via safe_backend_restart..."
+    # Слепой `kickstart -k` рвал бы живую диктовку; safe-скрипт отказывает под записью/встречей
+    # и при неизвестном состоянии, UID не зашит, готовность подтверждается IPC-ping.
+    if ! "$ROOT_DIR/scripts/safe_backend_restart.command"; then
+        _log "ERROR: безопасный рестарт отказал (занято записью/встречей или состояние неизвестно)."
         return 1
-    }
-    _log "Waiting 10s for backend to come up..."
-    sleep 10
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -168,7 +202,8 @@ EOF
 
 _log "=== ROUND 1: Control (KRAB_EAR_DISABLE_MPS_POOL_FREE=1) ==="
 launchctl setenv KRAB_EAR_DISABLE_MPS_POOL_FREE 1
-restart_backend
+restart_backend || exit 1  # zsh: errexit из ФУНКЦИИ пропускает EXIT-trap, явный exit — нет
+RUNNING_ENV="1"
 
 PRE_CONTROL_WORKER=$(get_worker_rss_mb)
 PRE_CONTROL_BACKEND=$(get_backend_rss_mb)
@@ -204,7 +239,8 @@ EOF
 _log ""
 _log "=== ROUND 2: Treatment (fix ENABLED, env var unset) ==="
 launchctl unsetenv KRAB_EAR_DISABLE_MPS_POOL_FREE
-restart_backend
+restart_backend || exit 1  # zsh: errexit из ФУНКЦИИ пропускает EXIT-trap, явный exit — нет
+RUNNING_ENV=""
 
 PRE_TREAT_WORKER=$(get_worker_rss_mb)
 PRE_TREAT_BACKEND=$(get_backend_rss_mb)
@@ -240,7 +276,12 @@ WORKER_SAVINGS=$((DELTA_CONTROL_WORKER - DELTA_TREAT_WORKER))
 BACKEND_SAVINGS=$((DELTA_CONTROL_BACKEND - DELTA_TREAT_BACKEND))
 PER_CYCLE_SAVINGS=$(echo "scale=2; $WORKER_SAVINGS / $CYCLES" | bc)
 
-if [ "$WORKER_SAVINGS" -gt 0 ]; then
+if [ "$PRE_CONTROL_WORKER" -eq 0 ] || [ "$POST_CONTROL_WORKER" -eq 0 ] \
+   || [ "$PRE_TREAT_WORKER" -eq 0 ] || [ "$POST_TREAT_WORKER" -eq 0 ] || [ "$IPC_FAILS" -gt 0 ]; then
+    # Нулевой RSS = gigaam_worker не найден (его нет без реального STT); IPC-сбои = нагрузка не
+    # создавалась. Из таких замеров нельзя делать вывод о гипотезе H1 ни в какую сторону.
+    VERDICT="INCONCLUSIVE: gigaam_worker не обнаружен в замерах или IPC-вызовы падали (сбоев: $IPC_FAILS) — вывод о H1 невозможен; повторить во время реальной диктовки"
+elif [ "$WORKER_SAVINGS" -gt 0 ]; then
     VERDICT="Fix REDUCES memory growth — H1 hypothesis confirmed (gigaam_worker path)"
 elif [ "$WORKER_SAVINGS" -eq 0 ]; then
     VERDICT="No difference in gigaam_worker RSS — H1 not primary cause; investigate H2 (model re-load) or H3 (pyannote)"

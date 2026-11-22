@@ -114,14 +114,16 @@ class TestExportSettings(unittest.TestCase):
 
     def test_export_default_path_created_if_no_file_param(self):
         """Без 'file' экспорт создаёт файл в домашнем каталоге."""
-        svc = self._svc()
-        result = svc.handle_export_settings({})
-        path = Path(result["file"])
-        try:
-            self.assertTrue(path.exists())
-            self.assertTrue(path.name.startswith("krabear_settings_"))
-        finally:
-            path.unlink(missing_ok=True)
+        # E5 п.3: HOME — временный каталог, тест не пишет в реальный домашний каталог.
+        import os
+        with tempfile.TemporaryDirectory() as fake_home:
+            with patch.dict(os.environ, {"HOME": fake_home}):
+                svc = self._svc()
+                result = svc.handle_export_settings({})
+                path = Path(result["file"])
+                self.assertTrue(path.exists())
+                self.assertTrue(path.name.startswith("krabear_settings_"))
+                self.assertEqual(path.parent.resolve(), Path(fake_home).resolve())
 
 
 class TestImportSettings(unittest.TestCase):

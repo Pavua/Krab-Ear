@@ -138,118 +138,60 @@ class SentimentTrendsPrivacyModeTestCase(unittest.TestCase):
 # F4 — Local timezone date bucketing tests
 # ---------------------------------------------------------------------------
 
-def _system_utcoffset_seconds() -> float:
-    """Return the local system timezone UTC offset in seconds (0 = UTC)."""
-    import time
-    return -time.timezone  # time.timezone = seconds WEST of UTC; negate for offset
-
-
-@unittest.skipIf(
-    _system_utcoffset_seconds() == 0,
-    "W1748: local timezone is UTC — test requires UTC+N (N>0) to distinguish "
-    "UTC date from local date bucketing; skip on CI runners with UTC clock",
-)
 class SentimentTrendsLocalDateTestCase(unittest.TestCase):
-    """W1289 F4: дата записи определяется в локальном, а не UTC часовом поясе."""
+    """W1289 F4: дата записи определяется в локальном, а не UTC часовом поясе.
+
+    Часовой пояс процесса ФИКСИРУЕТСЯ (UTC+3) и восстанавливается после теста; на вход подаются
+    чистые UTC-метки без подмены _get_ts — преобразование проверяет сам анализатор (раньше фикстура
+    заранее переводила время, и анализатор с простым .date() получал ожидаемый день; к тому же весь
+    класс пропускался на машинах/CI с UTC-часами).
+    """
+
+    def setUp(self) -> None:
+        import os
+        import time
+
+        if not hasattr(time, "tzset"):
+            self.skipTest("time.tzset недоступен на этой платформе")
+        old_tz = os.environ.get("TZ")
+
+        def _restore() -> None:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+        self.addCleanup(_restore)
+        os.environ["TZ"] = "Etc/GMT-3"  # POSIX-знак обратный: это UTC+3 без перехода на летнее время
+        time.tzset()
+
+    def _buckets(self, items):
+        report = SentimentTrendAnalyzer().analyze_sentiment_trends(items, days=3650)
+        self.assertTrue(report.daily_sentiment, "отчёт пуст — анализатор не принял записи")
+        return {d["date"]: d["count"] for d in report.daily_sentiment}
 
     def test_sentiment_uses_local_date_not_utc(self) -> None:
-        """Запись в 00:30 UTC (= 03:30 Moscow) должна попасть в UTC-дату, но
-        при UTC+3 корректный local день на 3 часа вперёд.
-
-        Тест проверяет что analyze_sentiment_trends использует .astimezone().date()
-        — т.е. для ts=2026-01-02T00:30:00+00:00 при UTC+3 → local date = 2026-01-02
-        (совпадает), но ts=2025-12-31T23:30:00+00:00 при UTC+3 → local 2026-01-01.
-        """
-        # Создаём ts = полночь UTC минус 30 минут → предыдущий день UTC, но
-        # при любом положительном смещении (UTC+N, N>0) это уже следующий день локально.
-        # Конкретно: 2026-01-01 23:30 UTC → при UTC+1 → 2026-01-02 00:30 local.
-        # .date() (UTC) = 2026-01-01; .astimezone().date() при UTC+1 = 2026-01-02.
-        #
-        # Мы симулируем это через явный offset: создаём UTC timestamp и tz+1.
-        from datetime import timezone as tz
-
-        # Timestamp: 2026-01-01 23:45 UTC (без смещения)
-        ts_utc = datetime(2026, 1, 1, 23, 45, 0, tzinfo=tz.utc)
-
-        # Имитируем offset +01:00 через patching astimezone
-        from datetime import timedelta
-        local_tz = timezone(timedelta(hours=1))
-        ts_local = ts_utc.astimezone(local_tz)  # → 2026-01-02 00:45 +01:00
-
-        # Проверяем что raw UTC date != local date
-        self.assertEqual(ts_utc.date().isoformat(), "2026-01-01")
-        self.assertEqual(ts_local.date().isoformat(), "2026-01-02")
-
-        # Теперь проверяем что наш analyzer использует astimezone().date()
-        # путём patching datetime.astimezone на ts объекте.
-        analyzer = SentimentTrendAnalyzer()
-
-        # Создаём item с ts на 23:45 UTC
-        item = {"text": "отлично", "ts": ts_utc.isoformat(), "language": "ru"}
-
-        # Patch astimezone на datetime instances чтобы вернуть UTC+1 версию
-        original_get_ts = SentimentTrendAnalyzer._get_ts
-
-        def patched_get_ts(item_):
-            result = original_get_ts(item_)
-            if result is not None:
-                # Wrap в UTC+1
-                return result.astimezone(local_tz)
-            return result
-
-        with patch.object(SentimentTrendAnalyzer, "_get_ts", staticmethod(patched_get_ts)):
-            report = analyzer.analyze_sentiment_trends([item], days=365)
-
-        # Если используется local date → дата должна быть 2026-01-02
-        if report.daily_sentiment:
-            date_used = report.daily_sentiment[0]["date"]
-            self.assertEqual(date_used, "2026-01-02",
-                             "Ожидается local date (UTC+1), но получена UTC date")
+        """23:45 UTC 1 января = 02:45 2 января по UTC+3 → bucket 2026-01-02, не 2026-01-01."""
+        ts_utc = datetime(2026, 1, 1, 23, 45, 0, tzinfo=timezone.utc)
+        buckets = self._buckets([{"text": "отлично", "ts": ts_utc.isoformat(), "language": "ru"}])
+        self.assertEqual(buckets, {"2026-01-02": 1})
 
     def test_sentiment_utc_item_date_uses_astimezone(self) -> None:
-        """Прямой тест: _get_ts возвращает aware datetime, и date() через astimezone
-        совпадает с astimezone().date() при системном tz."""
-        from datetime import timezone as tz
-        ts_utc = datetime(2026, 3, 15, 12, 0, 0, tzinfo=tz.utc)
-        # В любом tz astimezone().date() должен быть корректным local date
-        local_date = ts_utc.astimezone().date()
-        self.assertIsNotNone(local_date)
-        # Дата должна быть 2026-03-15 или соседний день (при экзотических UTC-12/+12)
-        year = local_date.year
-        self.assertEqual(year, 2026)
+        """22:30 UTC 15 марта = 01:30 16 марта по UTC+3: день сдвигается через astimezone()."""
+        ts_utc = datetime(2026, 3, 15, 22, 30, 0, tzinfo=timezone.utc)
+        buckets = self._buckets([{"text": "хорошо", "ts": ts_utc.isoformat(), "language": "ru"}])
+        self.assertEqual(buckets, {"2026-03-16": 1})
 
     def test_sentiment_analyzer_date_bucketing_is_consistent(self) -> None:
-        """Два элемента с одинаковым local-днём группируются вместе."""
-        from datetime import timezone as tz, timedelta
-
-        local_tz = timezone(timedelta(hours=3))  # UTC+3
-
-        # Оба в один local-день (2026-06-01 UTC+3 = 2026-05-31 22:xx UTC → 2026-06-01 01:xx UTC)
-        ts1 = datetime(2026, 5, 31, 23, 0, 0, tzinfo=tz.utc)   # local 2026-06-01 02:00
-        ts2 = datetime(2026, 6, 1,  0, 30, 0, tzinfo=tz.utc)   # local 2026-06-01 03:30
-
-        analyzer = SentimentTrendAnalyzer()
-        original_get_ts = SentimentTrendAnalyzer._get_ts
-
-        def patched_get_ts(item_):
-            result = original_get_ts(item_)
-            if result is not None:
-                return result.astimezone(local_tz)
-            return result
-
-        items = [
+        """Два элемента с одним local-днём (UTC+3) группируются вместе: один bucket, count=2."""
+        ts1 = datetime(2026, 5, 31, 23, 0, 0, tzinfo=timezone.utc)   # local 2026-06-01 02:00
+        ts2 = datetime(2026, 6, 1, 0, 30, 0, tzinfo=timezone.utc)    # local 2026-06-01 03:30
+        buckets = self._buckets([
             {"text": "хорошо", "ts": ts1.isoformat(), "language": "ru"},
             {"text": "отлично", "ts": ts2.isoformat(), "language": "ru"},
-        ]
-
-        with patch.object(SentimentTrendAnalyzer, "_get_ts", staticmethod(patched_get_ts)):
-            report = analyzer.analyze_sentiment_trends(items, days=365)
-
-        # Оба в local 2026-06-01 → должен быть один day bucket с count=2
-        dates = [d["date"] for d in report.daily_sentiment]
-        self.assertIn("2026-06-01", dates)
-        bucket = next(d for d in report.daily_sentiment if d["date"] == "2026-06-01")
-        self.assertEqual(bucket["count"], 2)
+        ])
+        self.assertEqual(buckets, {"2026-06-01": 2})
 
 
 if __name__ == "__main__":

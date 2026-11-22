@@ -191,8 +191,9 @@ class ModelLoadedFormsTestCase(unittest.TestCase):
             def __init__(self, body):
                 self._body = body
 
-            def read(self):
-                return _json.dumps(self._body).encode()
+            def read(self, amt=-1):  # как http.client.HTTPResponse.read(amt=None)
+                data = _json.dumps(self._body).encode()
+                return data if amt is None or amt < 0 else data[:amt]
 
             def __enter__(self):
                 return self

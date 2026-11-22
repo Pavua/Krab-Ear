@@ -152,9 +152,27 @@ def test_ordinary_stt_does_not_persist_when_later_privacy_read_fails(rest):
     client = app.test_client()
 
     resp = _post_stt(client, persist_history="true")
-
-    assert resp.status_code != 403 or not (resp.get_json() or {}).get("text")
+    # Сценарий РЕАЛЬНО выполнен: STT вызван, а после него настройки прочитаны повторно (и упали)
+    deps.transcriber.transcribe.assert_called_once()
+    assert reads["n"] >= 2, "повторное чтение privacy после STT не произошло"
     deps.store.add_history_item.assert_not_called()
+    # ответ ушёл вызывающему (он сам прислал аудио), но в историю ничего не записано
+    assert resp.status_code == 200, resp.get_json()
+    assert (resp.get_json() or {}).get("history_id") in ("", None)
+
+
+def test_ordinary_stt_persists_when_privacy_readable_off(rest):
+    """Положительный контроль: при исправных settings (privacy OFF) та же загрузка сохраняется."""
+    app, deps = rest
+    deps.store.load_settings.return_value = {"privacy_mode_enabled": False}
+    client = app.test_client()
+
+    resp = _post_stt(client, persist_history="true")
+
+    assert resp.status_code == 200, resp.get_json()
+    deps.transcriber.transcribe.assert_called_once()
+    deps.store.add_history_item.assert_called_once()
+    assert resp.get_json().get("history_id") == "hist-rest-privacy"
 
 
 def test_ws_stream_fails_closed_when_settings_unreadable(rest):

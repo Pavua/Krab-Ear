@@ -33,6 +33,31 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
+# Откат импортных подмен (раньше: заглушки sys.modules жили вечно; атрибуты возвращались только
+# при `_orig is not None` — «отсутствовал» не восстанавливался; при исключении импорта
+# rest_server откат вообще не выполнялся). Всё, что вставлено/подменено, учитывается здесь и
+# снимается в finally (атрибуты) и в teardown_module (заглушки, свежеимпортированный rest_server).
+_MISSING = object()
+_INSERTED_STUBS: list = []
+_PATCHED_ATTRS: list = []  # (module, attr, original-or-_MISSING)
+_REST_WAS_IMPORTED = "backend.rest_server" in sys.modules
+
+
+def _patch_attr(mod, attr, value):
+    _PATCHED_ATTRS.append((mod, attr, getattr(mod, attr, _MISSING)))
+    setattr(mod, attr, value)
+
+
+def _restore_patched_attrs() -> None:
+    while _PATCHED_ATTRS:
+        mod, attr, orig = _PATCHED_ATTRS.pop()
+        if orig is _MISSING:
+            if hasattr(mod, attr):
+                delattr(mod, attr)
+        else:
+            setattr(mod, attr, orig)
+
+
 def _ensure_real_or_stub(mod_name: str) -> types.ModuleType:
     if mod_name in sys.modules:
         return sys.modules[mod_name]
@@ -41,11 +66,24 @@ def _ensure_real_or_stub(mod_name: str) -> types.ModuleType:
         importlib.import_module(mod_name)
     except Exception:
         sys.modules[mod_name] = types.ModuleType(mod_name)
+        _INSERTED_STUBS.append(mod_name)
     return sys.modules[mod_name]
 
 
+def teardown_module(module=None):
+    """Снять заглушки sys.modules, вставленные этим файлом, и свежеимпортированный rest_server."""
+    _restore_patched_attrs()
+    if not _REST_WAS_IMPORTED:
+        sys.modules.pop("backend.rest_server", None)
+    for name in reversed(_INSERTED_STUBS):
+        sys.modules.pop(name, None)
+    _INSERTED_STUBS.clear()
+
+
+tearDownModule = teardown_module  # для запуска через unittest
+
+
 _engine_mod = _ensure_real_or_stub("core.engine")
-_orig_AudioEngine = getattr(_engine_mod, "AudioEngine", None)
 
 
 class _FakeEngine:
@@ -58,16 +96,15 @@ class _FakeEngine:
         pass
 
 
-_engine_mod.AudioEngine = _FakeEngine  # type: ignore[attr-defined]
+_patch_attr(_engine_mod, "AudioEngine", _FakeEngine)
 
 _eb = _ensure_real_or_stub("backend.event_bus")
 if not hasattr(_eb, "bus"):
-    _eb.bus = MagicMock()  # type: ignore[attr-defined]
+    _patch_attr(_eb, "bus", MagicMock())
 if not hasattr(_eb, "sse_stream"):
-    _eb.sse_stream = MagicMock(return_value=iter([]))  # type: ignore[attr-defined]
+    _patch_attr(_eb, "sse_stream", MagicMock(return_value=iter([])))
 
 _service_mod = _ensure_real_or_stub("backend.service")
-_orig_BackendService = getattr(_service_mod, "BackendService", None)
 
 
 class _FakeBackendService:
@@ -76,10 +113,9 @@ class _FakeBackendService:
         return {"overall_ready": True, "components": {}}
 
 
-_service_mod.BackendService = _FakeBackendService  # type: ignore[attr-defined]
+_patch_attr(_service_mod, "BackendService", _FakeBackendService)
 
 _state_store_mod = _ensure_real_or_stub("backend.state_store")
-_orig_StateStore = getattr(_state_store_mod, "StateStore", None)
 
 
 class _FakeStateStore:
@@ -101,10 +137,9 @@ class _FakeStateStore:
         return dict(self._settings)
 
 
-_state_store_mod.StateStore = _FakeStateStore  # type: ignore[attr-defined]
+_patch_attr(_state_store_mod, "StateStore", _FakeStateStore)
 
 _transcriber_mod = _ensure_real_or_stub("backend.transcriber")
-_orig_Transcriber = getattr(_transcriber_mod, "Transcriber", None)
 
 
 class _FakeTranscriber:
@@ -112,10 +147,9 @@ class _FakeTranscriber:
         pass
 
 
-_transcriber_mod.Transcriber = _FakeTranscriber  # type: ignore[attr-defined]
+_patch_attr(_transcriber_mod, "Transcriber", _FakeTranscriber)
 
 _metrics_mod = _ensure_real_or_stub("backend.metrics_collector")
-_orig_metrics = getattr(_metrics_mod, "metrics", None)
 
 
 class _FakeMetrics:
@@ -126,7 +160,7 @@ class _FakeMetrics:
         pass
 
 
-_metrics_mod.metrics = _FakeMetrics()  # type: ignore[attr-defined]
+_patch_attr(_metrics_mod, "metrics", _FakeMetrics())
 
 try:
     import flask_smorest  # noqa: F401
@@ -168,6 +202,7 @@ except ImportError:
     smorest_mod.Blueprint = _FakeBlueprint
     smorest_mod.abort = MagicMock()
     sys.modules["flask_smorest"] = smorest_mod
+    _INSERTED_STUBS.append("flask_smorest")
 
 try:
     import marshmallow  # noqa: F401
@@ -189,6 +224,7 @@ except ImportError:
     ma_mod.fields = _Fields()
     ma_mod.validate = types.SimpleNamespace()
     sys.modules["marshmallow"] = ma_mod
+    _INSERTED_STUBS.append("marshmallow")
 
 try:
     from werkzeug.utils import secure_filename  # noqa: F401
@@ -196,22 +232,16 @@ except ImportError:
     wz_mod = types.ModuleType("werkzeug.utils")
     wz_mod.secure_filename = lambda name: name
     sys.modules["werkzeug.utils"] = wz_mod
+    _INSERTED_STUBS.append("werkzeug.utils")
 
 from core.config import settings  # noqa: E402
 
-with patch("pathlib.Path.mkdir"):
-    import backend.rest_server as rest_server  # noqa: E402
-
-if _orig_AudioEngine is not None:
-    _engine_mod.AudioEngine = _orig_AudioEngine  # type: ignore[attr-defined]
-if _orig_BackendService is not None:
-    _service_mod.BackendService = _orig_BackendService  # type: ignore[attr-defined]
-if _orig_StateStore is not None:
-    _state_store_mod.StateStore = _orig_StateStore  # type: ignore[attr-defined]
-if _orig_Transcriber is not None:
-    _transcriber_mod.Transcriber = _orig_Transcriber  # type: ignore[attr-defined]
-if _orig_metrics is not None:
-    _metrics_mod.metrics = _orig_metrics  # type: ignore[attr-defined]
+try:
+    with patch("pathlib.Path.mkdir"):
+        import backend.rest_server as rest_server  # noqa: E402
+finally:
+    # Подмены атрибутов возвращаются СРАЗУ после импорта и при исключении импорта
+    _restore_patched_attrs()
 
 
 class TestPrivacyGateBeatsAuth(unittest.TestCase):

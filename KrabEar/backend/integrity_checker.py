@@ -20,10 +20,16 @@ import json
 import logging
 import os
 import re
+import stat
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from backend import state_store
+from backend.history_encryption_policy import HistoryEncryptionOperationUnavailable
+from backend.plaintext_export_authorization import PolicyState
+from core.atomic_io import atomic_write_bytes, atomic_write_text
 
 logger = logging.getLogger("KrabEar.Backend.IntegrityChecker")
 
@@ -83,7 +89,14 @@ class IntegrityChecker:
         settings_path = data_dir / "settings.json"
 
         # 1. Valid NDJSON format
-        valid_lines, bad_lines, parsed_items = self._load_ndjson(history_path)
+        try:
+            _, bad_lines, parsed_items = self._load_ndjson(history_path)
+        except OSError:
+            return IntegrityReport(status="errors", checks=[CheckResult(
+                name="history_file",
+                status="error",
+                message="Не удалось прочитать history.ndjson как обычный файл",
+            )])
         invalid_json_lines = bad_lines
         if bad_lines > 0:
             checks.append(CheckResult(
@@ -182,10 +195,7 @@ class IntegrityChecker:
         # 6. Settings file valid JSON
         if settings_path.exists():
             try:
-                settings_text = settings_path.read_text(encoding="utf-8")
-                parsed_settings = json.loads(settings_text)
-                if not isinstance(parsed_settings, dict):
-                    raise ValueError("не является объектом")
+                state_store.StateStore.read_settings_import(settings_path)
                 checks.append(CheckResult(
                     name="settings_json",
                     status="ok",
@@ -239,10 +249,15 @@ class IntegrityChecker:
 
         for check in fixable:
             if check.name == "valid_ndjson":
-                fixed, backup, quarantine = self._repair_ndjson(
-                    data_dir / "history.ndjson",
-                    data_dir / "history.lock",
-                )
+                try:
+                    fixed, backup, quarantine = self._repair_ndjson(
+                        data_dir / "history.ndjson",
+                        data_dir / "history.lock",
+                    )
+                except HistoryEncryptionOperationUnavailable as exc:
+                    result.skipped += 1
+                    result.details.append(str(exc))
+                    continue
                 result.fixed += fixed
                 if backup:
                     result.backup_paths.append(backup)
@@ -274,6 +289,9 @@ class IntegrityChecker:
 
         non_fixable = [c for c in report.checks if not c.auto_fixable and c.status != "ok"]
         result.skipped += len(non_fixable)
+        for check in non_fixable:
+            if check.name == "history_file":
+                result.details.append(check.message)
         if any(check.name == "settings_json" for check in non_fixable):
             result.details.append("settings_json: требуется явное восстановление настроек")
         return result
@@ -323,6 +341,14 @@ class IntegrityChecker:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _read_history_bytes(path: Path) -> bytes:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as source:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError("Ожидался обычный файл истории")
+            return source.read()
+
     def _load_ndjson(self, path: Path) -> tuple[int, int, list[dict]]:
         """Читает NDJSON-файл. Возвращает (valid_lines, bad_lines, parsed_items).
 
@@ -330,12 +356,13 @@ class IntegrityChecker:
         (без errors='replace'), чтобы не засорять результат mojibake-строками.
         Строки с ошибками декодирования считаются bad.
         """
-        if not path.exists():
+        try:
+            raw_bytes = self._read_history_bytes(path)
+        except FileNotFoundError:
             return 0, 0, []
         valid = 0
         bad = 0
         items: list[dict] = []
-        raw_bytes = path.read_bytes()
         for raw_line in raw_bytes.splitlines():
             if not raw_line.strip():
                 continue
@@ -392,8 +419,22 @@ class IntegrityChecker:
 
         lock_fd = self._acquire_lock(lock_path)
         try:
+            # Stale report не разрешает копировать историю. Решение и все
+            # последующие записи защищены тем же flock, что и commit настроек.
+            policy = state_store.StateStore.read_profile_policy_locked(path.parent / "settings.json")
+            if (
+                policy.state is not PolicyState.KNOWN_OFF
+                or policy.privacy_mode_enabled is not False
+                or state_store.has_encrypted_history_in(
+                    state_store.history_journal_paths(path.parent),
+                    tolerate_invalid_utf8=True,
+                    reject_nonregular=True,
+                )
+            ):
+                raise HistoryEncryptionOperationUnavailable("valid_ndjson")
+
             # Читаем байты под lock — никакого concurrent write не проскочит.
-            raw_bytes = path.read_bytes()
+            raw_bytes = self._read_history_bytes(path)
 
             good_lines: list[str] = []
             bad_raw_lines: list[bytes] = []
@@ -423,14 +464,14 @@ class IntegrityChecker:
                 return 0, "", ""
 
             # 1. Бэкап оригинала — перед любой записью.
-            backup_path.write_bytes(raw_bytes)
+            atomic_write_bytes(backup_path, raw_bytes)
             logger.info(
                 "integrity_checker: бэкап оригинала сохранён",
                 extra={"backup": str(backup_path), "path": str(path)},
             )
 
             # 2. Карантин для отклонённых строк.
-            quarantine_path.write_bytes(b"\n".join(bad_raw_lines) + b"\n")
+            atomic_write_bytes(quarantine_path, b"\n".join(bad_raw_lines) + b"\n")
             logger.info(
                 "integrity_checker: %d строк помещено в карантин",
                 removed,
@@ -438,13 +479,8 @@ class IntegrityChecker:
             )
 
             # 3. Атомарная замена файла валидными строками.
-            tmp = path.with_suffix(".ndjson.tmp")
             content = "\n".join(good_lines) + ("\n" if good_lines else "")
-            tmp.write_text(content, encoding="utf-8")
-            with tmp.open("r+", encoding="utf-8") as fh:
-                fh.flush()
-                os.fsync(fh.fileno())
-            tmp.replace(path)
+            atomic_write_text(path, content)
 
             return removed, str(backup_path), str(quarantine_path)
         finally:

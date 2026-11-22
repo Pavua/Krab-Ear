@@ -60,6 +60,17 @@ class TestExportSettingsPathTraversal(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # E5 п.3: HOME — временный каталог. Тесты целятся в ~/.ssh/authorized_keys и ~/.gitconfig,
+        # и при регрессии охранника писали бы JSON в РЕАЛЬНЫЙ домашний каталог.
+        # Каталог ВНЕ allowlist (/var/tmp не входит в корни; gettempdir()/tmp — входят и сделали бы
+        # ~/.gitconfig «разрешённым»).
+        _home_tmp = tempfile.TemporaryDirectory(dir="/var/tmp")
+        self.addCleanup(_home_tmp.cleanup)
+        self._home = Path(_home_tmp.name).resolve()
+        (self._home / "Downloads").mkdir(parents=True)
+        _home_env = patch.dict(os.environ, {"HOME": str(self._home)})
+        _home_env.start()
+        self.addCleanup(_home_env.stop)
         self.svc = _make_settings_svc(self._tmp.name)
 
     def test_traversal_to_ssh_authorized_keys_rejected(self) -> None:
@@ -87,10 +98,8 @@ class TestExportSettingsPathTraversal(unittest.TestCase):
 
     def test_legit_tmp_path_allowed(self) -> None:
         """A path inside /tmp must be allowed."""
-        with tempfile.NamedTemporaryFile(
-            suffix=".json", dir="/tmp", delete=False
-        ) as tf:
-            out_path = tf.name
+        # E5 п.2: экспорт не перезаписывает существующий файл — путь должен быть свежим.
+        out_path = os.path.join("/tmp", f"krab_w1736_{os.getpid()}_{id(self)}.json")
         self.addCleanup(lambda: Path(out_path).unlink(missing_ok=True))
         result = self.svc.handle_export_settings({"file": out_path})
         self.assertIn("file", result)
@@ -351,6 +360,17 @@ class TestDotDotEscapeHandlers(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # E5 п.3: HOME — временный каталог. Тесты целятся в ~/.ssh/authorized_keys и ~/.gitconfig,
+        # и при регрессии охранника писали бы JSON в РЕАЛЬНЫЙ домашний каталог.
+        # Каталог ВНЕ allowlist (/var/tmp не входит в корни; gettempdir()/tmp — входят и сделали бы
+        # ~/.gitconfig «разрешённым»).
+        _home_tmp = tempfile.TemporaryDirectory(dir="/var/tmp")
+        self.addCleanup(_home_tmp.cleanup)
+        self._home = Path(_home_tmp.name).resolve()
+        (self._home / "Downloads").mkdir(parents=True)
+        _home_env = patch.dict(os.environ, {"HOME": str(self._home)})
+        _home_env.start()
+        self.addCleanup(_home_env.stop)
 
     def test_export_settings_dotdot_escape_rejected(self) -> None:
         """export_settings dotdot path to .ssh/authorized_keys must be rejected."""
@@ -420,6 +440,17 @@ class TestExportSettingsNoSideEffectOnReject(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tmp.cleanup)
+        # E5 п.3: HOME — временный каталог. Тесты целятся в ~/.ssh/authorized_keys и ~/.gitconfig,
+        # и при регрессии охранника писали бы JSON в РЕАЛЬНЫЙ домашний каталог.
+        # Каталог ВНЕ allowlist (/var/tmp не входит в корни; gettempdir()/tmp — входят и сделали бы
+        # ~/.gitconfig «разрешённым»).
+        _home_tmp = tempfile.TemporaryDirectory(dir="/var/tmp")
+        self.addCleanup(_home_tmp.cleanup)
+        self._home = Path(_home_tmp.name).resolve()
+        (self._home / "Downloads").mkdir(parents=True)
+        _home_env = patch.dict(os.environ, {"HOME": str(self._home)})
+        _home_env.start()
+        self.addCleanup(_home_env.stop)
 
     def test_evil_file_unchanged_after_reject(self) -> None:
         """The /etc target must be absent (or unchanged) after a rejected call."""

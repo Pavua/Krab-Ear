@@ -48,12 +48,16 @@ class TestGetLastLlmDiffPrivacyGate(unittest.TestCase):
         self.assertTrue(result.get("ok"), "ok должен быть True при privacy блокировке")
 
     def test_privacy_on_does_not_touch_transcriber(self) -> None:
+        from unittest.mock import PropertyMock
+
         svc = _make_llm_ops(privacy_on=True)
-        # engine.whatever should NOT be accessed
-        svc._transcriber.engine = MagicMock(side_effect=Exception("should not be called"))
-        # Must not raise
+        # PropertyMock фиксирует ЧТЕНИЕ атрибута engine (MagicMock(side_effect=...) реагировал бы
+        # только на вызов); assert_not_called работает и если обработчик перехватил исключение.
+        engine_prop = PropertyMock(return_value=MagicMock())
+        type(svc._transcriber).engine = engine_prop
         result = svc.handle_get_last_llm_diff({})
         self.assertIsNone(result.get("diff"))
+        engine_prop.assert_not_called()
 
     def test_privacy_off_no_diff_available(self) -> None:
         svc = _make_llm_ops(privacy_on=False)
@@ -108,9 +112,19 @@ class TestReplaceWordPrivacyGate(unittest.TestCase):
         try:
             # Add item — it should NOT be read/updated
             store.add_history_item(text="hello world test", paste_status="ok")
-            result = svc.handle_replace_word_in_last_transcript(
-                {"old_word": "hello", "new_word": "bye"}
-            )
+            from unittest.mock import patch as _patch
+            # spy на ЧТЕНИЕ и изменение истории (раньше проверялась лишь неизменность текста)
+            with _patch.object(store, "_load_active_items_unlocked",
+                               wraps=store._load_active_items_unlocked) as read_spy, \
+                    _patch.object(store, "get_history_item_by_id",
+                                  wraps=store.get_history_item_by_id) as by_id_spy, \
+                    _patch.object(store, "_lock", wraps=store._lock) as lock_spy:
+                result = svc.handle_replace_word_in_last_transcript(
+                    {"old_word": "hello", "new_word": "bye"}
+                )
+            read_spy.assert_not_called()
+            by_id_spy.assert_not_called()
+            lock_spy.assert_not_called()
             self.assertEqual(result.get("reason"), "privacy_mode_active")
             # Confirm store not modified: load and check text unchanged
             with store._lock():

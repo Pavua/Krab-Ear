@@ -87,7 +87,13 @@ class TestAddTranscriptParseBound(unittest.TestCase):
     def tearDown(self) -> None:
         self._tmpdir.cleanup()
 
-    def test_parse_count_is_not_quadratic(self) -> None:
+    def test_each_append_reads_file_at_most_once_total_bounded(self) -> None:
+        """Каждый add_transcript перечитывает файл НЕ БОЛЕЕ одного раза (бюджет 4K + K(K-1)/2 строк).
+
+        Это гарантия «один проход на добавление», а не линейный рост суммарных чтений: replay сессии
+        на каждый append даёт Θ(K²) строк в сумме по определению. Тест ловит многопроходное
+        чтение (K³ и хуже), но не называет текущую границу линейной.
+        """
         K = 500
         s = self.store.create("+79001234567", "тест масштабирования")
         _walk_to_talking(self.store, s.id)
@@ -534,11 +540,13 @@ class TestCompactAtomicity(unittest.TestCase):
             self.store.add_transcript(s.id, "u", f"т{i}")
 
         lines_before = _count_file_lines(self.store.sessions_path)
+        bytes_before = self.store.sessions_path.read_bytes()
         tmp = self.store.sessions_path.with_suffix(".ndjson.tmp")
 
-        original_dump = json.dumps
+        dump_calls: list[int] = []
 
         def _failing_dump(*args, **kwargs):
+            dump_calls.append(1)
             raise OSError("disk full simulation")
 
         with patch("backend.call_session_store.json.dumps", side_effect=_failing_dump):
@@ -547,11 +555,17 @@ class TestCompactAtomicity(unittest.TestCase):
             except OSError:
                 pass
 
+        # Внедрённая ошибка действительно возникла (иначе тест проверял бы обычный успех)
+        self.assertGreaterEqual(len(dump_calls), 1, "сериализатор compact() не был вызван")
         # tmp-файл должен быть удалён
         self.assertFalse(tmp.exists(), "tmp-файл не удалён после сбоя compact()")
-        # Оригинальный файл не изменился
-        lines_after = _count_file_lines(self.store.sessions_path)
-        self.assertEqual(lines_after, lines_before)
+        # Оригинал не изменился ПОБАЙТОВО (число строк не доказывает неповреждённости содержимого)
+        self.assertEqual(self.store.sessions_path.read_bytes(), bytes_before)
+        self.assertEqual(_count_file_lines(self.store.sessions_path), lines_before)
+        # и новый экземпляр store восстанавливает исходную сессию
+        reloaded = _make_store(Path(self._tmpdir.name)).get(s.id)
+        self.assertIsNotNone(reloaded)
+        self.assertEqual(len(reloaded.transcript_history), 5)
 
 
 # ---------------------------------------------------------------------------

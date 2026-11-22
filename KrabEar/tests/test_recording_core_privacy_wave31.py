@@ -17,6 +17,7 @@ from __future__ import annotations
 import sys
 import os
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -175,89 +176,88 @@ class TestGetRecordingStatePrivacyGate(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestSemanticAutoIndexPrivacyGate(unittest.TestCase):
-    """wave-31 MED: semantic index_item must NOT be called when privacy_mode=True."""
+    """wave-31 MED: semantic index_item must NOT be called when privacy_mode=True.
 
-    def _run_phase_e_stub(self, svc, privacy: bool, index_calls: list) -> None:
-        """Simulate the relevant part of _stop_recording_phase_e at the auto-index site.
+    Вызывается НАСТОЯЩИЙ RecordingCoreService._stop_recording_phase_e. Прежние тесты исполняли
+    копию условия (и «страховку» поиском строки, не ограничивавшую расстояние слева), поэтому
+    удаление проверки privacy из рабочего кода их не краснило.
+    """
 
-        Rather than invoking the full complex pipeline, we directly exercise the
-        guard condition by calling _semantic_searcher.index_item conditionally
-        in the same way the fixed code does: skip when _privacy_mode is True.
-
-        This mirrors what _stop_recording_phase_e does at the auto-index site.
-        """
-        import os as _os
-        with patch.dict(_os.environ, {}):
-            # Re-import to get fresh reference
-            from backend.recording_core_service import RecordingCoreService  # noqa: F401
-
-        _privacy_mode = privacy
-
-        # Replicate the guard as written in the fix
-        from backend.models import DEFAULT_SETTINGS  # noqa: F401
+    def _run_real_phase_e(self, *, privacy: bool, searcher_enabled: bool = True) -> MagicMock:
+        import tempfile
+        import threading as _real_threading
+        from backend.recording_core_service import RecordingCoreService
+        from backend.state_store import StateStore
         import backend.recording_core_service as _rcs_mod
+        from backend.translator import TranslationResult
 
-        # Simulate: if searcher.is_enabled and AUTO_INDEX and not _privacy_mode → index
-        searcher = svc._semantic_searcher
-        searcher.is_enabled = True
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        searcher = MagicMock()
+        searcher.is_enabled = searcher_enabled
+        session_tracker = MagicMock()
+        session_tracker._active_session = None
+        vocab = MagicMock()
+        vocab.get_words.return_value = []
+        svc = RecordingCoreService(
+            recorder=MagicMock(), transcriber=MagicMock(), translator=MagicMock(),
+            store=StateStore(data_dir=Path(tmp.name)), vocabulary=vocab,
+            settings_svc=_make_settings_svc(privacy=privacy), llm_rewriter=None, auto_glossary=None,
+            semantic_searcher=searcher, context_memory=None, clipboard_history=[],
+            auto_backup=MagicMock(), session_tracker=session_tracker, action_items_extractor=None,
+            transcription_counter_ref=[0], last_stt_engine_ref=[None],
+        )
+        text = "Тестовая запись для индексации."
+        tr = TranslationResult(text=text, status="skipped", source_lang="auto", target_lang="ru",
+                               mode="auto", engine="fake")
+        phase_d = {
+            "text": text, "display_text": text, "translated_text": "", "final_text": text,
+            "translation": tr, "translation_status": "skipped", "confidence": 0.9,
+            "diarization_data": None, "tp": {"language": "ru"},
+        }
+        sr = {"quality_profile": "balanced", "cleanup_profile": "soft",
+              "translation_style": "neutral", "translate_and_paste": False}
 
-        with patch.object(_rcs_mod._cfg_settings, "SEMANTIC_SEARCH_AUTO_INDEX", True):
-            if searcher.is_enabled and _rcs_mod._cfg_settings.SEMANTIC_SEARCH_AUTO_INDEX \
-                    and not _privacy_mode:
-                index_calls.append("called")
+        real_thread = _real_threading.Thread
+
+        class _SyncSemanticThread:
+            """semantic-index поток исполняется синхронно; прочие потоки — настоящие."""
+
+            def __new__(cls, *args, **kwargs):
+                if kwargs.get("name") == "semantic-index":
+                    inst = object.__new__(cls)
+                    inst._target, inst._args = kwargs["target"], kwargs.get("args", ())
+                    return inst
+                return real_thread(*args, **kwargs)
+
+            def start(self):
+                self._target(*self._args)
+
+        with patch.object(_rcs_mod._cfg_settings, "SEMANTIC_SEARCH_AUTO_INDEX", True), \
+                patch.object(_rcs_mod.threading, "Thread", _SyncSemanticThread):
+            svc._stop_recording_phase_e(
+                phase_d=phase_d, sr=sr, duration_sec=5.0, stop_tail_trim_ms=0,
+                silence_detected=False, silence_guard_enabled=False,
+                background_guard_rejected=False, rt_session_id=None,
+                settings={"privacy_mode_enabled": privacy},
+            )
+        return searcher
 
     def test_semantic_index_called_when_privacy_off(self):
-        """Normal path: index_item thread is started when privacy is off."""
-        svc = _make_service(privacy=False)
-        calls: list = []
-        self._run_phase_e_stub(svc, privacy=False, index_calls=calls)
-        self.assertEqual(len(calls), 1, "index_item должен вызываться при privacy=False")
+        """Normal path: index_item вызывается один раз с текстом записи при privacy OFF."""
+        searcher = self._run_real_phase_e(privacy=False)
+        searcher.index_item.assert_called_once()
+        self.assertIn("Тестовая запись", searcher.index_item.call_args.args[1])
 
     def test_semantic_index_skipped_when_privacy_on(self):
-        """Privacy gate: index_item must not be called when privacy_mode=True."""
-        svc = _make_service(privacy=True)
-        calls: list = []
-        self._run_phase_e_stub(svc, privacy=True, index_calls=calls)
-        self.assertEqual(len(calls), 0, "index_item НЕ должен вызываться при privacy=True")
+        """Privacy gate: index_item НЕ вызывается при privacy_mode=True."""
+        searcher = self._run_real_phase_e(privacy=True)
+        searcher.index_item.assert_not_called()
 
     def test_semantic_index_not_started_when_disabled(self):
-        """Baseline: index_item not called when is_enabled=False regardless of privacy."""
-        svc = _make_service(privacy=False)
-        calls: list = []
-        # Override: searcher disabled
-        svc._semantic_searcher.is_enabled = False
-        # With disabled searcher, guard short-circuits regardless of privacy
-        import backend.recording_core_service as _rcs_mod
-        with patch.object(_rcs_mod._cfg_settings, "SEMANTIC_SEARCH_AUTO_INDEX", True):
-            if svc._semantic_searcher.is_enabled and _rcs_mod._cfg_settings.SEMANTIC_SEARCH_AUTO_INDEX \
-                    and not False:  # privacy=False but is_enabled=False
-                calls.append("called")
-        self.assertEqual(len(calls), 0, "index_item не должен вызываться при is_enabled=False")
-
-    def test_semantic_index_guarded_via_phase_e_privacy_mode_variable(self):
-        """Verify the guard sits at the exact auto-index site in the real source.
-
-        This is a static code inspection test — checks that the guard expression
-        'and not _privacy_mode' appears in the source near the semantic-index thread.
-        """
-        import inspect
-        from backend.recording_core_service import RecordingCoreService
-        source = inspect.getsource(RecordingCoreService)
-
-        # The guard must be present
-        self.assertIn("not _privacy_mode", source,
-                      "Должен быть guard 'and not _privacy_mode' в источнике")
-
-        # The guard must appear near the semantic index call
-        idx_guard = source.find("not _privacy_mode")
-        idx_index = source.find("semantic-index")
-        self.assertNotEqual(idx_guard, -1, "'not _privacy_mode' не найдено")
-        self.assertNotEqual(idx_index, -1, "'semantic-index' не найдено")
-        # Guard must appear before the thread name
-        self.assertLess(
-            idx_guard, idx_index + 200,
-            "Guard 'not _privacy_mode' должен быть рядом с запуском semantic-index thread"
-        )
+        """Baseline: index_item не вызывается при is_enabled=False независимо от privacy."""
+        searcher = self._run_real_phase_e(privacy=False, searcher_enabled=False)
+        searcher.index_item.assert_not_called()
 
 
 if __name__ == "__main__":

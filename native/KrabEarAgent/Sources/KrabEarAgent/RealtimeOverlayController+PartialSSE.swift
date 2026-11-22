@@ -36,6 +36,7 @@ extension RealtimeOverlayController {
         let owner = transport ?? SSESubscriptionTransport()
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
         objc_setAssociatedObject(self, &partialSSETransportKey, owner, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         owner.start(request: request, onConnectionReset: { [weak self] in
             guard let self else { return }

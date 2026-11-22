@@ -382,8 +382,51 @@ final class LaunchAgentManagerTests: XCTestCase {
         manager.uninstall()
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: manager.plistPathForTest))
-        XCTAssertEqual(recorder.calls.count, 3)
+        // E4 п.5: провал записи plist НЕ должен трогать launchd (раньше install() всё равно
+        // делал bootout+bootstrap и снимал рабочий агент). Остаётся один bootout от uninstall().
+        XCTAssertEqual(recorder.calls.count, 1)
         XCTAssertTrue(recorder.calls.allSatisfy { $0.executable == "/bin/launchctl" })
+        XCTAssertEqual(recorder.calls.first?.arguments.first, "bootout")
+    }
+
+    /// Ревью ChatGPT: провал записи нового plist не должен стоить пользователю legacy-автозапуска.
+    func test_install_keepsLegacyPlistWhenNewPlistCannotBeWritten() throws {
+        let fixture = try makeFixture()
+        try FileManager.default.createDirectory(
+            at: fixture.launchAgentsDirectory, withIntermediateDirectories: true)
+        try Data("legacy".utf8).write(to: fixture.legacyPlist)
+        // Каталог на месте целевого plist: запись файла туда провалится.
+        try FileManager.default.createDirectory(
+            at: fixture.canonicalPlist.appendingPathComponent("blocker"), withIntermediateDirectories: true)
+
+        fixture.manager.install()
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.legacyPlist.path),
+                      "legacy-автозапуск удалён до успешной записи замены")
+    }
+
+    /// E4 п.5: путь с XML-спецсимволами обязан остаться ДАННЫМИ. Раньше путь подставлялся в XML
+    /// строкой: `&`/`<` ломали plist, а `</string>…` позволяло дописать чужие ключи.
+    func test_plist_hostileBundlePath_staysDataAndParses() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("KrabEarLaunchAgentHostile-\(UUID().uuidString)", isDirectory: true)
+            .standardizedFileURL
+        let hostileName = "a&b<c>\"d'e"
+        let projectRoot = root.appendingPathComponent(hostileName, isDirectory: true)
+        let bundle = projectRoot.appendingPathComponent("Krab Ear.app", isDirectory: true)
+        try FileManager.default.createDirectory(at: bundle, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let manager = LaunchAgentManager(
+            projectRoot: projectRoot.path,
+            launchAgentsDirectory: root.appendingPathComponent("LaunchAgents", isDirectory: true),
+            processRunner: LaunchAgentProcessRecorder().run(executable:arguments:)
+        )
+
+        let data = Data(manager.makePlistContent().utf8)
+        let object = try PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+        let plist = try XCTUnwrap(object as? [String: Any])
+        XCTAssertEqual(plist["ProgramArguments"] as? [String], ["/usr/bin/open", "-W", bundle.path])
+        XCTAssertEqual(Set(plist.keys), ["Label", "ProgramArguments", "RunAtLoad", "KeepAlive", "StandardOutPath", "StandardErrorPath"])
     }
 
     // MARK: - Валидность XML plist

@@ -39,9 +39,9 @@ final class CallObserverSettingsPrivacyTests: XCTestCase {
         XCTAssertTrue(r.privacy)
     }
 
-    func test_absent_privacy_key_keeps_new_profile_default_off() {
+    func test_absent_privacy_key_is_restricted() {
         let r = IPCCallObserverSettings.resolveSettings(response: ["result": [:] as [String: Any]])
-        XCTAssertFalse(r.privacy)
+        XCTAssertTrue(r.privacy)
         XCTAssertTrue(r.hud)
         XCTAssertFalse(r.autoplay)
     }

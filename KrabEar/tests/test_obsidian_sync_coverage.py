@@ -21,7 +21,9 @@ from _plaintext_export_test_helpers import off_authorizer
 import json
 import sys
 import tempfile
+import os as _os
 import unittest
+from unittest import mock as _env_patch
 from pathlib import Path
 from unittest.mock import patch
 
@@ -221,6 +223,11 @@ class TestSyncStatePersistedToObsidianSyncJson(_Base):
 
     def test_state_reloaded_on_new_instance(self) -> None:
         """Новый экземпляр загружает vault_path и last_sync_ts из JSON."""
+        # Внешнее ревью E3 (6г): vault из state-файла проверяется на $HOME,
+        # поэтому «домом» для теста служит его временный корень.
+        _home = _env_patch.patch.dict(_os.environ, {"HOME": self.tmp.name})
+        _home.start()
+        self.addCleanup(_home.stop)
         self.mgr.sync([_item()])
         original_status = self.mgr.get_sync_status()
 
@@ -431,6 +438,11 @@ class TestStateFileCorruptedRecoveredToEmpty(unittest.TestCase):
 
     def test_valid_state_with_existing_vault_restores(self) -> None:
         """State с существующим vault_path восстанавливает конфигурацию."""
+        # Внешнее ревью E3 (6г): vault из state-файла проверяется на $HOME,
+        # поэтому «домом» для теста служит его временный корень.
+        _home = _env_patch.patch.dict(_os.environ, {"HOME": self.tmp.name})
+        _home.start()
+        self.addCleanup(_home.stop)
         vault_dir = Path(self.tmp.name) / "vault"
         vault_dir.mkdir()
 

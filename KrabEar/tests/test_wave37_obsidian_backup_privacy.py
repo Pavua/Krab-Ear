@@ -91,17 +91,15 @@ class ObsidianExportPrivacyGateTestCase(unittest.TestCase):
         self._set_privacy(False)
         output_dir = Path(self.tmp.name) / "obsidian_normal"
         output_dir.mkdir()
-        # With real entries in the store the handler should succeed.
-        try:
-            res = self.svc.handle_export_obsidian({"output_dir": str(output_dir)})
-            # If it succeeds, reason should NOT be the privacy sentinel.
-            self.assertNotEqual(res.get("reason"), "privacy_mode_active")
-            self.assertIsNotNone(res.get("file"), "Should return a file path when privacy is off")
-        except RuntimeError:
-            # Raised if no items match — acceptable when store is empty or
-            # range yields nothing.  The key check is that we did NOT get the
-            # privacy sentinel.
-            pass
+        # В setUp добавлены 3 записи, фильтров нет — экспорт ОБЯЗАН пройти. Любое исключение
+        # экспортера теперь падение теста (раньше RuntimeError проглатывался и тест «проходил»).
+        res = self.svc.handle_export_obsidian({"output_dir": str(output_dir)})
+        self.assertNotEqual(res.get("reason"), "privacy_mode_active")
+        path = res.get("file")
+        self.assertIsNotNone(path, "Should return a file path when privacy is off")
+        self.assertTrue(Path(path).exists(), f"файл экспорта не создан: {path}")
+        content = Path(path).read_text(encoding="utf-8")
+        self.assertIn("запись", content, "в экспорте нет синтетических записей из setUp")
 
 
 class BackupHistoryPrivacyGateTestCase(unittest.TestCase):

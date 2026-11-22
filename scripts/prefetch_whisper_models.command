@@ -70,15 +70,26 @@ HF_CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 # Helper: check if a model is fully cached
 is_cached() {
     local repo_id="$1"
-    # HuggingFace stores repos as models--<org>--<name>
-    local cache_name
-    cache_name="models--$(echo "$repo_id" | tr '/' '--')"
-    local snapshots_dir="$HF_CACHE_DIR/$cache_name/snapshots"
-    if [ -d "$snapshots_dir" ] && [ -n "$(ls -A "$snapshots_dir" 2>/dev/null)" ]; then
-        echo "HIT"
-    else
+    # HuggingFace stores repos as models--<org>--<name>: КАЖДЫЙ "/" -> "--"
+    # (tr '/' '--' заменял "/" одним дефисом — проверка не находила ничего).
+    local cache_name="models--${repo_id//\//--}"
+    local repo_dir="$HF_CACHE_DIR/$cache_name"
+    local snapshots_dir="$repo_dir/snapshots"
+    # Недокачанный файл лежит в blobs/*.incomplete — это не кэш.
+    if compgen -G "$repo_dir/blobs/*.incomplete" >/dev/null 2>&1; then
         echo "MISS"
+        return 0
     fi
+    # HIT только если в snapshot есть реальные ВЕСА (config.json без весов — не кэш);
+    # битый симлинк на отсутствующий blob не считается.
+    local f
+    for f in "$snapshots_dir"/*/*.safetensors "$snapshots_dir"/*/*.npz "$snapshots_dir"/*/*.bin "$snapshots_dir"/*/*.gguf; do
+        if [ -e "$f" ]; then
+            echo "HIT"
+            return 0
+        fi
+    done
+    echo "MISS"
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then

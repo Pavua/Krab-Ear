@@ -35,7 +35,11 @@ def _module_path(module_name: str) -> Path | None:
     return None
 
 
-def _collect_top_level_names(path: Path) -> set[str]:
+def _collect_top_level_names(
+    path: Path,
+    *,
+    _source_cache: dict[Path, tuple[str, frozenset[str]]] | None = None,
+) -> set[str]:
     """Return set of names defined at module top-level in a .py file.
 
     Only names that are actually reachable at module scope are collected.
@@ -49,6 +53,10 @@ def _collect_top_level_names(path: Path) -> set[str]:
     """
     try:
         source = path.read_text(encoding="utf-8", errors="replace")
+        if _source_cache is not None:
+            cached = _source_cache.get(path)
+            if cached is not None and cached[0] == source:
+                return set(cached[1])
         tree = ast.parse(source, filename=str(path))
     except SyntaxError:
         return set()
@@ -104,6 +112,8 @@ def _collect_top_level_names(path: Path) -> set[str]:
                     _scan_stmts(handler.body)
 
     _scan_stmts(tree.body)
+    if _source_cache is not None:
+        _source_cache[path] = (source, frozenset(names))
     return names
 
 
@@ -134,6 +144,8 @@ def main(as_json: bool = False, fail_on_found: bool = False) -> list[dict]:
     missing: list[dict] = []
     checked = 0
     skipped_modules: set[str] = set()
+    # Reuse parsing only within this scan; reread every import to observe edits/errors.
+    source_cache: dict[Path, tuple[str, frozenset[str]]] = {}
 
     test_files = sorted(TESTS_DIR.glob("test_*.py"))
 
@@ -145,7 +157,7 @@ def main(as_json: bool = False, fail_on_found: bool = False) -> list[dict]:
             if mod_path is None:
                 skipped_modules.add(module_name)
                 continue
-            defined = _collect_top_level_names(mod_path)
+            defined = _collect_top_level_names(mod_path, _source_cache=source_cache)
             if symbol not in defined:
                 missing.append(
                     {

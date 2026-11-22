@@ -3,6 +3,7 @@
 import ast
 from pathlib import Path
 import sys
+import threading
 import types
 import unittest
 from unittest.mock import Mock, patch
@@ -15,7 +16,7 @@ _SERVICE = _PACKAGE / "backend" / "service.py"
 
 def _load_timeout_functions(*, backend_owner=False, static_setting=False):
     tree = ast.parse(_SOURCE.read_text(encoding="utf-8"), filename=str(_SOURCE))
-    names = {"_mark_backend_process", "_exit_poisoned_rest_process", "_arm_timeout_exit"}
+    names = {"_mark_backend_process", "_rest_may_exit_on_timeout", "_exit_poisoned_rest_process", "_arm_timeout_exit"}
     definitions = [node for node in tree.body
                    if (isinstance(node, ast.FunctionDef) and node.name in names)
                    or (isinstance(node, ast.Assign) and any(
@@ -28,6 +29,9 @@ def _load_timeout_functions(*, backend_owner=False, static_setting=False):
         "os": fake_os,
         "_flush_logs_before_exit": Mock(),
         "_TRANSCRIBE_TIMEOUT_EXIT_CODE": 70,
+        "_STT_RECYCLE_PENDING": threading.Event(),
+        "_CALL_IPC_DRAIN_MAX_SEC": 30.0,
+        "_wait_call_ipc_drain": Mock(return_value=True),
         "Response": object,
         "_Any": object,
     }
@@ -61,13 +65,28 @@ class RestTimeoutProcessOwnerTests(unittest.TestCase):
         kill = self._exercise(namespace)
         fake_os._exit.assert_not_called()
         kill.assert_not_called()
+        namespace["_wait_call_ipc_drain"].assert_not_called()
 
     def test_standalone_path_retains_fail_fast(self):
         namespace, fake_os = _load_timeout_functions()
         kill = self._exercise(namespace)
         kill.assert_called_once_with()
         namespace["_flush_logs_before_exit"].assert_called_once_with()
+        # Выход ждёт ходы звонка в полёте (RU IPC), и только затем убивает процесс.
+        namespace["_wait_call_ipc_drain"].assert_called_once_with(30.0)
         fake_os._exit.assert_called_once_with(70)
+
+    def test_admission_is_reopened_when_exit_is_refused_at_close(self):
+        namespace, fake_os = _load_timeout_functions()
+        response = Mock()
+        namespace["_arm_timeout_exit"](response, Mock())
+        self.assertTrue(namespace["_STT_RECYCLE_PENDING"].is_set())
+        namespace["_mark_backend_process"]()  # Между arm и close REST стал встроенным.
+        response.call_on_close.call_args.args[0]()
+        fake_os._exit.assert_not_called()
+        self.assertFalse(namespace["_STT_RECYCLE_PENDING"].is_set())
+        # Выхода не будет, значит ходы звонка не ждём.
+        namespace["_wait_call_ipc_drain"].assert_not_called()
 
     def test_static_true_still_blocks_exit(self):
         namespace, fake_os = _load_timeout_functions(static_setting=True)

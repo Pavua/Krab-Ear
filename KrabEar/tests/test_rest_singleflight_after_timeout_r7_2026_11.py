@@ -66,6 +66,8 @@ class SingleflightHandoffAfterTimeoutTest(unittest.TestCase):
             patch.object(rs, "store", store),
             patch.object(rs, "engine", engine),
             patch.object(rs, "_DEADLINE_SEC_MIN", 0.2),
+            # Для встроенного REST допуск возобновляется после завершения Future.
+            patch.object(rs, "_PROCESS_HOSTS_BACKEND", True),
             # 🔴 иначе закрытие 504-ответа сделает os._exit в процессе теста
             patch.object(rs, "_exit_poisoned_rest_process", self.exit_mock),
             patch("soundfile.info", return_value=info),

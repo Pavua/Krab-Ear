@@ -35,72 +35,73 @@ def _make_item(text: str, days_ago: float = 1.0, language: str = "ru") -> dict:
 ANALYTICS_PY = PROJECT_ROOT / "backend" / "analytics_service.py"
 
 
-def _build_service_stub(privacy_enabled: bool):
-    """Возвращает источник analytics_service.py (LIVE handle_get_sentiment_trends)."""
-    source = ANALYTICS_PY.read_text(encoding="utf-8")
-    return source
+class _TripwireStore:
+    """Любое чтение истории — ошибка теста (privacy ON обязан вернуться до чтения)."""
+
+    def __init__(self) -> None:
+        self.lock_calls = 0
+        self.read_calls = 0
+
+    def _lock(self):
+        self.lock_calls += 1
+        raise AssertionError("store._lock() вызван при privacy ON")
+
+    def _load_active_items_unlocked(self):
+        self.read_calls += 1
+        raise AssertionError("история прочитана при privacy ON")
 
 
-# ---------------------------------------------------------------------------
-# TestCase 1: privacy response uses "daily_sentiment" key
-# ---------------------------------------------------------------------------
+# Независимый контракт privacy-ответа (то, что ждёт Swift-декодер), а не копия production-схемы.
+_PRIVACY_CONTRACT = {
+    "ok": bool,
+    "daily_sentiment": list,
+    "overall_sentiment": float,
+    "mood_trend": str,
+    "sentiment_distribution": dict,
+    "most_positive_day": dict,
+    "most_negative_day": dict,
+    "reason": str,
+}
+
+
+def _privacy_response():
+    """Настоящий AnalyticsService.handle_get_sentiment_trends при privacy ON."""
+    from backend.analytics_service import AnalyticsService
+
+    store = _TripwireStore()
+    svc = AnalyticsService(
+        analytics_dashboard=MagicMock(),
+        sentiment_trends=SentimentTrendAnalyzer(),
+        activity_calendar=MagicMock(),
+        keyword_cloud_gen=MagicMock(),
+        timeline_view=MagicMock(),
+        store=store,
+        settings_get=lambda key, default=None: True if key == "privacy_mode_enabled" else default,
+    )
+    return svc.handle_get_sentiment_trends({}), store
+
 
 class PrivacyResponseKeyTestCase(unittest.TestCase):
-    """Проверяет что privacy_mode ответ использует ключ 'daily_sentiment'."""
+    """Фактический privacy-ответ реального обработчика соответствует независимому контракту."""
 
-    def test_privacy_response_uses_daily_sentiment_key(self) -> None:
-        """Privacy gate должен возвращать 'daily_sentiment', не 'trends'."""
-        source = ANALYTICS_PY.read_text(encoding="utf-8")
+    def test_privacy_response_matches_contract_keys_and_types(self) -> None:
+        resp, _ = _privacy_response()
+        for key, typ in _PRIVACY_CONTRACT.items():
+            self.assertIn(key, resp, f"в privacy-ответе нет обязательного ключа {key!r}")
+            self.assertIsInstance(resp[key], typ, f"{key!r}: ожидается {typ.__name__}, получен {type(resp[key]).__name__}")
+        self.assertNotIn("trends", resp, "устаревший ключ 'trends' (W1295)")
 
-        # Найдём блок handle_get_sentiment_trends (LIVE extracted handler)
-        idx = source.find("def handle_get_sentiment_trends")
-        self.assertGreater(idx, 0, "handle_get_sentiment_trends не найден в analytics_service.py")
+    def test_privacy_response_values(self) -> None:
+        resp, _ = _privacy_response()
+        self.assertIs(resp["ok"], True)
+        self.assertEqual(resp["reason"], "privacy_mode_active")
+        self.assertEqual(resp["daily_sentiment"], [])
+        self.assertEqual(resp["sentiment_distribution"], {"positive": 0, "negative": 0, "neutral": 0})
 
-        # Вырежем ~30 строк после определения функции
-        snippet = source[idx: idx + 1200]
-
-        # Ключ 'trends' без 'daily_' не должен появляться в privacy-ответе
-        # privacy_mode_active указывает что это наш новый privacy gate
-        self.assertIn("privacy_mode_active", snippet,
-                      "privacy gate должен включать reason='privacy_mode_active'")
-
-        self.assertIn('"daily_sentiment"', snippet,
-                      "privacy gate должен использовать ключ 'daily_sentiment'")
-
-        self.assertNotIn('"trends"', snippet,
-                         "устаревший ключ 'trends' не должен присутствовать в privacy gate")
-
-    def test_privacy_response_includes_reason(self) -> None:
-        """Privacy gate должен включать поле 'reason' = 'privacy_mode_active'."""
-        source = ANALYTICS_PY.read_text(encoding="utf-8")
-
-        idx = source.find("def handle_get_sentiment_trends")
-        snippet = source[idx: idx + 1200]
-
-        self.assertIn("reason", snippet,
-                      "privacy gate должен содержать поле 'reason'")
-        self.assertIn("privacy_mode_active", snippet,
-                      "reason должен быть 'privacy_mode_active'")
-
-    def test_privacy_response_includes_mood_trend(self) -> None:
-        """Privacy gate должен включать 'mood_trend' для консистентности схемы."""
-        source = ANALYTICS_PY.read_text(encoding="utf-8")
-
-        idx = source.find("def handle_get_sentiment_trends")
-        snippet = source[idx: idx + 1200]
-
-        self.assertIn("mood_trend", snippet,
-                      "privacy gate должен содержать 'mood_trend' для полной схемы")
-
-    def test_privacy_response_includes_ok_flag(self) -> None:
-        """Privacy gate должен возвращать 'ok': True чтобы не вызывать ошибку клиента."""
-        source = ANALYTICS_PY.read_text(encoding="utf-8")
-
-        idx = source.find("def handle_get_sentiment_trends")
-        snippet = source[idx: idx + 1200]
-
-        self.assertIn('"ok": True', snippet,
-                      "privacy gate должен возвращать 'ok': True")
+    def test_privacy_response_does_not_read_history(self) -> None:
+        resp, store = _privacy_response()
+        self.assertEqual((store.lock_calls, store.read_calls), (0, 0))
+        self.assertEqual(resp["reason"], "privacy_mode_active")
 
 
 # ---------------------------------------------------------------------------
@@ -163,90 +164,18 @@ class NormalResponseSchemaTestCase(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# TestCase 3: AST validation — no "trends" bare key in privacy gate
-# ---------------------------------------------------------------------------
-
-class ASTPrivacyGateValidationTestCase(unittest.TestCase):
-    """AST-проверка: нет литерала 'trends' в privacy gate функции."""
-
-    def test_no_bare_trends_key_in_handler_ast(self) -> None:
-        """AST parse analytics_service.py и проверяем что 'trends' не является ключом
-        словаря внутри handle_get_sentiment_trends (старый баг W1295)."""
-        source = ANALYTICS_PY.read_text(encoding="utf-8")
-        tree = ast.parse(source, filename=str(ANALYTICS_PY))
-
-        handler_body_lineno = None
-        handler_end_lineno = None
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.FunctionDef) and node.name == "handle_get_sentiment_trends":
-                handler_body_lineno = node.lineno
-                handler_end_lineno = getattr(node, "end_lineno", node.lineno + 50)
-                break
-
-        self.assertIsNotNone(handler_body_lineno,
-                             "handle_get_sentiment_trends не найден в AST")
-
-        # Собираем все строковые ключи словарей внутри функции
-        dict_keys_in_handler: list[str] = []
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Dict):
-                continue
-            node_line = getattr(node, "lineno", 0)
-            if handler_body_lineno <= node_line <= handler_end_lineno:
-                for key in node.keys:
-                    if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                        dict_keys_in_handler.append(key.value)
-
-        # "trends" не должен быть ключом словаря внутри этого обработчика
-        self.assertNotIn(
-            "trends",
-            dict_keys_in_handler,
-            f"Устаревший ключ 'trends' обнаружен в dict внутри хендлера: {dict_keys_in_handler}",
-        )
-
-        # "daily_sentiment" должен присутствовать (privacy gate)
-        self.assertIn(
-            "daily_sentiment",
-            dict_keys_in_handler,
-            f"Ожидаемый ключ 'daily_sentiment' не найден в хендлере: {dict_keys_in_handler}",
-        )
-
-    def test_ast_handler_has_privacy_check(self) -> None:
-        """handle_get_sentiment_trends должен содержать проверку privacy_mode_enabled."""
-        source = ANALYTICS_PY.read_text(encoding="utf-8")
-
-        idx = source.find("def handle_get_sentiment_trends")
-        snippet = source[idx: idx + 1200]
-
-        self.assertIn("privacy_mode_enabled", snippet,
-                      "Обработчик должен проверять privacy_mode_enabled")
-
-
-# ---------------------------------------------------------------------------
-# TestCase 4: privacy gate schema matches to_dict schema
+# TestCase 3/4: схема privacy-ответа совпадает со схемой to_dict() нормального ответа
 # ---------------------------------------------------------------------------
 
 class SchemaParityTestCase(unittest.TestCase):
-    """Privacy gate и to_dict() должны иметь идентичный набор ключей."""
+    """Фактический privacy-ответ содержит все ключи нормального to_dict() (Swift-декодер)."""
 
-    def test_privacy_gate_keys_match_to_dict_keys(self) -> None:
-        """Ключи privacy gate ответа должны совпадать с to_dict() ключами."""
-        # Получаем ключи нормального ответа через to_dict()
+    def test_privacy_gate_keys_cover_to_dict_keys(self) -> None:
         analyzer = SentimentTrendAnalyzer()
-        empty_report = analyzer.analyze_sentiment_trends([])
-        normal_keys = set(analyzer.to_dict(empty_report).keys())
-
-        # Из analytics_service.py (LIVE handler) вырезаем строки privacy gate.
-        source = ANALYTICS_PY.read_text(encoding="utf-8")
-
-        idx = source.find("def handle_get_sentiment_trends")
-        snippet = source[idx: idx + 1200]
-
-        # Ключи присутствия которых мы ожидаем в privacy gate
-        for key in normal_keys:
-            self.assertIn(f'"{key}"', snippet,
-                          f"Ключ '{key}' из нормальной схемы отсутствует в privacy gate")
+        normal_keys = set(analyzer.to_dict(analyzer.analyze_sentiment_trends([])).keys())
+        resp, _ = _privacy_response()
+        missing = normal_keys - set(resp)
+        self.assertEqual(missing, set(), f"в privacy-ответе нет ключей нормальной схемы: {sorted(missing)}")
 
 
 if __name__ == "__main__":

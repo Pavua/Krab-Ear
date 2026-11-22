@@ -72,6 +72,9 @@ private final class BookmarkMockSocketProvider: IPCSocketProviding, @unchecked S
     }
 
     func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
         let method = Self.extractMethod(from: payload)
         let responseJSON: String
         if let m = method, let r = responses[m] {
@@ -114,6 +117,9 @@ final class BookmarksIPCOffloadTests: XCTestCase {
             let counter: CallCounter
             init(counter: CallCounter) { self.counter = counter }
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
                 await counter.increment()
                 return Data(#"{"id":"x","ok":true,"result":{}}"#.utf8)
             }
@@ -158,6 +164,9 @@ final class BookmarksIPCOffloadTests: XCTestCase {
             }
 
             func send(payload: Data, timeoutSec: Int) async throws -> Data {
+        IPCFakeServerSupport.echoingRequestID(request: payload, intoData: try await sendRaw(payload: payload, timeoutSec: timeoutSec))
+    }
+    private func sendRaw(payload: Data, timeoutSec: Int) async throws -> Data {
                 guard
                     let dict = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
                     let method = dict["method"] as? String

@@ -41,7 +41,7 @@ def _make_backend_service(data_dir: str):
     """Return a BackendService instance with minimal stubs injected."""
     # We patch the heaviest imports so the module loads in a test context.
     heavy = [
-        "mlx_whisper", "pyannote.audio", "sounddevice", "torch",
+        "mlx_whisper", "sounddevice",
         "transformers", "sentence_transformers",
     ]
     patches = []

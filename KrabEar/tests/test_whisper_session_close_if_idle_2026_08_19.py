@@ -118,31 +118,54 @@ class CloseIfIdleInflightGateTest(unittest.TestCase):
         with patch("core.mlx_whisper_session.subprocess.Popen", return_value=proc):
             session.start()
 
-        worker = threading.Thread(
-            target=lambda: session.transcribe("/tmp/a.wav", {}, timeout_sec=5.0, model_name="turbo")
-        )
+        errors: list = []
+        results: dict = {}
+
+        def run_transcribe():
+            try:
+                results["transcribe"] = session.transcribe(
+                    "/tmp/a.wav", {}, timeout_sec=5.0, model_name="turbo")
+            except BaseException as exc:  # noqa: BLE001 — ошибки потоков передаются в основной
+                errors.append(("transcribe", exc))
+
+        worker = threading.Thread(target=run_transcribe)
+        closer = None
         worker.start()
         try:
             self.assertTrue(send_started.wait(timeout=2.0), "_send never reached readline")
+            closer_started = threading.Event()
             closer_done = threading.Event()
 
             def try_close():
-                session.close_if_idle(0.0)
-                closer_done.set()
+                closer_started.set()
+                try:
+                    results["close"] = session.close_if_idle(0.0)
+                except BaseException as exc:  # noqa: BLE001
+                    errors.append(("close_if_idle", exc))
+                finally:
+                    # раньше при исключении closer_done не выставлялся, и «не завершился»
+                    # принималось за требуемую блокировку на lock
+                    closer_done.set()
 
             closer = threading.Thread(target=try_close)
             closer.start()
+            self.assertTrue(closer_started.wait(timeout=2.0), "closer не стартовал")
             # Лок держит _send() — close_if_idle обязан застрять на acquire,
             # а не проскочить и убить процесс, который сейчас "в полёте".
             self.assertFalse(closer_done.wait(timeout=0.3))
+            self.assertEqual(errors, [], f"closer упал вместо ожидания lock: {errors}")
             self.assertIsNotNone(session._proc)
         finally:
             release_send.set()
             worker.join(timeout=5.0)
-            closer.join(timeout=5.0)
+            if closer is not None:
+                closer.join(timeout=5.0)
 
         self.assertFalse(worker.is_alive())
-        self.assertFalse(closer.is_alive())
+        self.assertFalse(closer is not None and closer.is_alive())
+        self.assertEqual(errors, [], f"исключения в потоках: {errors}")
+        self.assertIn("transcribe", results)
+        self.assertIn("close", results, "close_if_idle не завершился после освобождения lock")
 
 
 class CloseIfIdleTerminatesWhenIdleTest(unittest.TestCase):

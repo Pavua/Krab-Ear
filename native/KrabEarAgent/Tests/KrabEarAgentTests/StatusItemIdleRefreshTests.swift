@@ -144,7 +144,7 @@ final class StatusItemIdleRefreshWiringTests: XCTestCase {
             let changes: [() -> Void] = [
                 { delegate.applyHealthStateToStatusItem(.hung) },
                 {
-                    delegate.privacyModeEnabled = true
+                    delegate.privacyModeEnabled.toggle()
                     delegate.applyHealthStateToStatusItem(.hung)
                 },
                 {

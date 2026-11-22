@@ -44,10 +44,10 @@ class TestDiarizationCandidates(unittest.TestCase):
                 engine_mod.settings, "DIARIZATION_MODEL",
                 "pyannote/speaker-diarization-3.1",
             ),
-            mock.patch.object(engine_mod, "Pipeline"),
+            mock.patch.object(engine_mod, "_pyannote_pipeline_class"),
         ]
         started = [p.start() for p in patches]
-        started[2].from_pretrained = from_pretrained
+        started[2].return_value.from_pretrained = from_pretrained
         for p in patches:
             self.addCleanup(p.stop)
 

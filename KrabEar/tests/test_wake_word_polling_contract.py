@@ -111,12 +111,12 @@ class TestPrivacyLoopGuard(unittest.TestCase):
         )
         self.assertFalse(adapter._privacy_blocked())
 
-    def test_settings_exception_fails_open_to_false(self) -> None:
+    def test_settings_exception_blocks_microphone(self) -> None:
         def _boom(k, d):
             raise RuntimeError("settings unavailable")
 
         adapter = OpenWakeWordAdapter(data_dir=self.tmp, settings_get=_boom)
-        self.assertFalse(adapter._privacy_blocked())
+        self.assertTrue(adapter._privacy_blocked())
 
 
 class TestServiceWiringSourceContract(unittest.TestCase):
@@ -150,6 +150,10 @@ class TestServiceWiringSourceContract(unittest.TestCase):
         self.assertTrue(found, "конструкция OpenWakeWordAdapter не найдена в service.py")
         for kwargs in found:
             self.assertEqual(
+                kwargs.get("read_privacy_revision"),
+                "lambda: self.store.read_wake_privacy_revision()",
+            )
+            self.assertEqual(
                 kwargs.get("settings_get"), "self._get_runtime_setting",
                 "адаптер сконструирован без settings_get=self._get_runtime_setting "
                 "— privacy-гейт в handle_wake_word_start снова декоративен",
@@ -158,3 +162,18 @@ class TestServiceWiringSourceContract(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_missing_existing_policy_blocks_wake_even_if_cached_setting_is_off(tmp_path):
+    from backend.openwakeword_adapter import OpenWakeWordAdapter
+    from backend.state_store import StateStore
+
+    store = StateStore(tmp_path / "profile")
+    store.initialize_startup_plaintext_policy(new_profile=True)
+    adapter = OpenWakeWordAdapter(
+        data_dir=store.data_dir, settings_get=lambda key, default: False,
+        read_privacy_revision=store.read_wake_privacy_revision,
+    )
+    assert adapter._privacy_blocked() is False
+    store.settings_path.unlink()
+    assert adapter._privacy_blocked() is True

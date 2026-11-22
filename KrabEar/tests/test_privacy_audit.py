@@ -21,7 +21,9 @@ class TestPrivacyAuditLoggerAppend(unittest.TestCase):
     """Базовые тесты append NDJSON."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "privacy_audit.log"
         PrivacyAuditLogger.reset_instance()
         self.logger = PrivacyAuditLogger(log_path=self.log_path)
@@ -68,7 +70,9 @@ class TestPrivacyAuditLoggerParentDir(unittest.TestCase):
     """Тест авто-создания родительской директории."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         PrivacyAuditLogger.reset_instance()
 
     def tearDown(self):
@@ -87,7 +91,9 @@ class TestPrivacyAuditLoggerLimit(unittest.TestCase):
     """Тест параметра limit в read_entries."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         PrivacyAuditLogger.reset_instance()
         self.logger = PrivacyAuditLogger(log_path=self.log_path)
@@ -123,7 +129,9 @@ class TestPrivacyAuditLoggerMissingFile(unittest.TestCase):
     """Тест поведения при отсутствии лог-файла."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "missing.log"
         PrivacyAuditLogger.reset_instance()
         self.logger = PrivacyAuditLogger(log_path=self.log_path)
@@ -147,7 +155,9 @@ class TestSentryBlockLog(unittest.TestCase):
     """Тест логирования когда Sentry заблокирован privacy mode."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         PrivacyAuditLogger.reset_instance()
 
@@ -192,7 +202,9 @@ class TestTranslationForcedOfflineLog(unittest.TestCase):
     """Тест логирования forced_offline для translate."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         PrivacyAuditLogger.reset_instance()
 
@@ -308,7 +320,9 @@ class TestPrivacyAuditRedactSensitiveData(unittest.TestCase):
     """test_redact_sensitive_data — чувствительные поля не хранятся дословно."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()
@@ -356,7 +370,9 @@ class TestPrivacyAuditAtomicAppend(unittest.TestCase):
     """test_atomic_append — каждый log_event добавляет ровно одну строку."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()
@@ -406,44 +422,47 @@ class TestPrivacyAuditUnwritableDisk(unittest.TestCase):
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()
 
+    def _logger_in_tmp(self):
+        import tempfile
+        from backend.privacy_audit import PrivacyAuditLogger
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        log_path = Path(tmp.name) / "audit.log"
+        return PrivacyAuditLogger(log_path=log_path), log_path
+
+    def _assert_silent_on_real_io_error(self, exc):
+        """Ошибку инжектируем в НАСТОЯЩУЮ точку записи (os.open в backend.privacy_audit):
+        прежняя подмена builtins.open её не затрагивала (mock вызывался 0 раз), и тест
+        проходил на обычной успешной записи."""
+        logger, log_path = self._logger_in_tmp()
+        with patch("backend.privacy_audit.os.open", side_effect=exc) as io_mock:
+            try:
+                logger.log_event("sentry", "blocked")
+            except Exception as err:
+                self.fail(f"log_event не должен бросать исключение: {err}")
+        io_mock.assert_called()  # ошибка действительно возникла
+        self.assertFalse(log_path.exists() and log_path.read_text(encoding="utf-8").strip(),
+                         "при сбое записи в журнале не должно быть записей")
+        # положительный контроль: после снятия сбоя тот же логгер пишет штатно
+        logger.log_event("sentry", "after-error")
+        self.assertIn("after-error", log_path.read_text(encoding="utf-8"))
+
     def test_log_event_silent_on_io_error(self):
         """log_event не бросает исключение даже при IOError на диске."""
-        import tempfile
-        tmpdir = tempfile.mkdtemp()
-        log_path = Path(tmpdir) / "audit.log"
-        from backend.privacy_audit import PrivacyAuditLogger
-        logger = PrivacyAuditLogger(log_path=log_path)
-        # Заменяем _ensure_parent чтобы не мешал, потом симулируем ошибку через open
-        with patch("backend.privacy_audit.PrivacyAuditLogger._ensure_parent"):
-            with patch("builtins.open", side_effect=OSError("no space left on device")):
-                try:
-                    logger.log_event("sentry", "blocked")
-                except Exception as exc:
-                    self.fail(f"log_event не должен бросать исключение: {exc}")
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        self._assert_silent_on_real_io_error(OSError("no space left on device"))
 
     def test_log_event_with_mocked_open_error(self):
-        """log_event с замоканным open() → ошибка игнорируется."""
-        import tempfile
-        tmpdir = tempfile.mkdtemp()
-        log_path = Path(tmpdir) / "audit.log"
-        from backend.privacy_audit import PrivacyAuditLogger
-        logger = PrivacyAuditLogger(log_path=log_path)
-        with patch("builtins.open", side_effect=PermissionError("disk full")):
-            try:
-                logger.log_event("cat", "act")
-            except Exception as exc:
-                self.fail(f"Не должно быть исключения: {exc}")
-        import shutil
-        shutil.rmtree(tmpdir, ignore_errors=True)
+        """log_event: PermissionError точки записи → ошибка проглочена, журнал не повреждён."""
+        self._assert_silent_on_real_io_error(PermissionError("disk full"))
 
 
 class TestPrivacyAuditQueryRecentEvents(unittest.TestCase):
     """test_query_recent_events — read_entries с фильтрацией по limit."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()
@@ -497,7 +516,9 @@ class TestPrivacyAuditConcurrentWrites(unittest.TestCase):
     """test_concurrent_log_writes — параллельная запись не повреждает файл."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()
@@ -549,7 +570,9 @@ class TestPrivacyAuditLogRotation(unittest.TestCase):
     """test_log_rotation — clear() как ручная ротация + поведение после очистки."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         from backend.privacy_audit import PrivacyAuditLogger
         PrivacyAuditLogger.reset_instance()
@@ -596,7 +619,9 @@ class TestPrivacyAuditSingletonConcurrency(unittest.TestCase):
     """W958: проверка thread-safety get_instance() (double-checked locking)."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit_concurrent.log"
         PrivacyAuditLogger.reset_instance()
 

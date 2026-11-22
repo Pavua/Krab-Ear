@@ -131,8 +131,9 @@ class MigrationBackupsPurgeTestCase(unittest.TestCase):
     """W1767 #2: purge_all_data удаляет <data_dir>/backups/ целиком."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def _seed_backups(self) -> Path:
         """Создаёт тестовую структуру migration backup."""
         backups_dir = Path(self._tmpdir) / "backups"
@@ -227,8 +228,9 @@ class SharesDirPurgeTestCase(unittest.TestCase):
     """W1767 #3: purge_all_data удаляет <data_dir>/shares/ целиком."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def _seed_shares(self) -> tuple[Path, str]:
         """Создаёт тестовую директорию shares с файлами транскрипций."""
         shares_dir = Path(self._tmpdir) / "shares"
@@ -308,8 +310,9 @@ class TranslationCachePurgeTestCase(unittest.TestCase):
     """W1767 #7: purge_all_data очищает translation_cache in-memory + файл."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def _make_cache_with_data(self) -> TranslationCache:
         cache = TranslationCache(data_dir=self._tmpdir)
         cache.put("Привет мир", "ru", "es", "offline", "Hola mundo")
@@ -402,8 +405,9 @@ class TranslationGlossaryPurgeTestCase(unittest.TestCase):
     """W1767 #8: purge_all_data сбрасывает translation_glossary в settings.json."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def _make_store_with_glossary(self, glossary: dict) -> FakeStore:
         store = FakeStore(data_dir=self._tmpdir)
         store._settings = {"translation_glossary": glossary}
@@ -429,9 +433,14 @@ class TranslationGlossaryPurgeTestCase(unittest.TestCase):
         store = self._make_store_with_glossary(glossary)
         svc = HistoryService(store=store)
 
+        # Контроль: json.dumps по умолчанию экранирует кириллицу (\\uXXXX), и поиск исходной
+        # строки находил бы «ничего» даже без purge. ensure_ascii=False + проверка до purge.
+        before = json.dumps(store.load_settings(), ensure_ascii=False)
+        self.assertIn(secret_term, before, "предусловие: термин должен быть в настройках до purge")
+
         svc.handle_purge_all_data({"confirm": True})
 
-        saved = json.dumps(store.load_settings())
+        saved = json.dumps(store.load_settings(), ensure_ascii=False)
         self.assertNotIn(
             secret_term, saved,
             "Термин глоссария найден в настройках после purge"
@@ -499,8 +508,9 @@ class VocabularyStorePurgeTestCase(unittest.TestCase):
     """W1767 #9: purge_all_data удаляет vocabulary.json через VocabularyStore.clear_all()."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def _make_vocab_with_words(self) -> VocabularyStore:
         vocab = VocabularyStore(data_dir=Path(self._tmpdir))
         vocab.save(["Паша", "Иван", "Мария"])
@@ -607,8 +617,9 @@ class SettingsBackupsPurgeTestCase(unittest.TestCase):
     """W1767 #10: purge_all_data удаляет settings_backups/ через _settings_backup."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def _seed_settings_backups(self) -> Path:
         """Создаёт тестовые файлы settings backups."""
         sb_dir = Path(self._tmpdir) / "settings_backups"
@@ -708,7 +719,16 @@ class PurgeAllDataE2EW1767TestCase(unittest.TestCase):
     """W1767 E2E: все новые gap-ы закрыты одним вызовом purge_all_data."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
+        # Герметичность: legacy_ownership_ambiguous смотрит в РЕАЛЬНЫЙ ~/Library/Application Support/
+        # KrabEar/settings_backups. На dev-Mac владельца он существует → purge честно отвечает
+        # «неоднозначно» и E2E краснел, на чистом CI — нет. Дом подменяется временным каталогом.
+        from unittest.mock import patch as _patch
+        _home = _patch.object(Path, "home", return_value=Path(self._tmpdir) / "fake_home")
+        _home.start()
+        self.addCleanup(_home.stop)
 
     def test_e2e_all_six_gaps_closed(self) -> None:
         """E2E: backups + shares + translation_cache + glossary + vocabulary + settings_backups."""
@@ -815,21 +835,31 @@ class PurgeAllDataE2EW1767TestCase(unittest.TestCase):
                             token, content,
                             f"PII-токен '{token}' найден в {f} после purge"
                         )
-                except OSError:
-                    pass  # файл удалён параллельно
+                except FileNotFoundError:
+                    pass  # файл удалён параллельно; PermissionError и прочие OSError — не «удалён»
 
     def test_confirm_false_no_purge(self) -> None:
         """Без confirm=True purge не удаляет ничего."""
         store = FakeStore(data_dir=self._tmpdir)
         store.add_item("item-nc")
+        store._settings = {"translation_glossary": {"term": "value"}, "k": 1}
+        marker = Path(self._tmpdir) / "marker.bin"
+        marker.write_bytes(b"keep-me")
         svc = HistoryService(store=store)
+
+        items_before = dict(store._items)
+        tombstones_before = list(store._tombstones)
+        settings_before = dict(store._settings)
 
         result = svc.handle_purge_all_data({"confirm": False})
 
-        self.assertFalse(result.get("ok", True) is True and result.get("error") is None,
-                         "Без confirm не должно быть ok=True без error")
-        self.assertIn("error", result,
-                      "Ответ должен содержать 'error' при отсутствии confirm")
+        # Состояние не изменилось ДО возврата ошибки согласия (раньше проверялся только ответ).
+        self.assertEqual(store._items, items_before, "элементы удалены без confirm")
+        self.assertEqual(store._tombstones, tombstones_before, "tombstones записаны без confirm")
+        self.assertEqual(store._settings, settings_before, "настройки изменены без confirm")
+        self.assertEqual(marker.read_bytes(), b"keep-me", "файл в data_dir тронут без confirm")
+        self.assertIs(result.get("ok"), False, result)
+        self.assertTrue(result.get("error"), "Ответ должен содержать непустой 'error' без confirm")
 
 
 # ---------------------------------------------------------------------------
@@ -841,8 +871,9 @@ class BackendServiceW1767WiringTestCase(unittest.TestCase):
     settings_backup в HistoryService."""
 
     def setUp(self) -> None:
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def test_backend_wires_translation_cache_into_history(self) -> None:
         """BackendService.__init__ должен wire _translation_cache в _history._translation_cache."""
         from backend.state_store import StateStore

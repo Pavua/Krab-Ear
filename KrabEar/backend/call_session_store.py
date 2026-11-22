@@ -133,9 +133,11 @@ class CallSessionStore:
     # CRUD
     # ------------------------------------------------------------------
 
-    def create(self, phone_number: str, goal_text: str) -> CallSession:
+    def create(self, phone_number: str, goal_text: str, gateway_session_id: str = "") -> CallSession:
         """Создаёт новую сессию в состоянии IDLE и сохраняет её."""
-        session = CallSession.create(phone_number=phone_number, goal_text=goal_text)
+        session = CallSession.create(
+            phone_number=phone_number, goal_text=goal_text, gateway_session_id=gateway_session_id,
+        )
         with self._lock():
             self._append(session.to_dict())
         return session
@@ -236,6 +238,8 @@ class CallSessionStore:
         session_id: str,
         end_reason: str,
         cost_usd: float = 0.0,
+        *,
+        from_any_live_state: bool = False,
     ) -> CallSession:
         """Переводит сессию в COMPLETED, вычисляет длительность и стоимость.
 
@@ -253,7 +257,12 @@ class CallSessionStore:
                 raise KeyError(f"Сессия не найдена: {sid!r}")
 
             sm = CallSessionStateMachine(CallStatus(session.status))
-            sm.transition(CallStatus.COMPLETED)
+            if from_any_live_state and not sm.is_terminal():
+                # Звонок уже положен в шлюзе: журнал обязан закрыться из ЛЮБОГО живого
+                # состояния (промежуточные статусы шлюз в журнал Ear не присылает).
+                pass
+            else:
+                sm.transition(CallStatus.COMPLETED)
             session.status = CallStatus.COMPLETED.value
             session.end_reason = end_reason
             session.ended_at = _now_iso()
@@ -281,6 +290,8 @@ class CallSessionStore:
         session_id: str,
         end_reason: str,
         cost_usd: float = 0.0,
+        *,
+        from_any_live_state: bool = False,
     ) -> CallSession:
         """Переводит сессию в FAILED.
 
@@ -298,7 +309,12 @@ class CallSessionStore:
                 raise KeyError(f"Сессия не найдена: {sid!r}")
 
             sm = CallSessionStateMachine(CallStatus(session.status))
-            sm.transition(CallStatus.FAILED)
+            if from_any_live_state and not sm.is_terminal():
+                # Звонок уже положен в шлюзе: журнал обязан закрыться из ЛЮБОГО живого
+                # состояния (промежуточные статусы шлюз в журнал Ear не присылает).
+                pass
+            else:
+                sm.transition(CallStatus.FAILED)
             session.status = CallStatus.FAILED.value
             session.end_reason = end_reason
             session.ended_at = _now_iso()

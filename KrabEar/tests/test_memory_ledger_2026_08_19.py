@@ -243,6 +243,10 @@ class SidecarLockOnlySourceContractTestCase(unittest.TestCase):
 
         self.assertTrue(open_call_targets, "expected at least one os.open() call in the module")
         for target in open_call_targets:
+            if target == "self._path.parent":
+                # KE05C-17: каталог открывается O_RDONLY только ради fsync после replace —
+                # это не файл данных и не flock-цель (self._path остаётся под запретом ниже).
+                continue
             self.assertIn(
                 "_lock_path",
                 target,
@@ -259,6 +263,40 @@ class SidecarLockOnlySourceContractTestCase(unittest.TestCase):
             and node.func.attr == "flock"
         ]
         self.assertTrue(flock_calls, "expected fcntl.flock() call(s) in the module")
+
+
+class SidecarLockFdIdentityTestCase(LedgerClientBase):
+    """(f') flock берётся на ДЕСКРИПТОР sidecar-файла — проверяется по (st_dev, st_ino) реального fd.
+
+    AST-контракт выше видит os.open(_lock_path) и «какой-то flock», но не связь между ними:
+    flock мог получать дескриптор файла данных. Здесь перехватывается каждый fcntl.flock,
+    у переданного fd снимается идентичность и сравнивается с sidecar, а не с файлом данных.
+    """
+
+    def test_flock_receives_sidecar_descriptor_across_publishes(self):
+        real_flock = fcntl.flock
+        locked_ids: list[tuple[int, int]] = []
+
+        def spy(fd, op):
+            if op & fcntl.LOCK_EX:
+                st = os.fstat(fd)
+                locked_ids.append((st.st_dev, st.st_ino))
+            return real_flock(fd, op)
+
+        client = LedgerClient("krab_ear", path=self.ledger_path)
+        with patch.object(memory_ledger.fcntl, "flock", side_effect=spy):
+            # несколько публикаций: файл данных каждый раз заменяется (os.replace) —
+            # inode данных меняется, inode sidecar обязан оставаться тем же
+            for i in range(3):
+                self.assertTrue(client.publish_own({"gigaam": {"state": "idle", "n": i}}))
+
+        sidecar = client._lock_path
+        sc = os.stat(sidecar)
+        data = os.stat(self.ledger_path)
+        self.assertGreaterEqual(len(locked_ids), 3, "flock не вызывался на публикациях")
+        for ident in locked_ids:
+            self.assertEqual(ident, (sc.st_dev, sc.st_ino), "flock взят не на sidecar")
+            self.assertNotEqual(ident, (data.st_dev, data.st_ino), "flock взят на файл данных")
 
 
 class ReadAllNowaitTestCase(LedgerClientBase):

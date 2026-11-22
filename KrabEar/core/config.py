@@ -225,6 +225,16 @@ class Settings(BaseSettings):
     # Когда True, require_api_key использует RestAuth вместо одиночного ключа.
     REST_API_AUTH_ENABLED: bool = False
 
+    # Опт-аут от ключа по умолчанию: True = защищённые маршруты REST открыты без
+    # Bearer (старое поведение). По умолчанию при старте сервера выдаётся ключ
+    # <data_dir>/rest_api_key (см. backend/rest_api_key.py).
+    REST_API_ALLOW_ANONYMOUS: bool = False
+
+    # Дополнительные имена Host (через запятую), которым REST отвечает сверх
+    # loopback (127.0.0.1 / localhost / [::1]). Защита от DNS rebinding: чужой
+    # Host получает 403. Пусто = только loopback.
+    REST_ALLOWED_HOSTS: str = ""
+
     # Rate limiting для REST API (flask-limiter).
     # False = rate limiting полностью отключён (удобно для тестов и локальной разработки).
     RATE_LIMIT_ENABLED: bool = True
@@ -1372,6 +1382,12 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # 2.04с (несколько бюджетированных попыток подряд) — сравнимо со
     # --- Local SIP On-Device Telephony (Phase 3) ---
     "call_provider": "gateway",
+    # Исходящий звонок через Voice Gateway: умолчания равны умолчаниям шлюза (300 с, клон, ждать
+    # собеседника), поэтому поведение не меняется, пока владелец ничего не трогал.
+    # Клон — голос владельца: системный голос сразу выдаёт робота.
+    "call_max_duration_sec": 300,
+    "call_voice_mode": "clone",
+    "call_speak_first": False,
     "sip_server": "",
     "sip_port": 5060,
     "sip_user": "",

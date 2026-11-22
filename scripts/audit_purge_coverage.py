@@ -1326,10 +1326,17 @@ def _collect_removed_names_in_function(
 
     # self._path / self._x_path attributes that are unlinked/replaced/rmtree'd.
     for node in ast.walk(func):
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-            if node.func.attr in {"unlink", "rmtree", "replace"}:
+        _strict_rmtree = (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "rmtree_strict"
+        )
+        if _strict_rmtree or (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        ):
+            if _strict_rmtree or node.func.attr in {"unlink", "rmtree", "replace"}:
                 targets: list[ast.AST] = []
-                if node.func.attr == "rmtree":
+                if _strict_rmtree or node.func.attr == "rmtree":
                     targets.extend(node.args)
                 else:
                     targets.append(node.func.value)
@@ -1401,10 +1408,18 @@ def _dir_extension_coverage(
         return None
 
     for node in ast.walk(func):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+        if not isinstance(node, ast.Call):
             continue
-        attr = node.func.attr
-        recv = node.func.value
+        if isinstance(node.func, ast.Attribute):
+            attr = node.func.attr
+            recv = node.func.value
+        elif isinstance(node.func, ast.Name) and node.func.id == "rmtree_strict":
+            # backend.purge_fs.rmtree_strict(<dir>) — тот же wipe-all, но
+            # без ignore_errors: сбой удаления не маскируется под успех.
+            attr = "rmtree"
+            recv = node.func.id
+        else:
+            continue
 
         # <dir>.glob("...") — per-extension sweep OR wipe-all ("*").
         if attr == "glob" and node.args:

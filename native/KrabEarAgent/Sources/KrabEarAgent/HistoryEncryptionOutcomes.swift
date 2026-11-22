@@ -80,11 +80,17 @@ enum EncryptionChangeOutcome: Equatable {
     case failed(enabled: Bool?)
 
     /// `response` — полный конверт IPC (nil, если вызов бросил исключение).
-    static func resolve(response: [String: Any]?) -> EncryptionChangeOutcome {
-        guard let result = response?["result"] as? [String: Any] else { return .failed(enabled: nil) }
-        let enabled = result["enabled"] as? Bool
-        if (result["ok"] as? Bool) == true { return .applied }
-        if (result["error"] as? String) == "keychain_unavailable" { return .keychainUnavailable(enabled: enabled) }
+    static func resolve(response: [String: Any]?, desired: Bool) -> EncryptionChangeOutcome {
+        guard confirmedPrivacyFlag(response?["ok"]) == true,
+              let result = response?["result"] as? [String: Any] else { return .failed(enabled: nil) }
+        let enabled = confirmedPrivacyFlag(result["enabled"])
+        let ok = confirmedPrivacyFlag(result["ok"])
+        if ok == true, enabled == desired, confirmedPrivacyFlag(result["available"]) == true {
+            return .applied
+        }
+        if ok == false, (result["error"] as? String) == "keychain_unavailable" {
+            return .keychainUnavailable(enabled: enabled)
+        }
         return .failed(enabled: enabled)
     }
 
@@ -99,14 +105,4 @@ enum EncryptionChangeOutcome: Equatable {
         }
     }
 
-    /// Реальное состояние переключателя после отказа: свежее чтение > то, что сообщил
-    /// backend > отмена желаемого значения.
-    func actualEnabled(desired: Bool, reread: Bool?) -> Bool {
-        switch self {
-        case .applied:
-            return desired
-        case .keychainUnavailable(let enabled), .failed(let enabled):
-            return reread ?? enabled ?? !desired
-        }
-    }
 }

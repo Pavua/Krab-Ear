@@ -71,10 +71,21 @@ class _SchemeCheckingRedirectHandler(urllib.request.HTTPRedirectHandler):
     """
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if urlparse(newurl).scheme.lower() not in _ALLOWED_SCHEMES:
+        target = urlparse(newurl)
+        if target.scheme.lower() not in _ALLOWED_SCHEMES:
             raise urllib.error.HTTPError(
                 newurl, code,
                 f"redirect to disallowed scheme blocked: {newurl!r}",
+                headers, fp,
+            )
+        # KE05B-02: urllib переносит ВСЕ заголовки (включая Authorization: Bearer)
+        # на новый адрес. Редирект на другой хост/порт — отказ; LM Studio в норме
+        # не редиректит, так что легитимный сценарий не страдает.
+        origin = urlparse(req.full_url)
+        if (target.scheme.lower(), target.netloc.lower()) != (origin.scheme.lower(), origin.netloc.lower()):
+            raise urllib.error.HTTPError(
+                newurl, code,
+                "cross-origin redirect blocked",
                 headers, fp,
             )
         return super().redirect_request(req, fp, code, msg, headers, newurl)
@@ -103,6 +114,21 @@ def _add_bearer(req: urllib.request.Request, api_key: str | None) -> None:
     key = (api_key or "").strip()
     if key:
         req.add_header("Authorization", f"Bearer {key}")
+
+
+_MAX_RESPONSE_BYTES = 1024 * 1024  # KE05B-22: потолок тела ответа LM Studio (1 МиБ)
+
+
+def _read_bounded(resp) -> bytes:
+    """Читает тело ответа не больше ``_MAX_RESPONSE_BYTES``; больше — ValueError.
+
+    Вызывающие ловят Exception и трактуют сбой как «ответ непригоден» (load/unload → False,
+    каталог → неизвестно), а не читают гигабайты от неисправного/подменённого сервера.
+    """
+    raw = resp.read(_MAX_RESPONSE_BYTES + 1)
+    if len(raw) > _MAX_RESPONSE_BYTES:
+        raise ValueError("LM Studio response too large")
+    return raw
 
 
 def _rest_body_is_error(raw_body: bytes) -> bool:
@@ -137,7 +163,7 @@ def _try_rest_unload(base_url: str, model_id: str, api_key: str | None = None) -
         with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
             if not (200 <= resp.status < 300):
                 return False
-            body = resp.read()
+            body = _read_bounded(resp)
             if _rest_body_is_error(body):
                 logger.debug(
                     "LM Studio REST unload %s: HTTP 200 but body contains error — falling back to CLI",
@@ -176,7 +202,7 @@ def _try_rest_load(base_url: str, model_id: str, api_key: str | None = None) -> 
         with _SAFE_OPENER.open(req, timeout=_REST_TIMEOUT_SEC) as resp:
             if not (200 <= resp.status < 300):
                 return False
-            body = resp.read()
+            body = _read_bounded(resp)
             if _rest_body_is_error(body):
                 logger.debug(
                     "LM Studio REST load %s: HTTP 200 but body contains error — falling back to CLI",
@@ -353,9 +379,7 @@ def models_share_loaded_instance(
         with _SAFE_OPENER.open(req, timeout=timeout) as resp:
             if resp.status != 200:
                 return None
-            raw = resp.read(1024 * 1024 + 1)
-        if len(raw) > 1024 * 1024:
-            return None
+            raw = _read_bounded(resp)
         payload = json.loads(raw)
     except Exception:
         logger.debug("LM Studio: loaded instance identity unavailable")
@@ -489,7 +513,7 @@ def model_loaded(
                 if resp.status != 200:
                     continue
                 entries = parse_lm_studio_catalog(
-                    json.loads(resp.read().decode("utf-8", errors="replace"))
+                    json.loads(_read_bounded(resp).decode("utf-8", errors="replace"))
                 )
         except Exception as exc:
             logger.debug("LM Studio model_loaded probe %s (%s): %s", model_id, endpoint, exc)
@@ -549,7 +573,7 @@ def probe_loaded_chat_models(
             with _SAFE_OPENER.open(req, timeout=timeout) as resp:
                 if resp.status != 200:
                     continue
-                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+                payload = json.loads(_read_bounded(resp).decode("utf-8", errors="replace"))
                 entries = parse_lm_studio_catalog(payload)
         except Exception as exc:
             logger.debug("LM Studio loaded-chat probe (%s): %s", endpoint, exc)

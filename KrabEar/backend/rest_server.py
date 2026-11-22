@@ -606,6 +606,9 @@ _TRANSCRIBE_TIMEOUT_SEC = 600  # 10 minutes
 # ЕДИНСТВЕННОГО источника истины (stt_budget), а не новой магической константой.
 _DEADLINE_SEC_MIN = stt_budget.MIN_USEFUL_ATTEMPT_SEC * 2  # 10.0
 _DEADLINE_SEC_MAX = 120.0
+# In-process pyannote cannot be stopped safely once loading or MPS work starts.
+_SHORT_STT_DEADLINE_SEC = 25.0
+_STT_RESPONSE_MARGIN_SEC = 2.0
 
 
 def _resolve_transcribe_deadline_sec(raw: _Any) -> tuple[float | None, str | None]:
@@ -633,13 +636,22 @@ _REST_ACTIVITY = ActivityReservations()
 # R7 (2026-11-07): слот передан брошенному после таймаута worker'у. Пока он
 # жив, MLX занят: ждать бессмысленно (живой замер — 92с), отвечаем 503 сразу.
 _STT_ORPHAN_ACTIVE = threading.Event()
+# Пока закрытие ответа может завершить standalone REST, новый STT запрещён.
+# Признак действует до конца жизни процесса, независимо от старого Future.
+_STT_RECYCLE_PENDING = threading.Event()
 
 
 def try_acquire_stt_singleflight(timeout_sec: float) -> bool:
     """Захватить STT-слот. False → 503 stt_busy, transcribe не стартует."""
-    if _STT_ORPHAN_ACTIVE.is_set():
+    if _STT_RECYCLE_PENDING.is_set() or _STT_ORPHAN_ACTIVE.is_set():
         return False
-    return _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec)))
+    if not _STT_SINGLEFLIGHT.acquire(timeout=max(0.0, float(timeout_sec))):
+        return False
+    # Таймаут мог произойти, пока этот запрос ждал удерживаемый слот.
+    if _STT_RECYCLE_PENDING.is_set():
+        _STT_SINGLEFLIGHT.release()
+        return False
+    return True
 
 
 def hand_off_stt_singleflight(future: "concurrent.futures.Future") -> None:
@@ -658,6 +670,47 @@ def hand_off_stt_singleflight(future: "concurrent.futures.Future") -> None:
 
 def release_stt_singleflight() -> None:
     _STT_SINGLEFLIGHT.release()
+
+
+# RU-звонок идёт по IPC к владельцу GigaAM и не трогает MLX этого процесса, поэтому слот
+# файлового STT ему не нужен (иначе длинная транскрипция превращала ход звонка в
+# 503 stt_busy). Нужна лишь защита от fail-fast выхода standalone REST посреди хода:
+# считаем ходы в полёте, а выход ждёт их завершения. Ограничение — потолок бюджета
+# звонка (25 с) плюс запас.
+_CALL_IPC_COND = threading.Condition()
+_call_ipc_inflight = 0
+_CALL_IPC_DRAIN_MAX_SEC = 30.0
+
+
+def _call_ipc_enter() -> bool:
+    """Занять ход звонка. False — fail-fast уже поставлен, новый ход не допускается."""
+    global _call_ipc_inflight
+    with _CALL_IPC_COND:
+        # Проверка и инкремент под одним локом: drain стартует после установки
+        # признака, поэтому он либо увидит этот ход, либо ход увидит признак.
+        if _STT_RECYCLE_PENDING.is_set():
+            return False
+        _call_ipc_inflight += 1
+        return True
+
+
+def _call_ipc_exit() -> None:
+    global _call_ipc_inflight
+    with _CALL_IPC_COND:
+        _call_ipc_inflight = max(0, _call_ipc_inflight - 1)
+        _CALL_IPC_COND.notify_all()
+
+
+def _wait_call_ipc_drain(timeout_sec: float) -> bool:
+    """Дождаться ходов звонка в полёте. False — не успели, выходим всё равно."""
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    with _CALL_IPC_COND:
+        while _call_ipc_inflight > 0:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            _CALL_IPC_COND.wait(remaining)
+    return True
 
 
 # EX_SOFTWARE из sysexits.h. Отдельный код отличает намеренный fail-fast после
@@ -711,6 +764,10 @@ def _mark_backend_process() -> None:
     _PROCESS_HOSTS_BACKEND = True
 
 
+def _rest_may_exit_on_timeout() -> bool:
+    return not (_PROCESS_HOSTS_BACKEND or bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)))
+
+
 def _exit_poisoned_rest_process(exit_code: int) -> None:
     """Немедленно завершает только REST-процесс, не запуская Python-finalize.
 
@@ -727,7 +784,10 @@ def _exit_poisoned_rest_process(exit_code: int) -> None:
     самоубийство запрещено: остаёмся с отравленным MLX-локом до штатного
     рестарта — деградация STT предпочтительнее потери записи владельца.
     """
-    if _PROCESS_HOSTS_BACKEND or bool(getattr(settings, "REST_IN_PROCESS_ENABLED", False)):
+    if not _rest_may_exit_on_timeout():
+        # Выхода не будет, значит и закрывать допуск навсегда незачем: слот STT остаётся
+        # у брошенного Future (_STT_ORPHAN_ACTIVE), а RU-ходы не должны отказывать вечно.
+        _STT_RECYCLE_PENDING.clear()
         logger.error(
             "REST transcribe timeout: MLX-локом, возможно, владеет зависший "
             "поток, но процесс НЕ завершается — REST работает внутри backend, "
@@ -760,9 +820,10 @@ def _arm_timeout_exit(response: Response, temp_path: _Any) -> Response:
 
     ``call_on_close`` вызывается WSGI-сервером после выдачи тела ответа. До этой
     границы временный файл остаётся на месте и зависший decoder не получает путь,
-    удалённый из-под него. После закрытия ответа файл удаляется непосредственно
-    перед невозвратным завершением poisoned REST-процесса.
+    удалённый из-под него. Только standalone REST ставит завершение процесса.
+    Допуск STT закрывается до передачи слота Future, пока слот ещё удерживается.
     """
+    should_exit = _rest_may_exit_on_timeout()
 
     def _cleanup_and_exit() -> None:
         try:
@@ -774,9 +835,25 @@ def _arm_timeout_exit(response: Response, temp_path: _Any) -> Response:
                 exc,
             )
         finally:
-            _exit_poisoned_rest_process(_TRANSCRIBE_TIMEOUT_EXIT_CODE)
+            if should_exit:
+                # Владелец мог смениться между arm и close: тогда выхода не будет и
+                # ждать ходы звонка незачем. Любой сбой ожидания не должен отменять выход.
+                if _rest_may_exit_on_timeout():
+                    try:
+                        drained = _wait_call_ipc_drain(_CALL_IPC_DRAIN_MAX_SEC)
+                    except Exception:
+                        drained = False
+                        logger.exception("REST fail-fast: ожидание ходов звонка завершилось ошибкой")
+                    if not drained:
+                        logger.error(
+                            "REST fail-fast: ход звонка не завершился за %.0fс, выходим без ожидания",
+                            _CALL_IPC_DRAIN_MAX_SEC,
+                        )
+                _exit_poisoned_rest_process(_TRANSCRIBE_TIMEOUT_EXIT_CODE)
 
     response.call_on_close(_cleanup_and_exit)
+    if should_exit:
+        _STT_RECYCLE_PENDING.set()
     return response
 
 
@@ -1035,6 +1112,44 @@ TEMP_DIR.mkdir(parents=True, exist_ok=True)
 # validation even runs.  The global MAX_CONTENT_LENGTH (500 MB) is for audio
 # uploads — vocabulary payloads never legitimately exceed a few kilobytes.
 _VOCABULARY_POST_MAX_BYTES = 512 * 1024  # 512 KB
+
+
+_LOOPBACK_HOST_NAMES = frozenset({"127.0.0.1", "localhost", "[::1]"})
+
+
+def _host_without_port(raw_host: str) -> str:
+    """Имя хоста из заголовка Host без порта (в нижнем регистре, IPv6 в скобках)."""
+    host = (raw_host or "").strip().lower()
+    if host.startswith("["):
+        end = host.find("]")
+        return host[: end + 1] if end != -1 else host
+    return host.rsplit(":", 1)[0] if ":" in host else host
+
+
+def _allowed_host_names() -> frozenset[str]:
+    extra = str(getattr(settings, "REST_ALLOWED_HOSTS", "") or "")
+    names = {h.strip().lower() for h in extra.split(",") if h.strip()}
+    return _LOOPBACK_HOST_NAMES | names
+
+
+def _reject_foreign_host():
+    """DNS-rebinding guard: Host обязан быть loopback-именем (или из REST_ALLOWED_HOSTS).
+
+    Сервер слушает только 127.0.0.1, но страница злоумышленника после смены
+    A-записи становится «своей» для браузера (тот же origin, Origin-гейт слеп) и
+    читает /v1/events. Её Host — чужое имя. Пустой Host (HTTP/1.0 без заголовка,
+    редкие локальные утилиты) браузер не шлёт, такой запрос пропускаем.
+    """
+    raw_host = request.headers.get("Host", "")
+    if not raw_host:
+        return None
+    if _host_without_port(raw_host) in _allowed_host_names():
+        return None
+    logger.warning(
+        "Blocked request with foreign Host=%r path=%s from %s",
+        raw_host, request.path, request.remote_addr,
+    )
+    return jsonify({"error": "Forbidden host"}), 403
 
 
 def _check_vocabulary_post_size():
@@ -1672,7 +1787,7 @@ def _load_settings_field(key: str, default):
         return default
 
 
-def _privacy_mode_enabled() -> bool:
+def _privacy_mode_enabled(*, nowait: bool = False) -> bool:
     """FAIL-CLOSED чтение ``privacy_mode_enabled`` для обычного REST/WS.
 
     IO/lock ошибка → privacy ON. Отсутствие ключа после успешного чтения →
@@ -1681,7 +1796,7 @@ def _privacy_mode_enabled() -> bool:
     Эталон: ``RecordingCoreService._privacy_mode_enabled``.
     """
     try:
-        return bool(_deps().store.load_settings().get("privacy_mode_enabled", False))
+        return bool(_deps().store.load_settings(nowait=nowait).get("privacy_mode_enabled", False))
     except Exception:
         logger.warning(
             "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
@@ -1713,7 +1828,15 @@ def _privacy_gate(f):
             return jsonify({"ok": False, "skipped": "privacy_mode"}), 403
         result = f(*args, **kwargs)
         if not call_profile:
-            return result
+            if not getattr(g, "rest_stt_has_explicit_deadline", False):
+                return result
+            # Для явного дедлайна проверяем 503 и 504 перед возможным fallback,
+            # в том числе таймаут до запуска STT. Не ждём файловый lock.
+            response = current_app.make_response(result)
+            if response.status_code in (503, 504) and _privacy_mode_enabled(nowait=True):
+                response.set_data(json.dumps({"skipped": "privacy_mode", "text": ""}))
+                response.status_code = 403
+            return response
         # Проверяем ВСЕ исходы, включая busy/ошибку auth/inference. Сохраняем
         # исходный Response и его close-callback poisoned REST cleanup.
         response = current_app.make_response(result)
@@ -1760,28 +1883,46 @@ def _transcribe_call_ru(deadline: float):
     # REST DATA_DIR исторически может быть другим каталогом — не ищем сокеты.
     socket_override = os.getenv("KRAB_EAR_SOCKET", "").strip()
     socket_path = Path(socket_override).expanduser() if socket_override else default_socket_path(default_data_dir())
+    # Слот файлового STT не берём: ход идёт через владельца, не через MLX этого
+    # процесса. Счётчик удерживает fail-fast выход REST до ДОСТАВКИ ответа: после IPC
+    # остаются пост-проверка приватности, сериализация и запись в сокет, и выход между
+    # ними терял бы уже готовый текст.
+    if not _call_ipc_enter():
+        return jsonify({"error": "stt_busy", "text": ""}), 503
+
+    def _owner_reply():
+        try:
+            result = transcribe_ephemeral_call(
+                wav_bytes, socket_path=socket_path, deadline_monotonic=deadline,
+                signing_enabled=settings.IPC_SIGNING_ENABLED,
+                signing_secret=settings.IPC_SIGNING_SECRET,
+            )
+        except CallSTTRejectedError:
+            return jsonify({"error": "owner policy refused", "text": ""}), 403
+        except CallSTTTimeoutError:
+            if _call_profile_privacy_enabled():
+                return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+            return jsonify({"error": "call STT timeout", "text": ""}), 504
+        except CallSTTProtocolError:
+            if _call_profile_privacy_enabled():
+                return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+            return jsonify({"error": "call STT unavailable", "text": ""}), 503
+        if _call_profile_privacy_enabled() or result.get("status") == "privacy_mode":
+            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
+        status = result.get("status")
+        if status != "ok":
+            return jsonify(result), 504 if status == "timeout" else 503
+        return jsonify({**result, "history_id": "", "request_profile": "voice_gateway_call"}), 200
+
     try:
-        result = transcribe_ephemeral_call(
-            wav_bytes, socket_path=socket_path, deadline_monotonic=deadline,
-            signing_enabled=settings.IPC_SIGNING_ENABLED,
-            signing_secret=settings.IPC_SIGNING_SECRET,
-        )
-    except CallSTTRejectedError:
-        return jsonify({"error": "owner policy refused", "text": ""}), 403
-    except CallSTTTimeoutError:
-        if _call_profile_privacy_enabled():
-            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-        return jsonify({"error": "call STT timeout", "text": ""}), 504
-    except CallSTTProtocolError:
-        if _call_profile_privacy_enabled():
-            return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-        return jsonify({"error": "call STT unavailable", "text": ""}), 503
-    if _call_profile_privacy_enabled() or result.get("status") == "privacy_mode":
-        return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-    status = result.get("status")
-    if status != "ok":
-        return jsonify(result), 504 if status == "timeout" else 503
-    return jsonify({**result, "history_id": "", "request_profile": "voice_gateway_call"}), 200
+        response = current_app.make_response(_owner_reply())
+    except BaseException:
+        _call_ipc_exit()
+        raise
+    # Тот же объект Response проходит через _privacy_gate (он меняет тело и статус,
+    # сохраняя close-callback), поэтому счётчик снимется ровно один раз при закрытии.
+    response.call_on_close(_call_ipc_exit)
+    return response
 
 
 @v1_blp.route("/tts/synthesize", methods=["POST"])
@@ -1874,9 +2015,12 @@ def transcribe_audio():
           for callers streaming ephemeral utterances (e.g. Voice Gateway's
           "Разговор с AI" conversation turns) that should not pollute permanent
           history. privacy_mode_enabled ALWAYS wins over this flag — see below.
-        - deadline_sec (W2c, optional): wall-clock бюджет Future.result вместо
-          глобальных 600 с. Пусто/нет поля → 600. Число clamp [5, 120].
+        - deadline_sec (W2c, optional): общий срок с момента входа в запрос,
+          включая подготовку и очередь STT. Пусто/нет поля → прежний лимит
+          600 с на транскрибацию. Число clamp [10, 120].
           Мусор / ≤0 / >120 → 400 ``invalid deadline_sec`` без транскрибации.
+          До 25 с включительно STT возвращает текст без диаризации, отмечая
+          её пропуск в ``diarization.skipped`` при запрошенной разметке.
 
     Returns 403 {"ok": false, "skipped": "privacy_mode"} when IPC privacy
     mode is active (privacy_mode_enabled=true in settings.json) — enforced by
@@ -1888,6 +2032,7 @@ def transcribe_audio():
         return jsonify({"error": "invalid request_profile"}), 400
     call_profile = profile == "voice_gateway_call"
     call_deadline = None
+    _deadline_sec = None
     if call_profile:
         if _call_profile_privacy_enabled():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403
@@ -1902,6 +2047,15 @@ def transcribe_audio():
         call_language = (request.form.get("lang_hint") or request.form.get("language") or "auto").strip().lower()
         if call_language == "ru":
             return _transcribe_call_ru(call_deadline)
+    else:
+        _deadline_sec, deadline_error = _resolve_transcribe_deadline_sec(request.form.get("deadline_sec"))
+        if deadline_error is not None:
+            return jsonify({"error": "invalid deadline_sec"}), 400
+    request_deadline = call_deadline
+    if _deadline_sec is not None:
+        request_deadline = entered_at + _deadline_sec
+        g.rest_stt_has_explicit_deadline = True
+    timeout_error = "call STT timeout" if call_profile else "Transcription timeout"
     deps = _deps()
     chat_id = request.form.get("chat_id")
     message_id = request.form.get("message_id")
@@ -2003,25 +2157,32 @@ def transcribe_audio():
         if call_profile:
             diarize_override = False
 
-        _deadline_sec, _deadline_err = _resolve_transcribe_deadline_sec(
-            request.form.get("deadline_sec"),
-        )
-        if _deadline_err is not None:
-            return jsonify({"error": "invalid deadline_sec"}), 400
-        _transcribe_timeout_sec = (
-            _TRANSCRIBE_TIMEOUT_SEC if _deadline_sec is None else _deadline_sec
-        )
-        if call_deadline is not None:
-            _transcribe_timeout_sec = call_deadline - time.monotonic()
+        diarization_skipped = False
+        if not call_profile and _deadline_sec is not None and _deadline_sec <= _SHORT_STT_DEADLINE_SEC:
+            diarization_skipped = diarize_override
+            if diarization_skipped is None:
+                diarization_skipped = (
+                    settings.DIARIZATION_ENABLED
+                    or settings.DIARIZED_TRANSCRIPTION_ENABLED
+                    or (settings.WHISPERX_ENABLED and settings.WHISPERX_DIARIZATION)
+                )
+            diarize_override = False
+        _transcribe_timeout_sec = _TRANSCRIBE_TIMEOUT_SEC
+        if request_deadline is not None:
+            _transcribe_timeout_sec = request_deadline - time.monotonic()
             if _transcribe_timeout_sec <= 0:
-                return jsonify({"error": "call STT timeout"}), 504
+                return jsonify({"error": timeout_error}), 504
 
         if not try_acquire_stt_singleflight(0.0 if call_profile else _transcribe_timeout_sec):
+            if request_deadline is not None and time.monotonic() >= request_deadline:
+                return jsonify({"error": timeout_error}), 504
             logger.warning(
                 "REST STT singleflight busy after %.1fs for %s",
                 _transcribe_timeout_sec,
                 safe_base,
             )
+            if not call_profile and _privacy_mode_enabled(nowait=True):
+                return jsonify({"skipped": "privacy_mode", "text": ""}), 403
             return jsonify({"error": "stt_busy"}), 503
 
         # F2: ограничиваем весь вызов транскрайбера wall-clock таймаутом.
@@ -2055,10 +2216,21 @@ def transcribe_audio():
         except Exception:
             _budget_settings_snapshot = None
         try:
-            if call_deadline is not None:
-                _transcribe_timeout_sec = call_deadline - time.monotonic()
-                if _transcribe_timeout_sec <= 0:
-                    return jsonify({"error": "call STT timeout"}), 504
+            now = time.monotonic()
+            response_deadline = request_deadline if request_deadline is not None else now + _TRANSCRIBE_TIMEOUT_SEC
+            _transcribe_timeout_sec = response_deadline - now
+            if _transcribe_timeout_sec <= 0:
+                return jsonify({"error": timeout_error}), 504
+            # Очередь сокращает время инференса, но не запас на завершение
+            # supervised Whisper worker. Короткий звонок без очереди
+            # сохраняет собственный резерв и внутренний watchdog.
+            response_margin = _STT_RESPONSE_MARGIN_SEC
+            if _deadline_sec is None:
+                response_margin = min(
+                    response_margin,
+                    max(0.0, _transcribe_timeout_sec - stt_budget.MIN_USEFUL_ATTEMPT_SEC) * 0.2,
+                )
+            work_deadline = response_deadline - response_margin
             _future = _pool.submit(
                 _REST_ACTIVITY.run,
                 _activity_token,
@@ -2066,16 +2238,15 @@ def transcribe_audio():
                 deps.transcriber.transcribe,
                 _transcribe_path,
                 profile=stt_budget.INTERACTIVE,
-                deadline_sec=_transcribe_timeout_sec,
+                deadline_monotonic=work_deadline,
+                allow_diarization=diarize_override is not False,
+                explicit_rest_deadline=_deadline_sec is not None,
                 settings_snapshot=_budget_settings_snapshot,
                 **_transcribe_kwargs,
             )
             _REST_ACTIVITY.follow_future(_activity_token, _future)
             try:
-                result = _future.result(timeout=(
-                    max(0.0, call_deadline - time.monotonic())
-                    if call_deadline is not None else _transcribe_timeout_sec
-                ))
+                result = _future.result(timeout=max(0.0, response_deadline - time.monotonic()))
             except concurrent.futures.TimeoutError:
                 if _future.done():
                     # Сам транскрайбер тоже может завершиться исключением
@@ -2104,10 +2275,6 @@ def transcribe_audio():
                     # Не ждём non-daemon worker: ожидание снова превратило бы
                     # быстрый 504 в зависание Python-finalize.
                     _pool.shutdown(wait=False, cancel_futures=True)
-                    # R7: слот уходит вместе с работающим worker'ом — иначе
-                    # следующий запрос «получит» singleflight и повиснет на MLX.
-                    hand_off_stt_singleflight(_future)
-                    _slot_handed_off = True
                     logger.error(
                         "Transcription timed out after %ss for %s",
                         _transcribe_timeout_sec,
@@ -2117,6 +2284,10 @@ def transcribe_audio():
                     timeout_response.status_code = 504
                     _arm_timeout_exit(timeout_response, temp_path)
                     temp_cleanup_deferred = True
+                    # R7: слот держится до завершения Future. Standalone
+                    # уже закрыл допуск, в том числе если Future закончил работу.
+                    hand_off_stt_singleflight(_future)
+                    _slot_handed_off = True
                     return timeout_response
                 else:
                     # Для стандартного Future ветка недостижима. Нестандартному
@@ -2152,16 +2323,19 @@ def transcribe_audio():
 
         if call_profile and _call_profile_privacy_enabled():
             return jsonify({"skipped": "privacy_mode", "text": ""}), 403
-        if call_deadline is not None and time.monotonic() >= call_deadline:
-            return jsonify({"error": "call STT timeout", "text": ""}), 504
+        if request_deadline is not None and (
+            time.monotonic() >= request_deadline
+            or result.get("error_code") == stt_budget.DEADLINE_EXCEEDED
+        ):
+            return jsonify({"error": timeout_error, "text": ""}), 504
         # AudioEngine возвращает ошибку словарём, а не исключением. Не превращать
         # её в успешный пустой STT/прогрев и не сохранять в history/metrics.
         # Внутренний error может содержать пути/текст; наружу только stable code.
         # Этот ответ не аттестует завершение вложенной native-работы.
         if result.get("status") == "error" or result.get("error"):
-            # Обычный профиль не имеет post-call проверки в _privacy_gate.
-            # Новый retryable503 не должен разрешить cloud fallback при privacy.
-            if not call_profile and _privacy_mode_enabled():
+            # Запросы без явного срока проверяются здесь. Остальные профили
+            # проверяются в _privacy_gate на ответах 503 и 504.
+            if request_deadline is None and _privacy_mode_enabled():
                 return jsonify({"skipped": "privacy_mode", "text": ""}), 403
             return jsonify({"status": "error", "error": "stt_failed", "text": ""}), 503
         text = result.get("text", "")
@@ -2203,6 +2377,12 @@ def transcribe_audio():
             "diarization": result.get("diarization", {}),
             "history_id": history_item_id,
         }
+        if diarization_skipped:
+            response_payload["diarization"] = {
+                **response_payload["diarization"],
+                "enabled": False,
+                "skipped": "request_deadline",
+            }
         # W-2026-08-19: пустой text скрывал ДВЕ разных причины (тишина vs не
         # смогли распознать — вырожденный вход/VAD-скип), клиент (Voice
         # Gateway) вынужден был гадать по длительности ответа. Причина уже
@@ -2727,8 +2907,8 @@ def _ws_stream_handler(ws):
     mode = config.get("mode", "transcribe")
     target_lang = config.get("target_lang", "off") if mode == "translate" else "off"
 
-    # P0e: native WS делит REST STT-слот с POST; acquire(0) внутри _process_window.
-    # Cloud-ветка ниже LiveSubsService не использует. IPC BackendService gate не получает.
+    # Native WS делит REST STT-слот с остальными путями, acquire(0) внутри _process_window.
+    # Во внешнем BackendService свои правила допуска IPC.
     observed_acquire, observed_release = _REST_ACTIVITY.slot_callbacks(
         try_acquire_stt_singleflight, release_stt_singleflight, "native_ws",
     )
@@ -2742,6 +2922,40 @@ def _ws_stream_handler(ws):
 
     cloud_audio_buffer = bytearray()
     cloud_sample_rate = 16000
+
+    def flush_cloud_audio() -> None:
+        if not cloud_audio_buffer:
+            return
+        acquired = try_acquire_stt_singleflight(0.0)
+        try:
+            private = _privacy_mode_enabled(nowait=True)
+            provider = get_cloud_stt_provider(cloud_provider_name) if acquired and not private else None
+            res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang) if provider else {}
+        finally:
+            if acquired:
+                release_stt_singleflight()
+
+        # Слот защищает обращение к STT. Перевод и запись в WebSocket
+        # выполняются после освобождения, чтобы медленный клиент не держал слот.
+        if private:
+            ws.send(json.dumps({"type": "error", "code": "privacy_mode_active", "message": "Privacy mode active"}))
+        elif not acquired:
+            ws.send(json.dumps({"type": "error", "code": "stt_busy", "message": "STT is busy"}))
+        elif not provider:
+            ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
+        elif "error" in res:
+            code = "cloud_no_api_key" if res["error"] == "no_api_key" else "cloud_api_error"
+            ws.send(json.dumps({"type": "error", "code": code, "message": res.get("message", "")}))
+        elif text := res.get("text", ""):
+            reply = {
+                "type": "final",
+                "text": text,
+                "lang": res.get("lang") or "ru",
+                "confidence": res.get("confidence", 0.0),
+            }
+            if mode == "translate" and target_lang != "off":
+                reply["translation"] = deps.translator.translate(text, target_lang)
+            ws.send(json.dumps(reply))
 
     logger.info("WS /v1/stream: Client connected")
 
@@ -2765,29 +2979,7 @@ def _ws_stream_handler(ws):
             msg_type = msg.get("type")
             if msg_type == "end":
                 if backend == "cloud":
-                    if cloud_audio_buffer:
-                        provider = get_cloud_stt_provider(cloud_provider_name)
-                        if not provider:
-                            ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
-                        else:
-                            res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang)
-                            if "error" in res:
-                                if res["error"] == "no_api_key":
-                                    ws.send(json.dumps({"type": "error", "code": "cloud_no_api_key", "message": res.get("message", "")}))
-                                else:
-                                    ws.send(json.dumps({"type": "error", "code": "cloud_api_error", "message": res.get("message", "")}))
-                            else:
-                                text = res.get("text", "")
-                                if text:
-                                    resp = {
-                                        "type": "final",
-                                        "text": text,
-                                        "lang": res.get("lang") or "ru",
-                                        "confidence": res.get("confidence", 0.0),
-                                    }
-                                    if mode == "translate" and text and target_lang != "off":
-                                        resp["translation"] = deps.translator.translate(text, target_lang)
-                                    ws.send(json.dumps(resp))
+                    flush_cloud_audio()
                 else:
                     result = live_subs.ingest(audio_bytes=b"", sample_rate=16000, target_lang=target_lang, is_final=True)
                     if result and result.get("text"):
@@ -2823,29 +3015,7 @@ def _ws_stream_handler(ws):
                         ws.send(json.dumps({"type": "error", "code": "audio_too_large", "message": "Cloud audio buffer exceeded limit"}))
                         break
                     if is_final:
-                        if cloud_audio_buffer:
-                            provider = get_cloud_stt_provider(cloud_provider_name)
-                            if not provider:
-                                ws.send(json.dumps({"type": "error", "code": "invalid_cloud_provider", "message": "Unknown provider"}))
-                            else:
-                                res = provider.transcribe(bytes(cloud_audio_buffer), cloud_sample_rate, source_lang)
-                                if "error" in res:
-                                    if res["error"] == "no_api_key":
-                                        ws.send(json.dumps({"type": "error", "code": "cloud_no_api_key", "message": res.get("message", "")}))
-                                    else:
-                                        ws.send(json.dumps({"type": "error", "code": "cloud_api_error", "message": res.get("message", "")}))
-                                else:
-                                    text = res.get("text", "")
-                                    if text:
-                                        resp = {
-                                            "type": "final",
-                                            "text": text,
-                                            "lang": res.get("lang") or "ru",
-                                            "confidence": res.get("confidence", 0.0),
-                                        }
-                                        if mode == "translate" and text and target_lang != "off":
-                                            resp["translation"] = deps.translator.translate(text, target_lang)
-                                        ws.send(json.dumps(resp))
+                        flush_cloud_audio()
                         break
                 else:
                     result = live_subs.ingest(
@@ -2897,6 +3067,7 @@ def create_app(deps: "RestDeps | None" = None, config_mapping=None) -> Flask:
     limiter.init_app(flask_app)
     flask_app.register_error_handler(429, _rate_limit_exceeded_handler)
     flask_app.register_error_handler(413, _request_entity_too_large_handler)
+    flask_app.before_request(_reject_foreign_host)
     flask_app.before_request(_check_vocabulary_post_size)
     flask_app.before_request(start_timer)
     flask_app.after_request(log_request)
@@ -3124,6 +3295,13 @@ if __name__ == "__main__":
     except Exception:  # noqa: BLE001
         logger.warning("REST: faulthandler.enable() недоступен — крэш-трейсбека не будет")
 
+    # Bearer-auth по умолчанию (решение владельца 2026-11-15): без явного ключа,
+    # токен-стора и опт-аута REST_API_ALLOW_ANONYMOUS выдаём <data_dir>/rest_api_key.
+    from backend.rest_api_key import ensure_rest_api_key
+    from backend.service import default_data_dir as _default_data_dir
+
+    ensure_rest_api_key(_default_data_dir())
+
     _auth_mode = (
         "token-store" if getattr(settings, "REST_API_AUTH_ENABLED", False)
         else "legacy-key" if settings.REST_API_KEY
@@ -3131,11 +3309,10 @@ if __name__ == "__main__":
     )
     if _auth_mode == "DISABLED":
         logger.warning(
-            "REST server starting on 127.0.0.1:%s with NO auth "
-            "(Wave 47 B2 HIGH-1). Any local process can call /api/*. "
-            "To enable auth: set REST_API_AUTH_ENABLED=true OR populate "
-            "REST_API_KEY in settings.json. Localhost-only bind prevents "
-            "remote attack.",
+            "REST server starting on 127.0.0.1:%s with NO auth: "
+            "REST_API_ALLOW_ANONYMOUS=true (опт-аут от ключа по умолчанию). "
+            "Any local process can call the protected routes. "
+            "Чтобы вернуть auth: REST_API_ALLOW_ANONYMOUS=false.",
             settings.REST_SERVER_PORT,
         )
     else:

@@ -174,11 +174,23 @@ fi
 if [ -z "${HF_TOKEN:-}" ] && [ "${KRAB_EAR_SKIP_HF_TOKEN:-0}" != "1" ]; then
   printf '[install] HF-токен (Hugging Face, для диаризации говорящих — опционально).\n'
   printf '[install] Enter = пропустить (диаризация отключится, остальное работает): '
-  read -r HF_TOKEN
+  read -rs HF_TOKEN
+  printf '\n'
 fi
 if [ -z "${HF_TOKEN:-}" ]; then
   log "HF-токен пропущен — диаризация говорящих отключена"
   HF_TOKEN=""
+fi
+
+# Подготавливаем и проверяем приватный plist до остановки сервиса.
+log "render template → $TARGET"
+STAGED_PLIST=""
+trap '[ -z "$STAGED_PLIST" ] || rm -f -- "$STAGED_PLIST"' EXIT
+STAGED_PLIST="$(printf '%s' "$HF_TOKEN" |
+  python3 "$ROOT_DIR/scripts/render_launchagent_plist.py" "$TEMPLATE" "$TARGET" "$HOME" "$ROOT_DIR")" ||
+  fail "не удалось подготовить plist"
+if ! plutil -lint "$STAGED_PLIST" >/dev/null; then
+  fail "plutil lint failed для нового plist"
 fi
 
 # Busy-гейт перед переустановкой юнита (инцидент 2026-07-22: bootout под
@@ -206,43 +218,15 @@ else
   done
 fi
 
-# 1. Bootout старой версии (если загружена) — ДО записи нового plist, чтобы
-#    launchd не держал ссылку на старый путь/env.
 if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
   log "bootout gui/$UID_NUM/$LABEL (была загружена старая версия)"
   launchctl bootout "gui/$UID_NUM/$LABEL" 2>&1 || true
   wait_for_bootout "$LABEL" 5
 fi
 
-# 2. Substitution template → target. sed с | разделителем потому что пути и
-#    токен могут содержать `/`. __HF_TOKEN__ подставляем последним чтобы
-#    возможные спецсимволы в токене не зацепили предыдущие replace'ы.
-log "render template → $TARGET"
-sed -e "s|__HOME__|$HOME|g" \
-    -e "s|__PROJECT_ROOT__|$ROOT_DIR|g" \
-    "$TEMPLATE" > "$TARGET.tmp"
-# Для HF_TOKEN используем python чтобы не зависеть от sed escaping.
-# Пустой токен = диаризация пропущена: удаляем HF-ключи из plist целиком.
-python3 -c "
-import sys, pathlib, re
-p = pathlib.Path('$TARGET.tmp')
-text = p.read_text()
-token = sys.argv[1]
-if token:
-    text = text.replace('__HF_TOKEN__', token)
-else:
-    text = re.sub(
-        r'\s*<key>(?:KRAB_EAR_)?HF_TOKEN</key>\s*<string>__HF_TOKEN__</string>',
-        '', text)
-p.write_text(text)
-" "$HF_TOKEN"
-mv "$TARGET.tmp" "$TARGET"
-chmod 600 "$TARGET"  # plist содержит secret, ограничиваем доступ
-
-# 3. Валидация через plutil — убедиться что XML валиден до bootstrap
-if ! plutil -lint "$TARGET" >/dev/null; then
-  fail "plutil lint failed для $TARGET (проверь template)"
-fi
+# Подмена в том же каталоге сохраняет права временного файла.
+mv -f -- "$STAGED_PLIST" "$TARGET"
+STAGED_PLIST=""
 
 # 4. Bootstrap в gui domain текущего пользователя
 log "bootstrap gui/$UID_NUM $TARGET"

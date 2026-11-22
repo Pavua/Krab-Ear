@@ -1,11 +1,17 @@
-import requests
 import os
-import json
+import sys
 import time
 
+import requests
+
 # Конфигурация
-URL = "http://127.0.0.1:5005/v1/stt/transcribe"
+URL = os.environ.get("KRAB_EAR_REST_URL", "http://127.0.0.1:5005").rstrip("/") + "/v1/stt/transcribe"
 FILE_PATH = "test_audio.wav"
+
+
+def _headers():
+    key = os.environ.get("KRAB_EAR_REST_API_KEY", "").strip()
+    return {"Authorization": f"Bearer {key}"} if key else {}
 
 
 def create_test_audio():
@@ -20,11 +26,10 @@ def create_test_audio():
     print(f"Test audio created: {FILE_PATH}")
 
 
-def test_transcribe():
+def test_transcribe() -> int:
     if not os.path.exists(FILE_PATH):
         create_test_audio()
 
-    files = {'file': open(FILE_PATH, 'rb')}
     ts = int(time.time())
     data = {
         'chat_id': f'test_chat_{ts}',
@@ -34,25 +39,36 @@ def test_transcribe():
 
     print(f"Sending request to {URL}...")
     try:
-        response = requests.post(URL, files=files, data=data)
+        with open(FILE_PATH, 'rb') as fh:
+            response = requests.post(URL, files={'file': fh}, data=data, headers=_headers(), timeout=120)
         print(f"Status Code: {response.status_code}")
+        if response.status_code != 200:
+            print("FAILED: первый запрос не вернул 200", file=sys.stderr)
+            return 1
         res_json = response.json()
-        print(f"Response (text): {res_json.get('text')}")
+        # Содержимое (text/segments) не печатаем: только метаданные.
+        print(f"Response text length: {len(res_json.get('text') or '')} chars")
         print(f"Confidence: {res_json.get('confidence')}")
         print(f"Duration MS: {res_json.get('duration_ms')}")
         print(f"Model: {res_json.get('model')}")
         print(f"Segments count: {len(res_json.get('segments', []))}")
 
-        # Проверка идемпотентности
+        # Проверка идемпотентности: тот же chat_id/message_id → тот же ответ
         print("\nTesting idempotency (sending same request again)...")
-        files_retry = {'file': open(FILE_PATH, 'rb')}
-        response_retry = requests.post(URL, files=files_retry, data=data)
+        with open(FILE_PATH, 'rb') as fh:
+            response_retry = requests.post(URL, files={'file': fh}, data=data, headers=_headers(), timeout=120)
         print(f"Retry Status Code: {response_retry.status_code}")
-        print(f"Retry Response: {json.dumps(response_retry.json(), indent=2, ensure_ascii=False)}")
-
+        if response_retry.status_code != 200:
+            print("FAILED: повторный запрос не вернул 200", file=sys.stderr)
+            return 1
+        if response_retry.json() != res_json:
+            print("FAILED: повторный запрос вернул другой ответ (идемпотентность нарушена)", file=sys.stderr)
+            return 1
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error: {type(e).__name__}", file=sys.stderr)
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    test_transcribe()
+    sys.exit(test_transcribe())

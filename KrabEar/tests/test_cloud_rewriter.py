@@ -38,7 +38,7 @@ sys.modules.setdefault("mlx", _mlx_stub)
 sys.modules.setdefault("mlx.core", _mlx_core_stub)
 sys.modules.setdefault("mlx_whisper", types.ModuleType("mlx_whisper"))
 
-for _mod in ("sounddevice", "pyannote", "pyannote.audio", "torch", "numpy",
+for _mod in ("sounddevice", "numpy",
              "requests", "faster_whisper", "sentry_sdk"):
     sys.modules.setdefault(_mod, types.ModuleType(_mod))
 

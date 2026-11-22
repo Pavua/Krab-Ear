@@ -18,6 +18,7 @@ from backend.plugin_system import PluginManager
 from backend.feature_flags import FeatureFlags
 from backend.template_manager import TemplateManager
 from backend.search_history import SearchHistoryManager
+from backend.timeline_purge_guard import timeline_guard
 from backend.archive_manager import ArchiveManager
 from backend.timeline_view import TimelineViewGenerator
 from backend.timeline_export import TimelineExporter
@@ -335,6 +336,8 @@ def _shutdown_backend(
 # stt.partial, realtime.partial_transcript) which would flood external endpoints.
 # To forward more events: add the type string here AND scrub any new PII fields
 # in BackendService._webhook_safe_payload().
+_HISTORY_MIGRATION_START_LOCK = threading.Lock()
+
 _WEBHOOK_FORWARDED_EVENTS: frozenset[str] = frozenset({
     "stt.final",                # транскрибация завершена (EventType.STT_FINAL)
     "translation.completed",    # перевод завершён (EventType.TRANSLATION_COMPLETED)
@@ -483,6 +486,8 @@ class BackendService:
         socket_ownership_snapshot_getter: Callable[[], Any] | None = None,
     ) -> None:
         self.store = store
+        from backend.purge_recovery import recover_pending_purge
+        recover_pending_purge(store)
         # Startup LLM wiring reads runtime toggles before the other services are
         # built. Keep the single settings reader available from the first call.
         self._settings_svc = SettingsService(store=self.store)
@@ -591,14 +596,14 @@ class BackendService:
         _rewriter_ref = self._llm_rewriter
         if _rewriter_ref is not None:
             def _on_settings_saved(old: dict, new: dict) -> None:
-                new_key = str(new.get("lm_studio_api_key", ""))
-                if new_key != str(old.get("lm_studio_api_key", "")):
+                new_key = str(new.get("lm_studio_api_key") or "")
+                if new_key != str(old.get("lm_studio_api_key") or ""):
                     _rewriter_ref.set_api_key(new_key)
                 # Hot-swap model when user changes it via GUI dropdown (llm_model setting).
                 # Previously the rewriter was initialized once from the static config and
                 # never updated — GUI dropdown changes were silently ignored.
-                new_model = str(new.get("llm_model", "")).strip()
-                old_model = str(old.get("llm_model", "")).strip()
+                new_model = str(new.get("llm_model") or "").strip()
+                old_model = str(old.get("llm_model") or "").strip()
                 if new_model and new_model != old_model:
                     logger.info(
                         "LLM rewriter: hot-swap model %r → %r (settings change)",
@@ -618,7 +623,7 @@ class BackendService:
                 # Privacy mode just toggled OFF — re-init Sentry if DSN is configured.
                 from backend.observability import init_sentry, is_sentry_initialized  # noqa: PLC0415
                 if not is_sentry_initialized():
-                    dsn = str(new.get("sentry_dsn", "")).strip()
+                    dsn = str(new.get("sentry_dsn") or "").strip()
                     if dsn:
                         init_sentry(
                             dsn=dsn,
@@ -861,7 +866,9 @@ class BackendService:
             transcriber=self.transcriber,
             translator=self.translator,
             settings_get=self._get_runtime_setting,
+            read_capture_epoch=lambda: self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).live_subs_policy_epoch,
         )
+        self._settings_svc.register_after_save_hook(self._live_subs.on_settings_saved)
         self._translation = TranslationService(
             translator=self.translator,
             store=self.store,
@@ -1129,6 +1136,11 @@ class BackendService:
                 # Защита принадлежит процессу, а не текущему значению настроек
                 # или времени жизни сервера: ответ может закрыться после stop.
                 _rest_module._mark_backend_process()
+                # Bearer-auth по умолчанию: ключ <data_dir>/rest_api_key
+                # (решение владельца 2026-11-15), до первого запроса.
+                from backend.rest_api_key import ensure_rest_api_key
+
+                ensure_rest_api_key(self.store.data_dir)
                 from backend.rest_inprocess import InProcessRestServer
 
                 _rest_module.adopt_external_singletons(
@@ -1550,6 +1562,7 @@ class BackendService:
         # гейт активной записи декоративен, и self-heal агента открывает второй
         # входной тап посреди диктовки (recorder_timeout, запись теряется).
         self._oww_adapter = OpenWakeWordAdapter(
+            read_privacy_revision=lambda: self.store.read_wake_privacy_revision(),
             data_dir=self.store.data_dir,
             settings_get=self._get_runtime_setting,
             is_recording=lambda: bool(getattr(self.recorder, "is_recording", False)),
@@ -2038,13 +2051,24 @@ class BackendService:
         (gigaam-специфичный токен может не иметь прав на pyannote gating → spurious 401).
         Значение токена НИКОГДА не логируется.
         """
-        _hf = self._get_runtime_setting("hf_token", "").strip()
-        _gigaam = self._get_runtime_setting("stt_gigaam_hf_token", "").strip()
+        # E5 п.1: `.get(key, "")` отдаёт None, если ключ есть со значением null (settings.json,
+        # записанный до валидации строкового типа). Это старт backend — не роняем его:
+        # не-строка = «токена нет». Запись не-строки теперь отвергает SettingsValidator.
+        _hf_raw = self._get_runtime_setting("hf_token", "")
+        _gigaam_raw = self._get_runtime_setting("stt_gigaam_hf_token", "")
+        _hf = _hf_raw.strip() if isinstance(_hf_raw, str) else ""
+        _gigaam = _gigaam_raw.strip() if isinstance(_gigaam_raw, str) else ""
         # Общий hf_token предпочтителен для generic env-ключей.
         # stt_gigaam_hf_token — фолбэк когда hf_token пустой.
         _token = _hf or _gigaam
         _token_source = "generic" if _hf else "gigaam"
         if not _token:
+            # E5 V5: очистка токена в GUI убирает ровно те env-ключи, которые выставили
+            # настройки. Явный внешний env (KRAB_EAR_HF_TOKEN / plist) не трогаем.
+            for _k, _v in list((getattr(self, "_hf_env_from_settings", None) or {}).items()):
+                if os.environ.get(_k) == _v:  # чужое значение (подмена после нас) не трогаем
+                    os.environ.pop(_k, None)
+            self._hf_env_from_settings = {}
             return
         _env_keys = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
         _propagated: list[str] = []
@@ -2053,6 +2077,9 @@ class BackendService:
                 if overwrite or not os.environ.get(_k):
                     os.environ[_k] = _token
                     _propagated.append(_k)
+            _owned = dict(getattr(self, "_hf_env_from_settings", None) or {})
+            _owned.update({_k: _token for _k in _propagated})
+            self._hf_env_from_settings = _owned
         except Exception as exc:  # noqa: BLE001
             # Например, null-byte в токене вызывает ValueError в os.environ[k]=value.
             # Не логируем сам токен — только тип ошибки.
@@ -2890,6 +2917,9 @@ class BackendService:
         if value is None:
             return default
         if isinstance(value, (int, float)):
+            # E5 п.4: NaN/Inf не булевы — возвращаем default, а не True.
+            if isinstance(value, float) and not math.isfinite(value):
+                return default
             return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()
@@ -3427,6 +3457,15 @@ class BackendService:
                 level="info",
             )
 
+        if method not in {"purge_all_data", "ping"}:
+            try:
+                pending = timeline_guard(self.store).recovery_pending()
+            except OSError:
+                pending = True
+            if pending:
+                return self._error(request_id, "purge_recovery_required",
+                                   "Очистка не завершена. Повторите очистку данных.")
+
         _t0 = time.monotonic()
         ipc_timing.mark("handler_started")
         try:
@@ -3568,7 +3607,10 @@ class BackendService:
         fmt = str(params.get("format", "json")).strip()
         interval_hours = int(params.get("interval_hours", 24))
         output_dir = params.get("output_dir")
-        enabled = bool(params.get("enabled", True))
+        # E5 п.4: bool("false") == True — строка «выключить» включала авто-экспорт.
+        # Отсутствующий ключ = документированное True; явный null / мусор / NaN = fail-closed False
+        # (раньше `bool(None)` давало False, а _coerce_bool(None, True) включал экспорт).
+        enabled = BackendService._coerce_bool(params["enabled"], False) if "enabled" in params else True
         return self._export_scheduler.configure(
             fmt=fmt,
             interval_hours=interval_hours,
@@ -3583,7 +3625,7 @@ class BackendService:
         AutoBackupManager на время очистки, чтобы фоновый/оппортунистический
         backup-цикл не пересоздал backups/ с PII сразу после rmtree() в purge-теле
         (TOCTOU). set_purged() взводится ДО очистки (и сам удаляет backups/);
-        clear_purged() снимается в finally ПОСЛЕ завершения всех wipe-шагов, чтобы
+        clear_purged() снимается только ПОСЛЕ durable завершения всех wipe-шагов, чтобы
         будущие бэкапы возобновились. Вся остальная логика purge не тронута.
 
         wave-26 MED: после того как HistoryService удалит hotwords.json с диска,
@@ -3593,45 +3635,57 @@ class BackendService:
         wire сделан здесь, а не в handle_purge_all_data — намеренно (см. комментарий
         в audit_inmemory_purge_coverage.py).
         """
-        self._auto_backup.set_purged()
-        try:
+        confirm = params.get("confirm")
+        if confirm is not True and confirm != "PURGE_ALL":
+            return self._history.handle_purge_all_data(params)
+
+        def perform():
+            self._auto_backup.set_purged()
             result = self._history.handle_purge_all_data(params)
-        finally:
-            self._auto_backup.clear_purged()
-        # wave-26 MED: wipe in-memory hotwords after disk file was deleted by history purge.
-        # Guard: only clear if the purge actually ran (confirm check passed → ok key present
-        # and is not False).  If confirm was missing, handle_purge_all_data returned early
-        # with ok=False and nothing was deleted — do not clear in-memory state.
-        if isinstance(result, dict) and result.get("ok") is not False:
-            try:
-                self._hotword_detector.clear()
-            except Exception:
-                import logging as _logging
-                _logging.getLogger("KrabEar.BackendService").warning(
-                    "purge_all_data: hotword_detector.clear() failed", exc_info=True
-                )
-            # Wave-30 MED: wipe in-memory transcription queue (file_path + result fields)
-            # after history purge.  _transcription_queue lives in BackendService (not
-            # HistoryService), so the clear is wired here — same pattern as _hotword_detector.
-            # Documented in audit_inmemory_purge_coverage.py registry comment.
-            try:
-                self._transcription_queue.clear()
-            except Exception:
-                import logging as _logging
-                _logging.getLogger("KrabEar.BackendService").warning(
-                    "purge_all_data: transcription_queue.clear() failed", exc_info=True
-                )
-            # wave-41 MED: wipe usage_stats.json from disk + reset in-memory counters.
-            # UsageTracker._stats_file survives purge otherwise — daily_history / streak /
-            # peak_day all contain indirect usage-pattern PII.
-            try:
-                self._usage_tracker.clear_all()
-            except Exception:
-                import logging as _logging
-                _logging.getLogger("KrabEar.BackendService").warning(
-                    "purge_all_data: usage_tracker.clear_all() failed", exc_info=True
-                )
-        return result
+            # wave-26 MED: wipe in-memory hotwords after disk file was deleted by history purge.
+            # Guard: only clear if the purge actually ran (confirm check passed → ok key present
+            # and is not False).  If confirm was missing, handle_purge_all_data returned early
+            # with ok=False and nothing was deleted — do not clear in-memory state.
+            if isinstance(result, dict) and result.get("ok") is not False:
+                try:
+                    self._hotword_detector.clear()
+                except Exception:
+                    result["complete"] = False
+                    result.setdefault("errors", []).append("hotwords_memory")
+                    import logging as _logging
+                    _logging.getLogger("KrabEar.BackendService").warning(
+                        "purge_all_data: hotword_detector.clear() failed", exc_info=True
+                    )
+                # Wave-30 MED: wipe in-memory transcription queue (file_path + result fields)
+                # after history purge.  _transcription_queue lives in BackendService (not
+                # HistoryService), so the clear is wired here — same pattern as _hotword_detector.
+                # Documented in audit_inmemory_purge_coverage.py registry comment.
+                try:
+                    self._transcription_queue.clear()
+                except Exception:
+                    result["complete"] = False
+                    result.setdefault("errors", []).append("transcription_queue")
+                    import logging as _logging
+                    _logging.getLogger("KrabEar.BackendService").warning(
+                        "purge_all_data: transcription_queue.clear() failed", exc_info=True
+                    )
+                # wave-41 MED: wipe usage_stats.json from disk + reset in-memory counters.
+                # UsageTracker._stats_file survives purge otherwise — daily_history / streak /
+                # peak_day all contain indirect usage-pattern PII.
+                try:
+                    self._usage_tracker.clear_all()
+                except Exception:
+                    result["complete"] = False
+                    result.setdefault("errors", []).append("usage_stats_memory")
+                    import logging as _logging
+                    _logging.getLogger("KrabEar.BackendService").warning(
+                        "purge_all_data: usage_tracker.clear_all() failed", exc_info=True
+                    )
+            return result
+
+        return timeline_guard(self.store).run_purge(
+            perform, after_complete=self._auto_backup.clear_purged,
+        )
 
     def _handle_ping(self, params: dict[str, Any]) -> dict[str, Any]:
         """Делегирует к HealthCheckService.handle_ping (W1690)."""
@@ -3711,7 +3765,8 @@ class BackendService:
             raise ValueError("Параметр 'name' обязателен")
         rules = list(params.get("rules", []))
         description = str(params.get("description", ""))
-        overwrite = bool(params.get("overwrite", False))
+        # bool("false") is True: строка «не перезаписывать» затирала встроенный профиль.
+        overwrite = self._coerce_bool(params.get("overwrite", False), False)
         profile = self._norm_profiles.add_profile(name, rules, description, overwrite=overwrite)
         return {"profile": profile.to_dict()}
 
@@ -4079,6 +4134,10 @@ class BackendService:
         Позволяет отлаживать shipped-сборки одним кликом из вкладки «Диагностика».
         Возвращает {"ok": True, "sent_count": N} или {"ok": False, "reason": "..."}.
         """
+        # E5 V3: сестринский get_audit_log гейтится privacy; здесь та же защита в глубину.
+        # Отправка разрешена только при ЯВНОМ False: None/нечитаемое/нетипизированное = запрет.
+        if self._get_runtime_setting("privacy_mode_enabled", False) is not False:
+            return {"ok": False, "reason": "privacy_mode_active"}
         if self._error_bus is None:
             return {"ok": False, "reason": "error_bus_not_initialized"}
         try:
@@ -4665,23 +4724,9 @@ class BackendService:
             "purge_available": True,
         }
 
-        # --- privacy_mode ---
-        try:
-            result["privacy_mode"] = bool(
-                self._get_runtime_setting("privacy_mode_enabled", False)
-            )
-        except Exception:
-            logger.exception("get_privacy_dashboard: ошибка чтения privacy_mode_enabled")
-
-        # --- encryption_enabled: read flag directly from settings (no IPC cross-call) ---
-        try:
-            result["encryption_enabled"] = bool(
-                self._get_runtime_setting("history_encryption_enabled", False)
-            )
-        except Exception:
-            logger.exception(
-                "get_privacy_dashboard: ошибка чтения history_encryption_enabled"
-            )
+        policy = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5)
+        result["privacy_mode"] = policy.privacy_mode_enabled
+        result["encryption_enabled"] = policy.encryption_enabled
 
         # --- storage: sizes from HistoryService + item count from StateStore ---
         try:
@@ -5920,9 +5965,9 @@ class BackendService:
         Не создаёт ключ. Нет privacy gate (конфигурация, не данные транскрипций).
         """
         from backend.crypto_keystore import keychain_available
-        enabled = bool(self._settings_svc.cached_settings().get("history_encryption_enabled", False))
-        available = keychain_available()
-        return {"ok": True, "enabled": enabled, "available": available}
+        policy = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5)
+        enabled = policy.encryption_enabled
+        return {"ok": enabled is not None, "enabled": enabled, "available": keychain_available()}
 
     def _handle_set_history_encryption(self, params: dict[str, Any]) -> dict[str, Any]:
         """Включает или выключает AES-256-GCM шифрование NDJSON-истории.
@@ -5938,7 +5983,7 @@ class BackendService:
         Returns:
             {"ok": True, "enabled": bool, "available": True}
             или
-            {"ok": False, "error": "keychain_unavailable", "enabled": bool}
+            {"ok": False, "error": str, "enabled": bool | None}
         """
         enabled = params.get("enabled", False)
         if type(enabled) is not bool:
@@ -5952,11 +5997,14 @@ class BackendService:
         except HistoryEncryptionUnavailable:
             return {
                 "ok": False, "error": "keychain_unavailable",
-                "enabled": bool(self._settings_svc.cached_settings().get("history_encryption_enabled", False)),
+                "enabled": self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).encryption_enabled,
             }
         if not result.get("ok", True):
             return result
-        return {"ok": True, "enabled": enabled, "available": True}
+        confirmed = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5).encryption_enabled
+        if confirmed is not enabled:
+            return {"ok": False, "error": "encryption_state_unconfirmed", "enabled": confirmed}
+        return {"ok": True, "enabled": confirmed, "available": True}
 
     def _call_sessions_crypto(self) -> Any:
         """Ключ истории для журнала звонков (только чтение, без создания)."""
@@ -5975,12 +6023,24 @@ class BackendService:
             {"ok": True, "status": "already_running"}
             {"ok": False, "status": "encryption_unavailable"}
         """
-        if getattr(self, "_history_migration_running", False):
-            return {"ok": True, "status": "already_running"}
+        # E5 V7: проверка-и-выставление флага атомарны. IPC многопоточный, а флаг раньше
+        # выставлялся уже после store._lock(): два вызова могли запустить два воркера.
+        _migration_guard = _HISTORY_MIGRATION_START_LOCK
+        _migration_guard.acquire()
+        try:
+            if getattr(self, "_history_migration_running", False):
+                return {"ok": True, "status": "already_running"}
 
-        with self.store._lock():
-            if not self.store._read_encryption_flag_unlocked() or self.store._acquire_history_crypto_unlocked() is None:
-                return {"ok": False, "status": "encryption_unavailable"}
+            with self.store._lock():
+                if not self.store._read_encryption_flag_unlocked() or self.store._acquire_history_crypto_unlocked() is None:
+                    return {"ok": False, "status": "encryption_unavailable"}
+            self._history_migration_running = True
+            self._history_migration_last_status = None
+        except BaseException:
+            self._history_migration_running = False
+            raise
+        finally:
+            _migration_guard.release()
 
         def _run() -> None:
             from backend.event_bus import bus as _event_bus
@@ -6023,10 +6083,13 @@ class BackendService:
                 self._history_migration_running = False
 
         import threading as _threading
-        self._history_migration_running = True
-        self._history_migration_last_status = None
         t = _threading.Thread(target=_run, daemon=True, name="history-enc-migration")
-        t.start()
+        try:
+            t.start()
+        except BaseException:
+            # Воркера нет — флаг не должен навсегда отвечать «already_running».
+            self._history_migration_running = False
+            raise
         return {"ok": True, "status": "started"}
 
     def _handle_get_history_encryption_status(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -6374,6 +6437,8 @@ def build_service(
             # Недоступное подтверждение ownership не расширяет inventory.
             pass
     store = StateStore(data_dir=data_dir, startup_owned_lock_path=startup_owned_lock_path)
+    from backend.purge_recovery import recover_pending_purge
+    recover_pending_purge(store)
     if profile_created_by_this_startup is None:
         profile_created_by_this_startup = store._created_data_dir
     # Гарантируем наличие полного набора дефолтных настроек — но только там,

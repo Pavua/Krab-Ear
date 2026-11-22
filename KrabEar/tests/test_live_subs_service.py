@@ -99,6 +99,18 @@ class TestLiveSubsFlush(unittest.TestCase):
     test_flush_on_is_final_true) — контракт не менялся.
     """
 
+    def test_discard_stop_never_flushes_while_privacy_setting_is_still_off(self) -> None:
+        svc = _make_service()
+        self.addCleanup(svc.close)
+        svc.ingest(_pcm_chunk(1.0), 16000, "ru", False)
+        self.assertGreater(svc.buffer_duration_sec(), 0)
+
+        result = svc.handle_stop({"discard": True})
+
+        self.assertFalse(result["flushed"])
+        self.assertEqual(svc.buffer_duration_sec(), 0)
+        svc._transcriber.transcribe.assert_not_called()
+
     def test_flush_on_3s_boundary(self) -> None:
         """Чанк ≥3 с → ingest() возвращается немедленно (None), воркер флашит асинхронно."""
         svc = _make_service(stt_text="world")

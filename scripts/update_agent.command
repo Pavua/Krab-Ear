@@ -77,6 +77,13 @@ fi
 
 echo "Обновляю Krab Ear Agent... (channel: $UPDATE_CHANNEL)"
 
+# Сборка — ДО остановки агента: упавший `swift build` не должен оставлять машину
+# без работающего агента (хоткей, вставка) и со старым бинарём.
+echo "Собираю нативный агент (Swift release)"
+swift build -c release --package-path "$PACKAGE_DIR"
+
+[ -x "$BUILD_BIN" ] || preflight_fail "build artifact не найден: $BUILD_BIN"
+
 # Останавливаем ранее запущенный агент (как .app bundle, так и legacy standalone).
 # Без этого pkill после rebuild обновление бинаря приведёт к сбою TCC cdhash
 # и "висящему" экземпляру агента.
@@ -90,11 +97,6 @@ for _ in {1..20}; do
   fi
   sleep 0.1
 done
-
-echo "Собираю нативный агент (Swift release)"
-swift build -c release --package-path "$PACKAGE_DIR"
-
-[ -x "$BUILD_BIN" ] || preflight_fail "build artifact не найден: $BUILD_BIN"
 
 # Синхронизируем свежесобранный бинарь в обе точки доставки:
 #   * native/runtime/KrabEarAgent — legacy путь (dev-сценарии, smoke-тесты);

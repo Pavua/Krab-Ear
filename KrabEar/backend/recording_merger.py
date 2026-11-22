@@ -26,6 +26,21 @@ MAX_MERGE_ITEMS = 50
 MAX_SEPARATOR_LEN = 1000
 
 
+def _coerce_bool_param(value: Any) -> bool:
+    """Строгий разбор булева IPC-параметра разрушающего действия.
+
+    Включают только настоящий True, число 1 и строки-подтверждения; всё остальное
+    (включая "false", "0", None, NaN, контейнеры) — False: сомнение не удаляет данные.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value == 1
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return False
+
+
 class RecordingMerger:
     """Объединяет несколько записей истории в одну.
 
@@ -338,7 +353,8 @@ class RecordingMerger:
             separator        — необязательный разделитель текста.
         """
         item_ids = self._extract_ids(params)
-        delete_originals = bool(params.get("delete_originals", False))
+        # bool("false") is True: строка «не удалять» удаляла исходные записи.
+        delete_originals = _coerce_bool_param(params.get("delete_originals", False))
         separator = str(params.get("separator", _TIMESTAMP_SEP))
         # wave-1770 HIGH: reject oversized separator before building merged text.
         if len(separator) > MAX_SEPARATOR_LEN:

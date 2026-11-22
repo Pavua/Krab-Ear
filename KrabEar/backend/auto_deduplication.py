@@ -52,7 +52,8 @@ def _sanitize_threshold(value: object) -> float:
     """
     try:
         v = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: целое вроде 10**1000 не помещается в float.
         return DEFAULT_DEDUP_THRESHOLD
     if not math.isfinite(v):
         return DEFAULT_DEDUP_THRESHOLD
@@ -118,7 +119,10 @@ def _parse_ts_for_sort(item: dict) -> float:
     if ts is None or ts == "":
         return 0.0
     if isinstance(ts, (int, float)):
-        return float(ts)
+        try:
+            return float(ts)
+        except OverflowError:
+            return 0.0
     try:
         return datetime.fromisoformat(str(ts).replace("Z", "+00:00")).timestamp()
     except (ValueError, AttributeError, TypeError):

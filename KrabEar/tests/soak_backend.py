@@ -52,7 +52,9 @@ def latency_stats(values: list[float]) -> dict[str, float]:
     }
 
 
-def ipc_call(socket_path: Path, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+def ipc_call(
+    socket_path: Path, method: str, params: dict[str, Any] | None = None, timeout: float = 10.0
+) -> dict[str, Any]:
     payload = {
         "id": f"soak-{time.time_ns()}",
         "method": method,
@@ -60,6 +62,9 @@ def ipc_call(socket_path: Path, method: str, params: dict[str, Any] | None = Non
     }
 
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+        # Без таймаута connect/sendall/recv блокируются навсегда, а внешний цикл ожидания
+        # (wait_backend) зависший вызов не прерывает.
+        conn.settimeout(timeout)
         conn.connect(str(socket_path))
         conn.sendall((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
         chunks: list[bytes] = []
@@ -82,12 +87,27 @@ def ipc_call(socket_path: Path, method: str, params: dict[str, Any] | None = Non
     return response
 
 
+def extract_item_id(add_result: dict[str, Any]) -> str:
+    """id созданной записи; его отсутствие — ошибка прогона, а не повод молча пропустить шаг."""
+    item_id = (add_result.get("result") or {}).get("id")
+    if not isinstance(item_id, str) or not item_id:
+        raise RuntimeError("add_history_item не вернул id созданной записи")
+    return item_id
+
+
+def final_history_check(created_ids: list[str], final_page_count: int) -> tuple[bool, str]:
+    """Пустая итоговая история при созданных записях — провал, а не «ok»."""
+    if created_ids and final_page_count == 0:
+        return False, f"итоговая история пуста при {len(created_ids)} созданных записях"
+    return True, ""
+
+
 def wait_backend(socket_path: Path, timeout_sec: float = 12.0) -> None:
     start = time.perf_counter()
     while time.perf_counter() - start < timeout_sec:
         if socket_path.exists():
             try:
-                ipc_call(socket_path, "ping")
+                ipc_call(socket_path, "ping", timeout=2.0)
                 return
             except Exception:
                 pass
@@ -198,19 +218,18 @@ def run_soak(cycles: int, seed: int, report_path: Path | None) -> dict[str, Any]
                     )
                     metrics.add_ms.append((time.perf_counter() - t0) * 1000)
 
-                    item_id = ((add_result.get("result") or {}).get("id"))
-                    if isinstance(item_id, str):
-                        ids.append(item_id)
+                    item_id = extract_item_id(add_result)
+                    ids.append(item_id)
 
-                        # Эмулируем реальную жизнь: часть вставок "ok", часть "failed".
-                        simulated_paste_ok = random.random() < 0.82
-                        new_status = "ok" if simulated_paste_ok else "failed"
-                        t0 = time.perf_counter()
-                        ipc_call(socket_path, "set_paste_status", {"id": item_id, "paste_status": new_status})
-                        metrics.status_ms.append((time.perf_counter() - t0) * 1000)
-                        status_updates_total += 1
-                        if simulated_paste_ok:
-                            status_updates_ok += 1
+                    # Эмулируем реальную жизнь: часть вставок "ok", часть "failed".
+                    simulated_paste_ok = random.random() < 0.82
+                    new_status = "ok" if simulated_paste_ok else "failed"
+                    t0 = time.perf_counter()
+                    ipc_call(socket_path, "set_paste_status", {"id": item_id, "paste_status": new_status})
+                    metrics.status_ms.append((time.perf_counter() - t0) * 1000)
+                    status_updates_total += 1
+                    if simulated_paste_ok:
+                        status_updates_ok += 1
 
                     if idx % 20 == 0:
                         t0 = time.perf_counter()
@@ -244,6 +263,11 @@ def run_soak(cycles: int, seed: int, report_path: Path | None) -> dict[str, Any]
             except Exception as exc:
                 status = "failed"
                 errors.append(f"final_page_error: {exc}")
+            else:
+                history_ok, history_error = final_history_check(ids, final_page_count)
+                if not history_ok:
+                    status = "failed"
+                    errors.append(history_error)
 
             paste_success_rate = (
                 float(status_updates_ok) / float(status_updates_total)

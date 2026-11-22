@@ -49,6 +49,65 @@ _SETTINGS_IO_ALLOWED_ROOTS: tuple[str, ...] = (
 )
 
 
+# Токены HuggingFace: нестроковое значение с диска читается как «токена нет».
+_HF_TOKEN_FIELDS: tuple[str, ...] = ("hf_token", "stt_gigaam_hf_token")
+
+
+# E5 п.2: каталоги ДАННЫХ Ear из экспорта настроек исключены — они входят в allowlist (чтение/
+# импорт), но писать туда экспорт нельзя: рядом лежат settings.json, history.ndjson и т.д.
+_SETTINGS_EXPORT_FORBIDDEN_ROOTS: tuple[str, ...] = (
+    "~/Library/Application Support/KrabEar",
+    "~/.krab_ear_data",
+)
+
+
+def _validate_settings_export_target(p: Path, *, data_dir: Path | None = None) -> None:
+    """Raise RuntimeError, если *p* внутри каталога данных Ear (экспорт туда запрещён).
+
+    Помимо стандартных каталогов исключается фактический `data_dir` хранилища (кастомный/тестовый).
+    """
+    roots: list[Path] = [Path(r).expanduser().resolve() for r in _SETTINGS_EXPORT_FORBIDDEN_ROOTS]
+    if data_dir is not None:
+        roots.append(Path(data_dir).expanduser().resolve())
+    for forbidden in roots:
+        try:
+            p.relative_to(forbidden)
+        except ValueError:
+            continue
+        raise RuntimeError(
+            f"settings export: каталог данных Krab Ear недоступен для экспорта: {p!s}"
+        )
+
+
+def _write_export_file(out_path: Path, payload: str) -> None:
+    """Создаёт файл экспорта эксклюзивно: без перезаписи, без симлинков, права 0600.
+
+    Раньше открывался режим "w": существующий файл (в т.ч. из allowlist) затирался, а права
+    получались по umask (0644) для файла с настройками.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(out_path, flags, 0o600)
+    except FileExistsError as exc:
+        raise RuntimeError(
+            f"settings export: файл уже существует и не будет перезаписан: {out_path!s}"
+        ) from exc
+    created = os.fstat(fd)
+    try:
+        os.fchmod(fd, 0o600)  # итоговые права не зависят от umask процесса
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+    except BaseException:
+        # Удаляем только СВОЙ файл: имя могло быть подменено другим процессом.
+        try:
+            now = os.stat(out_path, follow_symlinks=False)
+            if (now.st_dev, now.st_ino) == (created.st_dev, created.st_ino):
+                out_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _validate_settings_path(p: Path, *, operation: str) -> None:
     """Raise RuntimeError if *p* is outside the settings I/O allowlist.
 
@@ -117,7 +176,7 @@ class SettingsService:
         self._cache_ts: float = 0.0
         self._cache_ttl: float = 5.0
         self._validator = SettingsValidator()
-        self._backup = backup if backup is not None else SettingsBackup()
+        self._backup = backup if backup is not None else SettingsBackup.for_store(store)
         # W1437: RLock serialises all 5 save paths to prevent concurrent race conditions.
         self._save_lock = threading.RLock()
         # Hooks called with (old_settings, new_settings) after a successful save.
@@ -191,7 +250,17 @@ class SettingsService:
         if result_v.warnings:
             for w in result_v.warnings:
                 _log.debug("settings load: %s", w)
-        self._cache = result_v.fixed
+        fixed = result_v.fixed
+        # Валидатор намеренно не подменяет текстовые поля неверного типа (запись отвергается
+        # ошибкой). Но null в HF-токенах, УЖЕ лежащий в settings.json, попадал бы из кэша в
+        # слитый словарь каждого set_settings/import/restore и блокировал изменение ЛЮБОЙ
+        # настройки. Чтение деградирует к «токена нет»; ближайшее сохранение лечит файл.
+        # Литерал, а не модульная константа: контрактный harness запуска исполняет исходник
+        # этого метода в изолированном namespace без глобалов модуля.
+        for _token_key in ("hf_token", "stt_gigaam_hf_token"):
+            if _token_key in fixed and not isinstance(fixed[_token_key], str):
+                fixed[_token_key] = ""
+        self._cache = fixed
         self._cache_ts = now
         return dict(self._cache)
 
@@ -367,6 +436,10 @@ class SettingsService:
         # Non-empty credential fields are replaced with 'REDACTED'; empty/absent fields
         # are left as-is so the UI can distinguish "not configured" from "set".
         settings = self.cached_settings()
+        # UI-дефолты и протухший кэш не подтверждают разрешение захвата.
+        policy = self.store.read_plaintext_policy_snapshot(timeout_sec=0.5)
+        settings["privacy_mode_enabled"] = policy.privacy_mode_enabled is not False
+        settings["live_subs_policy_epoch"] = policy.live_subs_policy_epoch
         for k in self._SENSITIVE_FIELDS:
             if settings.get(k):
                 settings[k] = "REDACTED"
@@ -419,6 +492,23 @@ class SettingsService:
                     f"remove {env_var} to allow updates"
                 )
 
+    def _check_env_pinned_changes(self, incoming: dict[str, Any], current: dict[str, Any]) -> None:
+        """E5 V2: import/restore не меняют env-пин. Раньше его соблюдал только set_settings.
+
+        Конфликтом считается только ИЗМЕНЕНИЕ значения: повторный импорт собственного
+        экспорта (то же значение) проходит.
+        """
+        def _norm(value: Any) -> Any:
+            coerced = self._coerce_bool(value, default=None)  # type: ignore[arg-type]
+            return coerced if coerced is not None else value
+
+        for key, env_var in self._ENV_PINNED_SETTINGS.items():
+            if key in incoming and os.environ.get(env_var) is not None and _norm(incoming[key]) != _norm(current.get(key)):
+                raise ValueError(
+                    f"{key} is pinned by env; "
+                    f"remove {env_var} to allow updates"
+                )
+
     def _handle_set_settings_locked(
         self, params: dict[str, Any], *, force_history_crypto_preflight: bool = False,
     ) -> dict[str, Any]:
@@ -433,7 +523,7 @@ class SettingsService:
         # Strip any sensitive-field entry whose value is exactly 'REDACTED' before merge.
         params = {
             k: v for k, v in params.items()
-            if not (k in self._SENSITIVE_FIELDS and v == "REDACTED")
+            if k != "live_subs_policy_epoch" and not (k in self._SENSITIVE_FIELDS and v == "REDACTED")
         }
 
         try:
@@ -497,14 +587,14 @@ class SettingsService:
         if settings.get("ui_last_tab") not in {"dictation", "live_translation", "history", "conversation", "call_automation", "diagnostics", "archive"}:
             settings["ui_last_tab"] = "history"
 
-        settings["auto_start_enabled"] = bool(settings.get("auto_start_enabled", False))
-        settings["show_dock_icon"] = bool(settings.get("show_dock_icon", True))
-        settings["auto_paste"] = bool(settings.get("auto_paste", True))
-        settings["play_start_sound"] = bool(settings.get("play_start_sound", True))
-        settings["realtime_preview_enabled"] = bool(settings.get("realtime_preview_enabled", True))
-        settings["translate_and_paste"] = bool(settings.get("translate_and_paste", False))
-        settings["onboarding_completed"] = bool(settings.get("onboarding_completed", False))
-        settings["audio_ducking_enabled"] = bool(settings.get("audio_ducking_enabled", True))
+        settings["auto_start_enabled"] = self._coerce_bool(settings.get("auto_start_enabled", False), default=False)
+        settings["show_dock_icon"] = self._coerce_bool(settings.get("show_dock_icon", True), default=True)
+        settings["auto_paste"] = self._coerce_bool(settings.get("auto_paste", True), default=True)
+        settings["play_start_sound"] = self._coerce_bool(settings.get("play_start_sound", True), default=True)
+        settings["realtime_preview_enabled"] = self._coerce_bool(settings.get("realtime_preview_enabled", True), default=True)
+        settings["translate_and_paste"] = self._coerce_bool(settings.get("translate_and_paste", False), default=False)
+        settings["onboarding_completed"] = self._coerce_bool(settings.get("onboarding_completed", False), default=False)
+        settings["audio_ducking_enabled"] = self._coerce_bool(settings.get("audio_ducking_enabled", True), default=True)
         settings["silence_guard_enabled"] = self._coerce_bool(settings.get("silence_guard_enabled", True), default=True)
         settings["background_guard_enabled"] = self._coerce_bool(settings.get("background_guard_enabled", True), default=True)
         settings["call_notify_default"] = self._coerce_bool(settings.get("call_notify_default", True), default=True)
@@ -525,7 +615,7 @@ class SettingsService:
         ):
             raise ValueError(f"Voice Gateway URL must be localhost or HTTPS: {_gw_url}")
         settings["voice_gateway_url"] = _gw_url
-        settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key", "")).strip()
+        settings["voice_gateway_api_key"] = str(settings.get("voice_gateway_api_key") or "").strip()  # null -> "", не "None"
 
         # wave-1770 HIGH: validate smtp_host to prevent SSRF to cloud metadata endpoints.
         # An attacker with IPC access can set smtp_host=169.254.169.254 to trigger TCP
@@ -533,7 +623,7 @@ class SettingsService:
         # Allow: empty (SMTP disabled), hostnames, loopback/localhost (local relay),
         # RFC 1918 (internal corporate mail servers).
         # Block: link-local 169.254.0.0/16 (cloud metadata), multicast, ::.
-        _smtp_host_raw = str(settings.get("smtp_host", "")).strip()
+        _smtp_host_raw = str(settings.get("smtp_host") or "").strip()  # null -> "", не "None"
         if _smtp_host_raw:
             try:
                 _smtp_addr = _ipaddress.ip_address(_smtp_host_raw)
@@ -980,13 +1070,13 @@ class SettingsService:
             out_path = Path(str(params["file"])).expanduser().resolve()
             # W1736: reject writes to paths outside the settings I/O allowlist.
             _validate_settings_path(out_path, operation="export")
+            _validate_settings_export_target(out_path, data_dir=getattr(self.store, "data_dir", None))
         else:
-            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
             out_path = Path.home() / f"krabear_settings_{ts}.json"
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        with out_path.open("w", encoding="utf-8") as fh:
-            json.dump(safe, fh, ensure_ascii=False, indent=2)
+        _write_export_file(out_path, json.dumps(safe, ensure_ascii=False, indent=2))
 
         _log.info("export_settings: %d settings → %s", len(safe), out_path)
         return {"file": str(out_path), "settings_count": len(safe)}
@@ -1046,6 +1136,7 @@ class SettingsService:
             errors: list[str] = []
             skipped = 0
             old_settings = self.cached_settings()
+            self._check_env_pinned_changes(incoming, old_settings)
             merged = dict(old_settings)
 
             for key, value in incoming.items():
@@ -1149,6 +1240,8 @@ class SettingsService:
             StateStore.validate_raw_policy_flags(restored, require_pair=True)
             raw_policy_input = dict(restored)
 
+            self._check_env_pinned_changes(restored, old_settings)
+
             # W1178: snapshot only after raw input validation.
             try:
                 self._backup.create_backup(old_settings, reason="before_restore")
@@ -1241,6 +1334,9 @@ class SettingsService:
         if value is None:
             return default
         if isinstance(value, (int, float)):
+            # NaN/Inf не булевы: bool(nan) был бы True.
+            if isinstance(value, float) and value != value or value in (float("inf"), float("-inf")):
+                return default
             return bool(value)
         if isinstance(value, str):
             normalized = value.strip().lower()

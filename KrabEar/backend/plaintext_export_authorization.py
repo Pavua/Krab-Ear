@@ -51,6 +51,7 @@ from typing import Callable, Optional
 #: КАЖДОЙ поддержанной записи settings (§7.3). Это durable-версия против
 #: ON→OFF→ON между процессами, НЕ secret/capability: персистентность допустима.
 POLICY_REVISION_KEY = "_plaintext_export_policy_revision"
+CAPTURE_EPOCH_BINDING_KEY = "_capture_privacy_epoch_binding"
 
 #: Канонический формат internal revision = ``uuid4().hex``: ровно 32 символа
 #: в lowercase hex. Единственный формат, который пишет центральный commit, и
@@ -138,6 +139,21 @@ class PolicySnapshot:
     internal_revision: str | None
     fingerprint: PolicyFingerprint | None
     reason: str | None
+
+    capture_epoch: str | None = None
+
+    @property
+    def live_subs_policy_epoch(self) -> str | None:
+        """Метка непрерывного privacy OFF. Старые файлы используют свою ревизию."""
+        if self.state is PolicyState.UNKNOWN or self.privacy_mode_enabled is not False:
+            return None
+        return self.capture_epoch or self.internal_revision
+
+    @property
+    def encryption_enabled(self) -> bool | None:
+        if self.state is PolicyState.UNKNOWN:
+            return None
+        return self.state is PolicyState.KNOWN_ON
 
 
 def unknown_snapshot(reason: str) -> PolicySnapshot:

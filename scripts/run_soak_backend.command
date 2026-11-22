@@ -27,8 +27,19 @@ source "$ROOT_DIR/.venv_krab_ear/bin/activate"
 python "$ROOT_DIR/KrabEar/tests/soak_backend.py" --cycles "$CYCLES" --report "$REPORT_PATH"
 
 REPORT_MD="${REPORT_PATH%.json}.md"
-cp "$REPORT_PATH" "$LATEST_JSON"
-cp "$REPORT_MD" "$LATEST_MD"
+# «latest» — согласованная пара: оба отчёта должны существовать, публикуем через
+# временные файлы в том же каталоге + rename (отказ второго cp больше не оставляет
+# новый json рядом со старым md, и читатель не видит наполовину записанный файл).
+[ -f "$REPORT_PATH" ] || { echo "Ошибка: soak не создал JSON-отчёт: $REPORT_PATH"; exit 1; }
+[ -f "$REPORT_MD" ] || { echo "Ошибка: soak не создал MD-отчёт: $REPORT_MD"; exit 1; }
+TMP_JSON="$(mktemp "$REPORT_DIR/.latest_json.XXXXXX")"
+TMP_MD="$(mktemp "$REPORT_DIR/.latest_md.XXXXXX")"
+trap 'rm -f "$TMP_JSON" "$TMP_MD"' EXIT
+cp "$REPORT_PATH" "$TMP_JSON"
+cp "$REPORT_MD" "$TMP_MD"
+chmod 644 "$TMP_JSON" "$TMP_MD"
+mv -f "$TMP_JSON" "$LATEST_JSON"
+mv -f "$TMP_MD" "$LATEST_MD"
 
 echo
 echo "✅ Soak backend завершён"

@@ -16,7 +16,7 @@ handlers ``configure_obsidian_sync`` / ``run_obsidian_sync`` (Unix socket).
 - sync() повторно проверяет инвариант, когда _folder подделан в state-файле
   и перезагружен при рестарте (запись вне vault не происходит);
 - _load_state() откатывает подделанный folder к безопасному значению по умолчанию;
-- purge_all_synced_files() — безопасный no-op при подделанном folder.
+- purge_all_synced_files() — при подделанном folder ничего не удаляет вне vault и бросает OSError.
 """
 
 from __future__ import annotations
@@ -26,7 +26,9 @@ from _plaintext_export_test_helpers import off_authorizer
 import json
 import sys
 import tempfile
+import os as _os
 import unittest
+from unittest import mock as _env_patch
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -183,6 +185,11 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
 
     def test_load_state_sanitizes_tampered_folder(self) -> None:
         """Подделанный folder в obsidian_sync.json откатывается к дефолту."""
+        # Внешнее ревью E3 (6г): vault из state-файла проверяется на $HOME,
+        # поэтому «домом» для теста служит его временный корень.
+        _home = _env_patch.patch.dict(_os.environ, {"HOME": self.tmp.name})
+        _home.start()
+        self.addCleanup(_home.stop)
         state = {
             "vault_path": str(self.vault_dir),
             "folder": "../../../" + self.outside_dir.name,
@@ -211,7 +218,7 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def test_purge_safe_noop_on_tampered_folder(self) -> None:
-        """purge() при подделанном _folder — no-op, ничего не удаляет вне vault."""
+        """purge() при подделанном _folder — ничего не удаляет вне vault и сообщает об ошибке."""
         self.mgr.configure(str(self.vault_dir), folder="Transcriptions")
         # Кладём посторонний .md в outside_dir, который НЕ должен быть удалён.
         self.outside_dir.mkdir(parents=True, exist_ok=True)
@@ -221,8 +228,9 @@ class TestObsidianSyncPathTraversal(unittest.TestCase):
         with self.mgr._lock:
             self.mgr._folder = "../../" + self.outside_dir.name
 
-        deleted = self.mgr.purge_all_synced_files()
-        self.assertEqual(deleted, 0)
+        # KE05D-05: ничего вне vault не удалено, но неподтверждённая очистка не выглядит успехом.
+        with self.assertRaises(OSError):
+            self.mgr.purge_all_synced_files()
         self.assertTrue(victim.exists())
 
 

@@ -57,6 +57,9 @@ struct ConfigPresetData {
     let description: String
     let builtin: Bool
     let settingsPatch: [String: Any]
+
+    /// Встроенный патч неизменяем. Пользовательский мог измениться после чтения списка.
+    var preservesPrivacy: Bool { builtin && settingsPatch["privacy_mode_enabled"] == nil }
 }
 
 // MARK: - HistoryPanelController+ConfigPresets
@@ -142,12 +145,13 @@ extension HistoryPanelController {
                 let result = resp["result"] as? [String: Any] ?? [:]
                 let rawPresets = result["presets"] as? [[String: Any]] ?? []
                 presets = rawPresets.compactMap { dict in
-                    guard let name = dict["name"] as? String else { return nil }
+                    guard let name = dict["name"] as? String,
+                          let settingsPatch = dict["settings_patch"] as? [String: Any] else { return nil }
                     return ConfigPresetData(
                         name: name,
                         description: (dict["description"] as? String) ?? "",
-                        builtin: (dict["builtin"] as? Bool) ?? false,
-                        settingsPatch: (dict["settings_patch"] as? [String: Any]) ?? [:]
+                        builtin: confirmedPrivacyFlag(dict["builtin"]) == true,
+                        settingsPatch: settingsPatch
                     )
                 }
             } catch {
@@ -280,6 +284,7 @@ extension HistoryPanelController {
         applyButton.toolTip = "Применить пресет «\(preset.name)»"
         applyButton.setAccessibilityLabel("Применить пресет «\(preset.name)»")
         applyButton.identifier = NSUserInterfaceItemIdentifier(preset.name)
+        applyButton.tag = preset.preservesPrivacy ? 1 : 0
         applyButton.target = self
         applyButton.action = #selector(onApplyConfigPreset(_:))
         applyButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -354,6 +359,7 @@ extension HistoryPanelController {
         applyButton.toolTip = "Применить пресет «\(preset.name)»"
         applyButton.setAccessibilityLabel("Применить пресет «\(preset.name)»")
         applyButton.identifier = NSUserInterfaceItemIdentifier(preset.name)
+        applyButton.tag = preset.preservesPrivacy ? 1 : 0
         applyButton.target = self
         applyButton.action = #selector(onApplyConfigPresetCD(_:))
         applyButton.setContentHuggingPriority(.required, for: .horizontal)
@@ -509,33 +515,28 @@ extension HistoryPanelController {
     // MARK: - Обработчики: Применить (Gemini + CD)
 
     @objc func onApplyConfigPreset(_ sender: NSButton) {
-        applyConfigPreset(named: sender.identifier?.rawValue)
+        applyConfigPreset(named: sender.identifier?.rawValue, preservesPrivacy: sender.tag == 1)
     }
 
     @objc func onApplyConfigPresetCD(_ sender: NSButton) {
-        applyConfigPreset(named: sender.identifier?.rawValue)
+        applyConfigPreset(named: sender.identifier?.rawValue, preservesPrivacy: sender.tag == 1)
     }
 
-    private func applyConfigPreset(named name: String?) {
-        guard let name, !name.isEmpty else { return }
-        let ipc = ipcClient
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+    private func applyConfigPreset(named name: String?, preservesPrivacy: Bool) {
+        guard let name, !name.isEmpty, let delegate = NSApp.delegate as? AgentAppDelegate else { return }
+        let operation = delegate.performSettingsMutation(
+            "apply_config_preset", params: ["name": name], preservesPrivacy: preservesPrivacy
+        )
+        Task { @MainActor [weak self] in
+            let applied = await operation.value
             guard let self else { return }
-            do {
-                _ = try ipc.call(method: "apply_config_preset", params: ["name": name])
-                DispatchQueue.main.async {
-                    BackendToast.shared.show("Пресет применён", duration: 2.0)
-                }
-            } catch {
-                DispatchQueue.main.async {
-                    BackendToast.shared.show(
-                        "Не удалось применить пресет: \(error.localizedDescription)",
-                        duration: 4.0
-                    )
-                }
+            if applied {
+                BackendToast.shared.show("Пресет применён", duration: 2.0)
+            } else {
+                BackendToast.shared.show("Не удалось подтвердить применение пресета", duration: 4.0)
             }
-            self.fetchAndRebuildConfigPresetsCard(isClaudeDesign: false)
-            self.fetchAndRebuildConfigPresetsCard(isClaudeDesign: true)
+            fetchAndRebuildConfigPresetsCard(isClaudeDesign: false)
+            fetchAndRebuildConfigPresetsCard(isClaudeDesign: true)
         }
     }
 
@@ -747,11 +748,6 @@ extension HistoryPanelController {
 
         presentPanelSheet(panel, for: self.window) { [weak self] response in
             guard let self, response == .OK, let url = panel.url else { return }
-            guard let json = try? String(contentsOf: url, encoding: .utf8) else {
-                self.showInfoAlert(title: "Импорт пресета", body: "Не удалось прочитать файл.")
-                return
-            }
-
             let ipc = self.ipcClient
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 guard let self else { return }
@@ -759,11 +755,25 @@ extension HistoryPanelController {
                 var errorText = ""
                 var success = false
                 do {
+                    // Учитываем JSON-экранирование и лимит IPC в 1 МиБ.
+                    let maxBytes = 128 * 1024
+                    let file = try FileHandle(forReadingFrom: url)
+                    defer { try? file.close() }
+                    guard let data = try file.read(upToCount: maxBytes + 1), data.count <= maxBytes,
+                          let json = String(data: data, encoding: .utf8) else {
+                        DispatchQueue.main.async {
+                            self.showInfoAlert(title: "Импорт пресета", body: "Нужен JSON в UTF-8 размером до 128 КиБ.")
+                        }
+                        return
+                    }
                     let resp = try ipc.call(method: "import_config_preset", params: ["json": json])
                     let result = resp["result"] as? [String: Any] ?? [:]
                     let preset = result["preset"] as? [String: Any] ?? [:]
                     importedName = (preset["name"] as? String) ?? ""
-                    success = true
+                    success = !importedName.isEmpty
+                    if !success {
+                        errorText = "сервер не подтвердил импорт"
+                    }
                 } catch {
                     success = false
                     errorText = error.localizedDescription

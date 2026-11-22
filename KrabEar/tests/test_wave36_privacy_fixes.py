@@ -243,78 +243,101 @@ class TestAutoSaveTranscriptsPrivacyGuard(unittest.TestCase):
             self.assertIn(token, helper_body,
                           f"{token} guard missing inside _should_write_plaintext_md")
 
-    # --- Guard-replication test (mirrors wave-31 B2 pattern) ---
+    # --- Поведенческие тесты: НАСТОЯЩИЙ helper и настоящий _stop_recording_phase_e ---
 
-    def _simulate_auto_save_guard(
-        self,
-        _privacy_mode: bool,
-        auto_save_enabled: bool,
-        write_calls: list,
-    ) -> None:
-        """Replicate the guard logic from _stop_recording_phase_e at the auto_save site.
+    @staticmethod
+    def _real_gate(privacy: bool, auto_save: bool, encryption: bool = False,
+                   require_auto_save: bool = True) -> bool:
+        """Настоящий RecordingCoreService._should_write_plaintext_md (раньше тесты исполняли копию
+        без учёта history_encryption_enabled — неверное рабочее условие оставалось незамеченным)."""
+        from backend.recording_core_service import RecordingCoreService
 
-        This mirrors exactly what the fixed code does:
-            if (
-                not _privacy_mode
-                and self._coerce_bool(settings.get("auto_save_transcripts", False), default=False)
-            ):
-                ... TranscriptWriter.write_transcript(...)
-        """
-        # Minimal coerce_bool implementation
-        def coerce_bool(val, default=False):
-            if isinstance(val, bool):
-                return val
-            return default
-
-        if (
-            not _privacy_mode
-            and coerce_bool(auto_save_enabled, default=False)
-        ):
-            write_calls.append("write_transcript_called")
+        return RecordingCoreService._should_write_plaintext_md(
+            {"auto_save_transcripts": auto_save, "history_encryption_enabled": encryption},
+            privacy, require_auto_save=require_auto_save,
+        )
 
     def test_write_called_privacy_off_autosave_on(self):
-        """Normal path: write_transcript called when privacy=False and auto_save=True."""
-        calls: list = []
-        self._simulate_auto_save_guard(
-            _privacy_mode=False,
-            auto_save_enabled=True,
-            write_calls=calls,
-        )
-        self.assertEqual(len(calls), 1,
-                         "write_transcript должен вызываться при privacy=False, auto_save=True")
+        """Normal path: запись разрешена при privacy=False, auto_save=True, без шифрования."""
+        self.assertTrue(self._real_gate(privacy=False, auto_save=True))
 
     def test_write_skipped_privacy_on_autosave_on(self):
-        """Privacy gate: write_transcript NOT called when privacy=True even if auto_save=True."""
-        calls: list = []
-        self._simulate_auto_save_guard(
-            _privacy_mode=True,
-            auto_save_enabled=True,
-            write_calls=calls,
-        )
-        self.assertEqual(len(calls), 0,
-                         "write_transcript НЕ должен вызываться при privacy=True")
+        """Privacy gate: запись запрещена при privacy=True даже если auto_save=True."""
+        self.assertFalse(self._real_gate(privacy=True, auto_save=True))
 
     def test_write_skipped_privacy_off_autosave_off(self):
-        """Baseline: write_transcript not called when auto_save=False."""
-        calls: list = []
-        self._simulate_auto_save_guard(
-            _privacy_mode=False,
-            auto_save_enabled=False,
-            write_calls=calls,
-        )
-        self.assertEqual(len(calls), 0,
-                         "write_transcript не должен вызываться при auto_save=False")
+        """Baseline: live-путь не пишет при auto_save=False."""
+        self.assertFalse(self._real_gate(privacy=False, auto_save=False))
 
     def test_write_skipped_both_privacy_on_and_autosave_on(self):
-        """Both flags: privacy_mode takes precedence over auto_save_transcripts=True."""
-        calls: list = []
-        self._simulate_auto_save_guard(
-            _privacy_mode=True,
-            auto_save_enabled=True,
-            write_calls=calls,
+        """privacy_mode=True имеет приоритет над auto_save_transcripts=True."""
+        self.assertFalse(self._real_gate(privacy=True, auto_save=True, require_auto_save=False))
+
+    def test_gate_matrix_privacy_encryption_autosave(self):
+        """Полная матрица privacy × encryption × auto_save × require_auto_save."""
+        import itertools
+
+        for privacy, enc, auto, req in itertools.product((False, True), repeat=4):
+            expected = (not privacy) and (not enc) and (auto or not req)
+            self.assertEqual(
+                self._real_gate(privacy, auto, enc, req), expected,
+                f"privacy={privacy} encryption={enc} auto_save={auto} require_auto_save={req}",
+            )
+
+    def _run_real_phase_e(self, settings: dict):
+        """Настоящий _stop_recording_phase_e со spy на TranscriptWriter.write_transcript."""
+        import tempfile
+        from pathlib import Path as _Path
+        from unittest.mock import MagicMock, patch
+        import backend.recording_core_service as rcs
+        from backend.state_store import StateStore
+        from backend.translator import TranslationResult
+
+        tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(tmp.cleanup)
+        session_tracker = MagicMock()
+        session_tracker._active_session = None
+        vocab = MagicMock()
+        vocab.get_words.return_value = []
+        searcher = MagicMock()
+        searcher.is_enabled = False
+        svc = rcs.RecordingCoreService(
+            recorder=MagicMock(), transcriber=MagicMock(), translator=MagicMock(),
+            store=StateStore(data_dir=_Path(tmp.name)), vocabulary=vocab,
+            settings_svc=MagicMock(cached_settings=lambda: dict(settings)),
+            llm_rewriter=None, auto_glossary=None, semantic_searcher=searcher,
+            context_memory=None, clipboard_history=[], auto_backup=MagicMock(),
+            session_tracker=session_tracker, action_items_extractor=None,
+            transcription_counter_ref=[0], last_stt_engine_ref=[None],
         )
-        self.assertEqual(len(calls), 0,
-                         "privacy_mode=True должен блокировать запись вне зависимости от auto_save")
+        text = "Синтетическая запись для автосохранения."
+        tr = TranslationResult(text=text, status="skipped", source_lang="auto", target_lang="ru",
+                               mode="auto", engine="fake")
+        phase_d = {"text": text, "display_text": text, "translated_text": "", "final_text": text,
+                   "translation": tr, "translation_status": "skipped", "confidence": 0.9,
+                   "diarization_data": None, "tp": {"language": "ru"}}
+        sr = {"quality_profile": "balanced", "cleanup_profile": "soft",
+              "translation_style": "neutral", "translate_and_paste": False}
+        with patch.object(rcs, "TranscriptWriter") as writer:
+            writer.write_transcript.return_value = _Path(tmp.name) / "t.md"
+            svc._stop_recording_phase_e(
+                phase_d=phase_d, sr=sr, duration_sec=5.0, stop_tail_trim_ms=0,
+                silence_detected=False, silence_guard_enabled=False,
+                background_guard_rejected=False, rt_session_id=None, settings=settings,
+            )
+        return writer.write_transcript
+
+    def test_real_phase_e_writes_md_when_allowed(self):
+        spy = self._run_real_phase_e({"auto_save_transcripts": True})
+        spy.assert_called_once()
+
+    def test_real_phase_e_does_not_write_md_in_privacy_mode(self):
+        spy = self._run_real_phase_e({"auto_save_transcripts": True, "privacy_mode_enabled": True})
+        spy.assert_not_called()
+
+    def test_real_phase_e_does_not_write_md_with_encryption(self):
+        spy = self._run_real_phase_e({"auto_save_transcripts": True, "history_encryption_enabled": True})
+        spy.assert_not_called()
 
 
 if __name__ == "__main__":

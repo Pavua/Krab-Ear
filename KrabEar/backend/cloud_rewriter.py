@@ -426,7 +426,7 @@ class OpenAIRewriterProvider:
         return raw or self._MODEL
 
     def rewrite(self, text: str, language: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
-        api_key = _load_settings().get("openai_api_key", "").strip()
+        api_key = str(_load_settings().get("openai_api_key") or "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -488,7 +488,7 @@ class AnthropicRewriterProvider:
     _API_VERSION = "2023-06-01"
 
     def rewrite(self, text: str, language: str, system_prompt: Optional[str] = None) -> Dict[str, Any]:
-        api_key = _load_settings().get("anthropic_api_key", "").strip()
+        api_key = str(_load_settings().get("anthropic_api_key") or "").strip()
         if not api_key:
             return {
                 "error": "no_api_key",
@@ -559,7 +559,7 @@ class CustomRewriterProvider:
                 "provider": "custom",
                 "message": "cloud_rewriter_base_url not set in settings",
             }
-        model = s.get("cloud_rewriter_custom_model", "").strip()
+        model = str(s.get("cloud_rewriter_custom_model") or "").strip()
         if not model:
             return {
                 "error": "no_model",
@@ -591,7 +591,7 @@ class CustomRewriterProvider:
         }).encode("utf-8")
 
         headers = {"Content-Type": "application/json"}
-        api_key = s.get("cloud_rewriter_api_key", "").strip()
+        api_key = str(s.get("cloud_rewriter_api_key") or "").strip()
         if api_key:  # опционально: self-hosted часто без ключа
             headers["Authorization"] = f"Bearer {api_key}"
 

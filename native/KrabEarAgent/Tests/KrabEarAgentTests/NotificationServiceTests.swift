@@ -88,18 +88,51 @@ final class NotificationServiceTests: XCTestCase {
 
         service.notify(title: #"Krab "Ear""#, body: #"Тело "уведомления""#)
 
+        // E4 п.1: текст идёт ОТДЕЛЬНЫМИ argv-аргументами (после `--`), а не склеивается
+        // в исходник AppleScript — экранирование больше не нужно и обойти его нельзя.
         XCTAssertEqual(
             runner.calls,
             [
                 .init(
                     executableURL: URL(fileURLWithPath: "/usr/bin/osascript"),
-                    arguments: [
-                        "-e",
-                        #"display notification "Тело \"уведомления\"" with title "Krab \"Ear\"""#,
-                    ]
+                    arguments: NotificationService.scriptArguments(
+                        title: #"Krab "Ear""#, body: #"Тело "уведомления""#
+                    )
                 ),
             ]
         )
+        XCTAssertEqual(
+            runner.calls.first?.arguments,
+            [
+                "-e", "on run argv",
+                "-e", "display notification (item 1 of argv) with title (item 2 of argv)",
+                "-e", "end run",
+                "--", #"Тело "уведомления""#, #"Krab "Ear""#,
+            ]
+        )
+    }
+
+    /// E4 п.1: `\"` в тексте раньше закрывало строку AppleScript и позволяло
+    /// подставить `do shell script`. Теперь ни один символ текста не попадает в исходник скрипта.
+    func test_notify_hostileText_neverReachesScriptSource() {
+        let runner = RecordingNotificationProcessRunner()
+        let service = NotificationService(processRunner: runner)
+        let hostile = #"\" & (do shell script "touch /tmp/pwned") & ""#
+
+        service.notify(title: hostile, body: hostile)
+
+        guard let args = runner.calls.first?.arguments else {
+            return XCTFail("runner не вызван")
+        }
+        let separator = args.firstIndex(of: "--")
+        XCTAssertNotNil(separator, "текст обязан идти после `--`, иначе body вида -x читается как опция osascript")
+        let scriptParts = zip(args, args.dropFirst()).filter { $0.0 == "-e" }.map { $0.1 }
+        for part in scriptParts {
+            XCTAssertFalse(part.contains("do shell script"), "текст попал в исходник скрипта: \(part)")
+        }
+        if let separator {
+            XCTAssertEqual(Array(args[(separator + 1)...]), [hostile, hostile])
+        }
     }
 
     /// Ошибка runner не должна прерывать основной сценарий приложения.
@@ -184,97 +217,25 @@ final class NotificationServiceTests: XCTestCase {
         // Все три вызова должны молча завершиться.
     }
 
-    // MARK: - Escaping logic (whitebox)
+    // MARK: - Передача текста (argv, без экранирования)
 
-    /// Формула экранирования кавычек: replacingOccurrences(of: "\"", with: "\\\"").
-    /// Проверяем что кавычки в title/body корректно экранируются перед передачей в osascript.
-    func test_escaping_doubleQuotesInTitle() {
-        let raw = "Say \"Hello\""
-        let escaped = raw.replacingOccurrences(of: "\"", with: "\\\"")
-        XCTAssertEqual(escaped, "Say \\\"Hello\\\"",
-                       "Двойные кавычки должны экранироваться как \\\"")
-        // Убеждаемся что notify вызывается без крэша на таком input
-        svc.notify(title: raw, body: "body")
-    }
-
-    func test_escaping_doubleQuotesInBody() {
-        let raw = "He said \"bye\""
-        let escaped = raw.replacingOccurrences(of: "\"", with: "\\\"")
-        XCTAssertEqual(escaped, "He said \\\"bye\\\"",
-                       "Двойные кавычки в body должны экранироваться как \\\"")
-        svc.notify(title: "title", body: raw)
-    }
-
-    func test_escaping_multipleQuotes() {
-        let raw = "\"A\" and \"B\""
-        let escaped = raw.replacingOccurrences(of: "\"", with: "\\\"")
-        XCTAssertEqual(escaped, "\\\"A\\\" and \\\"B\\\"")
-        svc.notify(title: raw, body: raw)
-    }
-
-    func test_escaping_backslash_preserved() {
-        // Backslash alone (не двойная кавычка) не должен ломать логику.
-        let raw = "Path: C:\\Users\\test"
-        svc.notify(title: raw, body: raw)
-        // No crash = pass
-    }
-
-    func test_escaping_newlines_in_body() {
-        // Перевод строки в теле — осaccript может не поддерживать,
-        // но сервис не должен падать.
-        svc.notify(title: "Multi", body: "Line 1\nLine 2\nLine 3")
-    }
-
-    // MARK: - Script format
-
-    /// Проверяем ожидаемый формат osascript команды (whitebox).
-    func test_scriptFormat_matchesExpected() {
-        let title = "KrabEar"
-        let body  = "Транскрипция готова"
-        let safeTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
-        let safeBody  = body.replacingOccurrences(of: "\"", with: "\\\"")
-        let expected  = "display notification \"\(safeBody)\" with title \"\(safeTitle)\""
-        XCTAssertEqual(
-            expected,
-            "display notification \"Транскрипция готова\" with title \"KrabEar\"",
-            "Формат скрипта должен быть: display notification \"<body>\" with title \"<title>\""
-        )
-    }
-
-    func test_scriptFormat_bodyBeforeTitle() {
-        // osascript format requires body before title keyword.
-        let title = "T"
-        let body  = "B"
-        let script = "display notification \"\(body)\" with title \"\(title)\""
-        // Verify order: body string literal appears before "with title"
-        let bodyRange  = script.range(of: "\"\(body)\"")
-        let titleRange = script.range(of: "with title")
-        XCTAssertNotNil(bodyRange)
-        XCTAssertNotNil(titleRange)
-        if let br = bodyRange, let tr = titleRange {
-            XCTAssertLessThan(br.lowerBound, tr.lowerBound,
-                              "Body string must appear before 'with title' in osascript command")
+    /// Спецсимволы идут в runner дословно: ни кавычки, ни обратный слэш, ни перевод строки
+    /// не меняются и не попадают в исходник скрипта.
+    func test_text_passedVerbatimAsArguments() {
+        let runner = RecordingNotificationProcessRunner()
+        let service = NotificationService(processRunner: runner)
+        let samples = [
+            "Say \"Hello\"", "Path: C:\\Users\\test", "Line 1\nLine 2", "-e x",
+            "日本語テスト", "🎤 Готово ✅", "\\",
+        ]
+        for raw in samples {
+            service.notify(title: raw, body: raw)
         }
-    }
-
-    func test_scriptFormat_escapedQuotes_integratedInScript() {
-        let title = "He said \"hi\""
-        let body  = "\"quoted body\""
-        let safeTitle = title.replacingOccurrences(of: "\"", with: "\\\"")
-        let safeBody  = body.replacingOccurrences(of: "\"", with: "\\\"")
-        let script = "display notification \"\(safeBody)\" with title \"\(safeTitle)\""
-
-        // The escaped sequences \\\" in the Swift source become the two-char sequence \"
-        // inside the String value, which is correct AppleScript escaping.
-        XCTAssertTrue(script.contains("\\\""),
-                      "Escaped script must contain properly escaped quotes \\\"")
-        // safeTitle and safeBody should also contain the escaping
-        XCTAssertTrue(safeTitle.contains("\\\""),
-                      "safeTitle must have escaped quotes, got: \(safeTitle)")
-        XCTAssertTrue(safeBody.contains("\\\""),
-                      "safeBody must have escaped quotes, got: \(safeBody)")
-        // Calling notify must not crash
-        svc.notify(title: title, body: body)
+        XCTAssertEqual(runner.calls.count, samples.count)
+        for (call, raw) in zip(runner.calls, samples) {
+            XCTAssertEqual(Array(call.arguments.suffix(2)), [raw, raw])
+            XCTAssertEqual(call.arguments.suffix(3).first, "--")
+        }
     }
 
     // MARK: - Long strings

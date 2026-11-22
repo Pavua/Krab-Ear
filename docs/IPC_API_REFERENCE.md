@@ -115,7 +115,7 @@ lock. Изменение во время sheet требует нового яв�
 
 Допустимые локальные `sink_kind`: `history-md`, `history-ndjson`,
 `history-selected`, `history-action-items`, `history-meeting-report`,
-`history-stats-report`, `history-pdf`. Неизвестный sink отклоняется. Backend
+`history-stats-report`, `history-pdf`, `history-html`. Неизвестный sink отклоняется. Backend
 file writers получают отдельный namespace:
 `plaintext_export:{app_session_id,epoch,capability,expected_policy_generation}`;
 `operation_seq` в этот namespace не добавляется. Серверные записи не расходуют
@@ -605,7 +605,7 @@ Returns: `{content}` (str, HTML)
 
 ### `generate_html_report`
 *(history_service.py)*  
-Алиас для `export_html_report` — используется из Analytics Dashboard в Swift UI.  
+Возвращает `{ok, html, path, reason?}` для Analytics Dashboard. Swift запрашивает HTML без записи на стороне backend. Запись выбранного файла проходит через свежую проверку разрешения для `history-html`.
 _(documented in history_service.py)_
 
 ### `batch_export`
@@ -1046,7 +1046,7 @@ Returns: `{ok, issues: [...], checked_files}`
 *(service.py)*  
 Исправляет автоматически устраняемые проблемы целостности данных.  
 Нет params.  
-Returns: `{ok, repaired, issues_remaining}`
+Returns: `{fixed, skipped, details}`. Ремонт NDJSON пропускается при неизвестной политике, включённой приватности или шифровании, а также при наличии записей ENC1.
 
 
 ### `merge_recordings`
@@ -1082,9 +1082,9 @@ Returns: `{preview: true, merged_from, item_count, ...}`
 
 ### `get_settings`
 *(settings_service.py)*  
-Возвращает все текущие настройки (из кэша с TTL 5 с).  
+Возвращает текущие настройки. Для privacy берётся свежий снимок политики под блокировкой. При неизвестной политике ответ содержит `privacy_mode_enabled=true`. Только подтверждённый OFF возвращает строку `live_subs_policy_epoch` для захвата системного аудио. Метка обозначает период непрерывно разрешённого захвата и сохраняется при обычной записи настроек. Политика экспорта получает новую ревизию при каждой записи.
 Нет params.  
-Returns: `{settings: {...}}` — полный словарь настроек
+Returns: словарь настроек внутри `result`
 
 ### `set_settings`
 *(settings_service.py)*  
@@ -1998,19 +1998,24 @@ Returns: `{ok, session_id, gateway_session_id, call_id, status}`
 | Метод | Описание |
 |---|---|
 | `live_subs_ingest` | Потоковая STT+translate (частый вызов) |
-| `live_subs_stop` | Flush и сброс буфера |
+| `live_subs_stop` | Остановка с финальным flush или сбросом буфера |
 
 ### `live_subs_ingest`
 *(live_subs_service.py)*  
 Принимает base64 PCM 16 kHz chunk от ScreenCaptureKit. Аккумулирует ≥3 с, затем Whisper STT → translate → emits `live_subs.result` via EventBus.  
-Params: `{audio_b64, is_final?}` — audio_b64: base64 PCM 16 kHz mono  
-Returns: `{ok, buffered_ms}`
+Перед захватом клиент получает `live_subs_policy_epoch` через `get_settings` и передаёт ту же метку с каждым чанком. Смена вкладки сохраняет метку. После включения приватности, восстановления настроек или восстановления известной политики из UNKNOWN требуется новый захват. Если настройки записал старый бэкенд, клиент получает метку его текущей ревизии.
+
+Params: `{audio_chunk, live_subs_policy_epoch, sample_rate?, target_lang?, is_final?}`. Поле `audio_chunk` содержит base64 PCM.
+
+Returns: `{status, buffer_duration_sec, ...}`. При неизвестной политике или устаревшей/отсутствующей метке возвращает `{ok: true, skipped: true, reason}`.
 
 ### `live_subs_stop`
 *(live_subs_service.py)*  
-Flush накопленного буфера и сброс состояния live subtitles.  
-Нет params.  
-Returns: `{ok, flushed_ms}`
+Обычная остановка завершает обработку накопленного буфера с ограниченным ожиданием.
+
+Params: `{discard?, live_subs_policy_epoch?}`. Метка от прежнего захвата защищает текущий буфер от запоздалой команды stop. Только JSON `true` сбрасывает буфер и инвалидирует поколение без запуска новой транскрипции. Это используется при включении приватности.
+
+Returns: `{status: "stopped", flushed, discarded?, skipped?, reason?}`
 
 ---
 
@@ -3239,7 +3244,7 @@ Returns: `{ok, migrated_records, from_version, to_version}`
 *(service.py → data_migrator.py)*  
 Восстанавливает данные из резервной копии миграции; `backup_path` обязан лежать внутри `<data_dir>/backups/`.  
 Params: `{backup_path, confirm}` — без `confirm=True` откат не выполняется  
-Returns: `{restored_files, backup_path}`
+При успехе `restored_files` содержит только `history.ndjson`. Сохраняются текущие настройки, правки и журналы удалений. При конфликте с новой диктовкой или правкой возвращает `ok=false`, `reason=migration_rollback_history_changed` и пустой `restored_files`.
 
 ---
 
@@ -3394,6 +3399,7 @@ Returns: `{ok, recommended_model, recommended_engine, tier, mic, rationale}` —
 *(service.py)*  
 Агрегированный privacy/security дашборд одним вызовом. Возвращает только счётчики/флаги/размеры — ни одного транскрипта/словаря/псевдонима спикера (читает privacy-метаданные, не пользовательский контент → gate не нужен).  
 Нет params.  
+При неизвестной политике `privacy_mode` и `encryption_enabled` содержат `null`.
 Returns: `{ok, privacy_mode, encryption_enabled, storage, retention, audit, purge_available}`  
 - `storage`: `{item_count, history_bytes, history_file_size_mb, transcripts_count, transcripts_size_mb, total_bytes, total_data_mb}`  
 - `retention`: `{auto_purge_enabled, auto_purge_retention_days}` (ключи `auto_cleanup_*` удалены 03.09.2026 — цепь была мёртвой)  
@@ -3415,6 +3421,7 @@ Returns: `{ok, enabled, total, encrypted, plaintext, pct, migrating, last_migrat
 
 
 ### `get_encryption_status`
+При неизвестной политике возвращает `ok=false`, `enabled=null`.
 *(service.py)*  
 Статус шифрования истории: включено и доступен ли macOS Keychain.  
 Нет params.  
@@ -3424,13 +3431,41 @@ Returns: `{ok, enabled, available}`
 *(service.py)*  
 Включает/выключает AES-256-GCM шифрование NDJSON-истории; без Keychain — отказ без смены настройки.  
 Params: `{enabled}` (bool)  
-Returns: `{ok, enabled, available}` или `{ok: false, error: "keychain_unavailable", enabled}`
+Успешный ответ `{ok: true, enabled, available: true}` подтверждает запрошенное состояние свежим чтением после записи. При ошибке `keychain_unavailable` или `encryption_state_unconfirmed` ответ содержит `ok: false` и `enabled: bool | null`.
 
 ### `purge_all_data`
 *(service.py → history_service.py)*  
 Privacy-purge с guard'ом авто-бэкапа: удаляет все персистентные хранилища с пользовательскими данными.  
 Params: `{confirm}` — обязателен (`true`/`"PURGE_ALL"`), иначе `confirmation_required`  
 Returns: `{ok, history_deleted, transcripts_deleted, chains_deleted, archive_deleted, bookmarks_deleted, call_sessions_deleted, rescue_deleted, obsidian_deleted, semantic_purged, complete, errors}`
+
+**Прерывание очистки.** После подтверждения backend сохраняет `.purge-pending`
+до первого удаления. При аварии следующая инициализация синхронно повторяет
+очистку до запуска runtime-служб. При ошибке восстановление оставляет marker
+и запрещает обычный startup; недоступный настроенный Obsidian vault нужно
+вернуть, затем повторить запуск. Permanent deletion ledger и политика
+шифрования сохраняются. Во время незавершённой операции обычные IPC-запросы
+возвращают `purge_recovery_required`; доступны `ping` и повторный
+`purge_all_data` с подтверждением. Автобэкапы не возобновляются после partial
+result. Успешное завершение снимает marker, поэтому последующий startup не
+стирает новые данные. Прерывания старой версии, которая ещё не писала marker,
+автоматически не распознаются: для них нужен явный повтор purge. Проверенный scope — завершение процесса и повторный
+запуск, а не потеря питания или очистка произвольных внешних экспортов.
+
+Резервные копии настроек по умолчанию принадлежат каталогу профиля
+`<data_dir>/settings_backups`; для штатного профиля это прежний путь. Явный
+`KRAB_EAR_SETTINGS_BACKUP_DIR` переопределяет его, поэтому владельцу конфигурации
+нужно задавать разные каталоги для разных профилей. При очистке проверяются
+текущий каталог и стандартный каталог самого профиля: в последнем могли
+остаться копии, созданные до включения override. Прежние версии могли хранить
+копии нестандартных профилей в общем штатном каталоге без отметки владельца.
+Если такой каталог существует и не выбран текущим профилем, очистка
+возвращает `settings_backups_legacy_ambiguous` и оставляет marker: определить
+принадлежность или безопасно удалить общий каталог автоматически невозможно.
+Маркер связывает прерванную операцию с выбранным путём копий: после смены
+override, при пустом или повреждённом marker автоматическое восстановление
+останавливается до выяснения конфигурации. Пути override, использованные и
+забытые до начала очистки, автоматически определить невозможно.
 
 **A5.2c1 — поля результата зачистки.** Добавлены, чтобы результат был читаем
 машиной, а не «отсутствующим файлом = зачистили»:

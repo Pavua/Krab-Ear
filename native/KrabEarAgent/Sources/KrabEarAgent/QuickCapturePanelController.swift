@@ -153,7 +153,9 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
     func _testResyncTimerAndPulse() { resyncTimerAndPulseIfNeeded() }
     /// Прямой вызов SSE-парсера строки — без реального сетевого стрима (образец
     /// MeetingLivePanelController._testHandleSSELine).
-    func _testHandleSSELine(_ line: String) { handleSSELine(line) }
+    func _testHandleSSELine(_ line: String, generation: UInt64? = nil) {
+        handleSSELine(line, generation: generation ?? sseGeneration)
+    }
 
     // MARK: - Init
 
@@ -294,6 +296,7 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         guard let url = URL(string: "\(restBaseURL)/v1/events?filter=\(filter)") else { return }
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+        RestAuth.apply(to: &request)
 
         // Отдельные делегат+сессия на каждую попытку (не общий lazy var, как
         // раньше) — иначе onComplete не смог бы различить завершение старой,
@@ -302,7 +305,9 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
         // именно для ЭТОЙ попытки.
         let delegate = SSESessionDelegate(
             onLine: { [weak self] line in
-                Task { @MainActor [weak self] in self?.handleSSELine(line) }
+                Task { @MainActor [weak self] in
+                    self?.handleSSELine(line, generation: generation)
+                }
             },
             onComplete: { [weak self] _ in
                 Task { @MainActor [weak self] in self?.handleSSECompletion(generation: generation) }
@@ -367,7 +372,8 @@ final class QuickCapturePanelController: NSObject, NSWindowDelegate {
 
     /// Паттерн MeetingLivePanelController.handleSSELine: `event: ` трекает тип,
     /// `data: ` диспатчит по нему.
-    private func handleSSELine(_ line: String) {
+    private func handleSSELine(_ line: String, generation: UInt64) {
+        guard generation == sseGeneration else { return }
         // Любая полученная строка (включая пустые keep-alive) доказывает, что
         // поток жив — сбрасываем backoff, чтобы следующий обрыв снова начинал
         // с минимальной задержки, а не с потолка, накопленного прошлой серией.

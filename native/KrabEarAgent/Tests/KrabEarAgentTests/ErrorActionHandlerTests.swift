@@ -60,8 +60,9 @@ private func runIPCEchoServer(
         guard clientFd >= 0 else { close(serverFd); return }
         defer { close(clientFd); close(serverFd) }
         var buf = [UInt8](repeating: 0, count: 4096)
-        Darwin.read(clientFd, &buf, buf.count)
-        let bytes = Array((responseJSON + "\n").utf8)
+        let received = Darwin.read(clientFd, &buf, buf.count)
+        let echoed = IPCFakeServerSupport.echoingRequestID(request: Array(buf.prefix(max(received, 0))), into: responseJSON)
+        let bytes = Array((echoed + "\n").utf8)
         _ = bytes.withUnsafeBytes { Darwin.write(clientFd, $0.baseAddress, $0.count) }
     }
 }
