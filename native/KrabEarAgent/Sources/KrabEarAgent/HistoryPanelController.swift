@@ -133,6 +133,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var transcribeProgressFailCount: Int = 0
     var isSyncingTabs = false
     var previewPollTick = 0
+    /// G3-MEM-07 (M07-11): generation token — старый ответ semantic_search не
+    /// перезаписывает более новый (смена запроса / privacy mode).
+    var semanticSearchGeneration = 0
     // True while a Call Assist session is running. Gates the periodic
     // get_call_assist_state poll in the preview timer so it is NOT hammered
     // when no session is active (BACKEND-T over-poll / IPC rate-limit fix).

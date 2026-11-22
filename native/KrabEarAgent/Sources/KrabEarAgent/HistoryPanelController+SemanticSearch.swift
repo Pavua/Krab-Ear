@@ -139,8 +139,15 @@ extension HistoryPanelController {
         let queryCopy = query
         let resultsView = self.semanticResultsView
         let items = self.items
+        // G3-MEM-07 (M07-11): инвалидируем предыдущие ответы, когда пользователь
+        // сделал новый поиск.
+        let generation = {
+            self.semanticSearchGeneration += 1
+            return self.semanticSearchGeneration
+        }()
 
-        DispatchQueue.global(qos: .userInitiated).async {
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self else { return }
             do {
                 // M07-01: локальный keyword-путь через self.items МИНУЯ серверный privacy-gate
                 // запрещал текст истории в privacy-режиме. Все режимы идут через backend,
@@ -152,7 +159,6 @@ extension HistoryPanelController {
                 let result = r["result"] as? [String: Any] ?? [:]
                 let mode = result["mode"] as? String ?? "?"
                 let rawResults = result["results"] as? [[String: Any]] ?? []
-                let displayMode = mode
                 let formatted = HistoryPanelController.formatSearchResults(
                     results: rawResults.map { dict -> (String, Double) in
                         let id = dict["id"] as? String ?? ""
@@ -160,13 +166,15 @@ extension HistoryPanelController {
                         return (id, score)
                     },
                     items: items,
-                    mode: displayMode
+                    mode: mode
                 )
                 DispatchQueue.main.async {
+                    guard self.semanticSearchGeneration == generation else { return }
                     resultsView.string = formatted
                 }
             } catch {
                 DispatchQueue.main.async {
+                    guard self.semanticSearchGeneration == generation else { return }
                     resultsView.string = "Ошибка: \(error.localizedDescription)"
                 }
             }
