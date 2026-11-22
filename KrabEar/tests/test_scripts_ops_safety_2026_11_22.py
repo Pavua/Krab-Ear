@@ -1575,10 +1575,11 @@ class TestTccCurrentClientStatus:
 
 # ═══ Пачка 5: KEG2-11 install_agent_launchagent ═══════════════════════════════
 
-PLUTIL = shutil.which("plutil")
+PLUTIL = shutil.which("plutil") if sys.platform == "darwin" else None  # Swift на Linux тоже ставит plutil
 
 
-def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_pid: bool = True):
+def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_pid: bool = True,
+                     launchctl: str | None = None, pid_line_override: str | None = None):
     root = tmp_path / "agent_proj"
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPTS / "install_agent_launchagent.command", root / "scripts")
@@ -1592,13 +1593,16 @@ def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_
     binary.write_text("#!/bin/sh\n")
     binary.chmod(0o755)
     pid_line = 'echo "pid = 4242"' if job_gets_pid else 'echo "state = spawn scheduled"'
+    if pid_line_override:
+        pid_line = pid_line_override
     ctx = _stubs(
         tmp_path,
-        'case "$1" in\n'
-        f'  print) if [ -e "$STUB_LOG.boot" ]; then {pid_line}; fi; exit 0;;\n'
-        '  bootout) rm -f "$STUB_LOG.boot";;\n'
-        '  bootstrap) touch "$STUB_LOG.boot";;\n'
-        'esac\nexit 0\n',
+        launchctl
+        or ('case "$1" in\n'
+            f'  print) if [ -e "$STUB_LOG.boot" ]; then {pid_line}; fi; exit 0;;\n'
+            '  bootout) rm -f "$STUB_LOG.boot";;\n'
+            '  bootstrap) touch "$STUB_LOG.boot";;\n'
+            'esac\nexit 0\n'),
     )
     # любой подходящий процесс «найден» — старая проверка через pgrep это принимала за запуск
     _exe(tmp_path / "stubbin" / "pgrep", "exit 0\n")
@@ -1946,3 +1950,175 @@ def test_validate_c1_rejects_nondefault_backend_label_before_touching_anything(t
     assert "BACKEND_LABEL" in (res.stdout + res.stderr)
     assert not Path(str(ctx["log"]) + ".restart").exists(), "рестарт запущен для чужого label"
     assert not any("setenv" in c for c in _calls(ctx)), "launchctl env изменён до отказа"
+
+
+# ═══ Ревью ChatGPT, раунд 2 (принятые пункты) ════════════════════════════════
+
+
+@pytest.mark.skipif(PLUTIL is None, reason="plutil доступен только на macOS")
+class TestInstallAgentRound2:
+    def test_pid_zero_is_not_a_running_job(self, tmp_path):
+        res, _, _ = _agent_installer(tmp_path, pid_line_override='echo "pid = 0"')
+        assert res.returncode != 0, "pid = 0 принят за запущенный юнит"
+
+    def test_failed_bootstrap_restores_previous_plist_and_job(self, tmp_path):
+        # bootstrap нового plist падает; прежний («OLD-PLIST» невалиден как plist) — стаб принимает его
+        launchctl = (
+            'case "$1" in\n'
+            '  print) if [ -e "$STUB_LOG.boot" ]; then echo "pid = 4242"; fi; exit 0;;\n'
+            '  bootout) rm -f "$STUB_LOG.boot";;\n'
+            '  bootstrap) if grep -q OLD-PLIST "$3" 2>/dev/null; then touch "$STUB_LOG.boot"; exit 0; fi; exit 5;;\n'
+            'esac\nexit 0\n'
+        )
+        res, ctx, target = _agent_installer(tmp_path, launchctl=launchctl)
+        assert res.returncode != 0, res.stdout + res.stderr
+        assert target.read_text() == "OLD-PLIST", "прежний plist не восстановлен после неудачного bootstrap"
+        assert sum("bootstrap" in c for c in _calls(ctx)) >= 2, "прежний юнит не загружен обратно"
+
+
+@needs_zsh
+class TestVerifyBuildDirNesting:
+    def test_nested_extra_component_is_refused(self, tmp_path):
+        wts = tmp_path / "worktrees"
+        nested = wts / "wt1" / "backup" / "native" / "KrabEarAgent" / ".build"
+        nested.mkdir(parents=True)
+        res = _verify_build_dir(wts, nested)
+        assert res.returncode != 0, "вложенный путь вида wt/backup/native/... принят"
+
+    def test_exact_structure_still_accepted(self, tmp_path):
+        wts = tmp_path / "worktrees"
+        ok = wts / "wt1" / "native" / "KrabEarAgent" / ".build"
+        ok.mkdir(parents=True)
+        assert _verify_build_dir(wts, ok).returncode == 0
+
+
+class TestD10aDeadline:
+    def _call(self, send, deadline: str) -> subprocess.CompletedProcess:
+        body = _function_source("smoke_test_d10a.command", "ipc_call")
+        with tempfile.TemporaryDirectory(prefix="ke-d10b-", dir="/tmp") as short:
+            sock = Path(short) / "t.sock"
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(str(sock))
+            srv.listen(1)
+            srv.settimeout(15)
+
+            def serve():
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                with conn:
+                    try:
+                        conn.recv(4096)
+                        send(conn)
+                    except OSError:
+                        pass
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            try:
+                env = dict(os.environ, KE_IPC_DEADLINE=deadline)
+                return subprocess.run(["/bin/bash", "-c", f'SOCKET="{sock}"\n{body}\nipc_call llm_status'],
+                                      env=env, capture_output=True, text=True, timeout=40)
+            finally:
+                srv.close()
+                thread.join(timeout=2)
+
+    def test_slow_trickle_cannot_outlive_the_deadline(self, tmp_path):
+        def trickle(conn):
+            for _ in range(40):
+                conn.sendall(b"x")
+                time.sleep(0.4)
+
+        started = time.monotonic()
+        res = self._call(trickle, deadline="2")
+        assert res.returncode != 0
+        assert time.monotonic() - started < 8, "капельная отправка удерживала вызов далеко за дедлайн"
+
+    def test_newline_in_the_chunk_that_crosses_the_cap_is_rejected(self, tmp_path):
+        def oversized(conn):
+            conn.sendall(b"y" * (1 << 20) + b"z" * 1024 + b"\n")
+
+        res = self._call(oversized, deadline="15")
+        assert res.returncode != 0, "ответ больше 1 МиБ принят из-за перевода строки в последнем куске"
+
+
+@needs_zsh
+@pytest.mark.skipif(shutil.which("bc") is None, reason="нужен bc")
+def test_validate_c1_warns_when_backend_is_left_on_experimental_setting(tmp_path):
+    root = tmp_path / "c1_warn_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "validate_c1_mps_fix.command", root / "scripts")
+    counter = tmp_path / "restart_count"
+    _exe(root / "scripts" / "safe_backend_restart.command",
+         f'n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{counter}"\n'
+         '[ "$n" -eq 1 ] && exit 0\nexit 1\n')
+    ctx = _stubs(tmp_path, "exit 0\n")
+    _exe(tmp_path / "stubbin" / "ps", "exit 0\n")
+    env = dict(ctx["env"], CYCLES="1", SLEEP_BETWEEN="0", SOCK=str(tmp_path / "no.sock"))
+    res = subprocess.run([ZSH, str(root / "scripts" / "validate_c1_mps_fix.command")], env=env, capture_output=True,
+                         text=True, timeout=120)
+    assert res.returncode != 0
+    assert "НЕ восстановлен" in (res.stdout + res.stderr), res.stderr[-400:]
+
+
+class TestTccExactMatch:
+    def _summary(self, tmp_path: Path, rows: list[tuple[str, str, int, int]]) -> dict:
+        root = tmp_path / "proj"
+        (root / "scripts").mkdir(parents=True)
+        shutil.copy2(SCRIPTS / "audit_tcc_permissions.command", root / "scripts")
+        home = tmp_path / "home"
+        db_dir = home / "Library" / "Application Support" / "com.apple.TCC"
+        db_dir.mkdir(parents=True)
+        con = sqlite3.connect(db_dir / "TCC.db")
+        con.execute("CREATE TABLE access (service TEXT, client TEXT, client_type INT, auth_value INT, last_modified INT)")
+        for service, client, auth, ts in rows:
+            con.execute("INSERT INTO access VALUES (?, ?, 0, ?, ?)", (service, client, auth, ts))
+        con.commit()
+        con.close()
+        out = tmp_path / "audit.json"
+        env = dict(os.environ, HOME=str(home), KRAB_TCC_AUDIT_OUT=str(out))
+        subprocess.run(["/bin/bash", str(root / "scripts" / "audit_tcc_permissions.command")], env=env,
+                       capture_output=True, text=True, timeout=60, check=True)
+        return json.loads(out.read_text())["key_services"]
+
+    def test_regex_lookalike_bundle_id_is_not_the_current_client(self, tmp_path):
+        summary = self._summary(tmp_path, [("kTCCServiceMicrophone", "com.antigravityXkrab-ear", 0, 100)])
+        assert summary["Microphone"] == "DENIED (path-based only)", summary
+
+    def test_latest_row_of_current_client_wins(self, tmp_path):
+        summary = self._summary(tmp_path, [
+            ("kTCCServiceMicrophone", "com.antigravity.krab-ear", 2, 200),  # свежая — разрешено
+            ("kTCCServiceMicrophone", "com.antigravity.krab-ear", 0, 100),  # старая — отказ, идёт ПОСЛЕДНЕЙ
+        ])
+        assert summary["Microphone"] == "GRANTED", summary
+
+
+class TestBuildAndDeployRollbackCompleteness:
+    def _fail_app_sign_mutating_signature(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        sig = root / "Krab Ear.app" / "Contents" / "_CodeSignature"
+        sig.mkdir(parents=True)
+        (sig / "CodeResources").write_text("OLD-SIG")
+        # подпись бандла успевает переписать CodeResources и затем падает проверка/подпись
+        _exe(tmp_path / "stubbin" / "codesign",
+             'case "$*" in\n'
+             f'  *"Krab Ear.app"*) echo NEW-SIG > "{sig}/CodeResources"; exit 1;;\n'
+             'esac\nexit 0\n')
+        return root, ctx, runtime, app_bin, fw, sig
+
+    def test_signature_metadata_of_the_whole_bundle_is_restored(self, tmp_path):
+        root, ctx, runtime, app_bin, fw, sig = self._fail_app_sign_mutating_signature(tmp_path)
+        res = _run_deploy(root, ctx)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert (sig / "CodeResources").read_text() == "OLD-SIG", "подпись бандла осталась от неудачной попытки"
+        assert app_bin.read_text() == "OLD-APP"
+
+    def test_first_delivery_leaves_no_new_files_when_signing_fails(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        runtime.unlink()  # такого файла до поставки не было
+        res = _run_deploy(root, ctx, FAKE_CODESIGN_FAIL="app")
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert not runtime.exists(), "созданный поставкой runtime-бинарь остался после отката"
+        assert not (root / "native" / "Frameworks" / "Sparkle.framework").exists(), \
+            "созданный поставкой native/Frameworks/Sparkle остался после отката"

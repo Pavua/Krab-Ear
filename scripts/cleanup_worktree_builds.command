@@ -111,6 +111,9 @@ verify_build_dir() {
   real="$(cd "$d" && pwd -P)" || return 1
   [[ "$real" == "$WORKTREES_REAL"/*/native/KrabEarAgent/.build ]] || return 1
   rel="${d#$WORKTREES_DIR/}"
+  # Ровно <worktree>/native/KrabEarAgent/.build: `*` в шаблоне [[ == ]] совпадает и со слешами,
+  # поэтому вложенные wt/backup/native/... иначе проходили.
+  [[ "$rel" =~ '^[^/]+/native/KrabEarAgent/\.build$' ]] || return 1
   [[ "$real" == "$WORKTREES_REAL/$rel" ]] || return 1
   print -r -- "$real"
 }

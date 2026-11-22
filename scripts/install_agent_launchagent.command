@@ -53,7 +53,33 @@ if ! plutil -lint "$STAGED" >/dev/null; then
 fi
 
 # 3. Bootout старой версии (если загружена), затем атомарная подмена файла.
+# Прежний plist и состояние «был загружен» запоминаем: если установка не удалась, возвращаем
+# рабочую конфигурацию (юнит без plist после неудачного bootstrap — потерянный автозапуск агента).
+BACKUP_PLIST=""
+WAS_LOADED=0
+if [ -f "$TARGET" ]; then
+  BACKUP_PLIST="$(mktemp "$(dirname "$TARGET")/.ai.krab.ear.agent.backup.XXXXXX")"
+  cp -p "$TARGET" "$BACKUP_PLIST"
+fi
+trap 'rm -f "$STAGED" "$BACKUP_PLIST"' EXIT
+
+rollback_install() {
+  log "откат: возвращаю прежнюю установку"
+  launchctl bootout "gui/$UID_NUM/$LABEL" >/dev/null 2>&1 || true
+  if [ -n "$BACKUP_PLIST" ] && [ -f "$BACKUP_PLIST" ]; then
+    mv -f "$BACKUP_PLIST" "$TARGET"
+    BACKUP_PLIST=""
+    if [ "$WAS_LOADED" -eq 1 ]; then
+      launchctl bootstrap "gui/$UID_NUM" "$TARGET" >/dev/null 2>&1 \
+        || log "⚠️ прежний юнит не удалось загрузить обратно: $TARGET"
+    fi
+  else
+    rm -f "$TARGET"
+  fi
+}
+
 if launchctl print "gui/$UID_NUM/$LABEL" >/dev/null 2>&1; then
+  WAS_LOADED=1
   log "bootout gui/$UID_NUM/$LABEL (была загружена старая версия)"
   launchctl bootout "gui/$UID_NUM/$LABEL" 2>&1 || true
   sleep 1
@@ -63,14 +89,17 @@ STAGED=""
 
 # 4. Bootstrap
 log "bootstrap gui/$UID_NUM $TARGET"
-launchctl bootstrap "gui/$UID_NUM" "$TARGET" || fail "bootstrap failed"
+if ! launchctl bootstrap "gui/$UID_NUM" "$TARGET"; then
+  rollback_install
+  fail "bootstrap failed — прежняя установка восстановлена"
+fi
 
 # 5. Smoke test: ждём, что ИМЕННО этот launchd-юнит получил pid (до 10 секунд).
 # pgrep по пути бинаря принимал за запуск любой подходящий процесс (например, открытый
 # вручную через Dock), хотя юнит мог не стартовать.
 log "ждём запуск launchd-юнита $LABEL..."
 for i in 1 2 3 4 5 6 7 8 9 10; do
-  if launchctl print "gui/$UID_NUM/$LABEL" 2>/dev/null | grep -q 'pid = [0-9]'; then
+  if launchctl print "gui/$UID_NUM/$LABEL" 2>/dev/null | grep -qE 'pid = [1-9][0-9]*'; then
     log "✅ agent запущен через launchd"
     log "   status:  launchctl print gui/$UID_NUM/$LABEL"
     log "   stop:    launchctl bootout gui/$UID_NUM/$LABEL"
@@ -83,4 +112,5 @@ for i in 1 2 3 4 5 6 7 8 9 10; do
   sleep 1
 done
 
-fail "юнит $LABEL не получил pid за 10 сек. Смотри $ROOT_DIR/logs/krab-ear-agent.err.log"
+rollback_install
+fail "юнит $LABEL не получил pid за 10 сек — прежняя установка восстановлена. Смотри $ROOT_DIR/logs/krab-ear-agent.err.log"

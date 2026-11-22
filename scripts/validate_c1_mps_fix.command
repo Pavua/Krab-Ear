@@ -54,11 +54,22 @@ _log() {
 # с выключенным исправлением, а следующий запуск вообще не знает об этом.
 ENV_NAME="KRAB_EAR_DISABLE_MPS_POOL_FREE"
 PREV_ENV="$(launchctl getenv "$ENV_NAME" 2>/dev/null || true)"
+# С каким значением ЗАПУЩЕН backend после наших рестартов (__unchanged__ — мы его не перезапускали).
+# Возврат launchctl env сам по себе работающий процесс не меняет.
+RUNNING_ENV="__unchanged__"
 restore_env() {
     if [ -n "$PREV_ENV" ]; then
         launchctl setenv "$ENV_NAME" "$PREV_ENV" 2>/dev/null || true
     else
         launchctl unsetenv "$ENV_NAME" 2>/dev/null || true
+    fi
+    if [ "$RUNNING_ENV" != "__unchanged__" ] && [ "$RUNNING_ENV" != "$PREV_ENV" ]; then
+        _log "Backend запущен с экспериментальным значением $ENV_NAME='$RUNNING_ENV' — пробую безопасно вернуть исходное..."
+        if ! "$ROOT_DIR/scripts/safe_backend_restart.command" >/dev/null 2>&1; then
+            _log "ВНИМАНИЕ: состояние backend НЕ восстановлен (идёт запись/встреча или рестарт отказал)."
+            _log "          Он продолжает работать с экспериментальной настройкой; перезапустите:"
+            _log "          scripts/safe_backend_restart.command"
+        fi
     fi
 }
 trap restore_env EXIT
@@ -192,6 +203,7 @@ EOF
 _log "=== ROUND 1: Control (KRAB_EAR_DISABLE_MPS_POOL_FREE=1) ==="
 launchctl setenv KRAB_EAR_DISABLE_MPS_POOL_FREE 1
 restart_backend || exit 1  # zsh: errexit из ФУНКЦИИ пропускает EXIT-trap, явный exit — нет
+RUNNING_ENV="1"
 
 PRE_CONTROL_WORKER=$(get_worker_rss_mb)
 PRE_CONTROL_BACKEND=$(get_backend_rss_mb)
@@ -228,6 +240,7 @@ _log ""
 _log "=== ROUND 2: Treatment (fix ENABLED, env var unset) ==="
 launchctl unsetenv KRAB_EAR_DISABLE_MPS_POOL_FREE
 restart_backend || exit 1  # zsh: errexit из ФУНКЦИИ пропускает EXIT-trap, явный exit — нет
+RUNNING_ENV=""
 
 PRE_TREAT_WORKER=$(get_worker_rss_mb)
 PRE_TREAT_BACKEND=$(get_backend_rss_mb)

@@ -25,9 +25,10 @@ ipc_call() {
   local params="${2:-}"
   [ -n "$params" ] || params='{}'
   python3 - "$SOCKET" "$1" "$params" <<'PYEND'
-import json, socket, sys, time
+import json, os, socket, sys, time
 path, method, params = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
-deadline = time.monotonic() + 15
+deadline = time.monotonic() + float(os.environ.get("KE_IPC_DEADLINE", "15"))
+CAP = 1 << 20
 buf = b""
 try:
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -35,12 +36,16 @@ try:
     s.connect(path)
     s.sendall((json.dumps({"id": method, "method": method, "params": params}) + "\n").encode())
     while b"\n" not in buf:
-        if time.monotonic() > deadline or len(buf) > 1 << 20:
-            raise TimeoutError("ответ не завершён за дедлайн/потолок")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("ответ не завершён за дедлайн")
+        s.settimeout(min(5.0, remaining))  # капельная отправка не продлевает общий дедлайн
         chunk = s.recv(65536)
         if not chunk:
             raise ConnectionError("соединение закрыто до конца ответа")
         buf += chunk
+        if len(buf) > CAP:  # потолок — ПОСЛЕ добавления куска, до приёма перевода строки
+            raise OverflowError("ответ больше 1 МиБ")
     s.close()
     print(buf.split(b"\n", 1)[0].decode("utf-8"))
 except Exception as exc:

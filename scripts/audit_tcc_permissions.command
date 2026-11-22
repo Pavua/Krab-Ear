@@ -115,10 +115,13 @@ for SVC in "${SERVICES_OF_INTEREST[@]}"; do
   # Статус считаем по ТЕКУЩЕМУ приложению (bundle-id): максимум auth_value по всем клиентам
   # прятал отказ текущему бандлу за старым path-based разрешением. Если записи для бандла
   # нет — показываем path-based статус с явной пометкой.
-  best=$(echo "$ROWS" | { grep "^${SVC}|${CS_IDENTIFIER}|" || true; } | awk -F'|' '{print $4}' | tail -1)
+  # Точное равенство полей (grep по "^svc|bundle.id|" воспринимал точки идентификатора как
+  # regex-шаблон), а при нескольких записях текущего клиента побеждает САМАЯ СВЕЖАЯ по last_modified.
+  best=$(printf '%s\n' "$ROWS" | awk -F'|' -v svc="$SVC" -v bid="$CS_IDENTIFIER" \
+      '$1 == svc && $2 == bid { print $5 "|" $4 }' | sort -t'|' -k1,1n | tail -1 | cut -d'|' -f2)
   via_path=""
   if [[ -z "$best" ]]; then
-    best=$(echo "$ROWS" | { grep "^${SVC}|" || true; } | awk -F'|' '{print $4}' | sort -rn | head -1)
+    best=$(printf '%s\n' "$ROWS" | awk -F'|' -v svc="$SVC" '$1 == svc { print $4 }' | sort -rn | head -1)
     [[ -z "$best" ]] || via_path=" (path-based only)"
   fi
   if [[ -z "$best" ]]; then
