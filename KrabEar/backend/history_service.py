@@ -2834,6 +2834,9 @@ class HistoryService:
             )
         except Exception:
             logger.warning("purge_all_data: privacy audit log failed", exc_info=True)
+            # G3-P02-02: комплаенс-запись не легла — «complete» без неё было бы
+            # ложным all-clear. Удаление уже выполнено (повтор purge идемпотентен).
+            secondary_errors.append("privacy_audit")
 
         add_breadcrumb(
             category="history",
