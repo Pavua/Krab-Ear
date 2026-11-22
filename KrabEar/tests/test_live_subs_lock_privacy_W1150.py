@@ -156,6 +156,7 @@ class TestLiveSubsRLock(unittest.TestCase):
             t.start()
         for t in threads:
             t.join(timeout=5.0)
+        self.assertFalse([t for t in threads if t.is_alive()], "worker threads did not finish")
 
         self.assertEqual(errors, [], f"Errors in threads: {errors}")
 
@@ -163,8 +164,10 @@ class TestLiveSubsRLock(unittest.TestCase):
         # Note: some threads may have triggered a flush which resets the buffer, so the
         # invariant is: samples_in_buffer + samples_in_flushed_chunks = N * SAMPLES_PER_CHUNK.
         # We just verify no errors and buffer_samples is non-negative and consistent.
+        # 10 × 400 = 4000 сэмплов ≪ порога flush (48000): ничего не сброшено, поэтому
+        # ТОЧНЫЙ итог — ровно N * SAMPLES_PER_CHUNK (пустой буфер/потеря аудио не проходят).
         with svc._lock:
-            self.assertGreaterEqual(svc._buffer_samples, 0)
+            self.assertEqual(svc._buffer_samples, N_THREADS * SAMPLES_PER_CHUNK)
             self.assertEqual(svc._buffer_samples, sum(len(arr) for arr in svc._buffer))
 
     def test_rlock_is_reentrant(self):

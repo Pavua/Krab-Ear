@@ -79,9 +79,9 @@ class TestBufferConcurrentIngestNoCorruption(unittest.TestCase):
         """
         svc = _make_service(stt_text="")  # empty text → no flush side effects
         sample_rate = 16000
-        chunk_samples = int(0.5 * sample_rate)  # 8000 samples each
+        chunk_samples = int(0.1 * sample_rate)  # 1600 samples each
         chunk_bytes = (np.zeros(chunk_samples, dtype=np.int16)).tobytes()
-        n_threads = 20
+        n_threads = 20  # 20 × 1600 = 32000 сэмплов (2 с) — ниже порога flush (3 с)
         errors: list[Exception] = []
 
         def worker():
@@ -99,9 +99,12 @@ class TestBufferConcurrentIngestNoCorruption(unittest.TestCase):
         for t in threads:
             t.start()
         for t in threads:
-            t.join()
+            t.join(timeout=10.0)
+        self.assertFalse([t for t in threads if t.is_alive()], "worker threads did not finish")
 
         self.assertEqual(errors, [], f"Concurrent ingest raised exceptions: {errors}")
+        # Ни один чанк не потерян: сброса не было, значит в буфере ровно всё принятое аудио.
+        self.assertEqual(svc.buffer_duration_sec(sample_rate), n_threads * chunk_samples / sample_rate)
 
     def test_buffer_lock_exists(self) -> None:
         """LiveSubsService must expose a _lock threading.RLock."""
@@ -129,7 +132,8 @@ class TestBufferConcurrentIngestNoCorruption(unittest.TestCase):
 
         self.assertEqual(len(results), 10)
         for r in results:
-            self.assertGreaterEqual(r, 0.0)
+            # 1 с аудио передана — ожидаем ровно 1.0 (ноль после ingest не допускается)
+            self.assertEqual(r, 1.0)
 
 
 # ── F5: privacy mode guard (handle_ingest / stop level) ───────────────────────
