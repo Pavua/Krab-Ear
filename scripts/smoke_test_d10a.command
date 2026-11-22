@@ -18,6 +18,42 @@ LOG_FILE="$ROOT_DIR/logs/krab-ear-backend.out.log"
 log() { printf '[smoke] %s\n' "$*"; }
 fail() { printf '[smoke] ❌ %s\n' "$*" >&2; exit 1; }
 
+ipc_call() {
+  # $1 = метод, $2 = JSON params (по умолчанию {}). Читает ответ ДО перевода строки:
+  # одиночный recv(8192) отдавал часть ответа (или обрывал UTF-8 символ посередине) и
+  # давал ложный провал на корректном backend. Дедлайн 15с и потолок 1 МиБ.
+  local params="${2:-}"
+  [ -n "$params" ] || params='{}'
+  python3 - "$SOCKET" "$1" "$params" <<'PYEND'
+import json, os, socket, sys, time
+path, method, params = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+deadline = time.monotonic() + float(os.environ.get("KE_IPC_DEADLINE", "15"))
+CAP = 1 << 20
+buf = b""
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.settimeout(5)
+    s.connect(path)
+    s.sendall((json.dumps({"id": method, "method": method, "params": params}) + "\n").encode())
+    while b"\n" not in buf:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("ответ не завершён за дедлайн")
+        s.settimeout(min(5.0, remaining))  # капельная отправка не продлевает общий дедлайн
+        chunk = s.recv(65536)
+        if not chunk:
+            raise ConnectionError("соединение закрыто до конца ответа")
+        buf += chunk
+        if len(buf) > CAP:  # потолок — ПОСЛЕ добавления куска, до приёма перевода строки
+            raise OverflowError("ответ больше 1 МиБ")
+    s.close()
+    print(buf.split(b"\n", 1)[0].decode("utf-8"))
+except Exception as exc:
+    print(f"ipc_call {method}: {exc}", file=sys.stderr)
+    sys.exit(1)
+PYEND
+}
+
 # 1. Socket exists
 [ -S "$SOCKET" ] || fail "socket not found: $SOCKET (backend not running?)"
 
@@ -32,16 +68,7 @@ log "✅ LLM rewriter инициализирован (найдено в логе
 
 # 3. Call llm_status IPC
 log "запрос llm_status..."
-STATUS_JSON="$(python3 -c "
-import socket, json, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(5)
-s.connect('$SOCKET')
-s.sendall((json.dumps({'id':'smoke','method':'llm_status','params':{}})+'\n').encode())
-data = s.recv(8192).decode()
-print(data.strip())
-s.close()
-" 2>&1)"
+STATUS_JSON="$(ipc_call llm_status)" || fail "llm_status IPC не ответил"
 
 if ! echo "$STATUS_JSON" | grep -q '"ok":\s*true'; then
   fail "llm_status IPC failed: $STATUS_JSON"
@@ -62,20 +89,7 @@ log "  reachable=$REACHABLE"
 
 # 4. Enable runtime toggle
 log "включение runtime toggle (llm_rewrite_enabled=true)..."
-TOGGLE_JSON="$(python3 -c "
-import socket, json
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(5)
-s.connect('$SOCKET')
-s.sendall((json.dumps({
-    'id':'toggle',
-    'method':'set_settings',
-    'params':{'settings':{'llm_rewrite_enabled':True}}
-})+'\n').encode())
-data = s.recv(8192).decode()
-print(data.strip())
-s.close()
-")"
+TOGGLE_JSON="$(ipc_call set_settings '{"settings":{"llm_rewrite_enabled":true}}')" || fail "set_settings IPC не ответил"
 
 if ! echo "$TOGGLE_JSON" | grep -q '"ok":\s*true'; then
   fail "set_settings toggle failed: $TOGGLE_JSON"
@@ -83,16 +97,7 @@ fi
 log "✅ runtime toggle включён"
 
 # 5. Re-check llm_status that enabled is now true
-STATUS_JSON2="$(python3 -c "
-import socket, json
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(5)
-s.connect('$SOCKET')
-s.sendall((json.dumps({'id':'smoke2','method':'llm_status','params':{}})+'\n').encode())
-data = s.recv(8192).decode()
-print(data.strip())
-s.close()
-")"
+STATUS_JSON2="$(ipc_call llm_status)" || fail "повторный llm_status IPC не ответил"
 
 ENABLED="$(echo "$STATUS_JSON2" | python3 -c "import json,sys;d=json.loads(sys.stdin.read());print(d['result'].get('enabled',False))")"
 RUNTIME="$(echo "$STATUS_JSON2" | python3 -c "import json,sys;d=json.loads(sys.stdin.read());print(d['result'].get('runtime_enabled',False))")"

@@ -1427,6 +1427,9 @@ def _smoke_tree(tmp_path: Path) -> Path:
 def _run_smokes(tmp_path: Path, **env_extra: str) -> subprocess.CompletedProcess:
     root = _smoke_tree(tmp_path)
     ctx = _stubs(tmp_path)
+    # настоящий sleep: скрипт ждёт появления сокета циклом «sleep 0.5» — со стабом-пустышкой
+    # 40 итераций пролетали за миллисекунды раньше запуска python-заглушки (флейк).
+    (tmp_path / "stubbin" / "sleep").unlink()
     env = dict(ctx["env"], **env_extra)
     return subprocess.run(["/bin/bash", str(root / "scripts" / "run_e2e_smokes.command")], env=env,
                           capture_output=True, text=True, timeout=120)
@@ -1451,6 +1454,7 @@ class TestE2eSmokesRunner:
     def test_sigint_stops_the_run_instead_of_continuing_to_next_phase(self, tmp_path):
         root = _smoke_tree(tmp_path)
         ctx = _stubs(tmp_path)
+        (tmp_path / "stubbin" / "sleep").unlink()
         env = dict(ctx["env"], FAKE_IPC_SLEEP="6")
         proc = subprocess.Popen(["/bin/bash", str(root / "scripts" / "run_e2e_smokes.command")], env=env,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -1571,10 +1575,11 @@ class TestTccCurrentClientStatus:
 
 # ═══ Пачка 5: KEG2-11 install_agent_launchagent ═══════════════════════════════
 
-PLUTIL = shutil.which("plutil")
+PLUTIL = shutil.which("plutil") if sys.platform == "darwin" else None  # Swift на Linux тоже ставит plutil
 
 
-def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_pid: bool = True):
+def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_pid: bool = True,
+                     launchctl: str | None = None, pid_line_override: str | None = None):
     root = tmp_path / "agent_proj"
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPTS / "install_agent_launchagent.command", root / "scripts")
@@ -1588,13 +1593,16 @@ def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_
     binary.write_text("#!/bin/sh\n")
     binary.chmod(0o755)
     pid_line = 'echo "pid = 4242"' if job_gets_pid else 'echo "state = spawn scheduled"'
+    if pid_line_override:
+        pid_line = pid_line_override
     ctx = _stubs(
         tmp_path,
-        'case "$1" in\n'
-        f'  print) if [ -e "$STUB_LOG.boot" ]; then {pid_line}; fi; exit 0;;\n'
-        '  bootout) rm -f "$STUB_LOG.boot";;\n'
-        '  bootstrap) touch "$STUB_LOG.boot";;\n'
-        'esac\nexit 0\n',
+        launchctl
+        or ('case "$1" in\n'
+            f'  print) if [ -e "$STUB_LOG.boot" ]; then {pid_line}; fi; exit 0;;\n'
+            '  bootout) rm -f "$STUB_LOG.boot";;\n'
+            '  bootstrap) touch "$STUB_LOG.boot";;\n'
+            'esac\nexit 0\n'),
     )
     # любой подходящий процесс «найден» — старая проверка через pgrep это принимала за запуск
     _exe(tmp_path / "stubbin" / "pgrep", "exit 0\n")
@@ -1716,6 +1724,216 @@ class TestValidateC1:
         assert "H1 not primary" not in report
 
 
+# ═══ Пачка 6: G2-KE02a-F11, KEG2-16, KEG2-18 ═══════════════════════════════════
+
+# ── F11 smoke_test_d10a: ответ IPC читается целиком ──────────────────────
+
+
+def _ipc_call_via_script(tmp_path: Path, payload: bytes, method: str = "llm_status") -> subprocess.CompletedProcess:
+    body = _function_source("smoke_test_d10a.command", "ipc_call")
+    with tempfile.TemporaryDirectory(prefix="ke-d10-", dir="/tmp") as short:
+        sock = Path(short) / "t.sock"
+        srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        srv.bind(str(sock))
+        srv.listen(1)
+        srv.settimeout(10)
+        done = threading.Event()
+
+        def serve():
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            with conn:
+                conn.settimeout(2)
+                try:
+                    conn.recv(4096)
+                    for pos in range(0, len(payload), 7):  # мелкие куски, в т.ч. внутри UTF-8 символа
+                        conn.sendall(payload[pos:pos + 7])
+                        time.sleep(0.0005)
+                except OSError:
+                    pass
+            done.set()
+
+        thread = threading.Thread(target=serve, daemon=True)
+        thread.start()
+        try:
+            return subprocess.run(["/bin/bash", "-c", f'SOCKET="{sock}"\n{body}\nipc_call {method}'],
+                                  capture_output=True, text=True, timeout=30)
+        finally:
+            srv.close()
+            thread.join(timeout=2)
+
+
+class TestD10aIpcCall:
+    def test_large_fragmented_utf8_response_is_read_completely(self, tmp_path):
+        reply = {"id": "x", "ok": True, "result": {"model": "модель-" + "я" * 12000, "circuit_state": "closed"}}
+        payload = (json.dumps(reply, ensure_ascii=False) + "\n").encode()
+        assert len(payload) > 8192
+        res = _ipc_call_via_script(tmp_path, payload)
+        assert res.returncode == 0, res.stderr
+        assert json.loads(res.stdout) == reply
+
+    def test_truncated_response_without_newline_fails(self, tmp_path):
+        res = _ipc_call_via_script(tmp_path, b'{"id": "x", "ok": tr')
+        assert res.returncode != 0
+
+
+# ── KEG2-16: soak/профилирование не притворяются нагрузкой транскрипции ──
+
+
+@needs_zsh
+class TestSoakHonesty:
+    def test_memory_soak_test_states_it_sends_no_transcription(self, tmp_path):
+        root = tmp_path / "soak_proj"
+        (root / "scripts").mkdir(parents=True)
+        shutil.copy2(SCRIPTS / "memory_soak_test.command", root / "scripts")
+        (root / "scripts" / "memory_baseline.py").write_text("")
+        _stubs(tmp_path)
+        stub = tmp_path / "stubbin"
+        _exe(stub / "python3", "exit 0\n")
+        env = dict(os.environ, PATH=f"{stub}{os.pathsep}{os.environ['PATH']}", CYCLES="2", INTERVAL="0",
+                   OUTPUT=str(tmp_path / "out.csv"))
+        res = subprocess.run([ZSH, str(root / "scripts" / "memory_soak_test.command")], env=env, capture_output=True,
+                             text=True, timeout=60)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "NO transcription" in res.stdout, res.stdout
+
+    def test_profile_gigaam_worker_states_it_sends_no_transcription(self, tmp_path):
+        ctx = _profile_ctx(tmp_path, gate_rc=0)
+        res = _run_profile(tmp_path, ctx)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "NO transcription" in res.stdout, res.stdout
+
+
+# ── KEG2-18 cleanup_worktree_builds: проверка пути перед rm -rf — по канонической файловой идентичности ──
+
+
+def _verify_build_dir(worktrees_dir: Path, candidate: Path) -> subprocess.CompletedProcess:
+    body = _function_source("cleanup_worktree_builds.command", "verify_build_dir")
+    code = (f'WORKTREES_DIR="{worktrees_dir}"\nWORKTREES_REAL="$(cd "$WORKTREES_DIR" && pwd -P)"\n'
+            f'{body}\nverify_build_dir "{candidate}"')
+    return subprocess.run([ZSH, "-c", code], capture_output=True, text=True, timeout=30)
+
+
+@needs_zsh
+class TestVerifyBuildDir:
+    def _tree(self, tmp_path: Path) -> Path:
+        wts = tmp_path / "worktrees"
+        (wts / "wt1" / "native" / "KrabEarAgent" / ".build").mkdir(parents=True)
+        return wts
+
+    def test_real_build_dir_is_accepted_and_canonical_path_returned(self, tmp_path):
+        wts = self._tree(tmp_path)
+        res = _verify_build_dir(wts, wts / "wt1" / "native" / "KrabEarAgent" / ".build")
+        assert res.returncode == 0, res.stderr
+        assert res.stdout.strip().endswith("wt1/native/KrabEarAgent/.build")
+
+    def test_symlinked_parent_swapped_after_discovery_is_refused(self, tmp_path):
+        wts = self._tree(tmp_path)
+        outside = tmp_path / "outside" / "native" / "KrabEarAgent" / ".build"
+        outside.mkdir(parents=True)
+        (outside / "precious").write_text("p")
+        # подмена после find: каталог native заменён симлинком наружу
+        shutil.rmtree(wts / "wt1" / "native")
+        (wts / "wt1" / "native").symlink_to(tmp_path / "outside" / "native")
+        res = _verify_build_dir(wts, wts / "wt1" / "native" / "KrabEarAgent" / ".build")
+        assert res.returncode != 0, "подменённый родитель принят"
+        assert (outside / "precious").exists()
+
+    def test_symlinked_build_dir_itself_is_refused(self, tmp_path):
+        wts = self._tree(tmp_path)
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        shutil.rmtree(wts / "wt1" / "native" / "KrabEarAgent" / ".build")
+        (wts / "wt1" / "native" / "KrabEarAgent" / ".build").symlink_to(target)
+        assert _verify_build_dir(wts, wts / "wt1" / "native" / "KrabEarAgent" / ".build").returncode != 0
+
+    def test_path_outside_worktrees_is_refused(self, tmp_path):
+        wts = self._tree(tmp_path)
+        stray = tmp_path / "stray" / "native" / "KrabEarAgent" / ".build"
+        stray.mkdir(parents=True)
+        assert _verify_build_dir(wts, stray).returncode != 0
+
+
+# ── KEG2-17 build_and_deploy: поставка транзакционна (откат при сбое подписи/проверки) ──
+
+
+def _deploy_tree(tmp_path: Path):
+    root = tmp_path / "deploy_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "build_and_deploy.command", root / "scripts")
+    (root / "scripts" / "agent_signing_identity.sh").write_text(
+        'resolve_agent_signing_identity() { echo "TEST-IDENTITY"; }\n')
+    pkg = root / "native" / "KrabEarAgent"
+    pkg.mkdir(parents=True)
+    runtime = root / "native" / "runtime" / "KrabEarAgent"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("OLD-RUNTIME")
+    app_bin = root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
+    app_bin.parent.mkdir(parents=True)
+    app_bin.write_text("OLD-APP")
+    fw = root / "Krab Ear.app" / "Contents" / "Frameworks" / "Sparkle.framework"
+    fw.mkdir(parents=True)
+    (fw / "marker").write_text("OLD-FW")
+    ctx = _stubs(tmp_path)
+    stub = tmp_path / "stubbin"
+    build = f"{pkg}/.build/release"
+    new_fw = f"{pkg}/.build/checkouts/Sparkle.framework"
+    _exe(stub / "swift",
+         f'mkdir -p "{build}" "{new_fw}"; echo NEW-BUILD > "{build}/KrabEarAgent"; chmod +x "{build}/KrabEarAgent"; '
+         f'echo NEW-FW > "{new_fw}/marker"; exit 0\n')
+    _exe(stub / "dsymutil", 'mkdir -p "$3"; exit 0\n')
+    _exe(stub / "dwarfdump", 'echo "UUID: AAAA-BBBB (arm64) $2"\n')
+    _exe(stub / "ditto", 'rm -rf "$2"; cp -R "$1" "$2"\n')
+    codesign = ('case "$*" in *"Krab Ear.app"*) [ "$FAKE_CODESIGN_FAIL" = app ] && exit 1;; '
+                '*runtime*) [ "$FAKE_CODESIGN_FAIL" = runtime ] && exit 1;; esac\nexit 0\n')
+    _exe(stub / "codesign", codesign)
+    return root, ctx, runtime, app_bin, fw
+
+
+def _run_deploy(root: Path, ctx: dict, **extra) -> subprocess.CompletedProcess:
+    env = dict(ctx["env"], **extra)
+    return subprocess.run(["/bin/bash", str(root / "scripts" / "build_and_deploy.command"), "--no-sentry"], env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+class TestBuildAndDeployTransaction:
+    @pytest.mark.parametrize("which", ["app", "runtime"])
+    def test_signing_failure_restores_previous_delivery(self, tmp_path, which):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        res = _run_deploy(root, ctx, FAKE_CODESIGN_FAIL=which)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert runtime.read_text() == "OLD-RUNTIME"
+        assert app_bin.read_text() == "OLD-APP"
+        assert (fw / "marker").read_text() == "OLD-FW"
+
+    def test_failure_after_verified_delivery_does_not_roll_back(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        # UUID-проверка (шаг 4) падает уже ПОСЛЕ подписи и верификации: поставка состоялась
+        _exe(tmp_path / "stubbin" / "dwarfdump", "exit 1\n")
+        res = _run_deploy(root, ctx)
+        assert res.returncode == 3, res.stdout + res.stderr
+        assert runtime.read_text().strip() == "NEW-BUILD"
+        assert app_bin.read_text().strip() == "NEW-BUILD"
+
+    def test_full_success_keeps_new_delivery(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        res = _run_deploy(root, ctx)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert runtime.read_text().strip() == "NEW-BUILD"
+        assert (fw / "marker").read_text().strip() == "NEW-FW"
+
+    def test_dry_run_changes_nothing_and_succeeds(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        env = dict(ctx["env"])
+        # --no-sentry: тест герметичен — без него исход зависел от наличия sentry-cli в PATH
+        # (на dev-Mac он есть, на Linux-раннере нет → код 4)
+        res = subprocess.run(["/bin/bash", str(root / "scripts" / "build_and_deploy.command"), "--dry-run",
+                              "--no-sentry"], env=env, capture_output=True, text=True, timeout=60)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert runtime.read_text() == "OLD-RUNTIME"
+        assert app_bin.read_text() == "OLD-APP"
 # ── Codex review #2224: нестандартный BACKEND_LABEL — отказ до любых изменений ──
 
 
@@ -1734,3 +1952,289 @@ def test_validate_c1_rejects_nondefault_backend_label_before_touching_anything(t
     assert "BACKEND_LABEL" in (res.stdout + res.stderr)
     assert not Path(str(ctx["log"]) + ".restart").exists(), "рестарт запущен для чужого label"
     assert not any("setenv" in c for c in _calls(ctx)), "launchctl env изменён до отказа"
+
+
+# ═══ Ревью ChatGPT, раунд 2 (принятые пункты) ════════════════════════════════
+
+
+@pytest.mark.skipif(PLUTIL is None, reason="plutil доступен только на macOS")
+class TestInstallAgentRound2:
+    def test_pid_zero_is_not_a_running_job(self, tmp_path):
+        res, _, _ = _agent_installer(tmp_path, pid_line_override='echo "pid = 0"')
+        assert res.returncode != 0, "pid = 0 принят за запущенный юнит"
+
+    def test_failed_bootstrap_restores_previous_plist_and_job(self, tmp_path):
+        # bootstrap нового plist падает; прежний («OLD-PLIST» невалиден как plist) — стаб принимает его
+        launchctl = (
+            'case "$1" in\n'
+            '  print) if [ -e "$STUB_LOG.boot" ]; then echo "pid = 4242"; fi; exit 0;;\n'
+            '  bootout) rm -f "$STUB_LOG.boot";;\n'
+            '  bootstrap) if grep -q OLD-PLIST "$3" 2>/dev/null; then touch "$STUB_LOG.boot"; exit 0; fi; exit 5;;\n'
+            'esac\nexit 0\n'
+        )
+        res, ctx, target = _agent_installer(tmp_path, launchctl=launchctl)
+        assert res.returncode != 0, res.stdout + res.stderr
+        assert target.read_text() == "OLD-PLIST", "прежний plist не восстановлен после неудачного bootstrap"
+        assert sum("bootstrap" in c for c in _calls(ctx)) >= 2, "прежний юнит не загружен обратно"
+
+
+@needs_zsh
+class TestVerifyBuildDirNesting:
+    def test_nested_extra_component_is_refused(self, tmp_path):
+        wts = tmp_path / "worktrees"
+        nested = wts / "wt1" / "backup" / "native" / "KrabEarAgent" / ".build"
+        nested.mkdir(parents=True)
+        res = _verify_build_dir(wts, nested)
+        assert res.returncode != 0, "вложенный путь вида wt/backup/native/... принят"
+
+    def test_exact_structure_still_accepted(self, tmp_path):
+        wts = tmp_path / "worktrees"
+        ok = wts / "wt1" / "native" / "KrabEarAgent" / ".build"
+        ok.mkdir(parents=True)
+        assert _verify_build_dir(wts, ok).returncode == 0
+
+
+class TestD10aDeadline:
+    def _call(self, send, deadline: str) -> subprocess.CompletedProcess:
+        body = _function_source("smoke_test_d10a.command", "ipc_call")
+        with tempfile.TemporaryDirectory(prefix="ke-d10b-", dir="/tmp") as short:
+            sock = Path(short) / "t.sock"
+            srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            srv.bind(str(sock))
+            srv.listen(1)
+            srv.settimeout(15)
+
+            def serve():
+                try:
+                    conn, _ = srv.accept()
+                except OSError:
+                    return
+                with conn:
+                    try:
+                        conn.recv(4096)
+                        send(conn)
+                    except OSError:
+                        pass
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            try:
+                env = dict(os.environ, KE_IPC_DEADLINE=deadline)
+                return subprocess.run(["/bin/bash", "-c", f'SOCKET="{sock}"\n{body}\nipc_call llm_status'],
+                                      env=env, capture_output=True, text=True, timeout=40)
+            finally:
+                srv.close()
+                thread.join(timeout=2)
+
+    def test_slow_trickle_cannot_outlive_the_deadline(self, tmp_path):
+        def trickle(conn):
+            for _ in range(40):
+                conn.sendall(b"x")
+                time.sleep(0.4)
+
+        started = time.monotonic()
+        res = self._call(trickle, deadline="2")
+        assert res.returncode != 0
+        assert time.monotonic() - started < 8, "капельная отправка удерживала вызов далеко за дедлайн"
+
+    def test_newline_in_the_chunk_that_crosses_the_cap_is_rejected(self, tmp_path):
+        def oversized(conn):
+            conn.sendall(b"y" * (1 << 20) + b"z" * 1024 + b"\n")
+
+        res = self._call(oversized, deadline="15")
+        assert res.returncode != 0, "ответ больше 1 МиБ принят из-за перевода строки в последнем куске"
+
+
+@needs_zsh
+@pytest.mark.skipif(shutil.which("bc") is None, reason="нужен bc")
+def test_validate_c1_warns_when_backend_is_left_on_experimental_setting(tmp_path):
+    root = tmp_path / "c1_warn_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "validate_c1_mps_fix.command", root / "scripts")
+    counter = tmp_path / "restart_count"
+    _exe(root / "scripts" / "safe_backend_restart.command",
+         f'n=$(cat "{counter}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{counter}"\n'
+         '[ "$n" -eq 1 ] && exit 0\nexit 1\n')
+    ctx = _stubs(tmp_path, "exit 0\n")
+    _exe(tmp_path / "stubbin" / "ps", "exit 0\n")
+    env = dict(ctx["env"], CYCLES="1", SLEEP_BETWEEN="0", SOCK=str(tmp_path / "no.sock"))
+    res = subprocess.run([ZSH, str(root / "scripts" / "validate_c1_mps_fix.command")], env=env, capture_output=True,
+                         text=True, timeout=120)
+    assert res.returncode != 0
+    assert "НЕ восстановлен" in (res.stdout + res.stderr), res.stderr[-400:]
+
+
+class TestTccExactMatch:
+    def _summary(self, tmp_path: Path, rows: list[tuple[str, str, int, int]]) -> dict:
+        root = tmp_path / "proj"
+        (root / "scripts").mkdir(parents=True)
+        shutil.copy2(SCRIPTS / "audit_tcc_permissions.command", root / "scripts")
+        home = tmp_path / "home"
+        db_dir = home / "Library" / "Application Support" / "com.apple.TCC"
+        db_dir.mkdir(parents=True)
+        con = sqlite3.connect(db_dir / "TCC.db")
+        con.execute("CREATE TABLE access (service TEXT, client TEXT, client_type INT, auth_value INT, last_modified INT)")
+        for service, client, auth, ts in rows:
+            con.execute("INSERT INTO access VALUES (?, ?, 0, ?, ?)", (service, client, auth, ts))
+        con.commit()
+        con.close()
+        out = tmp_path / "audit.json"
+        env = dict(os.environ, HOME=str(home), KRAB_TCC_AUDIT_OUT=str(out))
+        subprocess.run(["/bin/bash", str(root / "scripts" / "audit_tcc_permissions.command")], env=env,
+                       capture_output=True, text=True, timeout=60, check=True)
+        return json.loads(out.read_text())["key_services"]
+
+    def test_regex_lookalike_bundle_id_is_not_the_current_client(self, tmp_path):
+        summary = self._summary(tmp_path, [("kTCCServiceMicrophone", "com.antigravityXkrab-ear", 0, 100)])
+        assert summary["Microphone"] == "DENIED (path-based only)", summary
+
+    def test_latest_row_of_current_client_wins(self, tmp_path):
+        summary = self._summary(tmp_path, [
+            ("kTCCServiceMicrophone", "com.antigravity.krab-ear", 2, 200),  # свежая — разрешено
+            ("kTCCServiceMicrophone", "com.antigravity.krab-ear", 0, 100),  # старая — отказ, идёт ПОСЛЕДНЕЙ
+        ])
+        assert summary["Microphone"] == "GRANTED", summary
+
+
+class TestBuildAndDeployRollbackCompleteness:
+    def _fail_app_sign_mutating_signature(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        sig = root / "Krab Ear.app" / "Contents" / "_CodeSignature"
+        sig.mkdir(parents=True)
+        (sig / "CodeResources").write_text("OLD-SIG")
+        # подпись бандла успевает переписать CodeResources и затем падает проверка/подпись
+        _exe(tmp_path / "stubbin" / "codesign",
+             'case "$*" in\n'
+             f'  *"Krab Ear.app"*) echo NEW-SIG > "{sig}/CodeResources"; exit 1;;\n'
+             'esac\nexit 0\n')
+        return root, ctx, runtime, app_bin, fw, sig
+
+    def test_signature_metadata_of_the_whole_bundle_is_restored(self, tmp_path):
+        root, ctx, runtime, app_bin, fw, sig = self._fail_app_sign_mutating_signature(tmp_path)
+        res = _run_deploy(root, ctx)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert (sig / "CodeResources").read_text() == "OLD-SIG", "подпись бандла осталась от неудачной попытки"
+        assert app_bin.read_text() == "OLD-APP"
+
+    def test_first_delivery_leaves_no_new_files_when_signing_fails(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        runtime.unlink()  # такого файла до поставки не было
+        res = _run_deploy(root, ctx, FAKE_CODESIGN_FAIL="app")
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert not runtime.exists(), "созданный поставкой runtime-бинарь остался после отката"
+        assert not (root / "native" / "Frameworks" / "Sparkle.framework").exists(), \
+            "созданный поставкой native/Frameworks/Sparkle остался после отката"
+
+
+# ── W6-B V11 / EAR-W6B: приёмка run_smoke_release на заглушках процессов ────
+
+_PGREP = r'''#!/bin/sh
+mode=""; pat=""
+while [ $# -gt 0 ]; do
+  case "$1" in -a) shift;; -x) mode=x; pat="$2"; shift 2;; -f) mode=f; pat="$2"; shift 2;; *) shift;; esac
+done
+found=1
+while IFS='|' read -r pid ucomm ppid cmd; do
+  [ -n "$pid" ] || continue
+  if [ "$mode" = x ]; then [ "$ucomm" = "$pat" ] || continue
+  else printf '%s' "$cmd" | grep -Eq -e "$pat" || continue; fi
+  echo "$pid"; found=0
+done < "$PROCS"
+exit $found
+'''
+_PS = r'''#!/bin/sh
+if [ "$1" = "-p" ]; then
+  pid="$2"; field="$4"
+  line=$(grep "^$pid|" "$PROCS" | head -1); [ -n "$line" ] || exit 1
+  ucomm=$(echo "$line" | cut -d'|' -f2); ppid=$(echo "$line" | cut -d'|' -f3); cmd=$(echo "$line" | cut -d'|' -f4-)
+  case "$field" in command=) echo "$cmd";; ucomm=) echo "$ucomm";; ppid=) echo "$ppid";; esac
+  exit 0
+fi
+cut -d'|' -f1,3 "$PROCS" | tr '|' ' '
+'''
+_KILL = r'''#!/bin/sh
+case "$1" in
+  -0) grep -q "^$2|" "$PROCS"; exit $?;;
+  *) echo "kill $*" >> "$STUB_LOG"
+     pid="${2:-$1}"; case "$1" in -*) pid="$2";; *) pid="$1";; esac
+     grep -v "^$pid|" "$PROCS" > "$PROCS.new"; mv "$PROCS.new" "$PROCS";;
+esac
+'''
+
+
+def _smoke_release_tree(tmp_path: Path, *, preexisting: list[str], socket_exists: bool = False):
+    root = tmp_path / "rel_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "run_smoke_release.command", root / "scripts")
+    _exe(root / ".venv_krab_ear" / "bin" / "python", 'echo "terminate $2" >> "$STUB_LOG"\ngrep -Ev "^$2\\||^[0-9]+\\|[^|]*\\|$2\\|" "$PROCS" > "$PROCS.new"; mv "$PROCS.new" "$PROCS"\nexit 0\n')
+    procs = tmp_path / "procs.txt"
+    procs.write_text("\n".join(preexisting) + ("\n" if preexisting else ""))
+    # старт агента: поднимает агент (41200) и его backend-ребёнка (41201) для ЭТОГО ROOT_DIR
+    _exe(root / "scripts" / "start_agent.command",
+         'echo "start_agent $*" >> "$STUB_LOG"\n'
+         'echo "41200|KrabEarAgent|1|/x/Krab Ear.app/Contents/MacOS/KrabEarAgent" >> "$PROCS"\n'
+         f'echo "41201|python3|41200|python3 {root}/KrabEar/main.py --data-dir /tmp/d" >> "$PROCS"\n')
+    ctx = _stubs(tmp_path)
+    stub = tmp_path / "stubbin"
+    (stub / "sleep").unlink()  # настоящий sleep: фоновый старт должен успеть записать процессы
+    for name, body in (("pgrep", _PGREP), ("ps", _PS), ("kill", _KILL)):
+        (stub / name).write_text(body)
+        (stub / name).chmod(0o755)
+    sock = tmp_path / "krabear.sock"
+    if socket_exists:
+        sock.write_text("")
+    env = dict(ctx["env"], PROCS=str(procs), KRAB_EAR_SOCKET=str(sock), KRAB_SMOKE_WAIT_START="8",
+               KRAB_SMOKE_WAIT_BACKEND="8", KRAB_SMOKE_WAIT_STOP="6", KRAB_SMOKE_WAIT_STOP_RETRY="2",
+               KRAB_SMOKE_SETTLE="0")
+    return root, ctx, procs, env
+
+
+def _run_smoke_release(root: Path, env: dict) -> subprocess.CompletedProcess:
+    # 🔴 Встроенный kill zsh перекрывает заглушку в PATH, а PID — выдуманные: `disable kill` +
+    # source гарантирует, что скрипт вызывает ТОЛЬКО заглушку и ни один настоящий процесс не получит сигнал.
+    return subprocess.run([ZSH, "-c", 'disable kill; source "$1"', "smoke", str(root / "scripts" / "run_smoke_release.command")],
+                          env=env, capture_output=True, text=True, timeout=90)
+
+
+FOREIGN_BACKEND = "41300|python3|1|python3 /somewhere/else/KrabEar/main.py --data-dir /tmp/other"
+
+
+@needs_zsh
+class TestSmokeReleaseAcceptance:
+    def test_preflight_refusal_touches_no_process_and_starts_nothing(self, tmp_path):
+        existing_agent = "41100|KrabEarAgent|1|/Applications/Krab Ear.app/Contents/MacOS/KrabEarAgent"
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[existing_agent, FOREIGN_BACKEND])
+        before = procs.read_text()
+        res = _run_smoke_release(root, env)
+        assert res.returncode == 1, res.stdout + res.stderr
+        calls = _calls(ctx)
+        assert not any(c.startswith(("kill", "terminate", "start_agent", "pkill")) for c in calls), calls
+        assert procs.read_text() == before, "preflight изменил таблицу процессов"
+
+    def test_existing_socket_also_refuses_before_any_side_effect(self, tmp_path):
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[FOREIGN_BACKEND], socket_exists=True)
+        res = _run_smoke_release(root, env)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert not any(c.startswith(("kill", "terminate", "start_agent")) for c in _calls(ctx)), _calls(ctx)
+
+    def test_success_terminates_only_own_agent_and_leaves_foreign_backend(self, tmp_path):
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[FOREIGN_BACKEND])
+        res = _run_smoke_release(root, env)
+        calls = _calls(ctx)
+        assert res.returncode == 0, res.stdout + res.stderr + str(calls)
+        assert "terminate 41200" in calls, calls
+        assert not any(" 41300" in c or c.endswith("41300") for c in calls), "тронут чужой процесс 41300"
+        assert "41300|" in procs.read_text(), "чужой backend другого ROOT_DIR остановлен"
+
+    def test_cleanup_after_failed_control_stops_only_own_processes(self, tmp_path):
+        root, ctx, procs, env = _smoke_release_tree(tmp_path, preexisting=[FOREIGN_BACKEND])
+        # «мягкое завершение» агента не срабатывает (AppKit недоступен) → прогон FAILED, cleanup обязан
+        # погасить свои 41200/41201 и НЕ трогать 41300
+        _exe(root / ".venv_krab_ear" / "bin" / "python", 'echo "terminate-failed $2" >> "$STUB_LOG"\nexit 1\n')
+        res = _run_smoke_release(root, env)
+        assert res.returncode == 1, res.stdout + res.stderr
+        killed = [c for c in _calls(ctx) if c.startswith("kill")]
+        assert any("41200" in c for c in killed), _calls(ctx)
+        assert not any("41300" in c for c in killed), killed
+        remaining = procs.read_text()
+        assert "41300|" in remaining and "41200|" not in remaining

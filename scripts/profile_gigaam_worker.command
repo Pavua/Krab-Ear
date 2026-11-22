@@ -1,7 +1,8 @@
 #!/bin/zsh
 # Profile gigaam_worker memory growth.
-# Sets KRAB_EAR_TRACE_GIGAAM_MEM=1 + restarts backend, runs N transcribe IPC calls,
-# captures memory growth deltas via memory_baseline.py snapshots.
+# Sets KRAB_EAR_TRACE_GIGAAM_MEM=1 + restarts backend, then samples memory via memory_baseline.py
+# every 10 idle cycles. NO transcription requests are sent: gigaam_worker only grows while you
+# dictate during the run, so dictate (or run real STT) while this script is sampling.
 #
 # Usage:
 #   chmod +x scripts/profile_gigaam_worker.command
@@ -77,6 +78,7 @@ echo "3. Baseline snapshot (before cycles)..."
 
 echo ""
 echo "4. Running $CYCLES cycles (snapshot every 10)..."
+echo "NOTICE: NO transcription requests are sent — this run measures IDLE memory drift only (sleep between snapshots). For a real leak signal run it DURING dictation."
 for i in $(seq 1 "$CYCLES"); do
     if (( i % 10 == 0 )); then
         echo "   Cycle $i — taking snapshot..."

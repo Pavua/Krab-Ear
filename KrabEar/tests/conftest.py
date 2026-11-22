@@ -33,6 +33,7 @@ import pytest
 # RuntimeError. Escape: marker `live`/`acceptance` или env
 # KRAB_ALLOW_TEST_NETWORK=1 (integration-прогон).
 # ---------------------------------------------------------------------------
+import ipaddress  # noqa: E402
 import os  # noqa: E402
 import socket  # noqa: E402
 from collections.abc import Iterator  # noqa: E402
@@ -76,8 +77,17 @@ def _is_loopback_address(address: Any) -> bool:
         return True  # Unix domain socket — всегда локальный
     if isinstance(address, tuple) and address:
         host = address[0]
-        if isinstance(host, str):
-            return host in _LOOPBACK_HOSTS or host.startswith("127.")
+        if not isinstance(host, str):
+            return False  # bytes/None внутри кортежа — не доверяем
+        if host in _LOOPBACK_HOSTS:
+            return True
+        # IP разбираем как IP, а не по строковому префиксу: «127.evil.example» — имя хоста.
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return False
+        mapped = getattr(ip, "ipv4_mapped", None)
+        return ip.is_loopback or bool(mapped is not None and mapped.is_loopback)
     return True
 
 

@@ -143,7 +143,8 @@ class TopicTimelinePrivacyGuardTestCase(unittest.TestCase):
 
         svc = _make_svc(privacy_enabled=True)
         result = svc.handle_get_topic_timeline({})
-        dumped = json.dumps(result)
+        # ensure_ascii=False: иначе кириллица экранируется (\\uXXXX) и assertNotIn проходит всегда.
+        dumped = json.dumps(result, ensure_ascii=False)
         # The mock topic tracker would return "технологии" — must NOT appear as a value
         self.assertNotIn("технологии", dumped)
         # segments must be empty — no topic entries
@@ -274,8 +275,8 @@ class TopicTimelineDoSClampTestCase(unittest.TestCase):
         """limit=9999999 must not cause full store scan — clamped to 10000."""
         svc = _make_svc(privacy_enabled=False)
 
-        # Build store with enough items to observe slicing
-        big_items = [_make_fake_item(f"id{i}") for i in range(50)]
+        # Элементов БОЛЬШЕ потолка: с 50 элементами условие <= 10000 выполнялось бы и без clamp.
+        big_items = [_make_fake_item(f"id{i}") for i in range(10_050)]
         svc._store = _make_fake_store(big_items)
 
         # The mock topic tracker records what items it received
@@ -289,8 +290,8 @@ class TopicTimelineDoSClampTestCase(unittest.TestCase):
         svc._topic_tracker.get_current_topic.return_value = None
 
         svc.handle_get_topic_timeline({"limit": 9_999_999})
-        # Must be clamped to 10000 — so at most min(50, 10000)=50 items passed
-        self.assertLessEqual(len(received_items), 10000)
+        # Ровно потолок: без ограничения трекер получил бы все 10 050 элементов.
+        self.assertEqual(len(received_items), 10000)
 
     def test_limit_within_bound_is_honoured(self) -> None:
         """limit=20 must slice to last 20 items (no clamping needed)."""
