@@ -99,6 +99,18 @@ while IFS=$'\t' read -r path branch_raw locked_flag prunable_flag; do
             preserved=$((preserved + 1))
             continue
         fi
+        # Игнорируемые файлы (записи, данные, .env) `git worktree remove` без --force УДАЛЯЕТ,
+        # хотя `status --porcelain` их не показывает. Блокируют всё, кроме воспроизводимых кэшей.
+        ignored_work="$(git -C "$path" status --porcelain --ignored=matching 2>/dev/null \
+            | grep '^!! ' \
+            | grep -vE '^!! (.*/)?(__pycache__|\.pytest_cache|\.ruff_cache|\.mypy_cache|\.hypothesis|\.build|node_modules|\.venv[^/]*)/$|^!! (.*/)?\.DS_Store$|^!! .*\.pyc$' \
+            || true)"
+        if [ -n "$ignored_work" ]; then
+            echo "  KEEP (ignored files that would be lost): $path  [$branch_raw]"
+            printf '%s\n' "$ignored_work" | head -3 | sed 's/^/      /'
+            preserved=$((preserved + 1))
+            continue
+        fi
         echo "  MERGED → candidate: $path  [$branch_raw]"
         candidates=$((candidates + 1))
         if [ "$DRY_RUN" = false ]; then

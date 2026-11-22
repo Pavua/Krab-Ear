@@ -30,16 +30,40 @@ TARGETS=(
 )
 
 # 🔴 ALLOWLIST через git, а не слепой `rsync -a`: рядом с исходниками годами
-# лежат .env (реальные секреты), data/ (история диктовок), чужие venv. Копируем
-# только то, что принадлежит проекту: отслеживаемое + неотслеживаемое, НЕ
-# попавшее под .gitignore. Файлы, удалённые с диска, пропускаются.
+# лежат .env (реальные секреты), data/ (история диктовок), чужие venv.
+#  • только ОТСЛЕЖИВАЕМЫЕ файлы (--cached): неотслеживаемое не попадает, даже если не в
+#    .gitignore (там может лежать api-credentials.json) — нужное добавьте через `git add`;
+#  • только обычные файлы и симлинки (gitlink подмодуля — каталог: его содержимое подчиняется
+#    правилам ДРУГОГО репозитория, tar вытянул бы его .env); битый симлинк сохраняется как симлинк;
+#  • имена, похожие на секреты, отбрасываются даже когда отслеживаются.
+is_secret_like() {
+  case "${1:l}" in
+    .env|*/.env|.env.*|*/.env.*|*.pem|*.key|*.p12|*.pfx|*.jks|*.keystore|*credential*|*secret*|*id_rsa*|*id_ed25519*|*id_ecdsa*|*token*.json) return 0 ;;
+  esac
+  return 1
+}
+
 if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git -C "$ROOT_DIR" ls-files -z --cached --others --exclude-standard -- "${TARGETS[@]}" \
+  SKIPPED_LIST="$STAGE_DIR/../.skipped_${NAME}.txt"
+  : > "$SKIPPED_LIST"
+  git -C "$ROOT_DIR" ls-files -z --cached -- "${TARGETS[@]}" \
     | while IFS= read -r -d '' rel; do
-        if [ -e "$ROOT_DIR/$rel" ]; then printf '%s\0' "$rel"; fi
+        if is_secret_like "$rel"; then
+          printf '%s\n' "$rel" >> "$SKIPPED_LIST"
+        elif [ -L "$ROOT_DIR/$rel" ] || [ -f "$ROOT_DIR/$rel" ]; then
+          printf '%s\0' "$rel"
+        fi
       done \
     | { cd "$ROOT_DIR" && tar -cf - --null -T -; } \
     | tar -xf - -C "$STAGE_DIR"
+  if [ -s "$SKIPPED_LIST" ]; then
+    echo "⚠️  Пропущены файлы, похожие на секреты ($(wc -l < "$SKIPPED_LIST" | tr -d ' ')): $(head -3 "$SKIPPED_LIST" | tr '\n' ' ')..." >&2
+  fi
+  rm -f "$SKIPPED_LIST"
+  UNTRACKED_N="$(git -C "$ROOT_DIR" ls-files --others --exclude-standard -- "${TARGETS[@]}" | wc -l | tr -d ' ')"
+  if [ "$UNTRACKED_N" != "0" ]; then
+    echo "⚠️  Неотслеживаемых файлов в бэкап НЕ включено: $UNTRACKED_N (git add — чтобы включить)." >&2
+  fi
 else
   echo "⚠️  Не git-репозиторий: копирую с исключением секретов и данных (список не исчерпывающий)." >&2
   for target in "${TARGETS[@]}"; do

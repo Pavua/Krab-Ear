@@ -166,7 +166,9 @@ class TestProfileGigaam:
     def test_restart_goes_through_safe_script(self, tmp_path):
         ctx = _profile_ctx(tmp_path, gate_rc=0)
         _run_profile(tmp_path, ctx)
-        assert Path(str(ctx["log"]) + ".gate").exists(), "safe_backend_restart не вызван"
+        gate_calls = Path(str(ctx["log"]) + ".gate").read_text().splitlines()
+        # сначала проверка занятости, затем сам безопасный рестарт (без флагов)
+        assert gate_calls == ["--check-only", ""], gate_calls
 
 
 # ── KEG2-06 cleanup_merged_worktrees ────────────────────────────────────────
@@ -232,9 +234,11 @@ class TestCleanupMergedWorktrees:
         _git(repo, "push", "origin", "has-extra:codex/krab-ear-v2")  # теперь ветка предок origin
         _git(repo, "fetch", "origin")
         res = _cleanup(repo)
-        # worktree чист, ветка слита в origin → удаление допустимо; но не через force-метод,
-        # перезаписывающий состояние: главное, что скрипт не падает и не оставляет мусор.
         assert res.returncode == 0, res.stdout + res.stderr
+        # worktree чист и ветка слита → удалён штатно; ветка же снимается только безопасным -d,
+        # который отказывает, пока локальный HEAD не содержит её коммитов (BRANCH -D не применяется).
+        assert not wt.exists()
+        assert "has-extra" in _git(repo, "branch", "--list", "has-extra")
 
     def test_source_has_no_force_flags(self):
         text = (SCRIPTS / "cleanup_merged_worktrees.command").read_text()
@@ -252,6 +256,8 @@ def _run_build(tmp_path: Path, output: str) -> subprocess.CompletedProcess:
     ctx = _stubs(tmp_path)
     # curl не должен вызываться вовсе: проверка --output идёт ДО скачивания
     _exe(tmp_path / "stubbin" / "curl", 'echo "curl $*" >> "$STUB_LOG"\nexit 22\n')
+    # скрипт требует arm64: тесты не должны зависеть от архитектуры/ОС хоста
+    _exe(tmp_path / "stubbin" / "uname", 'echo arm64\n')
     res = subprocess.run(
         ["/bin/bash", str(tmp_path / "scripts" / "build_bundled_runtime.command"), "--output", output],
         env=ctx["env"], capture_output=True, text=True, timeout=30,
@@ -307,15 +313,19 @@ class TestBuildBundledRuntime:
         res = _run_build(tmp_path, str(vendor))
         assert "curl" in "\n".join(_calls(res.ctx)), res.stdout + res.stderr
 
-    def test_symlink_output_refused(self, tmp_path):
-        real = tmp_path / "real"
-        real.mkdir()
+    @pytest.mark.parametrize("suffix", ["", "/", "/."])
+    def test_symlink_output_refused_even_when_target_is_allowed(self, tmp_path, suffix):
+        # цель внутри build/ разрешена сама по себе: отказ обязан дать именно проверка симлинка
+        real = tmp_path / "build" / "vendor_real"
+        real.mkdir(parents=True)
         (real / "keep").write_text("k")
         link = tmp_path / "link"
         link.symlink_to(real)
-        res = _run_build(tmp_path, str(link))
+        res = _run_build(tmp_path, str(link) + suffix)
         assert res.returncode != 0
-        assert (real / "keep").exists()
+        assert (real / "keep").exists(), "rm -rf прошёл через симлинк"
+        assert "curl" not in "\n".join(_calls(res.ctx)), "валидация пропустила симлинк"
+        assert "симлинк" in (res.stdout + res.stderr)
 
 
 # ── KEG2-19 migrate_to_canonical_launchagent ────────────────────────────────
@@ -419,12 +429,12 @@ class TestStableBackup:
         assert not any("history.ndjson" in n for n in names), names
         assert SECRET.encode() not in blob
 
-    def test_tracked_and_untracked_sources_are_kept(self, tmp_path):
+    def test_tracked_sources_kept_untracked_not_included(self, tmp_path):
         archive = _run_backup(_backup_tree(tmp_path))
         with tarfile.open(archive) as tar:
             names = {n.lstrip("./") for n in tar.getnames()}
         assert "KrabEar/app.py" in names
-        assert "KrabEar/new_untracked.py" in names
+        assert "KrabEar/new_untracked.py" not in names  # неотслеживаемое — только через git add
 
     def test_archive_and_dir_are_private(self, tmp_path):
         root = _backup_tree(tmp_path)
@@ -637,6 +647,7 @@ class TestPrefetchCacheDetection:
         snap = tmp_path / "hub" / "models--mlx-community--whisper-large" / "snapshots" / "abc123"
         snap.mkdir(parents=True)
         (snap / "config.json").write_text("{}")
+        (snap / "weights.npz").write_text("w")
         assert _is_cached(tmp_path, "mlx-community/whisper-large") == "HIT"
 
     def test_single_dash_lookalike_is_not_a_hit(self, tmp_path):
@@ -1164,3 +1175,205 @@ class TestUpdateAgentOrdering:
         stop_at = next(i for i, c in enumerate(calls) if c.startswith("pkill"))
         assert build_at < stop_at, calls
         assert (root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent").read_text().strip() == "NEW-BUILD"
+
+
+# ═══ Ревью ChatGPT 22.11 (F1–F11) ═════════════════════════════════════════════
+
+
+# F1: ignored-файлы не теряются при удалении worktree
+class TestCleanupKeepsIgnoredWork:
+    def _ignored_worktree(self, repo: Path, name: str, ignored_name: str, content: str) -> Path:
+        (repo / ".gitignore").write_text("secret-data/\n__pycache__/\n.pytest_cache/\n")
+        _git(repo, "add", ".gitignore")
+        _git(repo, "commit", "-m", "ignore rules")
+        _git(repo, "push", "origin", "codex/krab-ear-v2")
+        wt = _add_merged_worktree(repo, name)
+        target = wt / ignored_name
+        target.mkdir(parents=True)
+        (target / "recording.wav").write_text(content)
+        return wt
+
+    def test_ignored_valuable_files_keep_worktree(self, repo):
+        wt = self._ignored_worktree(repo, "has-ignored", "secret-data", "ценная запись")
+        res = _cleanup(repo)
+        assert (wt / "secret-data" / "recording.wav").read_text() == "ценная запись", res.stdout
+        assert "KEEP (ignored" in res.stdout
+
+    def test_only_regenerable_caches_do_not_block_cleanup(self, repo):
+        wt = self._ignored_worktree(repo, "caches-only", "__pycache__", "pyc")
+        res = _cleanup(repo)
+        assert not wt.exists(), res.stdout + res.stderr
+
+
+# F2/F8/F9: границы файлового отбора бэкапа
+class TestBackupSelection:
+    def _tree(self, tmp_path: Path) -> Path:
+        root = _backup_tree(tmp_path)
+        return root
+
+    def test_untracked_secret_like_file_never_archived(self, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "KrabEar" / "api-credentials.json").write_text(f"token={SECRET}")
+        (root / "KrabEar" / "service.pem").write_text(SECRET)
+        archive = _run_backup(root)
+        with tarfile.open(archive) as tar:
+            blob = b"".join(tar.extractfile(m).read() for m in tar.getmembers() if m.isfile())
+        assert SECRET.encode() not in blob
+
+    def test_tracked_secret_like_file_is_filtered(self, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "KrabEar" / "prod-secret.key").write_text(SECRET)
+        _git(root, "add", "-f", "KrabEar/prod-secret.key")
+        _git(root, "commit", "-q", "-m", "oops tracked key")
+        archive = _run_backup(root)
+        with tarfile.open(archive) as tar:
+            assert not any("prod-secret.key" in n for n in tar.getnames())
+
+    def test_submodule_directory_contents_are_not_archived(self, tmp_path):
+        root = self._tree(tmp_path)
+        sub_src = tmp_path / "subsrc"
+        sub_src.mkdir()
+        _git(sub_src, "init", "-q", "-b", "main")
+        (sub_src / "lib.py").write_text("x = 1\n")
+        (sub_src / ".env").write_text(f"KEY={SECRET}")
+        (sub_src / ".gitignore").write_text(".env\n")
+        _git(sub_src, "add", "lib.py", ".gitignore")
+        _git(sub_src, "commit", "-q", "-m", "sub")
+        env = dict(os.environ, GIT_ALLOW_PROTOCOL="file")
+        subprocess.run(["git", "-c", "protocol.file.allow=always", "submodule", "add", str(sub_src), "native/vendored"],
+                       cwd=root, env=env, check=True, capture_output=True)
+        archive = _run_backup(root)
+        with tarfile.open(archive) as tar:
+            names = tar.getnames()
+            blob = b"".join(tar.extractfile(m).read() for m in tar.getmembers() if m.isfile())
+        assert SECRET.encode() not in blob
+        assert not any("native/vendored" in n for n in names), "содержимое подмодуля попало в архив"
+
+    def test_tracked_dangling_symlink_survives(self, tmp_path):
+        root = self._tree(tmp_path)
+        (root / "KrabEar" / "link_to_missing").symlink_to("does-not-exist.txt")
+        _git(root, "add", "KrabEar/link_to_missing")
+        _git(root, "commit", "-q", "-m", "dangling")
+        archive = _run_backup(root)
+        with tarfile.open(archive) as tar:
+            members = {m.name.lstrip("./"): m for m in tar.getmembers()}
+        assert "KrabEar/link_to_missing" in members
+        assert members["KrabEar/link_to_missing"].issym()
+
+
+# F3: гейт REST-миграции валидирует JSON, а не подстроки
+@pytest.mark.parametrize(
+    "rec,meet",
+    [
+        ('not-json "is_recording": false', '{"ok": true, "result": {"active": false}}'),
+        ('{"id":"1","ok":true,"result":{"is_recording":false}}', 'not-json "active": false'),
+        ('{"id":"1","ok":false,"result":{"is_recording":false}}', '{"id":"1","ok":true,"result":{"active":false}}'),
+        ('{"id":"1","ok":true,"result":{"is_recording":false}}', '{"id":"1","ok":false,"result":{"active":false}}'),
+        ('{"id":"1","ok":true,"result":{"is_recording":"false"}}', '{"id":"1","ok":true,"result":{"active":false}}'),
+    ],
+)
+def test_migrate_rest_gate_rejects_malformed_idle_proofs(tmp_path, rec, meet):
+    with tempfile.TemporaryDirectory(prefix="ke-mig2-", dir="/tmp") as short:
+        home = Path(short)
+        sock_dir = home / "Library" / "Application Support" / "KrabEar"
+        sock_dir.mkdir(parents=True)
+        (home / "Library" / "LaunchAgents").mkdir(parents=True)
+        ctx = _stubs(tmp_path, "exit 0\n")
+        env = dict(ctx["env"], HOME=str(home))
+        server = _MethodServer(str(sock_dir / "krabear.sock"), {"get_recording_state": rec, "get_meeting_live_state": meet})
+        try:
+            res = subprocess.run(["/bin/bash", str(SCRIPTS / "migrate_to_inprocess_rest.command")], env=env,
+                                 capture_output=True, text=True, timeout=30)
+        finally:
+            server.close()
+    assert res.returncode == 1, res.stdout + res.stderr
+    assert not any("bootout" in c or "bootstrap" in c for c in _calls(ctx)), _calls(ctx)
+
+
+class _MethodServer(_IpcServer):
+    """Unix-сокет, отвечающий по методу запроса заданными сырыми строками."""
+
+    def __init__(self, path: str, replies: dict) -> None:
+        self.replies = replies
+        super().__init__(path, None)
+
+    def _serve(self) -> None:
+        while not self.stop.is_set():
+            try:
+                conn, _ = self.srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(1)
+                    data = conn.recv(4096)
+                    method = json.loads(data).get("method")
+                    raw = self.replies.get(method)
+                    if raw is not None:
+                        conn.sendall((raw + "\n").encode())
+                except (OSError, ValueError):
+                    pass
+
+
+# F7: «кэш» без весов не считается HIT
+class TestPrefetchWeights:
+    def test_config_only_snapshot_is_a_miss(self, tmp_path):
+        snap = tmp_path / "hub" / "models--mlx-community--whisper-large" / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text("{}")
+        assert _is_cached(tmp_path, "mlx-community/whisper-large") == "MISS"
+
+    @pytest.mark.parametrize("weights", ["weights.npz", "model.safetensors"])
+    def test_snapshot_with_weights_is_a_hit(self, tmp_path, weights):
+        snap = tmp_path / "hub" / "models--mlx-community--whisper-large" / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text("{}")
+        (snap / weights).write_text("w")
+        assert _is_cached(tmp_path, "mlx-community/whisper-large") == "HIT"
+
+    def test_dangling_weights_symlink_is_a_miss(self, tmp_path):
+        snap = tmp_path / "hub" / "models--mlx-community--whisper-large" / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "weights.npz").symlink_to("../../blobs/missing")
+        assert _is_cached(tmp_path, "mlx-community/whisper-large") == "MISS"
+
+
+# F10: неудачное профилирование возвращает прежнее значение launchctl env
+@needs_zsh
+class TestProfileRestoresEnv:
+    def _ctx(self, tmp_path: Path, previous: str | None):
+        ctx = _profile_ctx(tmp_path, gate_rc=0)
+        # второй вызов safe_backend_restart (без флагов) падает; первый (--check-only) проходит
+        _exe(tmp_path / "scripts" / "safe_backend_restart.command",
+             'echo "$*" >> "$STUB_LOG.gate"\n[ "$1" = "--check-only" ] && exit 0\nexit 1\n')
+        getenv = f'echo "{previous}"' if previous is not None else "true"
+        _exe(tmp_path / "stubbin" / "launchctl",
+             'printf "launchctl %s\\n" "$*" >> "$STUB_LOG"\n'
+             f'case "$1" in getenv) {getenv};; esac\nexit 0\n')
+        return ctx
+
+    @pytest.mark.parametrize("previous", ["0", "1", "custom"])
+    def test_previous_value_is_restored(self, tmp_path, previous):
+        ctx = self._ctx(tmp_path, previous)
+        res = _run_profile(tmp_path, ctx)
+        assert res.returncode != 0
+        calls = _calls(ctx)
+        assert f"launchctl setenv KRAB_EAR_TRACE_GIGAAM_MEM {previous}" == calls[-1], calls
+
+    def test_previously_unset_is_unset_again(self, tmp_path):
+        ctx = self._ctx(tmp_path, None)
+        res = _run_profile(tmp_path, ctx)
+        assert res.returncode != 0
+        assert _calls(ctx)[-1] == "launchctl unsetenv KRAB_EAR_TRACE_GIGAAM_MEM", _calls(ctx)
+
+
+# F11: TCC-аудит не меняет права существующего каталога
+def test_tcc_audit_does_not_chmod_existing_output_dir(tmp_path):
+    out_dir = tmp_path / "shared"
+    out_dir.mkdir()
+    out_dir.chmod(0o755)
+    _run_tcc(tmp_path, "com.antigravity.krab-ear", out_dir / "audit.json")
+    assert stat.S_IMODE(out_dir.stat().st_mode) == 0o755
+    assert (out_dir / "audit.json").exists()

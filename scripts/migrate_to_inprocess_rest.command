@@ -72,32 +72,45 @@ except Exception:
 PY
 }
 
+classify_state() {
+  # $1 = recording|meeting, $2 = сырой ответ IPC. Печатает busy | idle | unknown.
+  # СТРОГИЙ разбор JSON: объект, ok строго true, result — объект, поле — настоящий bool.
+  # Подстрока "is_recording": false внутри не-JSON или в ответе с ok:false — это unknown.
+  python3 - "$1" "$2" <<'PYEND' 2>/dev/null
+import json, sys
+kind, raw = sys.argv[1], sys.argv[2]
+try:
+    doc = json.loads(raw)
+    if not isinstance(doc, dict) or doc.get("ok") is not True:
+        raise ValueError("envelope")
+    result = doc.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("result")
+    value = result.get("is_recording" if kind == "recording" else "active")
+    if not isinstance(value, bool):
+        raise ValueError("field")
+    print("busy" if value else "idle")
+except Exception:
+    print("unknown")
+PYEND
+}
+
 busy_reason() {
   # 0 + причина = занято ИЛИ состояние не подтверждено (блокировать);
-  # 1 = оба IPC ответили валидно и подтвердили «не занято».
-  # Пустой ответ (мёртвый/отсутствующий сокет), не-JSON и ответ без явного
-  # булева поля — «unknown», а не «idle»: молчание бэкенда не разрешение.
+  # 1 = оба IPC дали валидный ответ с явным false (get_recording_state / get_meeting_live_state).
   local rec meet
   rec=$(ipc_call get_recording_state)
-  if [ -n "$rec" ] && printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*true'; then
-    echo "recording"
-    return 0
-  fi
-  if [ -z "$rec" ] || ! printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*false'; then
-    echo "unknown-recording"
-    return 0
-  fi
+  case "$(classify_state recording "$rec")" in
+    busy) echo "recording"; return 0 ;;
+    idle) ;;
+    *) echo "unknown-recording"; return 0 ;;
+  esac
   meet=$(ipc_call get_meeting_live_state)
-  if [ -n "$meet" ] && printf '%s' "$meet" | grep -qE \
-    '"active"[[:space:]]*:[[:space:]]*true|"(state|status)"[[:space:]]*:[[:space:]]*"(recording|active|running)"'; then
-    echo "meeting"
-    return 0
-  fi
-  if [ -z "$meet" ] || ! printf '%s' "$meet" | grep -qE '"active"[[:space:]]*:[[:space:]]*false'; then
-    echo "unknown-meeting"
-    return 0
-  fi
-  return 1
+  case "$(classify_state meeting "$meet")" in
+    busy) echo "meeting"; return 0 ;;
+    idle) return 1 ;;
+    *) echo "unknown-meeting"; return 0 ;;
+  esac
 }
 
 rest_inprocess_running() {

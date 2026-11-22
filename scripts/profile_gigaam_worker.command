@@ -52,6 +52,8 @@ if ! "$ROOT_DIR/scripts/safe_backend_restart.command" --check-only; then
 fi
 
 echo "2. Setting KRAB_EAR_TRACE_GIGAAM_MEM=1 in launchctl env..."
+# Запоминаем прежнее значение: при неудаче возвращаем его, а не стираем чужую настройку.
+PREV_TRACE="$(launchctl getenv KRAB_EAR_TRACE_GIGAAM_MEM 2>/dev/null || true)"
 launchctl setenv KRAB_EAR_TRACE_GIGAAM_MEM 1
 echo "   Done. Workers spawned after this point will enable tracemalloc."
 
@@ -60,8 +62,12 @@ if "$ROOT_DIR/scripts/safe_backend_restart.command"; then
     echo "   Waiting 5s for gigaam_worker to load model..."
     sleep 5
 else
-    echo "ERROR: безопасный рестарт backend не удался; снимаю env."
-    launchctl unsetenv KRAB_EAR_TRACE_GIGAAM_MEM
+    echo "ERROR: безопасный рестарт backend не удался; возвращаю прежнее значение env."
+    if [ -n "$PREV_TRACE" ]; then
+        launchctl setenv KRAB_EAR_TRACE_GIGAAM_MEM "$PREV_TRACE"
+    else
+        launchctl unsetenv KRAB_EAR_TRACE_GIGAAM_MEM
+    fi
     exit 1
 fi
 

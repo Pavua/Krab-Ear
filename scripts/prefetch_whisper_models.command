@@ -80,12 +80,16 @@ is_cached() {
         echo "MISS"
         return 0
     fi
-    # Непустой snapshot: хотя бы одна ревизия с хотя бы одним файлом/ссылкой.
-    if [ -d "$snapshots_dir" ] && [ -n "$(find "$snapshots_dir" -mindepth 2 -maxdepth 2 2>/dev/null | head -1)" ]; then
-        echo "HIT"
-    else
-        echo "MISS"
-    fi
+    # HIT только если в snapshot есть реальные ВЕСА (config.json без весов — не кэш);
+    # битый симлинк на отсутствующий blob не считается.
+    local f
+    for f in "$snapshots_dir"/*/*.safetensors "$snapshots_dir"/*/*.npz "$snapshots_dir"/*/*.bin "$snapshots_dir"/*/*.gguf; do
+        if [ -e "$f" ]; then
+            echo "HIT"
+            return 0
+        fi
+    done
+    echo "MISS"
 }
 
 if [ "$DRY_RUN" -eq 1 ]; then

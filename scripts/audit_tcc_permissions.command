@@ -145,8 +145,13 @@ echo -e "  Current CDHash: ${CYAN}${CS_HASH:-N/A}${RESET}"
 # при quoted-heredoc, а не подстановкой в исходник (иначе `"""` в имени клиента
 # исполнялся бы как код). Запись — во временный файл 0600 рядом + атомарный
 # os.replace: симлинк по целевому пути не разыменовывается.
-mkdir -p "$(dirname "$OUT_JSON")"
-chmod 700 "$(dirname "$OUT_JSON")" 2>/dev/null || true
+# Права меняем ТОЛЬКО у каталога, который создали сами; чужой существующий (KRAB_TCC_AUDIT_OUT
+# мог указать в общий каталог) не трогаем — файл и так создаётся с 0600.
+OUT_DIR="$(dirname "$OUT_JSON")"
+if [[ ! -d "$OUT_DIR" ]]; then
+  mkdir -p "$OUT_DIR"
+  chmod 700 "$OUT_DIR"
+fi
 TCC_JSON_LINES="$JSON_LINES" TCC_SUMMARY_LINES="$SUMMARY_LINES" TCC_APP_BUNDLE="$APP_BUNDLE" \
 TCC_BUNDLE_ID="$CS_IDENTIFIER" TCC_CD_HASH="$CS_HASH" TCC_AUTHORITY="${CS_AUTHORITY:-adhoc}" \
 TCC_OUT="$OUT_JSON" python3 - <<'PYEOF'

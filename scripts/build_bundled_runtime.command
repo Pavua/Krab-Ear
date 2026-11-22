@@ -55,6 +55,11 @@ fail() { printf '\033[0;31m[bundled-runtime] ❌ %s\033[0m\n' "$*" >&2; exit 1; 
 OUTPUT_MARKER=".krab_runtime_output"
 validate_output_dir() {
   local raw="$1"
+  # Хвостовые "/" и "/." не должны маскировать симлинк: `[ -L link/ ]` ложно, а rm -rf link/
+  # уходит в цель. Нормализуем ДО проверки.
+  while [[ "$raw" == */ || "$raw" == */. ]]; do
+    [[ "$raw" == */. ]] && raw="${raw%/.}" || raw="${raw%/}"
+  done
   [[ -n "$raw" ]] || fail "--output пуст"
   [[ ! -L "$raw" ]] || fail "--output — симлинк ($raw): отказ, rm -rf пошёл бы по цели"
   local resolved
@@ -68,14 +73,14 @@ validate_output_dir() {
   case "$home_real/" in "$resolved"/*) fail "--output ($resolved) — домашний каталог или его предок" ;; esac
   [[ "$resolved" != "/" ]] || fail "--output — корень файловой системы"
   case "$resolved/" in
-    "$root_real/build/"?*) return 0 ;;
+    "$root_real/build/"?*) OUTPUT_DIR="$resolved"; return 0 ;;
     # Остальное дерево проекта (KrabEar/, scripts/, native/ ...) — исходники, не вывод сборки.
     "$root_real/"*) fail "--output ($resolved) внутри проекта вне build/: отказ" ;;
   esac
   # Вне проекта: только новое место, пустой каталог или каталог с нашим маркером.
-  if [[ ! -e "$resolved" ]]; then return 0; fi
+  if [[ ! -e "$resolved" ]]; then OUTPUT_DIR="$resolved"; return 0; fi
   [[ -d "$resolved" ]] || fail "--output ($resolved) существует и не каталог"
-  if [[ -z "$(ls -A "$resolved")" || -f "$resolved/$OUTPUT_MARKER" ]]; then return 0; fi
+  if [[ -z "$(ls -A "$resolved")" || -f "$resolved/$OUTPUT_MARKER" ]]; then OUTPUT_DIR="$resolved"; return 0; fi
   fail "--output ($resolved) — непустой каталог без маркера $OUTPUT_MARKER: отказ удалять чужие файлы"
 }
 validate_output_dir "$OUTPUT_DIR"
