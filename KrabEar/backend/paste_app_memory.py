@@ -76,28 +76,33 @@ class PasteAppMemory:
     def enabled(self, value: bool) -> None:
         self._enabled = value
 
-    def record(self, bundle_id: str, profile: str) -> None:
-        """Записывает/обновляет профиль для bundle_id."""
+    def record(self, bundle_id: str, profile: str) -> bool:
+        """Записывает/обновляет профиль для bundle_id.
+
+        G3-MEM-05 (M05-14): возвращает True при подтверждённой записи на диск;
+        при ошибке сохранения — False и откат изменений в RAM.
+        """
         if not self._enabled:
-            return
+            return True
         if not bundle_id or not bundle_id.strip():
-            return
+            return False
         if len(str(bundle_id)) > _MAX_BUNDLE_ID_LEN:
             _log.warning(
                 "PasteAppMemory.record: bundle_id слишком длинный (%d > %d символов), игнорируем",
                 len(str(bundle_id)),
                 _MAX_BUNDLE_ID_LEN,
             )
-            return
+            return False
         if not _BUNDLE_ID_RE.match(bundle_id):
             _log.warning(
                 "PasteAppMemory.record: bundle_id содержит недопустимые символы %r, игнорируем",
                 bundle_id,
             )
-            return
+            return False
         if profile not in VALID_PROFILES:
             raise ValueError(f"Неизвестный профиль вставки: {profile!r}. Допустимые: {sorted(VALID_PROFILES)}")
         with self._lock:
+            prev = self._data.get(bundle_id)
             if bundle_id not in self._data and len(self._data) >= MAX_BUNDLE_IDS:
                 # Лимит достигнут — вытесняем самую старую запись (LRU eviction)
                 oldest_bid = min(
@@ -114,7 +119,14 @@ class PasteAppMemory:
                 "profile": profile,
                 "last_used": _utcnow_iso(),
             }
-            self._save()
+            if not self._save():
+                # Откат: ram не должна выглядеть «проиндексированной», когда не было сохранения.
+                if prev is None:
+                    self._data.pop(bundle_id, None)
+                else:
+                    self._data[bundle_id] = prev
+                return False
+            return True
 
     def get_profile_for(self, bundle_id: str) -> str | None:
         """Возвращает профиль для bundle_id, или None если не найден / не включено."""
@@ -142,13 +154,20 @@ class PasteAppMemory:
             ]
 
     def delete(self, bundle_id: str) -> bool:
-        """Удаляет запись для bundle_id. Возвращает True если запись существовала."""
+        """Удаляет запись для bundle_id. Возвращает True если запись удалена с диска.
+
+        G3-MEM-05 (M05-06): при сбое сохранения возвращает False и оставляет
+        запись в RAM — иначе ok: true при восстановлении на следующем чтении.
+        """
         with self._lock:
             if bundle_id not in self._data:
                 return False
+            prev = self._data[bundle_id]
             del self._data[bundle_id]
-            self._save()
-        return True
+            if not self._save():
+                self._data[bundle_id] = prev
+                return False
+            return True
 
     def cleanup_stale(self) -> int:
         """Удаляет записи не использовавшиеся дольше stale_days. Возвращает кол-во удалённых."""
@@ -190,14 +209,11 @@ class PasteAppMemory:
         except Exception as exc:
             _log.warning("PasteAppMemory: ошибка загрузки %s: %s", self._path, exc)
 
-    def _save(self) -> None:
-        try:
-            self._data_dir.mkdir(parents=True, exist_ok=True)
-            tmp = self._path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._data, ensure_ascii=False, indent=2), encoding="utf-8")
-            tmp.replace(self._path)
-        except Exception as exc:
-            _log.error("PasteAppMemory: ошибка сохранения: %s", exc)
+    def _save(self) -> bool:
+        # G3-MEM-05 (M05-14): _save подтверждает успешную запись на диск;
+        # ошибка не проглатывается — иначе ok: true без сохранения.
+        from backend.private_json_io import write_private_json
+        return write_private_json(self._path, self._data)
 
     @staticmethod
     def _parse_dt(iso: str) -> datetime:
@@ -225,8 +241,8 @@ class PasteAppMemory:
         if not profile:
             return {"ok": False, "error": "profile обязателен"}
         try:
-            self.record(bundle_id, profile)
-            return {"ok": True, "bundle_id": bundle_id, "profile": profile}
+            ok = self.record(bundle_id, profile)
+            return {"ok": ok, "bundle_id": bundle_id, "profile": profile}
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
 

@@ -104,6 +104,11 @@ class SearchHistoryManager:
         query = query.strip()
         if not query:
             return
+        # G3-MEM-05 (M05-15): privacy mode блокирует накопление истории поисков —
+        # запросы раскрывают активность, поэтому при политике no-retention они
+        # не записываются вообще (раньше писались и возвращались пустым списком).
+        if self._settings_get("privacy_mode_enabled", False):
+            return
         if len(query) > 1000:
             query = query[:1000]
 
@@ -151,15 +156,21 @@ class SearchHistoryManager:
             for q, c in counts.most_common(limit)
         ]
 
-    def clear_search_history(self) -> None:
-        """Очищает всю историю поисковых запросов."""
+    def clear_search_history(self) -> bool:
+        """Очищает всю историю поисковых запросов.
+
+        G3-MEM-05 (M05-06): возвращает True только если файл удалён (или его не
+        было); при ошибке удаления — False (ram не объявляется «почищенной»).
+        """
         with self._lock:
-            self._entries.clear()
             if self._path and self._path.exists():
                 try:
                     self._path.unlink(missing_ok=True)
-                except Exception as exc:
-                    logger.warning("Не удалось удалить %s: %s", self._path, exc)
+                except OSError:
+                    logger.exception("Не удалось удалить %s", self._path)
+                    return False
+            self._entries.clear()
+            return True
 
     # ------------------------------------------------------------------
     # IPC-обработчики
@@ -191,6 +202,9 @@ class SearchHistoryManager:
         return {"searches": self.get_popular_searches(limit=limit)}
 
     def handle_clear_search_history(self, params: dict[str, Any]) -> dict[str, Any]:
-        """IPC: clear_search_history — удаляет всю историю поиска."""
-        self.clear_search_history()
-        return {"ok": True}
+        """IPC: clear_search_history — удаляет всю историю поиска.
+
+        G3-MEM-05 (M05-06): ok: true только при подтверждённой удалённости
+        файла; при сбое — ok: false.
+        """
+        return {"ok": self.clear_search_history()}

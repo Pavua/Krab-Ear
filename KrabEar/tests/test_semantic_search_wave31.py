@@ -60,7 +60,7 @@ def _make_searcher(tmpdir: str, enabled: bool = True) -> SemanticSearcher:
     s._model = object()
     s._model_loaded = True
     # Inject deterministic fake encode methods so real model is never called
-    s._encode = lambda model, text: _fake_vec()
+    s._encode = lambda model, text, prefix="query: ": _fake_vec()
     s._encode_batch = lambda model, texts: np.stack([_fake_vec() for _ in texts])
     return s
 

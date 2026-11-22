@@ -121,7 +121,7 @@ class SemanticSearcher:
             # must NOT re-add this (now-purged) cleartext-derived embedding.
             with self._index_lock:
                 epoch_before = self._purge_epoch
-            embedding = self._encode(model, text)  # shape (D,)
+            embedding = self._encode_passage(model, text)  # shape (D,)
 
             with self._index_lock:
                 if self._purge_epoch != epoch_before:
@@ -252,7 +252,7 @@ class SemanticSearcher:
                 embeddings = self._embeddings.copy()
                 index = list(self._index)
 
-            q_emb = self._encode(model, query)  # shape (D,)
+            q_emb = self._encode_query(model, query)  # shape (D,)
             scores = self._cosine_similarity_batch(q_emb, embeddings)  # shape (N,)
 
             top_k = min(top_k, len(index))
@@ -415,12 +415,23 @@ class SemanticSearcher:
                 logger.warning("semantic_search: не удалось загрузить модель: %s", exc)
                 return None
 
-    def _encode(self, model: Any, text: str) -> Any:
+    def _encode_query(self, model: Any, text: str) -> Any:
+        """Кодирует запрос (search). Возвращает np.ndarray shape (D,)."""
+        return self._encode(model, text, prefix="query: ")
+
+    def _encode_passage(self, model: Any, text: str) -> Any:
+        """Кодирует документ (index_item/index_all). Возвращает np.ndarray shape (D,).
+
+        G3-MEM-05 (M05-12): документы индексируются passage:, запросы query: —
+        один и тот же документ при разных точках входа даёт одинаковый вектор.
+        """
+        return self._encode(model, text, prefix="passage: ")
+
+    def _encode(self, model: Any, text: str, prefix: str = "query: ") -> Any:
         """Кодирует один текст. Возвращает np.ndarray shape (D,)."""
         # multilingual-e5 рекомендует prefix "query: " / "passage: "
         # mxbai-embed-large рекомендует "Represent this sentence: "
         # Для единообразия используем "query: " (работает с обоими)
-        prefix = "query: "
         result = model.encode(prefix + text, normalize_embeddings=True)
         return result
 
@@ -504,9 +515,15 @@ class SemanticSearcher:
             logger.exception("semantic_search: _push_error failed for code=%s", code)
 
     def _load_from_disk(self) -> None:
-        """Загружает embeddings и индекс с диска (вызывается после загрузки модели)."""
+        """Загружает embeddings и индекс с диска (вызывается после загрузки модели).
+
+        G3-MEM-05 (M05-03): resurrection race — если purge_all() выполнилась
+        пока мы читали с диска, старые embeddings не могут вернуться в RAM.
+        """
         try:
             import numpy as np
+            with self._index_lock:
+                epoch_before = self._purge_epoch
             if self._embeddings_path.exists() and self._index_path.exists():
                 embeddings = np.load(str(self._embeddings_path))
                 with open(self._index_path, encoding="utf-8") as f:
@@ -522,6 +539,12 @@ class SemanticSearcher:
                     )
                     return
                 with self._index_lock:
+                    if self._purge_epoch != epoch_before:
+                        # purge_all() выполнилась после чтения файлов — данные устарели.
+                        logger.info(
+                            "semantic_search: загрузка с диска отменена — purge_all() после чтения"
+                        )
+                        return
                     self._embeddings = embeddings
                     self._index = index
                 logger.info(

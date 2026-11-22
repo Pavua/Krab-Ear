@@ -146,7 +146,11 @@ class ContextMemory:
 
         Args:
             window_size: размер скользящего окна (кол-во последних транскрибаций).
+                Должен быть >= 1 — deque(maxlen=0) теряет всё, а вытеснение
+                из пустого окна (deque[0]) — IndexError (G3-MEM-05 M05-17).
         """
+        if window_size < 1:
+            raise ValueError("window_size должен быть >= 1")
         self._window_size = window_size
         self._lock = threading.RLock()
         # Скользящее окно транскрибаций (сырой текст)

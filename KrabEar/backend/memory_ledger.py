@@ -16,6 +16,11 @@ import tempfile
 import time
 from pathlib import Path
 
+
+class UnsafeLedgerPath(OSError):
+    """Ledger path resolves to a symlink / неохраняемый inode (M05-01)."""
+
+
 logger = logging.getLogger("KrabEar.Backend.MemoryLedger")
 
 LEDGER_FILENAME = "memory_ledger.json"
@@ -43,8 +48,8 @@ def resolve_ledger_path() -> Path:
     путь ОДИНАКОВО и логировать его при первом касании (см. _log_path_once).
     """
     if _TEST_PATH_OVERRIDE is not None:
-        return (Path(_TEST_PATH_OVERRIDE) / LEDGER_FILENAME).resolve()
-    return (Path.home() / ".openclaw" / LEDGER_FILENAME).resolve()
+        return Path(_TEST_PATH_OVERRIDE).absolute() / LEDGER_FILENAME
+    return (Path.home() / ".openclaw" / LEDGER_FILENAME).absolute()
 
 
 class LedgerClient:
@@ -72,8 +77,11 @@ class LedgerClient:
     def _acquire(self, nowait: bool) -> int:
         """Захватывает эксклюзивный flock ТОЛЬКО на sidecar-файл (never self._path)."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        # G3-MEM-05 (M05-01): не следуем симлинкам на sidecar/lock; один inode.
+        fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         try:
+            if os.fstat(fd).st_nlink != 1:
+                raise UnsafeLedgerPath("unsafe ledger lock inode")
             if nowait:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 return fd
