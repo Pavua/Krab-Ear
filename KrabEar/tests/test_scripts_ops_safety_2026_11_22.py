@@ -27,7 +27,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPTS = ROOT / "scripts"
 UID = str(os.getuid())
-ZSH = shutil.which("zsh")
+# KE_SIMULATE_CI=1 имитирует Linux-раннер (нет zsh/plutil): так локально ловятся платформенные падения.
+ZSH = None if os.environ.get("KE_SIMULATE_CI") else shutil.which("zsh")
 needs_zsh = pytest.mark.skipif(ZSH is None, reason="zsh не установлен (shebang скриптов #!/bin/zsh)")
 
 
@@ -732,6 +733,9 @@ def _rest_installer(tmp_path: Path, gate_rc: int, launchctl_body: str, *args: st
     (root / ".venv_krab_ear").mkdir()
     _exe(root / "scripts" / "safe_backend_restart.command", f'echo "$*" >> "$STUB_LOG.gate"\nexit {gate_rc}\n')
     ctx = _stubs(tmp_path, launchctl_body)
+    # plutil есть только на macOS; здесь важна логика гейта, а не валидатор plist (его проверяет
+    # TestInstallAgentLaunchagent на macOS), поэтому заглушка делает тест платформонезависимым.
+    _exe(tmp_path / "stubbin" / "plutil", "exit 0\n")
     env = dict(ctx["env"], HF_TOKEN="hf_test_token_not_real")
     res = subprocess.run(["/bin/bash", str(root / "scripts" / "install_rest_launchagent.command"), *args],
                          env=env, capture_output=True, text=True, timeout=60)
@@ -1206,6 +1210,7 @@ class TestCleanupKeepsIgnoredWork:
 
 
 # F2/F8/F9: границы файлового отбора бэкапа
+@needs_zsh
 class TestBackupSelection:
     def _tree(self, tmp_path: Path) -> Path:
         root = _backup_tree(tmp_path)
@@ -1923,3 +1928,21 @@ class TestBuildAndDeployTransaction:
         assert res.returncode == 0, res.stdout + res.stderr
         assert runtime.read_text() == "OLD-RUNTIME"
         assert app_bin.read_text() == "OLD-APP"
+# ── Codex review #2224: нестандартный BACKEND_LABEL — отказ до любых изменений ──
+
+
+@needs_zsh
+@pytest.mark.skipif(shutil.which("bc") is None, reason="нужен bc")
+def test_validate_c1_rejects_nondefault_backend_label_before_touching_anything(tmp_path):
+    root = tmp_path / "c1_label_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "validate_c1_mps_fix.command", root / "scripts")
+    _exe(root / "scripts" / "safe_backend_restart.command", 'echo "$*" >> "$STUB_LOG.restart"\nexit 0\n')
+    ctx = _stubs(tmp_path)
+    env = dict(ctx["env"], BACKEND_LABEL="com.example.other-backend", CYCLES="1", SLEEP_BETWEEN="0")
+    res = subprocess.run([ZSH, str(root / "scripts" / "validate_c1_mps_fix.command")], env=env, capture_output=True,
+                         text=True, timeout=60)
+    assert res.returncode != 0, res.stdout + res.stderr
+    assert "BACKEND_LABEL" in (res.stdout + res.stderr)
+    assert not Path(str(ctx["log"]) + ".restart").exists(), "рестарт запущен для чужого label"
+    assert not any("setenv" in c for c in _calls(ctx)), "launchctl env изменён до отказа"
