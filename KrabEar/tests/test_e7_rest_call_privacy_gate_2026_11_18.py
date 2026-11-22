@@ -261,6 +261,10 @@ def test_call_stream_rechecks_privacy_after_stt():
     svc._gen = gen
     with patch('backend.call_assist_service.time.sleep', side_effect=lambda *_: svc._state.update(active=False)):
         svc._assist_loop(gen, 's', 'http://synthetic.invalid', '')
+    # сценарий действительно выполнен: STT вызван, privacy переключилась внутри него —
+    # иначе «ничего не отправлено» проходило бы и при цикле, вышедшем до транскрипции
+    svc.transcriber.transcribe_preview.assert_called_once()
+    assert cfg['privacy_mode_enabled'] is True
     assert not gw.post.called, 'STT text sent after privacy changed'
 
 
