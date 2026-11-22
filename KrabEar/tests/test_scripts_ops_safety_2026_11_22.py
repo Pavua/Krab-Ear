@@ -354,3 +354,303 @@ class TestMigrateCanonical:
         assert res.returncode == 0, res.stdout + res.stderr
         assert "Bootstrap complete" in res.stdout
         assert any("bootstrap" in c for c in _calls(ctx))
+
+
+# ═══ Пачка 2: KEG2-01 / 04 / 08+13 / 14 / 15 ══════════════════════════════════
+
+import json  # noqa: E402
+import re  # noqa: E402
+import socket  # noqa: E402
+import sqlite3  # noqa: E402
+import tarfile  # noqa: E402
+import tempfile  # noqa: E402
+import threading  # noqa: E402
+
+
+def _function_source(script: str, name: str) -> str:
+    text = (SCRIPTS / script).read_text()
+    match = re.search(rf"^{name}\(\) \{{.*?\n\}}\n", text, re.S | re.M)
+    assert match, f"{name}() не найдена в {script}"
+    return match.group()
+
+
+# ── KEG2-01 create_stable_backup ────────────────────────────────────────────
+
+SECRET = "sk-LIVE-SECRET-DO-NOT-ARCHIVE"
+
+
+def _backup_tree(tmp_path: Path) -> Path:
+    root = tmp_path / "proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "create_stable_backup.command", root / "scripts")
+    (root / "KrabEar").mkdir()
+    (root / "KrabEar" / "app.py").write_text("print('tracked')\n")
+    (root / "KrabEar" / ".env").write_text(f"KEY={SECRET}\n")
+    (root / "KrabEar" / "data").mkdir()
+    (root / "KrabEar" / "data" / "history.ndjson").write_text("приватная диктовка\n")
+    (root / ".gitignore").write_text(".env\ndata/\n_STABLE_BACKUPS/\n")
+    (root / "README.md").write_text("readme\n")
+    _git(root, "init", "-q", "-b", "main")
+    _git(root, "add", ".gitignore", "README.md", "KrabEar/app.py", "scripts")
+    _git(root, "commit", "-q", "-m", "init")
+    (root / "KrabEar" / "new_untracked.py").write_text("print('new')\n")  # не в индексе, не ignored
+    return root
+
+
+def _run_backup(root: Path) -> Path:
+    env = dict(os.environ, HOME=str(root.parent / "home"))
+    res = subprocess.run([ZSH, str(root / "scripts" / "create_stable_backup.command")], env=env,
+                         capture_output=True, text=True, timeout=60)
+    assert res.returncode == 0, res.stdout + res.stderr
+    archives = sorted((root / "_STABLE_BACKUPS").glob("*.tar.gz"))
+    assert len(archives) == 1, res.stdout
+    return archives[0]
+
+
+@needs_zsh
+class TestStableBackup:
+    def test_ignored_secrets_and_data_never_enter_archive(self, tmp_path):
+        archive = _run_backup(_backup_tree(tmp_path))
+        with tarfile.open(archive) as tar:
+            names = tar.getnames()
+            blob = b"".join(tar.extractfile(m).read() for m in tar.getmembers() if m.isfile())
+        assert not any(n.endswith(".env") for n in names), names
+        assert not any("history.ndjson" in n for n in names), names
+        assert SECRET.encode() not in blob
+
+    def test_tracked_and_untracked_sources_are_kept(self, tmp_path):
+        archive = _run_backup(_backup_tree(tmp_path))
+        with tarfile.open(archive) as tar:
+            names = {n.lstrip("./") for n in tar.getnames()}
+        assert "KrabEar/app.py" in names
+        assert "KrabEar/new_untracked.py" in names
+
+    def test_archive_and_dir_are_private(self, tmp_path):
+        root = _backup_tree(tmp_path)
+        archive = _run_backup(root)
+        assert stat.S_IMODE(archive.stat().st_mode) == 0o600
+        assert stat.S_IMODE((root / "_STABLE_BACKUPS").stat().st_mode) == 0o700
+
+    def test_deleted_tracked_file_does_not_break_backup(self, tmp_path):
+        root = _backup_tree(tmp_path)
+        (root / "README.md").unlink()  # tracked, удалён с диска
+        _run_backup(root)
+
+
+# ── KEG2-04 migrate_to_inprocess_rest: fail-closed гейт ─────────────────────
+
+
+class _IpcServer:
+    """Unix-сокет, отвечающий на любой запрос заданной сырой строкой."""
+
+    def __init__(self, path: str, raw: str | None) -> None:
+        self.path, self.raw = path, raw
+        self.srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.srv.bind(path)
+        self.srv.listen(8)
+        self.srv.settimeout(0.1)
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._serve, daemon=True)
+        self.thread.start()
+
+    def _serve(self) -> None:
+        while not self.stop.is_set():
+            try:
+                conn, _ = self.srv.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            with conn:
+                try:
+                    conn.settimeout(1)
+                    conn.recv(4096)
+                    if self.raw is not None:
+                        conn.sendall((self.raw + "\n").encode())
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        self.stop.set()
+        self.srv.close()
+        self.thread.join(timeout=2)
+
+
+def _run_migrate_rest(tmp_path: Path, raw: str | None, *args: str, socket_present: bool = True):
+    with tempfile.TemporaryDirectory(prefix="ke-mig-", dir="/tmp") as short:
+        home = Path(short)
+        sock_dir = home / "Library" / "Application Support" / "KrabEar"
+        sock_dir.mkdir(parents=True)
+        (home / "Library" / "LaunchAgents").mkdir(parents=True)
+        # print: «загружен», пока не было bootout (как настоящий launchd)
+        ctx = _stubs(
+            tmp_path,
+            'case "$1" in print) [ ! -e "$STUB_LOG.bootout" ]; exit $?;; bootout) touch "$STUB_LOG.bootout";; esac\nexit 0\n',
+        )
+        env = dict(ctx["env"], HOME=str(home))
+        server = _IpcServer(str(sock_dir / "krabear.sock"), raw) if socket_present else None
+        try:
+            res = subprocess.run(["/bin/bash", str(SCRIPTS / "migrate_to_inprocess_rest.command"), *args],
+                                 env=env, capture_output=True, text=True, timeout=30)
+        finally:
+            if server:
+                server.close()
+        return res, ctx
+
+
+_OK_REC = json.dumps({"id": "1", "ok": True, "result": {"is_recording": False}})
+
+
+class TestMigrateInprocessRestFailClosed:
+    def test_missing_socket_refuses_instead_of_skipping_gate(self, tmp_path):
+        res, ctx = _run_migrate_rest(tmp_path, None, socket_present=False)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert not any("bootout" in c for c in _calls(ctx)), _calls(ctx)
+
+    @pytest.mark.parametrize("raw", ["", "not json at all", '{"id":"1","ok":true,"result":{}}'])
+    def test_unconfirmed_state_refuses(self, tmp_path, raw):
+        res, ctx = _run_migrate_rest(tmp_path, raw)
+        assert res.returncode == 1, res.stdout + res.stderr
+        assert not any("bootout" in c or "bootstrap" in c for c in _calls(ctx)), _calls(ctx)
+
+    def test_force_allows_dead_backend(self, tmp_path):
+        res, ctx = _run_migrate_rest(tmp_path, None, "--force", socket_present=False)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert any("bootout" in c for c in _calls(ctx)), _calls(ctx)
+
+
+# ── KEG2-08/13 audit_tcc_permissions ────────────────────────────────────────
+
+
+def _tcc_home(tmp_path: Path, client: str) -> Path:
+    home = tmp_path / "home"
+    db_dir = home / "Library" / "Application Support" / "com.apple.TCC"
+    db_dir.mkdir(parents=True)
+    con = sqlite3.connect(db_dir / "TCC.db")
+    con.execute("CREATE TABLE access (service TEXT, client TEXT, client_type INT, auth_value INT, last_modified INT)")
+    con.execute("INSERT INTO access VALUES ('kTCCServiceMicrophone', ?, 0, 2, 1700000000)", (client,))
+    con.commit()
+    con.close()
+    return home
+
+
+def _run_tcc(tmp_path: Path, client: str, out: Path):
+    root = tmp_path / "proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "audit_tcc_permissions.command", root / "scripts")
+    home = _tcc_home(tmp_path, client)
+    env = dict(os.environ, HOME=str(home), KRAB_TCC_AUDIT_OUT=str(out))
+    return subprocess.run(["/bin/bash", str(root / "scripts" / "audit_tcc_permissions.command")], env=env,
+                          capture_output=True, text=True, timeout=60)
+
+
+class TestTccAudit:
+    def test_client_name_is_data_not_code(self, tmp_path):
+        marker = tmp_path / "PWNED"
+        payload = f'com.antigravity.krab-ear""" + str(open("{marker}", "w").write("x")) + """'
+        out = tmp_path / "out" / "audit.json"
+        out.parent.mkdir()
+        res = _run_tcc(tmp_path, payload, out)
+        assert not marker.exists(), "значение из TCC.db выполнилось как Python"
+        assert res.returncode == 0, res.stdout + res.stderr
+        data = json.loads(out.read_text())
+        assert any(e["client"] == payload for e in data["tcc_entries"])
+
+    def test_symlink_at_output_path_is_not_followed(self, tmp_path):
+        victim = tmp_path / "victim.txt"
+        victim.write_text("НЕ ТРОГАТЬ")
+        out = tmp_path / "out" / "audit.json"
+        out.parent.mkdir()
+        out.symlink_to(victim)
+        res = _run_tcc(tmp_path, "com.antigravity.krab-ear", out)
+        assert victim.read_text() == "НЕ ТРОГАТЬ"
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert not out.is_symlink()
+        assert json.loads(out.read_text())["tcc_entries"]
+
+    def test_output_is_private(self, tmp_path):
+        out = tmp_path / "out" / "audit.json"
+        out.parent.mkdir()
+        _run_tcc(tmp_path, "com.antigravity.krab-ear", out)
+        assert stat.S_IMODE(out.stat().st_mode) == 0o600
+
+    def test_default_output_is_not_a_fixed_world_writable_tmp_name(self):
+        text = (SCRIPTS / "audit_tcc_permissions.command").read_text()
+        code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+        assert '"/tmp/krab-tcc-audit.json"' not in code
+
+
+# ── KEG2-14 check_port без GNU timeout ──────────────────────────────────────
+
+
+def _bash_only_path(tmp_path: Path) -> str:
+    only = tmp_path / "onlybash"
+    only.mkdir(exist_ok=True)
+    (only / "bash").symlink_to(shutil.which("bash"))
+    return str(only)
+
+
+@pytest.mark.parametrize(
+    "script,func",
+    [("healthcheck_voice_assistant.command", "check_port"), ("observe_production.command", "_port_up")],
+)
+class TestPortCheckWithoutGnuTimeout:
+    def _run(self, tmp_path, script, func, port):
+        body = _function_source(script, func)
+        env = dict(os.environ, PATH=_bash_only_path(tmp_path))
+        return subprocess.run([shutil.which("bash"), "-c", f"{body}\n{func} {port}"], env=env,
+                              capture_output=True, text=True, timeout=10)
+
+    def test_listening_port_is_reported_up(self, tmp_path, script, func):
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        try:
+            res = self._run(tmp_path, script, func, srv.getsockname()[1])
+        finally:
+            srv.close()
+        assert res.returncode == 0, res.stderr
+
+    def test_closed_port_is_reported_down(self, tmp_path, script, func):
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+        assert self._run(tmp_path, script, func, port).returncode != 0
+
+
+# ── KEG2-15 prefetch_whisper_models: имя кэша HF и полнота ──────────────────
+
+
+def _is_cached(tmp_path: Path, repo_id: str) -> str:
+    body = _function_source("prefetch_whisper_models.command", "is_cached")
+    cache = tmp_path / "hub"
+    cache.mkdir(exist_ok=True)
+    res = subprocess.run(["/bin/bash", "-c", f'HF_CACHE_DIR="{cache}"\n{body}\nis_cached "{repo_id}"'],
+                         capture_output=True, text=True, timeout=10)
+    return res.stdout.strip()
+
+
+class TestPrefetchCacheDetection:
+    def test_double_dash_cache_name_is_a_hit(self, tmp_path):
+        snap = tmp_path / "hub" / "models--mlx-community--whisper-large" / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text("{}")
+        assert _is_cached(tmp_path, "mlx-community/whisper-large") == "HIT"
+
+    def test_single_dash_lookalike_is_not_a_hit(self, tmp_path):
+        snap = tmp_path / "hub" / "models--mlx-community-whisper-large" / "snapshots" / "abc123"
+        snap.mkdir(parents=True)
+        (snap / "config.json").write_text("{}")
+        assert _is_cached(tmp_path, "mlx-community/whisper-large") == "MISS"
+
+    def test_incomplete_download_is_a_miss(self, tmp_path):
+        base = tmp_path / "hub" / "models--mlx-community--whisper-large"
+        (base / "snapshots" / "abc123").mkdir(parents=True)
+        (base / "blobs").mkdir()
+        (base / "blobs" / "deadbeef.incomplete").write_text("partial")
+        assert _is_cached(tmp_path, "mlx-community/whisper-large") == "MISS"
+
+    def test_empty_snapshot_dir_is_a_miss(self, tmp_path):
+        (tmp_path / "hub" / "models--mlx-community--whisper-large" / "snapshots" / "abc123").mkdir(parents=True)
+        assert _is_cached(tmp_path, "mlx-community/whisper-large") == "MISS"

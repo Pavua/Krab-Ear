@@ -70,11 +70,18 @@ HF_CACHE_DIR="${HF_HOME:-$HOME/.cache/huggingface}/hub"
 # Helper: check if a model is fully cached
 is_cached() {
     local repo_id="$1"
-    # HuggingFace stores repos as models--<org>--<name>
-    local cache_name
-    cache_name="models--$(echo "$repo_id" | tr '/' '--')"
-    local snapshots_dir="$HF_CACHE_DIR/$cache_name/snapshots"
-    if [ -d "$snapshots_dir" ] && [ -n "$(ls -A "$snapshots_dir" 2>/dev/null)" ]; then
+    # HuggingFace stores repos as models--<org>--<name>: КАЖДЫЙ "/" -> "--"
+    # (tr '/' '--' заменял "/" одним дефисом — проверка не находила ничего).
+    local cache_name="models--${repo_id//\//--}"
+    local repo_dir="$HF_CACHE_DIR/$cache_name"
+    local snapshots_dir="$repo_dir/snapshots"
+    # Недокачанный файл лежит в blobs/*.incomplete — это не кэш.
+    if compgen -G "$repo_dir/blobs/*.incomplete" >/dev/null 2>&1; then
+        echo "MISS"
+        return 0
+    fi
+    # Непустой snapshot: хотя бы одна ревизия с хотя бы одним файлом/ссылкой.
+    if [ -d "$snapshots_dir" ] && [ -n "$(find "$snapshots_dir" -mindepth 2 -maxdepth 2 2>/dev/null | head -1)" ]; then
         echo "HIT"
     else
         echo "MISS"

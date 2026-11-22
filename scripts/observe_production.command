@@ -60,7 +60,8 @@ _proc_rss_mb() {
 
 # Check TCP port reachable
 _port_up() {
-    timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$1" 2>/dev/null
+    # Без GNU `timeout` (на macOS его нет): loopback-connect отвечает немедленно.
+    bash -c "echo >/dev/tcp/127.0.0.1/$1" 2>/dev/null
 }
 
 # ──────────────────────── main ────────────────────────

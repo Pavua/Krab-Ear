@@ -24,6 +24,11 @@
 #   scripts/migrate_to_inprocess_rest.command             # выгрузить легаси REST
 #   scripts/migrate_to_inprocess_rest.command --wait 120   # ждать окончания записи/встречи до 120с
 #   scripts/migrate_to_inprocess_rest.command --rollback   # вернуть легаси REST (парный откат)
+#   scripts/migrate_to_inprocess_rest.command --force      # осознанно: backend мёртв/завис, гейт не применять
+#
+# 🔴 Гейт fail-closed: пустой/невалидный ответ IPC и отсутствующий сокет — это
+# «состояние неизвестно», а НЕ «записи нет» (тот же контракт, что у
+# safe_backend_restart.command). Занято или неизвестно → отказ (код 1).
 #
 # Bash 3.2 / BSD-утилиты (macOS): без mapfile/readarray/declare -A; pgrep=ERE;
 # GNU timeout отсутствует — не используются.
@@ -38,10 +43,12 @@ REST_UNIT="gui/$UID_NUM/$REST_LABEL"
 
 WAIT_SEC=0
 ROLLBACK=0
+FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --wait) WAIT_SEC="${2:-60}"; shift 2 ;;
     --rollback) ROLLBACK=1; shift ;;
+    --force) FORCE=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,19 +73,28 @@ PY
 }
 
 busy_reason() {
-  # Печатает причину занятости ("recording" / "meeting") или ничего.
-  # Копия busy_reason() из safe_backend_restart.command — тот же инвариант,
-  # тот же живой IPC-контракт (MeetingSessionService.active — boolean).
+  # 0 + причина = занято ИЛИ состояние не подтверждено (блокировать);
+  # 1 = оба IPC ответили валидно и подтвердили «не занято».
+  # Пустой ответ (мёртвый/отсутствующий сокет), не-JSON и ответ без явного
+  # булева поля — «unknown», а не «idle»: молчание бэкенда не разрешение.
   local rec meet
   rec=$(ipc_call get_recording_state)
   if [ -n "$rec" ] && printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*true'; then
     echo "recording"
     return 0
   fi
+  if [ -z "$rec" ] || ! printf '%s' "$rec" | grep -qE '"is_recording"[[:space:]]*:[[:space:]]*false'; then
+    echo "unknown-recording"
+    return 0
+  fi
   meet=$(ipc_call get_meeting_live_state)
   if [ -n "$meet" ] && printf '%s' "$meet" | grep -qE \
     '"active"[[:space:]]*:[[:space:]]*true|"(state|status)"[[:space:]]*:[[:space:]]*"(recording|active|running)"'; then
     echo "meeting"
+    return 0
+  fi
+  if [ -z "$meet" ] || ! printf '%s' "$meet" | grep -qE '"active"[[:space:]]*:[[:space:]]*false'; then
+    echo "unknown-meeting"
     return 0
   fi
   return 1
@@ -130,23 +146,24 @@ PY
 }
 
 # ── Busy-гейт: первым делом, до любого launchctl-вызова ──────────────────────
-if [ -S "$SOCK" ]; then
+# Применяется ВСЕГДА (в т.ч. при отсутствующем сокете), кроме явного --force.
+if [ "$FORCE" -eq 1 ]; then
+  echo "[migrate-rest] --force: busy-гейт пропущен по явной просьбе владельца."
+else
   DEADLINE=$(( $(date +%s) + WAIT_SEC ))
   while REASON=$(busy_reason); do
     if [ "$WAIT_SEC" -eq 0 ]; then
-      echo "REFUSED: активная сессия ($REASON) — переустановка REST-юнита рискует потерять аудио." >&2
-      echo "Дождись окончания или запусти с --wait N." >&2
+      echo "REFUSED: активная сессия ($REASON) или состояние не подтверждено — переустановка REST-юнита рискует потерять аудио." >&2
+      echo "Дождись окончания, запусти с --wait N, либо --force если backend заведомо мёртв." >&2
       exit 1
     fi
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-      echo "REFUSED: сессия ($REASON) не закончилась за ${WAIT_SEC}с." >&2
+      echo "REFUSED: сессия ($REASON) не закончилась/не подтверждена за ${WAIT_SEC}с." >&2
       exit 1
     fi
-    echo "[migrate-rest] идёт $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
+    echo "[migrate-rest] $REASON — жду… ($(( DEADLINE - $(date +%s) ))с осталось)"
     sleep 3
   done
-else
-  echo "[migrate-rest] сокет backend отсутствует/мёртв — busy-гейт пропущен (нечего терять)."
 fi
 
 # ── Ветка --rollback: вернуть легаси REST-юнит ────────────────────────────────
