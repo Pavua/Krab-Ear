@@ -183,6 +183,45 @@ fi
 # ── Step 2: Copy to both delivery points ─────────────────────────
 section "Step 2/5 — Sync Binaries"
 
+# 🔴 Поставка транзакционна: бинарники и Sparkle заменяются ДО подписи и проверки; сбой
+# посередине оставлял смешанную поставку (новый бинарь + старый framework / неподписанный
+# бандл). Перед заменой снимаем копию, при любом выходе до успешной верификации подписи —
+# возвращаем прежнее состояние.
+DELIVERY_OK=0
+ROLLBACK_DIR=""
+SPARKLE_BUNDLE="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+SPARKLE_NATIVE="$ROOT_DIR/native/Frameworks/Sparkle.framework"
+if [ "$DRY_RUN" -eq 0 ]; then
+  ROLLBACK_DIR="$(mktemp -d)"
+  [ -e "$RUNTIME_BIN" ] && cp -p "$RUNTIME_BIN" "$ROLLBACK_DIR/runtime"
+  [ -e "$APP_BIN" ] && cp -p "$APP_BIN" "$ROLLBACK_DIR/app"
+  [ -d "$SPARKLE_BUNDLE" ] && ditto "$SPARKLE_BUNDLE" "$ROLLBACK_DIR/sparkle_bundle"
+  [ -d "$SPARKLE_NATIVE" ] && ditto "$SPARKLE_NATIVE" "$ROLLBACK_DIR/sparkle_native"
+fi
+
+delivery_rollback_on_exit() {
+  local rc=$?
+  trap - EXIT
+  if [ -n "$ROLLBACK_DIR" ] && [ -d "$ROLLBACK_DIR" ]; then
+    if [ "$DELIVERY_OK" -ne 1 ]; then
+      warn "Поставка не завершена (код $rc) — возвращаю прежние бинарники и Sparkle"
+      [ -f "$ROLLBACK_DIR/runtime" ] && cp -p "$ROLLBACK_DIR/runtime" "$RUNTIME_BIN"
+      [ -f "$ROLLBACK_DIR/app" ] && cp -p "$ROLLBACK_DIR/app" "$APP_BIN"
+      if [ -d "$ROLLBACK_DIR/sparkle_bundle" ]; then
+        rm -rf "$SPARKLE_BUNDLE"; ditto "$ROLLBACK_DIR/sparkle_bundle" "$SPARKLE_BUNDLE"
+      fi
+      if [ -d "$ROLLBACK_DIR/sparkle_native" ]; then
+        rm -rf "$SPARKLE_NATIVE"; ditto "$ROLLBACK_DIR/sparkle_native" "$SPARKLE_NATIVE"
+      fi
+    fi
+    rm -rf "$ROLLBACK_DIR"
+  fi
+  exit "$rc"
+}
+trap delivery_rollback_on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 log "→ native/runtime/KrabEarAgent"
 if [ "$DRY_RUN" -eq 0 ]; then
   mkdir -p "$(dirname "$RUNTIME_BIN")"
@@ -249,6 +288,7 @@ if [ "$DRY_RUN" -eq 0 ]; then
   # Verify
   if codesign --verify --strict "$RUNTIME_BIN" \
      && codesign --verify --strict "$APP_BUNDLE"; then
+    DELIVERY_OK=1
     ok "Signature verified"
   else
     fail "Signature verification failed"

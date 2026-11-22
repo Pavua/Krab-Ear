@@ -1845,3 +1845,81 @@ class TestVerifyBuildDir:
         stray = tmp_path / "stray" / "native" / "KrabEarAgent" / ".build"
         stray.mkdir(parents=True)
         assert _verify_build_dir(wts, stray).returncode != 0
+
+
+# ── KEG2-17 build_and_deploy: поставка транзакционна (откат при сбое подписи/проверки) ──
+
+
+def _deploy_tree(tmp_path: Path):
+    root = tmp_path / "deploy_proj"
+    (root / "scripts").mkdir(parents=True)
+    shutil.copy2(SCRIPTS / "build_and_deploy.command", root / "scripts")
+    (root / "scripts" / "agent_signing_identity.sh").write_text(
+        'resolve_agent_signing_identity() { echo "TEST-IDENTITY"; }\n')
+    pkg = root / "native" / "KrabEarAgent"
+    pkg.mkdir(parents=True)
+    runtime = root / "native" / "runtime" / "KrabEarAgent"
+    runtime.parent.mkdir(parents=True)
+    runtime.write_text("OLD-RUNTIME")
+    app_bin = root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
+    app_bin.parent.mkdir(parents=True)
+    app_bin.write_text("OLD-APP")
+    fw = root / "Krab Ear.app" / "Contents" / "Frameworks" / "Sparkle.framework"
+    fw.mkdir(parents=True)
+    (fw / "marker").write_text("OLD-FW")
+    ctx = _stubs(tmp_path)
+    stub = tmp_path / "stubbin"
+    build = f"{pkg}/.build/release"
+    new_fw = f"{pkg}/.build/checkouts/Sparkle.framework"
+    _exe(stub / "swift",
+         f'mkdir -p "{build}" "{new_fw}"; echo NEW-BUILD > "{build}/KrabEarAgent"; chmod +x "{build}/KrabEarAgent"; '
+         f'echo NEW-FW > "{new_fw}/marker"; exit 0\n')
+    _exe(stub / "dsymutil", 'mkdir -p "$3"; exit 0\n')
+    _exe(stub / "dwarfdump", 'echo "UUID: AAAA-BBBB (arm64) $2"\n')
+    _exe(stub / "ditto", 'rm -rf "$2"; cp -R "$1" "$2"\n')
+    codesign = ('case "$*" in *"Krab Ear.app"*) [ "$FAKE_CODESIGN_FAIL" = app ] && exit 1;; '
+                '*runtime*) [ "$FAKE_CODESIGN_FAIL" = runtime ] && exit 1;; esac\nexit 0\n')
+    _exe(stub / "codesign", codesign)
+    return root, ctx, runtime, app_bin, fw
+
+
+def _run_deploy(root: Path, ctx: dict, **extra) -> subprocess.CompletedProcess:
+    env = dict(ctx["env"], **extra)
+    return subprocess.run(["/bin/bash", str(root / "scripts" / "build_and_deploy.command"), "--no-sentry"], env=env,
+                          capture_output=True, text=True, timeout=120)
+
+
+class TestBuildAndDeployTransaction:
+    @pytest.mark.parametrize("which", ["app", "runtime"])
+    def test_signing_failure_restores_previous_delivery(self, tmp_path, which):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        res = _run_deploy(root, ctx, FAKE_CODESIGN_FAIL=which)
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert runtime.read_text() == "OLD-RUNTIME"
+        assert app_bin.read_text() == "OLD-APP"
+        assert (fw / "marker").read_text() == "OLD-FW"
+
+    def test_failure_after_verified_delivery_does_not_roll_back(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        # UUID-проверка (шаг 4) падает уже ПОСЛЕ подписи и верификации: поставка состоялась
+        _exe(tmp_path / "stubbin" / "dwarfdump", "exit 1\n")
+        res = _run_deploy(root, ctx)
+        assert res.returncode == 3, res.stdout + res.stderr
+        assert runtime.read_text().strip() == "NEW-BUILD"
+        assert app_bin.read_text().strip() == "NEW-BUILD"
+
+    def test_full_success_keeps_new_delivery(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        res = _run_deploy(root, ctx)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert runtime.read_text().strip() == "NEW-BUILD"
+        assert (fw / "marker").read_text().strip() == "NEW-FW"
+
+    def test_dry_run_changes_nothing_and_succeeds(self, tmp_path):
+        root, ctx, runtime, app_bin, fw = _deploy_tree(tmp_path)
+        env = dict(ctx["env"])
+        res = subprocess.run(["/bin/bash", str(root / "scripts" / "build_and_deploy.command"), "--dry-run"], env=env,
+                             capture_output=True, text=True, timeout=60)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert runtime.read_text() == "OLD-RUNTIME"
+        assert app_bin.read_text() == "OLD-APP"
