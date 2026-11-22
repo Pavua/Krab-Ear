@@ -364,7 +364,8 @@ extension HistoryPanelController {
             let sourceLang = (translateResult["source_lang"] as? String) ?? ""
             let targetLang = (translateResult["target_lang"] as? String) ?? ""
 
-            let _ = try? ipcClient.call(
+            // M06-08: статус записи проверяем — ошибка сохранения не должна выглядеть как успех.
+            let addResult: [String: Any]? = try? ipcClient.call(
                 method: "add_history_item",
                 params: [
                     "text": newText,
@@ -378,14 +379,23 @@ extension HistoryPanelController {
                     "target_lang": targetLang,
                 ]
             )
+            let resultDict = addResult?["result"] as? [String: Any]
+            let addedOk = resultDict?["ok"] as? Bool == true
 
             DispatchQueue.main.async {
                 guard let self = self else { return }
-                self.loadInitial()
-                self.showInfoAlert(
-                    title: "Повторить перевод",
-                    body: "Готово. Создана новая запись истории с обновлённым переводом."
-                )
+                if addedOk {
+                    self.loadInitial()
+                    self.showInfoAlert(
+                        title: "Повторить перевод",
+                        body: "Готово. Создана новая запись истории с обновлённым переводом."
+                    )
+                } else {
+                    self.showInfoAlert(
+                        title: "Повторить перевод",
+                        body: "Не удалось сохранить новую запись истории (ошибка сохранения). Попробуйте повторить."
+                    )
+                }
             }
         }
     }

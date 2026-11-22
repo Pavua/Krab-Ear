@@ -109,6 +109,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var isImportRunning = false
     var isImportPaused = false
     var importCancellationRequested = false
+    /// G3-MEM-06 (M06-05): отмена была нажата до получения job_id — cancellation
+    /// отправляется сразу после получения ID.
+    var importCancellationPending = false
     var importJobsPlanned = 0
     var importJobsCompleted = 0
     var importProcessedTotal = 0

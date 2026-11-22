@@ -373,11 +373,21 @@ extension HistoryPanelController {
                         "suggestions":  rawSuggestions,
                     ]
                 )
-                let added = (result["result"] as? [String: Any]).flatMap {
-                    ($0["applied"] as? Int) ?? ($0["applied"] as? NSNumber)?.intValue
-                } ?? selectedIds.count
-                DispatchQueue.main.async {
-                    self.showGlossaryToast("Добавлено \(added) терминов в глоссарий")
+                // M06-09: без applied в ответе — результат неподтверждённый; не выдаём
+                // «Добавлено N» вместо выбранных.
+                let appliedRaw = (result["result"] as? [String: Any])?["applied"]
+                if let appliedInt = appliedRaw as? Int, appliedInt > 0 {
+                    DispatchQueue.main.async {
+                        self.showGlossaryToast("Добавлено \(appliedInt) терминов в глоссарий")
+                    }
+                } else if appliedRaw == nil {
+                    DispatchQueue.main.async {
+                        self.showGlossaryToast("Отправлено в backend — ожидается подтверждение применения")
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        self.showGlossaryToast("Добавлено 0 терминов (применение не подтверждено backend-ом)")
+                    }
                 }
             } catch {
                 DispatchQueue.main.async {
