@@ -73,9 +73,11 @@ struct PrivacyDashboardData {
         guard confirmedPrivacyFlag(result["ok"]) == true else { return nil }
         privacyMode = confirmedPrivacyFlag(result["privacy_mode"])
         encryptionEnabled = confirmedPrivacyFlag(result["encryption_enabled"])
+        // G3-MEM-07 (M07-09): неполный payload — отклоняем (без ложных нулей/false).
         let storage = result["storage"] as? [String: Any]
         let retention = result["retention"] as? [String: Any]
         let audit = result["audit"] as? [String: Any]
+        guard storage != nil, retention != nil else { return nil }
         itemCount = storage?["item_count"] as? Int ?? 0
         transcriptsCount = storage?["transcripts_count"] as? Int ?? 0
         totalDataMb = HistoryPanelController.pdDouble(storage?["total_data_mb"])
