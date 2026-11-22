@@ -3427,7 +3427,11 @@ class StateStore:
                 return {"ok": False, "reason": "verification_failed"}
 
             # Step 6: verification passed — securely remove the plaintext .bak
+            # G3-MEM-03: отказ ПЕРЕЗАПИСИ (права, I/O) не повод оставлять plaintext
+            # рядом с зашифрованной историей — пробуем хотя бы удалить файл. ok=False
+            # (backup_cleanup_failed) только если файл так и остался.
             backup_cleanup_failed = False
+            backup_wipe = "overwritten"
             try:
                 bak_size = bak_path.stat().st_size
                 with bak_path.open("r+b") as fh:
@@ -3436,13 +3440,23 @@ class StateStore:
                     os.fsync(fh.fileno())
                 bak_path.unlink()
             except Exception as wipe_exc:
-                # Live уже зашифрован, но оставшийся plaintext backup означает,
-                # что миграцию нельзя объявлять завершённой.
                 logger.warning(
-                    "migrate_history_encryption: не удалось безопасно удалить .bak",
+                    "migrate_history_encryption: не удалось перезаписать .bak — пробуем удалить",
                     extra={"bak_path": str(bak_path), "error": str(wipe_exc)},
                 )
-                backup_cleanup_failed = True
+                try:
+                    bak_path.unlink()
+                    backup_wipe = "unlinked_only"
+                except FileNotFoundError:
+                    backup_wipe = "unlinked_only"
+                except Exception as unlink_exc:
+                    # Live уже зашифрован, но оставшийся plaintext backup означает,
+                    # что миграцию нельзя объявлять завершённой.
+                    logger.warning(
+                        "migrate_history_encryption: не удалось безопасно удалить .bak",
+                        extra={"bak_path": str(bak_path), "error": str(unlink_exc)},
+                    )
+                    backup_cleanup_failed = True
 
         # Step 7: reset crypto cache (file changed on disk)
         self._history_crypto_initialized = False
@@ -3459,12 +3473,16 @@ class StateStore:
             except Exception:
                 pass
 
-        return {
+        result = {
             "ok": True,
             "encrypted": encrypted_count,
             "total": total,
             "already_encrypted": already_count,
         }
+        if backup_wipe != "overwritten":
+            # G3-MEM-03: перезапись .bak не удалась, файл только удалён.
+            result["backup_wipe"] = backup_wipe
+        return result
 
     def get_history_encryption_status(self):
         """Return encryption statistics for history.ndjson.
