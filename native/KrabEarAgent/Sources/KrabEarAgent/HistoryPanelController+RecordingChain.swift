@@ -227,7 +227,9 @@ extension HistoryPanelController {
                 let resp = try ipc.call(method: "start_chain", params: ["name": name])
                 let result = resp["result"] as? [String: Any] ?? [:]
 
-                if let ok = result["ok"] as? Bool, !ok {
+                // G3-MEM-07 (M07-06): цепочка создана только с подтверждённым ok + chain_id.
+                let chainID = result["chain_id"] as? String
+                if result["ok"] as? Bool != true || chainID?.isEmpty != false {
                     let reason = result["reason"] as? String
                     let message = self?.chainErrorMessage(result: result, reason: reason) ?? "Не удалось создать цепочку"
                     DispatchQueue.main.async {
@@ -433,10 +435,11 @@ extension HistoryPanelController {
                             params: ["chain_id": finalChainId, "item_id": id]
                         )
                         let result = resp["result"] as? [String: Any] ?? [:]
-                        if let ok = result["ok"] as? Bool, !ok {
-                            lastFailureMessage = self?.chainErrorMessage(result: result, reason: result["reason"] as? String)
-                        } else {
+                        // G3-MEM-07 (M07-06): запись в цепочку успешна только ok==true.
+                        if result["ok"] as? Bool == true {
                             added += 1
+                        } else {
+                            lastFailureMessage = self?.chainErrorMessage(result: result, reason: result["reason"] as? String)
                         }
                     } catch {
                         lastFailureMessage = "Ошибка IPC: \(error.localizedDescription)"

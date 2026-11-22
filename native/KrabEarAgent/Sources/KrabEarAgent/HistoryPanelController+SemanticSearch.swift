@@ -44,7 +44,10 @@ extension HistoryPanelController {
             return v
         }
         let v = NSPopUpButton(frame: .zero, pullsDown: false)
-        v.addItems(withTitles: ["Авто (semantic + fallback)", "Только semantic", "Только keyword"])
+        // G3-MEM-07 (M07-01): клиентский «Только keyword» удалён — обход серверного
+        // privacy-gate приводил к утечке в privacy-режиме. Backend сам идёт keyword
+        // при недоступности semantic (wave-31 D2).
+        v.addItems(withTitles: ["Авто (semantic + fallback)", "Только semantic"])
         objc_setAssociatedObject(self, &SemanticSearchAssoc.modeSelector, v, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
         return v
     }
@@ -131,7 +134,6 @@ extension HistoryPanelController {
         }
         let modeIdx = semanticModeSelector.indexOfSelectedItem
         let useFallback = modeIdx != 1   // 1 = "Только semantic" → fallback off
-        let forceKeyword = modeIdx == 2  // 2 = "Только keyword" → используем фолбэк handler
 
         let ipcClient = self.ipcClient
         let queryCopy = query
@@ -140,23 +142,9 @@ extension HistoryPanelController {
 
         DispatchQueue.global(qos: .userInitiated).async {
             do {
-                if forceKeyword {
-                    let keywordResults = HistoryPanelController.keywordFallback(
-                        query: queryCopy,
-                        items: items.map { ["id": $0.id, "text": $0.text] },
-                        topK: 10
-                    )
-                    let formatted = HistoryPanelController.formatSearchResults(
-                        results: keywordResults,
-                        items: items,
-                        mode: "keyword (forced)"
-                    )
-                    DispatchQueue.main.async {
-                        resultsView.string = formatted
-                    }
-                    return
-                }
-
+                // M07-01: локальный keyword-путь через self.items МИНУЯ серверный privacy-gate
+                // запрещал текст истории в privacy-режиме. Все режимы идут через backend,
+                // который сам проверяет privacy (wave-31 D2).
                 let r = try ipcClient.call(
                     method: "semantic_search",
                     params: ["query": queryCopy, "top_k": 10, "fallback": useFallback]
@@ -164,6 +152,7 @@ extension HistoryPanelController {
                 let result = r["result"] as? [String: Any] ?? [:]
                 let mode = result["mode"] as? String ?? "?"
                 let rawResults = result["results"] as? [[String: Any]] ?? []
+                let displayMode = mode
                 let formatted = HistoryPanelController.formatSearchResults(
                     results: rawResults.map { dict -> (String, Double) in
                         let id = dict["id"] as? String ?? ""
@@ -171,7 +160,7 @@ extension HistoryPanelController {
                         return (id, score)
                     },
                     items: items,
-                    mode: mode
+                    mode: displayMode
                 )
                 DispatchQueue.main.async {
                     resultsView.string = formatted

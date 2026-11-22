@@ -88,6 +88,11 @@ extension HistoryPanelController {
             do {
                 let resp = try ipc.call(method: "apply_recommended_setup", params: ["dry_run": true])
                 let result = resp["result"] as? [String: Any] ?? [:]
+                // M07-05: без подтверждённого ok (например ok=false) — не показываем preview.
+                guard result["ok"] as? Bool == true else {
+                    preview = nil
+                    return
+                }
                 preview = RecommendedSetupPreview(
                     tier: (result["tier"] as? String) ?? "low",
                     applied: (result["applied"] as? [[String: Any]]) ?? [],
@@ -188,8 +193,9 @@ extension HistoryPanelController {
             guard let self else { return }
             var ok = false
             do {
-                _ = try ipc.call(method: "apply_recommended_setup", params: ["dry_run": false])
-                ok = true
+                let resp = try ipc.call(method: "apply_recommended_setup", params: ["dry_run": false])
+                // M07-05: ok==true обязателен.
+                ok = (resp["result"] as? [String: Any])?["ok"] as? Bool == true
             } catch {
                 ok = false
             }
