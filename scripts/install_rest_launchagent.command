@@ -11,6 +11,14 @@
 
 set -e
 
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    *) echo "unknown arg: $arg" >&2; exit 2 ;;
+  esac
+done
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$ROOT_DIR/KrabEar/launchagents/ai.krab.ear.rest.plist.template"
 TARGET="$HOME/Library/LaunchAgents/ai.krab.ear.rest.plist"
@@ -22,6 +30,14 @@ fail() { printf '[install-rest] ❌ %s\n' "$*" >&2; exit 1; }
 
 [ -f "$TEMPLATE" ] || fail "template not found: $TEMPLATE"
 [ -d "$ROOT_DIR/.venv_krab_ear" ] || fail "venv missing: $ROOT_DIR/.venv_krab_ear (run Start Krab Ear.command once)"
+
+# 🔴 Busy-гейт ДО любых изменений: перезагрузка REST-юнита рвёт идущие STT-запросы
+# и (в in-process режиме) соседствует с записью. Занято/неизвестно → отказ.
+if [ "$FORCE" -ne 1 ]; then
+  "$ROOT_DIR/scripts/safe_backend_restart.command" --check-only >/dev/null 2>&1 \
+    || fail "backend занят записью/встречей или состояние неизвестно — REST не тронут (--force обходит гейт)"
+fi
+
 mkdir -p "$ROOT_DIR/logs"
 mkdir -p "$HOME/Library/LaunchAgents"
 
@@ -62,6 +78,17 @@ STAGED_PLIST=""
 # 4. Bootstrap
 log "bootstrap gui/$UID_NUM/$LABEL"
 launchctl bootstrap "gui/$UID_NUM" "$TARGET"
+
+# Успех bootstrap не доказывает, что сервер поднялся: ждём загруженный юнит с pid (до 15с).
+STARTED=0
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  if launchctl print "gui/$UID_NUM/$LABEL" 2>/dev/null | grep -q 'pid = [0-9]'; then
+    STARTED=1
+    break
+  fi
+  sleep 1
+done
+[ "$STARTED" -eq 1 ] || fail "$LABEL загружен, но процесс не запустился за 15с (launchctl print gui/$UID_NUM/$LABEL, logs/krab-ear-rest.err.log)"
 
 log "✅ ai.krab.ear.rest установлен и запущен."
 log "Логи: $ROOT_DIR/logs/krab-ear-rest.{out,err}.log"

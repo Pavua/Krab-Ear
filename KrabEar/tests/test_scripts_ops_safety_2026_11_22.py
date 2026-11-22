@@ -704,3 +704,56 @@ class TestObserveProductionPrivacy:
         out = _observe(tmp_path, "--show-content", settings=settings)
         assert TRANSCRIPT_MARK not in out
         assert LOG_MARK not in out
+
+
+# ── KEG2-10 install_rest_launchagent: busy-гейт и подтверждение запуска ────
+
+
+def _rest_installer(tmp_path: Path, gate_rc: int, launchctl_body: str, *args: str):
+    root = tmp_path / "proj"
+    (root / "scripts").mkdir(parents=True)
+    for name in ("install_rest_launchagent.command", "render_launchagent_plist.py"):
+        shutil.copy2(SCRIPTS / name, root / "scripts")
+    (root / "KrabEar" / "launchagents").mkdir(parents=True)
+    shutil.copy2(ROOT / "KrabEar" / "launchagents" / "ai.krab.ear.rest.plist.template",
+                 root / "KrabEar" / "launchagents")
+    (root / ".venv_krab_ear").mkdir()
+    _exe(root / "scripts" / "safe_backend_restart.command", f'echo "$*" >> "$STUB_LOG.gate"\nexit {gate_rc}\n')
+    ctx = _stubs(tmp_path, launchctl_body)
+    env = dict(ctx["env"], HF_TOKEN="hf_test_token_not_real")
+    res = subprocess.run(["/bin/bash", str(root / "scripts" / "install_rest_launchagent.command"), *args],
+                         env=env, capture_output=True, text=True, timeout=60)
+    return res, ctx
+
+
+# print: «загружен с pid» после bootstrap (как живой launchd)
+_LOADED_LAUNCHCTL = (
+    'case "$1" in\n'
+    '  print) if [ -e "$STUB_LOG.boot" ]; then echo "pid = 4242"; exit 0; fi; exit 1;;\n'
+    '  bootstrap) touch "$STUB_LOG.boot";;\n'
+    'esac\nexit 0\n'
+)
+
+
+class TestInstallRestLaunchagent:
+    def test_busy_backend_refuses_before_any_launchctl_call(self, tmp_path):
+        res, ctx = _rest_installer(tmp_path, 1, _LOADED_LAUNCHCTL)
+        assert res.returncode != 0, res.stdout + res.stderr
+        assert not any("bootout" in c or "bootstrap" in c for c in _calls(ctx)), _calls(ctx)
+        assert not (ctx["home"] / "Library" / "LaunchAgents" / "ai.krab.ear.rest.plist").exists()
+
+    def test_idle_installs_and_confirms_running(self, tmp_path):
+        res, ctx = _rest_installer(tmp_path, 0, _LOADED_LAUNCHCTL)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert any("bootstrap" in c for c in _calls(ctx))
+        assert Path(str(ctx["log"]) + ".gate").read_text().strip() == "--check-only"
+
+    def test_force_skips_the_gate(self, tmp_path):
+        res, ctx = _rest_installer(tmp_path, 1, _LOADED_LAUNCHCTL, "--force")
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_bootstrap_that_never_starts_is_not_reported_as_running(self, tmp_path):
+        # bootstrap «успешен», но юнит так и не загрузился/не получил pid
+        res, _ = _rest_installer(tmp_path, 0, 'case "$1" in print) exit 1;; esac\nexit 0\n')
+        assert res.returncode != 0, res.stdout
+        assert "установлен и запущен" not in res.stdout
