@@ -46,6 +46,40 @@ done
 log()  { printf '\033[0;32m[bundled-runtime]\033[0m %s\n' "$*"; }
 fail() { printf '\033[0;31m[bundled-runtime] ❌ %s\033[0m\n' "$*" >&2; exit 1; }
 
+# 🔴 KEG2-07: ниже выполняется `rm -rf "$OUTPUT_DIR"`. Произвольный --output
+# («/», $HOME, корень проекта, каталог с чужими файлами) нельзя доверять.
+# Проверка идёт ДО скачивания и любых изменений. Разрешено только:
+#   • каталог внутри "$ROOT_DIR/build/" (штатное место, в т.ч. build/vendor);
+#   • несуществующий путь, пустой каталог либо каталог с маркером прошлой сборки.
+# Симлинк как --output запрещён (rm -rf пошёл бы по цели).
+OUTPUT_MARKER=".krab_runtime_output"
+validate_output_dir() {
+  local raw="$1"
+  [[ -n "$raw" ]] || fail "--output пуст"
+  [[ ! -L "$raw" ]] || fail "--output — симлинк ($raw): отказ, rm -rf пошёл бы по цели"
+  local resolved
+  resolved="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$raw")" \
+    || fail "не удалось разрешить --output: $raw"
+  local root_real home_real
+  root_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$ROOT_DIR")"
+  home_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$HOME")"
+  # Корень ФС, $HOME и любой предок проекта/HOME — под запретом.
+  case "$root_real/" in "$resolved"/*) fail "--output ($resolved) — корень проекта или его предок" ;; esac
+  case "$home_real/" in "$resolved"/*) fail "--output ($resolved) — домашний каталог или его предок" ;; esac
+  [[ "$resolved" != "/" ]] || fail "--output — корень файловой системы"
+  case "$resolved/" in
+    "$root_real/build/"?*) return 0 ;;
+    # Остальное дерево проекта (KrabEar/, scripts/, native/ ...) — исходники, не вывод сборки.
+    "$root_real/"*) fail "--output ($resolved) внутри проекта вне build/: отказ" ;;
+  esac
+  # Вне проекта: только новое место, пустой каталог или каталог с нашим маркером.
+  if [[ ! -e "$resolved" ]]; then return 0; fi
+  [[ -d "$resolved" ]] || fail "--output ($resolved) существует и не каталог"
+  if [[ -z "$(ls -A "$resolved")" || -f "$resolved/$OUTPUT_MARKER" ]]; then return 0; fi
+  fail "--output ($resolved) — непустой каталог без маркера $OUTPUT_MARKER: отказ удалять чужие файлы"
+}
+validate_output_dir "$OUTPUT_DIR"
+
 [[ "$(uname -m)" == "arm64" ]] || fail "Сборка только на Apple Silicon (arm64) — mlx-whisper требует arm64"
 
 CACHE_DIR="$ROOT_DIR/build/.runtime_cache"
@@ -74,6 +108,7 @@ log "Интерпретатор: $("$BASE_PYTHON" --version 2>&1)"
 
 rm -rf "$OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
+: > "$OUTPUT_DIR/$OUTPUT_MARKER"
 
 # ── переносим ИЗВЛЕЧЁННОЕ дерево целиком в финальное место, БЕЗ отдельного
 # venv-слоя. `python -m venv` создаёт site-packages локально, но stdlib

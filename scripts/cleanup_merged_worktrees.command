@@ -80,11 +80,23 @@ while IFS= read -r line; do
         echo "  MERGED → candidate: $path  [$branch_raw]"
         candidates=$((candidates + 1))
         if [ "$DRY_RUN" = false ]; then
+            # Без --force: git сам откажется удалять worktree с незакоммиченными
+            # или неотслеживаемыми файлами (там чужой WIP). Ветку — только безопасным -d.
+            if [ -n "$(git -C "$path" status --porcelain 2>/dev/null)" ]; then
+                echo "    SKIP (есть незакоммиченные изменения): $path"
+                preserved=$((preserved + 1))
+                continue
+            fi
             echo "    Removing worktree: $path"
-            git worktree remove --force "$path" 2>&1 | head -2
-            if git show-ref --verify --quiet "refs/heads/$branch_raw"; then
-                echo "    Deleting branch: $branch_raw"
-                git branch -D "$branch_raw" 2>&1 | head -1
+            remove_out=$(git worktree remove "$path" 2>&1); remove_rc=$?
+            [ -n "$remove_out" ] && printf '%s\n' "$remove_out" | head -2
+            if [ "$remove_rc" -eq 0 ]; then
+                if git show-ref --verify --quiet "refs/heads/$branch_raw"; then
+                    echo "    Deleting branch (safe -d): $branch_raw"
+                    git branch -d "$branch_raw" 2>&1 | head -1
+                fi
+            else
+                echo "    SKIP: git отказался удалять worktree — ветка остаётся"
             fi
         fi
     else

@@ -41,20 +41,28 @@ if [[ ! -f "$BASELINE" ]]; then
     exit 1
 fi
 
-echo "1. Setting KRAB_EAR_TRACE_GIGAAM_MEM=1 in launchctl env..."
+echo "1. Restart backend (только при подтверждённом отсутствии записи)..."
+# Рестарт — через safe_backend_restart: он отказывает под записью/встречей и при
+# неизвестном состоянии, UID не зашит, готовность подтверждается ping.
+# Отказ → ничего не меняем (ни env, ни процессы) и профилирование не начинаем.
+if ! "$ROOT_DIR/scripts/safe_backend_restart.command" --check-only; then
+    echo "ERROR: backend занят записью/встречей или его состояние неизвестно."
+    echo "       Профилирование отменено: окружение и процессы не тронуты."
+    exit 1
+fi
+
+echo "2. Setting KRAB_EAR_TRACE_GIGAAM_MEM=1 in launchctl env..."
 launchctl setenv KRAB_EAR_TRACE_GIGAAM_MEM 1
 echo "   Done. Workers spawned after this point will enable tracemalloc."
 
-echo ""
-echo "2. Restart backend to pick up env (requires launchd-managed backend)..."
-if launchctl kickstart -k gui/501/ai.krab.ear.backend 2>/dev/null; then
-    echo "   Backend restarted via launchctl."
+if "$ROOT_DIR/scripts/safe_backend_restart.command"; then
+    echo "   Backend restarted."
     echo "   Waiting 5s for gigaam_worker to load model..."
     sleep 5
 else
-    echo "   WARNING: launchctl kickstart failed (backend may not be launchd-managed)."
-    echo "   If running backend manually, restart it with KRAB_EAR_TRACE_GIGAAM_MEM=1 set."
-    echo "   Continuing with current process state..."
+    echo "ERROR: безопасный рестарт backend не удался; снимаю env."
+    launchctl unsetenv KRAB_EAR_TRACE_GIGAAM_MEM
+    exit 1
 fi
 
 echo ""
