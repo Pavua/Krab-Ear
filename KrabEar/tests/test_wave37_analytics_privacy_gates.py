@@ -21,13 +21,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-try:
-    from backend.analytics_service import AnalyticsService
-    from backend.state_store import StateStore
-    from backend.service import BackendService
-    _SKIP = False
-except ImportError:
-    _SKIP = True
+# Собственные обязательные модули импортируются БЕЗ общего except ImportError: поломка импорта
+# должна быть видимой ошибкой, а не тихим пропуском всех независимых тестов.
+from backend.analytics_service import AnalyticsService
+from backend.state_store import StateStore
+from backend.service import BackendService
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +71,6 @@ def _make_analytics_svc(*, privacy_on: bool) -> AnalyticsService:
 # B1 — BackendService._handle_get_recording_stats privacy gate
 # ---------------------------------------------------------------------------
 
-@unittest.skipIf(_SKIP, "BackendService or StateStore not available")
 class GetRecordingStatsPrivacyGateTestCase(unittest.TestCase):
     """B1: _handle_get_recording_stats must gate on privacy_mode_enabled."""
 
@@ -164,7 +161,6 @@ class GetRecordingStatsPrivacyGateTestCase(unittest.TestCase):
 # B2 — AnalyticsService.handle_compare_periods privacy gate
 # ---------------------------------------------------------------------------
 
-@unittest.skipIf(_SKIP, "AnalyticsService not available")
 class ComparePeriodsPrivacyGateTestCase(unittest.TestCase):
     """B2: handle_compare_periods must gate on privacy_mode_enabled."""
 
