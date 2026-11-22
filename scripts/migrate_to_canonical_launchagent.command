@@ -94,9 +94,18 @@ cat > "$NEW_PLIST" <<EOF
 EOF
 echo "Installed canonical plist: $NEW_PLIST"
 
-# Step 3: Activate (bootstrap into current session; errors if already loaded are harmless)
-launchctl bootstrap "gui/$(id -u)" "$NEW_PLIST" 2>/dev/null || true
-echo "  ✓ Bootstrap complete"
+# Step 3: Activate (bootstrap into current session). «Уже загружен» — не ошибка,
+# но любой другой отказ нельзя выдавать за успех.
+NEW_LABEL="com.antigravity.krab-ear"
+if launchctl bootstrap "gui/$(id -u)" "$NEW_PLIST" 2>/dev/null; then
+    echo "  ✓ Bootstrap complete"
+elif launchctl print "gui/$(id -u)/$NEW_LABEL" >/dev/null 2>&1; then
+    echo "  ✓ Already loaded ($NEW_LABEL)"
+else
+    echo "ERROR: launchctl bootstrap не удался и юнит $NEW_LABEL не загружен." >&2
+    echo "       plist записан: $NEW_PLIST. Проверьте: launchctl print gui/$(id -u)/$NEW_LABEL" >&2
+    exit 1
+fi
 
 echo ""
 echo "Migration done."

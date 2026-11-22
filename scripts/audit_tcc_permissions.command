@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # audit_tcc_permissions.command — Wave 686
 # Reads TCC.db and reports Krab Ear permission grants.
-# Output: colored stdout + /tmp/krab-tcc-audit.json
+# Output: colored stdout + JSON (по умолчанию ~/Library/Logs/KrabEar/tcc-audit.json, 0600;
+#         путь можно задать KRAB_TCC_AUDIT_OUT)
 #
 # Usage: double-click or ./scripts/audit_tcc_permissions.command
 # Requires Terminal with Full Disk Access (System Settings > Privacy > Full Disk Access).
@@ -15,7 +16,7 @@ CYAN='\033[0;36m'; BOLD='\033[1m'; RESET='\033[0m'
 
 TCC_DB="$HOME/Library/Application Support/com.apple.TCC/TCC.db"
 APP_BUNDLE="$(pwd)/Krab Ear.app"
-OUT_JSON="/tmp/krab-tcc-audit.json"
+OUT_JSON="${KRAB_TCC_AUDIT_OUT:-$HOME/Library/Logs/KrabEar/tcc-audit.json}"
 
 # auth_value codes: 0=deny 2=allow 3=limited 4=always_deny 5=prompt/unknown
 auth_label() {
@@ -108,18 +109,18 @@ fi
 
 # ── key-service summary ────────────────────────────────────────────────────
 echo -e "\n${BOLD}── Key-service summary ──${RESET}"
-SUMMARY_JSON=""
+SUMMARY_LINES=""
 for SVC in "${SERVICES_OF_INTEREST[@]}"; do
   short=$(svc_short "$SVC")
   best=$(echo "$ROWS" | { grep "^${SVC}|" || true; } | awk -F'|' '{print $4}' | sort -rn | head -1)
   if [[ -z "$best" ]]; then
     echo -e "  ${YELLOW}$(printf '%-20s' "$short")  NOT IN TCC.db  ← needs user grant${RESET}"
-    SUMMARY_JSON+="\"$short\": \"MISSING\","
+    SUMMARY_LINES+="${short}|MISSING"$'\n'
   else
     label=$(auth_label "$best")
     color=$(auth_color "$label")
     echo -e "  $(printf '%-20s' "$short")  ${color}${label}${RESET}"
-    SUMMARY_JSON+="\"$short\": \"$label\","
+    SUMMARY_LINES+="${short}|${label}"$'\n'
   fi
 done
 
@@ -140,12 +141,27 @@ fi
 echo -e "  Current CDHash: ${CYAN}${CS_HASH:-N/A}${RESET}"
 
 # ── write JSON ────────────────────────────────────────────────────────────
-python3 - <<PYEOF
-import json, sys
+# Значения из TCC.db (client, путь) — ДАННЫЕ: передаются в Python через окружение
+# при quoted-heredoc, а не подстановкой в исходник (иначе `"""` в имени клиента
+# исполнялся бы как код). Запись — во временный файл 0600 рядом + атомарный
+# os.replace: симлинк по целевому пути не разыменовывается.
+# Права меняем ТОЛЬКО у каталога, который создали сами; чужой существующий (KRAB_TCC_AUDIT_OUT
+# мог указать в общий каталог) не трогаем — файл и так создаётся с 0600.
+OUT_DIR="$(dirname "$OUT_JSON")"
+if [[ ! -d "$OUT_DIR" ]]; then
+  mkdir -p "$OUT_DIR"
+  chmod 700 "$OUT_DIR"
+fi
+TCC_JSON_LINES="$JSON_LINES" TCC_SUMMARY_LINES="$SUMMARY_LINES" TCC_APP_BUNDLE="$APP_BUNDLE" \
+TCC_BUNDLE_ID="$CS_IDENTIFIER" TCC_CD_HASH="$CS_HASH" TCC_AUTHORITY="${CS_AUTHORITY:-adhoc}" \
+TCC_OUT="$OUT_JSON" python3 - <<'PYEOF'
+import datetime
+import json
+import os
+import tempfile
 
-raw = """${JSON_LINES}"""
 entries = []
-for line in raw.strip().splitlines():
+for line in os.environ.get("TCC_JSON_LINES", "").splitlines():
     if not line.strip():
         continue
     parts = line.split('|')
@@ -163,27 +179,35 @@ for line in raw.strip().splitlines():
         "last_modified_human": human_ts,
     })
 
-summary_raw = """${SUMMARY_JSON}"""
 summary = {}
-for item in summary_raw.strip().rstrip(',').split('",'):
-    item = item.strip()
-    if '": "' in item:
-        k, v = item.split('": "', 1)
-        summary[k.strip('"')] = v.rstrip('"')
+for line in os.environ.get("TCC_SUMMARY_LINES", "").splitlines():
+    if "|" in line:
+        key, value = line.split("|", 1)
+        summary[key] = value
 
 out = {
-    "generated": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+    "generated": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "wave": 686,
-    "app_bundle": "$APP_BUNDLE",
-    "bundle_id": "$CS_IDENTIFIER",
-    "cd_hash": "$CS_HASH",
-    "authority": "${CS_AUTHORITY:-adhoc}",
+    "app_bundle": os.environ["TCC_APP_BUNDLE"],
+    "bundle_id": os.environ["TCC_BUNDLE_ID"],
+    "cd_hash": os.environ["TCC_CD_HASH"],
+    "authority": os.environ["TCC_AUTHORITY"],
     "key_services": summary,
     "tcc_entries": entries,
 }
-with open("$OUT_JSON", "w") as f:
-    json.dump(out, f, indent=2)
-print(f"  JSON written: $OUT_JSON  ({len(entries)} entries)")
+target = os.environ["TCC_OUT"]
+fd, tmp = tempfile.mkstemp(prefix=".tcc-audit.", suffix=".tmp", dir=os.path.dirname(target) or ".")
+try:
+    with os.fdopen(fd, "w") as f:  # mkstemp: O_EXCL, режим 0600
+        json.dump(out, f, indent=2)
+    os.replace(tmp, target)
+except BaseException:
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    raise
+print(f"  JSON written: {target}  ({len(entries)} entries)")
 PYEOF
 
 echo -e "\n${BOLD}Done.${RESET}\n"

@@ -7,6 +7,9 @@
 #
 # Запуск: ./scripts/observe_production.command
 #         ./scripts/observe_production.command --dry-run  (alias, same behaviour)
+#         ./scripts/observe_production.command --show-content
+#             (+ тексты последних диктовок и хвост лога; ТОЛЬКО если в settings.json
+#              явно privacy_mode_enabled=false — иначе содержимое скрыто)
 #
 # Выход:  0  — нет критических проблем
 #         1  — есть ≥1 🚨 (CRITICAL)
@@ -28,6 +31,31 @@ RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
 CRITICAL_COUNT=0
+
+# 🔴 По умолчанию диагностика НЕ печатает содержимое пользовательских данных:
+# хвост backend-лога и тексты диктовок (отчёт попадает в тикеты/чаты/логи CI).
+SHOW_CONTENT=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --show-content) SHOW_CONTENT=1 ;;
+        --dry-run) ;;
+    esac
+done
+
+# 0 — содержимое показывать можно: запрошено флагом И настройки читаются И
+# privacy_mode_enabled явно false. Ошибка/повреждение/отсутствие ключа = НЕ разрешено.
+_content_allowed() {
+    [ "$SHOW_CONTENT" -eq 1 ] || return 1
+    python3 - "$KRAB_DATA_DIR/settings.json" <<'PYEND' 2>/dev/null
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f:
+        value = json.load(f)
+    sys.exit(0 if isinstance(value, dict) and value.get("privacy_mode_enabled") is False else 1)
+except Exception:
+    sys.exit(1)
+PYEND
+}
 
 # ──────────────────────── helpers ────────────────────────
 
@@ -60,7 +88,8 @@ _proc_rss_mb() {
 
 # Check TCP port reachable
 _port_up() {
-    timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$1" 2>/dev/null
+    # Без GNU `timeout` (на macOS его нет): loopback-connect отвечает немедленно.
+    bash -c "echo >/dev/tcp/127.0.0.1/$1" 2>/dev/null
 }
 
 # ──────────────────────── main ────────────────────────
@@ -225,10 +254,14 @@ if [ -n "$BACKEND_LOG" ]; then
     LOG_MTIME="$(stat -f '%Sm' -t '%Y-%m-%d %H:%M:%S' "$BACKEND_LOG" 2>/dev/null || echo '?')"
     _info "Log file : $BACKEND_LOG"
     _info "Log mtime: $LOG_MTIME"
-    _info "Last 3 lines:"
-    tail -3 "$BACKEND_LOG" 2>/dev/null | while IFS= read -r line; do
-        _info "  $line"
-    done
+    if _content_allowed; then
+        _info "Last 3 lines:"
+        tail -3 "$BACKEND_LOG" 2>/dev/null | while IFS= read -r line; do
+            _info "  $line"
+        done
+    else
+        _info "Last lines: скрыты (могут содержать текст диктовок). --show-content при privacy_mode_enabled=false."
+    fi
 else
     _warn "No backend log found in $LOG_DIR"
 fi
@@ -240,22 +273,25 @@ if [ -f "$HISTORY_NDJSON" ]; then
     LINE_COUNT="$(wc -l < "$HISTORY_NDJSON" | tr -d ' ')"
     SIZE="$(du -sh "$HISTORY_NDJSON" 2>/dev/null | awk '{print $1}')"
     _ok "history.ndjson: ${LINE_COUNT} lines, ${SIZE}"
-    _info "Last 3 entries:"
+    if _content_allowed; then SHOW_TEXT=1; else SHOW_TEXT=0; fi
+    _info "Last 3 entries:$([ "$SHOW_TEXT" -eq 1 ] || echo ' (тексты скрыты; --show-content при privacy_mode_enabled=false)')"
     tail -3 "$HISTORY_NDJSON" 2>/dev/null \
-        | python3 -c "
-import sys, json
+        | SHOW_TEXT="$SHOW_TEXT" python3 -c "
+import os, sys, json
+show = os.environ.get('SHOW_TEXT') == '1'
 for line in sys.stdin:
     line = line.strip()
     if not line: continue
     try:
         d = json.loads(line)
-        ts   = d.get('ts','?')[:19]
+        ts   = str(d.get('ts','?'))[:19]
         lang = d.get('language','?')
         dur  = d.get('duration_s','?')
-        txt  = (d.get('text') or '(tombstone)')[:60]
-        print(f'    {ts}  [{lang}]  {dur}s  {txt!r}')
+        txt  = d.get('text') or ''
+        shown = repr(txt[:60]) if (show and txt) else ('(tombstone)' if not txt else '(%d chars)' % len(txt))
+        print(f'    {ts}  [{lang}]  {dur}s  {shown}')
     except Exception:
-        print('    (parse error)', line[:80])
+        print('    (parse error)')
 " 2>/dev/null || _info "  (python3 not available for JSON parsing)"
 else
     _warn "history.ndjson not found at $HISTORY_NDJSON"

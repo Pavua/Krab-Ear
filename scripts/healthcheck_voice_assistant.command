@@ -21,7 +21,9 @@ NC='\033[0m' # No Color
 
 check_port() {
     local port=$1
-    timeout 1 bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null || return 1
+    # Без GNU `timeout` (на macOS его нет → любой сервис выглядел «недоступным»).
+    # Loopback: connect отвечает немедленно (принят либо отказ), ожидание не нужно.
+    bash -c "echo >/dev/tcp/127.0.0.1/$port" 2>/dev/null || return 1
 }
 
 get_lm_studio_status() {
