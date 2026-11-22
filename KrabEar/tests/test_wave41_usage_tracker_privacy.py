@@ -128,7 +128,11 @@ class TestGetUsageStatsPrivacyGate(unittest.TestCase):
         """Build a minimal BackendService-like object with just what the handler needs."""
         from backend.usage_tracker import UsageTracker as _UT
 
-        tmp = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+
+        self.addCleanup(_td.cleanup)
+
+        tmp = _td.name
         tracker = _UT(data_dir=tmp)
         tracker.record_usage(30.0, 150)
 

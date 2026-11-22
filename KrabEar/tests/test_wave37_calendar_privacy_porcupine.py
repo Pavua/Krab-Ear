@@ -78,9 +78,22 @@ class _FakeTranslator:
         )
 
 
+_TMP_HOLDERS: list = []
+
+
+def teardown_module(module=None):
+    while _TMP_HOLDERS:
+        _TMP_HOLDERS.pop().cleanup()
+
+
+tearDownModule = teardown_module
+
+
 def _make_service():
     """Return a BackendService instance using fakes and a temp StateStore."""
-    tmp = Path(tempfile.mkdtemp())
+    _td = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    _TMP_HOLDERS.append(_td)  # живёт до teardown_module
+    tmp = Path(_td.name)
     from backend.state_store import StateStore
     from backend.service import BackendService
 
@@ -206,7 +219,9 @@ class TestPorcupineKeyInSensitiveFields(unittest.TestCase):
 
     def test_porcupine_key_not_written_to_backup_file(self):
         """porcupine_access_key must not appear in the backup JSON on disk."""
-        tmp = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_td.cleanup)
+        tmp = _td.name
         backup = SettingsBackup(backup_dir=Path(tmp))
         backup_id = backup.create_backup({
             "quality_profile": "balanced",
@@ -222,7 +237,9 @@ class TestPorcupineKeyInSensitiveFields(unittest.TestCase):
 
     def test_porcupine_key_not_in_restore(self):
         """restore_backup round-trip must not return porcupine_access_key."""
-        tmp = tempfile.mkdtemp()
+        _td = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_td.cleanup)
+        tmp = _td.name
         backup = SettingsBackup(backup_dir=Path(tmp))
         backup_id = backup.create_backup({
             "mode": "headless",
