@@ -56,8 +56,9 @@ class ActionItemsAutoExtractPrivacyGateTest(unittest.TestCase):
     """recording_core_service.py:~1644 — action_items_auto_extract privacy gate."""
 
     def setUp(self):
-        self._tmp = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmp = _tmp_dir.name
     def _make_service(self, action_items_extractor):
         store = StateStore(data_dir=Path(self._tmp))
         vocab = MagicMock()

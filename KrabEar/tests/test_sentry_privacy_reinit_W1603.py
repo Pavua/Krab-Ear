@@ -10,6 +10,8 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -24,6 +26,18 @@ for _ in range(3):
 
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
+
+
+@pytest.fixture(autouse=True)
+def _restore_sentry_initialized_flag():
+    """Исходное значение _sentry_initialized возвращается после КАЖДОГО теста (раньше флаг,
+    выставленный при работе с fake SDK, оставался и результат зависел от порядка тестов)."""
+    import backend.observability as mod  # noqa: PLC0415
+    original = mod._sentry_initialized
+    try:
+        yield
+    finally:
+        mod._sentry_initialized = original
 
 
 def _reset_observability():
