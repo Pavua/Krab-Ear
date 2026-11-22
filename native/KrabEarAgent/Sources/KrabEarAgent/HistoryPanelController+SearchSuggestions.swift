@@ -67,6 +67,13 @@ extension HistoryPanelController {
             let result = (response?["result"] as? [String: Any]) ?? [:]
             let searches = (result["searches"] as? [[String: Any]]) ?? []
 
+            // G3-MEM-07 (M07-07): оптимистичное добавление без подтверждения убрано —
+            // при отказе IPC / отсутствии ok не показываем запрос в recents, а при
+            // privacy mode — очищаем UI-список (серверный recents пуст).
+            let backendFailed = response == nil || response?["error"] != nil || result["ok"] as? Bool == false
+            let privacyActive = result["reason"] as? String == "privacy_mode_active"
+            let optimistic = privacyActive ? nil : (newQuery?.trimmingCharacters(in: .whitespacesAndNewlines))
+
             var seen = Set<String>()
             var queries: [String] = []
 
@@ -77,9 +84,11 @@ extension HistoryPanelController {
                 }
             }
 
-            append(optimistic)
-            for entry in searches {
-                append(entry["query"] as? String)
+            if !backendFailed {
+                append(optimistic)
+                for entry in searches {
+                    append(entry["query"] as? String)
+                }
             }
 
             // NSSearchField показывает максимум ~10 недавних; ограничим аккуратно.

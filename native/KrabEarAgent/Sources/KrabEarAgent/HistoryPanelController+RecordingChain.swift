@@ -808,8 +808,13 @@ final class RecordingChainDetailViewController: NSViewController {
                         let pb = NSPasteboard.general
                         InputAutomationQueue.shared.invalidatePending()
                         pb.clearContents()
-                        pb.setString(text, forType: .string)
-                        BackendToast.shared.show("Объединённый текст скопирован", duration: 2.5)
+                        // G3-MEM-07 (M07-13): setString возвращает Bool — подтверждаем
+                        // фактическую запись в буфер обмена.
+                        if pb.setString(text, forType: .string) {
+                            BackendToast.shared.show("Объединённый текст скопирован", duration: 2.5)
+                        } else {
+                            BackendToast.shared.show("Ошибка: не удалось записать в буфер обмена", duration: 3.5)
+                        }
                     }
                 }
             } catch {
