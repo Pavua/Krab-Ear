@@ -99,7 +99,10 @@ class TestHistoryServiceSemanticWiring(unittest.TestCase):
 
         # Should not raise, warning is logged internally
         result = svc.handle_delete_history_item({"id": item.id})
-        self.assertEqual(result, {"deleted": True})
+        # G3-MEM-02 (M02-03): частичный статус при сбое очистки семантического индекса.
+        self.assertTrue(result["deleted"])
+        self.assertFalse(result.get("complete", True))
+        self.assertEqual(result.get("reason"), "semantic_index_cleanup_failed")
         mock_searcher.remove_item.assert_called_once_with(item.id)
 
     # ------------------------------------------------------------------

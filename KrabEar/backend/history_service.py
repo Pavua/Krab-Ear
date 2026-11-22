@@ -1093,19 +1093,30 @@ class HistoryService:
         # versions).  Вынесено в cascade_delete_artifacts, чтобы RecordingMerger мог
         # переиспользовать тот же путь после собственного атомарного tombstone'а
         # (wave1776 HIGH 1) — DRY: один источник истины для каскадного удаления.
-        self.cascade_delete_artifacts(item_id, item_ts, item=deleted_item, siblings=active)
+        # G3-MEM-02 (M02-03): каскад возвращает список ошибок вторичных шагов, чтобы
+        # удаление из основной истории (уже выполнено) не выдавалось за полное.
+        secondary_errors = self.cascade_delete_artifacts(
+            item_id, item_ts, item=deleted_item, siblings=active, return_errors=True
+        )
 
         add_breadcrumb(
             category="history",
             message="delete_history_item",
             data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
         )
+        if secondary_errors:
+            # Семантический индекс (или другой каскад) не очищен — частичный статус.
+            # Основная запись удалена; durable retry остаётся на стороне вызывающего.
+            if any("semantic" in str(e).lower() or "remove_item" in str(e) for e in secondary_errors):
+                return {"deleted": True, "complete": False,
+                        "reason": "semantic_index_cleanup_failed"}
+            return {"deleted": True, "complete": False, "reason": "cascade_cleanup_failed"}
         return {"deleted": True}
 
     def cascade_delete_artifacts(
         self, item_id: str, item_ts: str, item: HistoryItem | None = None, *,
-        siblings: list[HistoryItem] | None = None,
-    ) -> None:
+        siblings: list[HistoryItem] | None = None, return_errors: bool = False,
+    ) -> list[str] | None:
         """Выполняет ВСЕ каскады удаления, КРОМE tombstone'а самой записи.
 
         Tombstone должен быть записан вызывающей стороной ДО этого вызова
@@ -1118,31 +1129,51 @@ class HistoryService:
         (W1426 F2), ghost-ссылки в цепочках (W1253 RC-3), playback-статистику
         (W1343), версии транскрипта (W1045 F2).  Каждый шаг отказоустойчив.
         """
+        errors: list[str] = []
+
         # W1762: стираем .md файл транскрипта (privacy gap — файл пережил tombstone).
-        self._erase_transcript_md(item_ts, item_id, item, siblings=siblings)
+        try:
+            self._erase_transcript_md(item_ts, item_id, item, siblings=siblings)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("transcript md erase failed for %s", item_id, exc_info=True)
+            errors.append(f"md_erase: {exc}")
 
         # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
         if self._semantic_searcher is not None:
             try:
                 self._semantic_searcher.remove_item(item_id)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "semantic_search remove failed for %s", item_id, exc_info=True
                 )
+                errors.append(f"semantic remove_item: {exc}")
         # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
         if self._recording_chain_mgr is not None:
-            self._recording_chain_mgr.remove_item_from_all_chains(item_id)
+            try:
+                self._recording_chain_mgr.remove_item_from_all_chains(item_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("recording_chain remove failed for %s", item_id, exc_info=True)
+                errors.append(f"recording_chain: {exc}")
         # F4 W1343: cascade-delete orphan playback stats.
         if self._playback_tracker is not None:
-            self._playback_tracker.remove_stats(item_id)
+            try:
+                self._playback_tracker.remove_stats(item_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("playback stats remove failed for %s", item_id, exc_info=True)
+                errors.append(f"playback_stats: {exc}")
         # W1045 F2: cascade-delete transcript versions to prevent privacy bypass.
         if self._transcript_versions is not None:
             try:
                 self._transcript_versions.delete_versions_for(item_id)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "transcript_versions cascade delete failed for %s", item_id, exc_info=True
                 )
+                errors.append(f"transcript_versions: {exc}")
+
+        if return_errors:
+            return errors
+        return None
 
     def handle_compact_history(self, params: dict[str, Any]) -> dict[str, Any]:
         stats = self.store.compact_with_stats()
