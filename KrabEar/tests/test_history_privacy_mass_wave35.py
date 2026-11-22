@@ -244,9 +244,6 @@ class TestPrivacyOffPassthrough(unittest.TestCase):
         self.assertEqual(res["text"], "hello")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 # ---------------------------------------------------------------------------
 # Wave-38/39 privacy gates: get_history_statistics + get_history_overview
@@ -303,3 +300,7 @@ class TestHistoryAggregatePrivacyGates(unittest.TestCase):
         svc = _make_service(privacy_on=False)
         with self.assertRaises((AssertionError, AttributeError, TypeError)):
             svc.handle_get_history_overview({})
+
+
+if __name__ == "__main__":
+    unittest.main()

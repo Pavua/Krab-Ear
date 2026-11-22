@@ -24,6 +24,14 @@ def _load_memory_baseline_module():
     return mod
 
 
+def _tmp_csv(testcase: unittest.TestCase, name: str) -> Path:
+    """CSV во ВРЕМЕННОМ каталоге теста: фиксированные пути в корне репозитория удаляли
+    чужой/заранее существующий файл и конфликтовали при параллельных прогонах."""
+    tmp = tempfile.TemporaryDirectory()
+    testcase.addCleanup(tmp.cleanup)
+    return Path(tmp.name) / name
+
+
 class _FakeBackendSocket:
     """Throwaway Unix-сокет, отвечающий на ОДИН JSON-RPC запрос заданным телом.
 
@@ -71,7 +79,7 @@ class MemoryBaselineScriptTests(unittest.TestCase):
     def test_script_runs_with_once_flag(self):
         if not SCRIPT.exists():
             self.skipTest("memory_baseline.py not found")
-        out_csv = REPO_ROOT / "test-mem-baseline-tmp.csv"
+        out_csv = _tmp_csv(self, "tmp.csv")
         try:
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), "--once", "--output", str(out_csv)],
@@ -90,9 +98,22 @@ class MemoryBaselineScriptTests(unittest.TestCase):
                 out_csv.unlink()
 
     def test_script_handles_no_backend(self):
-        # Even if backend not running, script should write 0 values + exit 0
-        # (already handled by get_backend_diagnostics returning None)
-        pass
+        """Backend не запущен (сокета нет): скрипт пишет нулевые значения диагностики и выходит с 0."""
+        if not SCRIPT.exists():
+            self.skipTest("memory_baseline.py not found")
+        missing_socket = _tmp_csv(self, "absent.sock")  # путь внутри tmp, файла нет
+        out_csv = _tmp_csv(self, "no-backend.csv")
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--once", "--socket", str(missing_socket),
+             "--output", str(out_csv)],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, f"script failed: {result.stderr}")
+        rows = list(csv.DictReader(out_csv.open()))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["uptime_sec"], "0")
+        self.assertEqual(rows[0]["history_total_items"], "0")
+        self.assertEqual(rows[0]["llm_circuit"], "unknown")
 
     def test_snapshot_fields_complete(self):
         """take_snapshot returns all expected keys even without backend."""
@@ -148,7 +169,7 @@ class MemoryBaselineSocketOverrideTests(unittest.TestCase):
         if not SCRIPT.exists():
             self.skipTest("memory_baseline.py not found")
         fake = _FakeBackendSocket({"system": {"uptime_sec": 999}})
-        out_csv = REPO_ROOT / "test-mem-baseline-socket-tmp.csv"
+        out_csv = _tmp_csv(self, "socket.csv")
         try:
             result = subprocess.run(
                 [sys.executable, str(SCRIPT), "--once", "--socket", fake.sock_path,
@@ -196,7 +217,7 @@ class MemoryBaselineSocketOverrideTests(unittest.TestCase):
 
             t = threading.Thread(target=_serve, daemon=True)
             t.start()
-            out_csv = REPO_ROOT / "test-mem-baseline-datadir-tmp.csv"
+            out_csv = _tmp_csv(self, "datadir.csv")
             try:
                 result = subprocess.run(
                     [sys.executable, str(SCRIPT), "--once", "--data-dir", str(data_dir),
@@ -301,43 +322,39 @@ class MemoryBaselinePidScopingTests(unittest.TestCase):
             target.wait(timeout=5)
 
     def test_take_snapshot_accepts_pid_roots(self):
-        """take_snapshot прокидывает pid_roots в get_processes — regression для
-        случая, когда прокидывание забыто на полпути (тот же класс, что и
-        socket-параметр выше)."""
+        """take_snapshot прокидывает ИМЕННО заданные pid_roots в get_processes
+        (раньше сравнивались только ключи снимков — игнорирование PID оставалось незамеченным)."""
+        from unittest.mock import patch
+
         mod = _load_memory_baseline_module()
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-        try:
-            # Ни один cmdline-маркер не матчит python -c "..." — все rss-поля
-            # останутся 0 БЕЗ scoping; с scoping total_rss_mb не проверяем
-            # напрямую (процесс не попадает ни в одну КАТЕГОРИЮ по маркеру),
-            # но get_processes(pid_roots=...) обязан вернуть его — проверяем
-            # косвенно через прямой вызов, что параметр не проглочен молча.
-            snap_unscoped = mod.take_snapshot(None)
-            snap_scoped = mod.take_snapshot(None, pid_roots=[proc.pid])
-            self.assertEqual(snap_unscoped.keys(), snap_scoped.keys())
-        finally:
-            proc.terminate()
-            proc.wait(timeout=5)
+        with patch.object(mod, "get_processes", return_value=[]) as gp, \
+                patch.object(mod, "get_backend_diagnostics", return_value=None):
+            mod.take_snapshot(None, pid_roots=[4242, 4343])
+            gp.assert_called_once_with([4242, 4343])
+            gp.reset_mock()
+            mod.take_snapshot(None)
+            gp.assert_called_once_with(None)
 
     def test_cli_accepts_repeated_pid_flag(self):
-        """CLI --pid (repeatable) — измерение конкретного дерева процессов, не
-        всей машины. Живой прогон подтверждает контракт end-to-end."""
-        if not SCRIPT.exists():
-            self.skipTest("memory_baseline.py not found")
-        out_csv = REPO_ROOT / "test-mem-baseline-pid-tmp.csv"
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(20)"])
-        try:
-            result = subprocess.run(
-                [sys.executable, str(SCRIPT), "--once", "--pid", str(proc.pid), "--output", str(out_csv)],
-                capture_output=True, text=True, timeout=15,
-            )
-            self.assertEqual(result.returncode, 0, f"script failed: {result.stderr}")
-            self.assertTrue(out_csv.exists())
-        finally:
-            proc.terminate()
-            proc.wait(timeout=5)
-            if out_csv.exists():
-                out_csv.unlink()
+        """CLI --pid (повторяемый): ОБА корня доходят до take_snapshot (main() в процессе, без
+        запуска дочернего интерпретатора — иначе один флаг и код выхода 0 ничего не доказывают)."""
+        from unittest.mock import patch
+
+        mod = _load_memory_baseline_module()
+        out_csv = _tmp_csv(self, "pid.csv")
+        snap = {
+            "timestamp": "t", "uptime_sec": 0, "agent_rss_mb": 0, "backend_rss_mb": 0,
+            "rest_rss_mb": 0, "worker_rss_mb_total": 0, "total_rss_mb": 0,
+            "history_total_items": 0, "llm_circuit": "unknown",
+        }
+        argv = ["memory_baseline.py", "--once", "--pid", "111", "--pid", "222",
+                "--socket", str(_tmp_csv(self, "absent.sock")), "--output", str(out_csv)]
+        with patch.object(sys, "argv", argv), \
+                patch.object(mod, "take_snapshot", return_value=snap) as ts:
+            self.assertEqual(mod.main(), 0)
+        ts.assert_called_once()
+        self.assertEqual(ts.call_args.kwargs.get("pid_roots"), [111, 222])
+        self.assertTrue(out_csv.exists())
 
 
 if __name__ == "__main__":
