@@ -757,3 +757,82 @@ class TestInstallRestLaunchagent:
         res, _ = _rest_installer(tmp_path, 0, 'case "$1" in print) exit 1;; esac\nexit 0\n')
         assert res.returncode != 0, res.stdout
         assert "установлен и запущен" not in res.stdout
+
+
+# ── G2-KE02a-F03/F04: validate_backup и restore_backup_preview ────────────
+
+
+def _backup_dir_tree(tmp_path: Path, *names: str) -> tuple[Path, Path]:
+    root = tmp_path / "proj"
+    (root / "scripts").mkdir(parents=True)
+    for name in names:
+        shutil.copy2(SCRIPTS / name, root / "scripts")
+    backups = root / "_STABLE_BACKUPS"
+    backups.mkdir()
+    return root, backups
+
+
+def _make_archive(path: Path, payload: str) -> None:
+    src = path.parent / ("src_" + path.stem)
+    src.mkdir()
+    (src / "f.txt").write_text(payload)
+    subprocess.run(["tar", "-czf", str(path), "-C", str(src), "."], check=True)
+
+
+def _sha(path: Path) -> str:
+    return subprocess.run(["shasum", "-a", "256", str(path)], capture_output=True, text=True,
+                          check=True).stdout.split()[0]
+
+
+@needs_zsh
+class TestValidateBackup:
+    def _run(self, root: Path) -> subprocess.CompletedProcess:
+        return subprocess.run([ZSH, str(root / "scripts" / "validate_backup.command")], capture_output=True,
+                              text=True, timeout=60)
+
+    def test_sidecar_naming_a_different_file_does_not_validate_the_archive(self, tmp_path):
+        root, backups = _backup_dir_tree(tmp_path, "validate_backup.command")
+        archive = backups / "krabear_stable_20261122_010101.tar.gz"
+        _make_archive(archive, "real archive payload")
+        decoy = backups / "decoy.bin"
+        decoy.write_text("decoy")
+        (backups / "krabear_stable_20261122_010101.sha256").write_text(f"{_sha(decoy)}  decoy.bin\n")
+        res = self._run(root)
+        assert res.returncode != 0, "checksum подложного файла принят за checksum архива"
+        assert "✅" not in res.stdout
+
+    def test_matching_checksum_with_absolute_old_path_validates(self, tmp_path):
+        root, backups = _backup_dir_tree(tmp_path, "validate_backup.command")
+        archive = backups / "krabear_stable_20261122_010101.tar.gz"
+        _make_archive(archive, "payload")
+        # формат, который пишет create_stable_backup: абсолютный путь прежнего места
+        (backups / "krabear_stable_20261122_010101.sha256").write_text(f"{_sha(archive)}  /old/place/{archive.name}\n")
+        res = self._run(root)
+        assert res.returncode == 0, res.stdout + res.stderr
+
+    def test_corrupted_archive_fails(self, tmp_path):
+        root, backups = _backup_dir_tree(tmp_path, "validate_backup.command")
+        archive = backups / "krabear_stable_20261122_010101.tar.gz"
+        _make_archive(archive, "payload")
+        (backups / "krabear_stable_20261122_010101.sha256").write_text(f"{_sha(archive)}  {archive.name}\n")
+        archive.write_bytes(archive.read_bytes() + b"tamper")
+        assert self._run(root).returncode != 0
+
+
+@needs_zsh
+class TestRestorePreview:
+    def test_same_second_runs_get_distinct_dirs(self, tmp_path):
+        root, backups = _backup_dir_tree(tmp_path, "restore_backup_preview.command")
+        _make_archive(backups / "krabear_stable_20261122_010101.tar.gz", "payload")
+        stub = tmp_path / "stubbin"
+        _exe(stub / "date", 'echo 20261122_010101\n')
+        env = dict(os.environ, PATH=f"{stub}{os.pathsep}{os.environ['PATH']}")
+        dirs = []
+        for _ in range(2):
+            res = subprocess.run([ZSH, str(root / "scripts" / "restore_backup_preview.command")], env=env,
+                                 capture_output=True, text=True, timeout=60)
+            assert res.returncode == 0, res.stdout + res.stderr
+            dirs.append(next(line.split(": ", 1)[1] for line in res.stdout.splitlines()
+                             if line.startswith("Preview dir:")))
+        assert dirs[0] != dirs[1], "повторный preview смешался с предыдущим каталогом"
+        assert all(Path(d).is_dir() for d in dirs)

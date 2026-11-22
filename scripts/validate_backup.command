@@ -23,14 +23,15 @@ if [ ! -f "$LATEST_SHA" ]; then
   exit 1
 fi
 
-pushd "$BACKUP_DIR" >/dev/null
-if ! shasum -a 256 -c "$(basename "$LATEST_SHA")" >/dev/null; then
-  popd >/dev/null
+# Сверяем хэш САМОГО архива с первым полем sidecar. `shasum -c` проверял бы файл,
+# названный внутри sidecar (может быть другим/перемещённым) и сообщал успех за архив.
+EXPECTED_SHA="$(awk 'NR==1 {print $1}' "$LATEST_SHA")"
+ACTUAL_SHA="$(shasum -a 256 "$LATEST_ARCHIVE" | awk '{print $1}')"
+if [ -z "$EXPECTED_SHA" ] || [ "$EXPECTED_SHA" != "$ACTUAL_SHA" ]; then
   echo "❌ Backup checksum mismatch"
   exit 1
 fi
-popd >/dev/null
 
 echo "✅ Backup checksum OK: $LATEST_ARCHIVE"
 echo "Содержимое (первые 40 строк):"
-tar -tzf "$LATEST_ARCHIVE" | head -n 40
+tar -tzf "$LATEST_ARCHIVE" | sed -n '1,40p' || true

@@ -12,7 +12,6 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BACKUP_DIR="$ROOT_DIR/_STABLE_BACKUPS"
 PREVIEW_ROOT="$BACKUP_DIR/_restore_preview"
 TS="$(date +%Y%m%d_%H%M%S)"
-TARGET_DIR="$PREVIEW_ROOT/$TS"
 
 LATEST_ARCHIVE="$(ls -1t "$BACKUP_DIR"/krabear_stable_*.tar.gz 2>/dev/null | head -n 1 || true)"
 if [ -z "$LATEST_ARCHIVE" ]; then
@@ -20,7 +19,11 @@ if [ -z "$LATEST_ARCHIVE" ]; then
   exit 1
 fi
 
-mkdir -p "$TARGET_DIR"
+# Каждый preview — свежий каталог (mktemp -d: уникально, 0700), без слияния с прошлым
+# запуском в ту же секунду и без захода по симлинку.
+[ ! -L "$PREVIEW_ROOT" ] || { echo "Ошибка: $PREVIEW_ROOT — симлинк"; exit 1; }
+mkdir -p "$PREVIEW_ROOT"
+TARGET_DIR="$(mktemp -d "$PREVIEW_ROOT/${TS}.XXXXXX")"
 tar -xzf "$LATEST_ARCHIVE" -C "$TARGET_DIR"
 
 echo "✅ Restore preview готов"
