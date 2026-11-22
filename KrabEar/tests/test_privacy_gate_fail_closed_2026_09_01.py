@@ -123,9 +123,31 @@ class PrivacyGateFailsClosedTests(unittest.TestCase):
 
     def test_terminal_replay_suppressed_when_settings_raise(self) -> None:
         """Утечка №2: replay полного stop-ответа с cleartext."""
-        svc = _make_service(_raises_oserror)
+        import time
+
+        # Кэш ЗАПОЛНЕН синтетическим terminal-ответом: на пустом кэше None — обычный miss
+        # и ничего не доказывает про privacy-gate.
+        state = {"broken": False}
+
+        def settings(*a, **k):
+            if state["broken"]:
+                raise OSError("settings unreadable")
+            return {"privacy_mode_enabled": False}
+
+        svc = _make_service(settings)
+        cache, cache_lock, _ = svc._ensure_terminal_cache_state()
+        with cache_lock:
+            cache["tok-1"] = (time.monotonic(), {"status": "stopped", "text": "synthetic-cleartext"})
+
+        # положительный контроль: приватность читается, ответ существует → replay отдаётся
+        replayed = svc._replay_terminal_response("tok-1")
+        self.assertIsNotNone(replayed)
+        self.assertEqual(replayed["text"], "synthetic-cleartext")
+
+        # на том же экземпляре и том же токене ломаем чтение настроек → replay молчит
+        state["broken"] = True
         self.assertIsNone(
-            svc._replay_terminal_response("любой-токен"),
+            svc._replay_terminal_response("tok-1"),
             "replay обязан молчать, пока состояние приватности неизвестно",
         )
 
