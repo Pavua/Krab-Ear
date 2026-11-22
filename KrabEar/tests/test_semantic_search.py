@@ -313,10 +313,13 @@ class TestSemanticSearchIPC(unittest.TestCase):
         fake_model = _make_fake_model(dim=4)
         self.searcher._model = fake_model
         self.searcher._model_loaded = True
-        self.searcher.index_item("item1", "Привет мир")
+        # G3-MEM-02: выдача содержит только id активных записей — индексируем настоящую.
+        item = self.store.add_history_item(text="Привет мир")
+        self.searcher.index_item(item.id, "Привет мир")
         result = self.service._search_analysis_svc.handle_semantic_search({"query": "привет", "top_k": 5})
         self.assertIn("results", result)
         self.assertEqual(result["mode"], "semantic")
+        self.assertEqual([r["id"] for r in result["results"]], [item.id])
 
 
 class TestSemanticSearchProgress(unittest.TestCase):

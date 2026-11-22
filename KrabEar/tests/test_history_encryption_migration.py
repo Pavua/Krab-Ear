@@ -321,8 +321,8 @@ class TestMigrateBakCreated(unittest.TestCase):
             ".bak с plaintext-данными НЕ должен оставаться на диске после успешного шифрования",
         )
 
-    def test_backup_wipe_failure_does_not_report_migration_success(self):
-        """Шифрованный live не оправдывает ok=True с открытым backup рядом."""
+    def test_backup_overwrite_denied_still_removes_plaintext_backup(self):
+        """G3-MEM-03: отказ перезаписи .bak не оставляет plaintext рядом — файл удаляется."""
         store = _make_store(self.data_dir)
         _inject_crypto(store)
         marker = "SYNTHETIC_A5_BACKUP"
@@ -340,10 +340,41 @@ class TestMigrateBakCreated(unittest.TestCase):
         with patch.object(Path, "open", deny_backup_wipe):
             result = store.migrate_history_encryption()
 
+        self.assertTrue((self.data_dir / "history.ndjson").read_text().startswith("ENC1:"))
+        self.assertFalse(bak_path.exists(), "plaintext .bak не должен остаться рядом с зашифрованной историей")
+        self.assertTrue(result["ok"], result)
+        # Честность: перезапись не удалась, файл лишь удалён (блоки могут остаться на диске).
+        self.assertEqual(result.get("backup_wipe"), "unlinked_only")
+
+    def test_backup_wipe_and_unlink_both_denied_does_not_report_migration_success(self):
+        """Если .bak не удалось ни перезаписать, ни удалить — ok=False (backup_cleanup_failed)."""
+        store = _make_store(self.data_dir)
+        _inject_crypto(store)
+        marker = "SYNTHETIC_A5_BACKUP"
+        _write_plaintext_line(
+            self.data_dir / "history.ndjson", _make_item_payload("a5", marker)
+        )
+        bak_path = self.data_dir / "history.ndjson.bak"
+        original_open = Path.open
+        original_unlink = Path.unlink
+
+        def deny_backup_wipe(path, mode="r", *args, **kwargs):
+            if path == bak_path and mode == "r+b":
+                raise PermissionError("synthetic backup wipe denial")
+            return original_open(path, mode, *args, **kwargs)
+
+        def deny_backup_unlink(path, *args, **kwargs):
+            if path == bak_path:
+                raise PermissionError("synthetic backup unlink denial")
+            return original_unlink(path, *args, **kwargs)
+
+        with patch.object(Path, "open", deny_backup_wipe), patch.object(Path, "unlink", deny_backup_unlink):
+            result = store.migrate_history_encryption()
+
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "backup_cleanup_failed")
         self.assertTrue((self.data_dir / "history.ndjson").read_text().startswith("ENC1:"))
-        self.assertIn(marker, bak_path.read_text())
+        self.assertIn(marker, bak_path.read_text())  # неустранимый остаток — честно отражён в ok=False
 
     def test_bak_plaintext_not_readable_after_migration(self):
         """Ни один файл .bak не должен содержать plaintext транскрипт после миграции."""

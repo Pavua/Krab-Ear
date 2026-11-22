@@ -145,8 +145,10 @@ class SemanticSearcher:
                         self._embeddings = np.vstack([self._embeddings, embedding[np.newaxis, :]])
                     self._index.append(item_id)
                 self._evict_over_cap_locked()
-                self._save_locked()
-            return True
+                persisted = self._save_locked()
+            # G3-P03-01: запись в память уже выполнена, но «успех» — только при
+            # подтверждённой записи на диск; иначе False (+ error bus из _save_locked).
+            return bool(persisted)
         except Exception as exc:
             logger.warning("semantic_search: ошибка индексации %s: %s", item_id, exc)
             return False
@@ -529,8 +531,12 @@ class SemanticSearcher:
         except Exception as exc:
             logger.warning("semantic_search: не удалось загрузить embeddings с диска: %s", exc)
 
-    def _save_locked(self) -> None:
+    def _save_locked(self) -> bool:
         """Сохраняет embeddings и индекс на диск атомарно. Должен вызываться под _index_lock.
+
+        Возвращает True только если ОБА файла записаны; False — отказ записи
+        (ошибка уже передана в error bus). Вызывающий не вправе докладывать
+        «проиндексировано» без этого подтверждения (G3-P03-01).
 
         Использует запись во временные файлы + ``os.replace`` чтобы избежать
         ситуации, при которой краш между двумя сохранениями оставляет .npy и
@@ -592,6 +598,8 @@ class SemanticSearcher:
                 "history.write_fail",
                 f"semantic_search _save_locked failed: {exc}",
             )
+            return False
+        return True
 
     # W1172: alias for backward compat
     remove = remove_item

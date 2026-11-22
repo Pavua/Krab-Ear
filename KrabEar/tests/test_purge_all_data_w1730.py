@@ -620,6 +620,10 @@ class PurgeAllDataPrivacyAuditTestCase(unittest.TestCase):
             self.assertTrue(result.get("ok"),
                             "purge must succeed even when audit log raises")
             self.assertEqual(result["history_deleted"], 1)
+            # G3-P02-02: удаление выполнено, но обязательный комплаенс-журнал
+            # не записан — ответ не вправе быть «всё чисто».
+            self.assertIs(result["complete"], False)
+            self.assertIn("privacy_audit", result["errors"])
         finally:
             pa_module.get_privacy_audit_logger = original_get
 

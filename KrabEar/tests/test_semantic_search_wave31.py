@@ -325,6 +325,41 @@ class TestSemanticSearchPrivacyGate(unittest.TestCase):
 # D2: privacy gates — handle_semantic_search_reindex
 # ===========================================================================
 
+class TestSemanticSearchDropsInactiveIds(unittest.TestCase):
+    """G3-MEM-02: сбой semantic_searcher.remove_item не должен оставлять удалённые id в выдаче."""
+
+    def _service(self, tmpdir, results):
+        from backend.state_store import StateStore
+
+        class StubSearcher:
+            is_enabled = True
+
+            def search(self, query, top_k=10):
+                return list(results)
+
+        store = StateStore(data_dir=Path(tmpdir))
+        return store, SearchAndAnalysisService(
+            store=store, semantic_searcher=StubSearcher(), action_items_extractor=None,
+            topic_tracker=None, recording_insights=None, recording_comparison=None,
+            stats_report=None, settings_get=lambda k, d: d,
+        )
+
+    def test_deleted_and_unknown_ids_are_not_returned(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, _ = self._service(tmp, [])
+            live = store.add_history_item(text="живая запись")
+            gone = store.add_history_item(text="удалённая запись")
+            store.delete_history_item(gone.id)
+            _, svc = self._service(tmp, [
+                {"id": gone.id, "score": 0.99},
+                {"id": "never-existed", "score": 0.95},
+                {"id": live.id, "score": 0.5},
+            ])
+            out = svc.handle_semantic_search({"query": "запись", "fallback": False})
+        self.assertEqual([r["id"] for r in out["results"]], [live.id])
+        self.assertEqual(out["mode"], "semantic")
+
+
 class TestSemanticSearchReindexPrivacyGate(unittest.TestCase):
     """D2: handle_semantic_search_reindex must return indexed=0 when privacy mode."""
 

@@ -346,10 +346,16 @@ class ObsidianSyncManager:
         # W19 (LOW, confused-deputy audit): log every vault_path change so the
         # write target is auditable.  This is intentionally a WARNING so it
         # surfaces in default log configs and can be cross-checked by the user.
+        # G3-P02-01: домашний каталог (имя пользователя) в лог не пишем — путь
+        # остаётся проверяемым в виде ~/…, остальные пути — как есть.
+        try:
+            logged_path = "~/" + str(p.relative_to(Path.home().resolve()))
+        except (ValueError, OSError, RuntimeError):
+            logged_path = str(p)
         logger.warning(
             "ObsidianSync: vault_path настроен/изменён → %s (folder=%r). "
             "Убедитесь, что этот путь подтверждён пользователем.",
-            p,
+            logged_path,
             folder.strip() or _DEFAULT_FOLDER,
         )
 

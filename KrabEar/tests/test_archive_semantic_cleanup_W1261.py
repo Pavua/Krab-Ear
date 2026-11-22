@@ -39,9 +39,11 @@ class FakeHistoryItem:
         self.target_lang = ""
         self.translation_status = "not_requested"
         self.translation_engine = ""
+        self.extra: dict[str, Any] = {}
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            **self.extra,
             "id": self.id,
             "ts": self.ts,
             "text": self.text,
@@ -167,8 +169,50 @@ class TestUnarchiveSemanticIndex(unittest.TestCase):
         self.assertEqual(result["unarchived_count"], 1)
         self.assertEqual(len(self._searcher.indexed), 1)
         indexed_id, indexed_text = self._searcher.indexed[0]
-        self.assertEqual(indexed_id, "id-A")
+        # G3-MEM-04: индексируется id ФАКТИЧЕСКИ созданной записи (её вернул store),
+        # а не id из архива — иначе индекс указывает на несуществующую запись.
+        restored = [i for i in self._store._items if i.startswith("restored-")]
+        self.assertEqual(restored, [indexed_id])
+        self.assertNotEqual(indexed_id, "id-A")
         self.assertEqual(indexed_text, "hello world transcript")
+
+    def test_unarchive_fallback_forwards_all_known_fields(self) -> None:
+        """G3-MEM-04: без restore_history_item_raw восстановление не теряет метаданные.
+
+        В проде StateStore.restore_history_item_raw НЕТ (он только в тестовых
+        двойниках), поэтому всегда работает ветка add_history_item: раньше она
+        передавала 9 полей и теряла теги, избранное, диаризацию и т.д.
+        """
+        item = self._store.add_fake_item("id-M", "meta transcript")
+        item.extra = {
+            "tags": ["важное"], "favorite": True, "llm_applied": True,
+            "diarization": {"speakers": 2}, "chat_id": "c1", "audio_duration_sec": 12.5,
+            "unknown_future_field": "ignored",
+        }
+        self._mgr.archive_items(["id-M"])
+
+        self._mgr.unarchive_items(["id-M"])
+
+        kwargs = self._store._added[-1]
+        self.assertEqual(kwargs["tags"], ["важное"])
+        self.assertIs(kwargs["favorite"], True)
+        self.assertIs(kwargs["llm_applied"], True)
+        self.assertEqual(kwargs["diarization"], {"speakers": 2})
+        self.assertEqual(kwargs["chat_id"], "c1")
+        self.assertEqual(kwargs["audio_duration_sec"], 12.5)
+        self.assertNotIn("unknown_future_field", kwargs)
+        self.assertNotIn("id", kwargs)
+        self.assertNotIn("ts", kwargs)
+
+    def test_restorable_fields_match_real_add_history_item_signature(self) -> None:
+        """Список полей восстановления не расходится с настоящим StateStore.add_history_item."""
+        import inspect
+
+        from backend.archive_manager import _RESTORABLE_FIELDS
+        from backend.state_store import StateStore
+
+        params = set(inspect.signature(StateStore.add_history_item).parameters)
+        self.assertEqual(sorted(set(_RESTORABLE_FIELDS) - params), [])
 
     def test_unarchive_items_not_found_no_index_call(self) -> None:
         result = self._mgr.unarchive_items(["ghost-id"])
