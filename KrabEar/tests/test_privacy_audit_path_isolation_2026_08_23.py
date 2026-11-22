@@ -127,10 +127,37 @@ _ENV_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
 _BASH_ASSIGNMENT = f'export {_ENV_VAR}="$DATADIR"'
 
 
+def _is_dead_branch(node: ast.AST, parents: dict) -> bool:
+    """True, если узел лежит в теле `if <константа-ложь>:` (недостижимый код)."""
+    cur = parents.get(node)
+    child = node
+    while cur is not None:
+        if isinstance(cur, ast.If) and isinstance(cur.test, ast.Constant) \
+                and not cur.test.value and child in cur.body:
+            return True
+        child, cur = cur, parents.get(cur)
+    return False
+
+
 def _python_assigns_env_var(source: str) -> bool:
-    """True, если в AST есть `<что-то>["KRAB_EAR_PRIVACY_AUDIT_DIR"] = <непустое>`."""
-    for node in ast.walk(ast.parse(source)):
-        if not isinstance(node, ast.Assign):
+    """True, если `<N>["KRAB_EAR_PRIVACY_AUDIT_DIR"] = <непустое>` стоит в ДОСТИЖИМОМ коде и
+    словарь N реально передаётся процессу как `env=N` (связь с окружением запускаемого backend).
+
+    Раньше принималось присваивание ЛЮБОМУ объекту — посторонний словарь или код под
+    `if False:` давали ложный PASS, хотя запускаемый backend окружения не получал.
+    """
+    tree = ast.parse(source)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+
+    env_names_passed = {
+        kw.value.id
+        for call in ast.walk(tree) if isinstance(call, ast.Call)
+        for kw in call.keywords
+        if kw.arg == "env" and isinstance(kw.value, ast.Name)
+    }
+
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or _is_dead_branch(node, parents):
             continue
         for target in node.targets:
             if not isinstance(target, ast.Subscript):
@@ -138,14 +165,53 @@ def _python_assigns_env_var(source: str) -> bool:
             key = target.slice
             if not (isinstance(key, ast.Constant) and key.value == _ENV_VAR):
                 continue
+            if not (isinstance(target.value, ast.Name) and target.value.id in env_names_passed):
+                continue
             value = node.value
             # Литеральная пустая/пробельная строка — не изоляция, а её видимость.
             if isinstance(value, ast.Constant) and (
                 not isinstance(value.value, str) or not value.value.strip()
             ):
-                return False
+                continue
             return True
     return False
+
+
+def _bash_exports_env_var(source: str) -> bool:
+    """Точная строка export вне комментариев (строка внутри `# ...` не считается)."""
+    return any(line.strip() == _BASH_ASSIGNMENT for line in source.splitlines())
+
+
+class TestEnvAssignmentCheckers:
+    """Сами проверки обязаны отвергать заведомо ложные случаи."""
+
+    GOOD = (
+        "import subprocess\n"
+        "env = dict()\n"
+        f'env["{_ENV_VAR}"] = str(data_dir)\n'
+        "subprocess.Popen(['x'], env=env)\n"
+    )
+
+    def test_accepts_real_wiring(self):
+        assert _python_assigns_env_var(self.GOOD)
+
+    def test_rejects_assignment_to_unrelated_dict(self):
+        src = self.GOOD.replace("env = dict()", "env = dict()\nother = {}").replace(
+            f'env["{_ENV_VAR}"]', f'other["{_ENV_VAR}"]')
+        assert not _python_assigns_env_var(src)
+
+    def test_rejects_unreachable_assignment(self):
+        src = self.GOOD.replace(
+            f'env["{_ENV_VAR}"] = str(data_dir)',
+            f'if False:\n    env["{_ENV_VAR}"] = str(data_dir)')
+        assert not _python_assigns_env_var(src)
+
+    def test_rejects_env_not_passed_to_process(self):
+        assert not _python_assigns_env_var(self.GOOD.replace("env=env", "env=None"))
+
+    def test_bash_comment_does_not_count(self):
+        assert not _bash_exports_env_var(f"# {_BASH_ASSIGNMENT}\n")
+        assert _bash_exports_env_var(f"  {_BASH_ASSIGNMENT}\n")
 
 
 @pytest.mark.parametrize("rel_path", _SMOKE_SCRIPTS)
@@ -157,7 +223,7 @@ def test_e2e_smoke_scripts_export_privacy_audit_dir(rel_path):
         assigned = _python_assigns_env_var(source)
         expected = f'env["{_ENV_VAR}"] = str(data_dir)'
     else:
-        assigned = _BASH_ASSIGNMENT in source
+        assigned = _bash_exports_env_var(source)
         expected = _BASH_ASSIGNMENT
 
     assert assigned, (
