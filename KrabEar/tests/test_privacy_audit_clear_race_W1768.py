@@ -34,7 +34,9 @@ class TestPrivacyAuditClearRaceW1768(unittest.TestCase):
     """W1768 MED — clear() должен держать _log_lock как log_event()."""
 
     def setUp(self) -> None:
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "privacy_audit.log"
         PrivacyAuditLogger.reset_instance()
         self.audit = PrivacyAuditLogger(log_path=self.log_path)
@@ -121,6 +123,10 @@ class TestPrivacyAuditClearRaceW1768(unittest.TestCase):
             t.start()
         for t in threads:
             t.join(timeout=15)
+        # Пустая валидная цепочка удовлетворяла бы итоговым проверкам, пока writers ещё
+        # ждут: сначала доказываем, что ВСЕ потоки завершились.
+        alive = [t for t in threads if t.is_alive()]
+        self.assertFalse(alive, f"{len(alive)} потоков не завершились (взаимная блокировка?)")
 
         self.assertFalse(errors, f"Потоки бросили исключения при гонке: {errors}")
 

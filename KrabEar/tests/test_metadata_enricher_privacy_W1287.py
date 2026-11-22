@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -53,18 +54,16 @@ class PrivacyModeTopicSkipTestCase(unittest.TestCase):
     def test_enrich_recording_normal_when_privacy_disabled(self) -> None:
         """When privacy_mode_enabled=False, topics may be populated (non-empty list)."""
         enricher = self._make_enricher(privacy_mode=False)
-        # Use a text with enough keyword-dense content to give TopicTracker words to extract
         item = _make_item(
             "Программирование Python искусственный интеллект технологии данные алгоритмы"
         )
-        result = enricher.enrich(item)
-        topics = result["metadata"]["topics"]
-        self.assertIsInstance(topics, list, "topics must be a list")
-        # Topics CAN be non-empty; the key invariant is that the list type is preserved
-        # and no exception was raised.  We do not assert non-empty because the
-        # TopicTracker may legitimately return [] for short inputs.
-        for t in topics:
-            self.assertIsInstance(t, str)
+        # Детерминированный extractor: точное значение и сам факт вызова (раньше проверялся
+        # только тип списка — постоянно пустые topics проходили).
+        with patch.object(enricher, "_extract_topics_for_item",
+                          return_value=["qa-topic"]) as extractor:
+            result = enricher.enrich(item)
+        self.assertEqual(result["metadata"]["topics"], ["qa-topic"])
+        extractor.assert_called_once()
 
     # ── test_enrich_other_fields_still_populated_in_privacy_mode ────────────
 
@@ -130,7 +129,10 @@ class PrivacyModeTopicSkipTestCase(unittest.TestCase):
             raise RuntimeError("provider broken")
 
         enricher = MetadataEnricher(settings_provider=bad_provider)
-        result = enricher.enrich(_make_item("Данные алгоритм программирование"))
+        with patch.object(enricher, "_extract_topics_for_item",
+                          return_value=["qa-topic"]) as extractor:
+            result = enricher.enrich(_make_item("Данные алгоритм программирование"))
+        extractor.assert_not_called()
         meta = result["metadata"]
         self.assertIn("topics", meta)
         self.assertEqual(meta["topics"], [])
@@ -142,25 +144,28 @@ class PrivacyModeRuntimeToggleTestCase(unittest.TestCase):
     def test_runtime_toggle_respected_per_call(self) -> None:
         """Toggling privacy_mode between calls affects topic enrichment dynamically."""
         state = {"privacy_mode_enabled": False}
-        enricher = MetadataEnricher(settings_provider=lambda: dict(state))
-
-        # With privacy OFF — topics list is a list (may or may not be non-empty)
+        provider = MagicMock(side_effect=lambda: dict(state))
+        enricher = MetadataEnricher(settings_provider=provider)
         item = _make_item(
             "Программирование Python технологии данные алгоритмы обработка"
         )
-        result_off = enricher.enrich(item)
-        # No exception; topics is a list
-        self.assertIsInstance(result_off["metadata"]["topics"], list)
+        with patch.object(enricher, "_extract_topics_for_item",
+                          return_value=["qa-topic"]) as extractor:
+            # OFF → точное значение и вызов extractor
+            self.assertEqual(enricher.enrich(item)["metadata"]["topics"], ["qa-topic"])
+            self.assertEqual(extractor.call_count, 1)
 
-        # Now enable privacy_mode
-        state["privacy_mode_enabled"] = True
-        result_on = enricher.enrich(item)
-        self.assertEqual(result_on["metadata"]["topics"], [])
+            # ON → пусто, extractor НЕ вызывается (текст даже не попадает в извлечение)
+            state["privacy_mode_enabled"] = True
+            self.assertEqual(enricher.enrich(item)["metadata"]["topics"], [])
+            self.assertEqual(extractor.call_count, 1)
 
-        # Disable again
-        state["privacy_mode_enabled"] = False
-        result_off2 = enricher.enrich(item)
-        self.assertIsInstance(result_off2["metadata"]["topics"], list)
+            # снова OFF → результат восстановлен
+            state["privacy_mode_enabled"] = False
+            self.assertEqual(enricher.enrich(item)["metadata"]["topics"], ["qa-topic"])
+            self.assertEqual(extractor.call_count, 2)
+        # провайдер опрашивается на каждый enrich (флаг читается в момент вызова)
+        self.assertGreaterEqual(provider.call_count, 3)
 
 
 if __name__ == "__main__":

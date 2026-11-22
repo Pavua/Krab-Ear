@@ -145,12 +145,24 @@ class _PolicySnapshotFixture(unittest.TestCase):
     """Общий fixtures: временный профиль без шифрования и без реальной истории."""
 
     def setUp(self) -> None:
+        self._services: list = []
         self._tmp = tempfile.TemporaryDirectory(prefix="a53-policy-")
         self.data_dir = Path(self._tmp.name)
         self.store = StateStore(self.data_dir)
 
+    def track_service(self, service):
+        """Сервис закрывается в tearDown ДО удаления каталога профиля (раньше addCleanup(close)
+        выполнялся после tearDown — close() видел уже удалённый профиль)."""
+        self._services.append(service)
+        return service
+
+    def _close_services(self) -> None:
+        while self._services:
+            self._services.pop().close()
+
     def tearDown(self) -> None:
         self.store = None
+        self._close_services()
         self._tmp.cleanup()
 
     # ── helpers ────────────────────────────────────────────────────────────
@@ -531,7 +543,27 @@ class TestCentralSettingsCommit(_PolicySnapshotFixture):
     def test_commit_uses_atomic_replace_without_shared_tmp_name(self):
         """Единственная запись settings.json — atomic replace, без .json.tmp гонки."""
         self.seed_known_profile()
-        self.store.save_settings({ENCRYPTION_KEY: False, PRIVACY_KEY: False})
+        settings_path = self.data_dir / "settings.json"
+        # Старый открытый дескриптор: при atomic replace он продолжает видеть ПРЕЖНИЕ байты (другой
+        # inode), при перезаписи на месте — увидел бы новые. «Нет *.tmp» этого не отличало.
+        with settings_path.open("rb") as old_fh:
+            old_bytes = old_fh.read()
+            old_ino = os.fstat(old_fh.fileno()).st_ino
+            from unittest.mock import patch as _patch
+            with _patch("os.replace", wraps=os.replace) as replace_spy:
+                self.store.save_settings({ENCRYPTION_KEY: False, PRIVACY_KEY: False})
+            old_fh.seek(0)
+            self.assertEqual(old_fh.read(), old_bytes, "старый дескриптор увидел новые байты: запись на месте")
+        # замена действительно вызвана: tmp → settings.json, имя временного файла не общее/не целевое
+        targets = [(Path(c.args[0]), Path(c.args[1])) for c in replace_spy.call_args_list
+                   if Path(c.args[1]) == settings_path]
+        self.assertEqual(len(targets), 1, replace_spy.call_args_list)
+        self.assertNotEqual(targets[0][0], settings_path)
+        self.assertNotEqual(targets[0][0].name, "settings.json.tmp", "общее имя tmp — гонка между процессами")
+        # путь теперь указывает на НОВЫЙ inode с корректным JSON
+        self.assertNotEqual(settings_path.stat().st_ino, old_ino)
+        import json as _json
+        self.assertIsInstance(_json.loads(settings_path.read_text(encoding="utf-8")), dict)
         leftovers = sorted(p.name for p in self.data_dir.iterdir() if p.name.endswith(".tmp"))
         self.assertEqual(leftovers, [], leftovers)
 
@@ -615,16 +647,29 @@ class _StartupPolicyFixture(unittest.TestCase):
     """
 
     def setUp(self) -> None:
+        self._services: list = []
         self._tmp = tempfile.TemporaryDirectory(prefix="a53-startup-")
         self.data_dir = Path(self._tmp.name) / "data"
 
+    def track_service(self, service):
+        self._services.append(service)
+        return service
+
+    def _close_services(self) -> None:
+        while self._services:
+            self._services.pop().close()
+
     def tearDown(self) -> None:
+        self._close_services()
         self._tmp.cleanup()
 
     # ── disk-state helpers ─────────────────────────────────────────────────
 
     def reset_profile(self, *, prefix: str = "a53-startup-") -> None:
-        """Чистый профиль на КАЖДЫЙ subtest (без вложенных TemporaryDirectory)."""
+        """Чистый профиль на КАЖДЫЙ subtest (без вложенных TemporaryDirectory).
+
+        Предыдущий сервис закрывается ДО удаления его профиля и создания следующего."""
+        self._close_services()
         self._tmp.cleanup()
         self._tmp = tempfile.TemporaryDirectory(prefix=prefix)
         self.data_dir = Path(self._tmp.name) / "data"
@@ -1349,8 +1394,7 @@ class TestHotwordsAutoSeedPolicyGate(_StartupPolicyFixture):
 
     def _build(self):
         service = _build_service_without_audio(self.data_dir)
-        self.addCleanup(service.close)
-        return service
+        return self.track_service(service)
 
     def test_auto_seed_is_skipped_on_unknown_profile(self):
         self.seed_settings({"foo": 1})
@@ -2075,8 +2119,7 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
     def _build(self, name):
         target = Path(self._tmp.name) / name
         service = _build_service_without_audio(target)
-        self.addCleanup(service.close)
-        return service
+        return self.track_service(service)
 
     def test_two_fresh_backend_services_have_different_epochs(self):
         module = self.authorizer_module()
@@ -2102,8 +2145,7 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
         payload["stt_hotwords"] = ["seeded"]
         self.write_settings(payload)
         before = (self.data_dir / "settings.json").read_bytes()
-        service = _build_service_without_audio(self.data_dir)
-        self.addCleanup(service.close)
+        service = self.track_service(_build_service_without_audio(self.data_dir))
         self.assertEqual((self.data_dir / "settings.json").read_bytes(), before)
         snapshot = self.store.read_plaintext_policy_snapshot()
         self.assertIs(snapshot.state, module_state_off())
@@ -2111,8 +2153,7 @@ class TestBackendServiceAuthorizerWiring(_AuthorizerFixture):
     def test_read_history_show_settings_status_create_no_grants(self):
         """Read/show/settings-status НЕ создают grants и НЕ мешают живому grant."""
         self.seed_on()
-        service = _build_service_without_audio(self.data_dir)
-        self.addCleanup(service.close)
+        service = self.track_service(_build_service_without_audio(self.data_dir))
         authorizer = service._plaintext_export_authorizer
         grant = authorizer.issue_grant(self.SESSION_A)
         self.assertTrue(grant.ok, grant)
@@ -2144,24 +2185,65 @@ def module_state_off():
 class TestAuthorizerSerializationHygiene(_AuthorizerFixture):
     """Контракт п.15b (authorizer-сторона): capability/receipt/session — только RAM."""
 
+    def _assert_no_secrets_in_profile(self, stage, secrets):
+        """Все обычные файлы профиля (рекурсивно, без следования symlink): ни имён, ни содержимого
+        с секретами. В сообщении — только stage и относительный путь, без значений секретов."""
+        root = Path(self.data_dir)
+        for path in sorted(root.rglob("*")):
+            rel = str(path.relative_to(root))
+            for secret in secrets:
+                self.assertNotIn(secret, rel, f"[{stage}] секрет в имени файла {rel}")
+            if path.is_file() and not path.is_symlink():
+                blob = path.read_bytes()
+                for secret in secrets:
+                    self.assertNotIn(secret.encode("utf-8"), blob,
+                                     f"[{stage}] секрет в содержимом {rel}")
+
     def test_settings_and_profile_contain_only_internal_revision(self):
+        import logging
+
         module = self.authorizer_module()
+        # Перехват ВСЕХ записей логов на время сценария (раньше проверялся только settings.json)
+        log_lines: list[str] = []
+
+        class _Cap(logging.Handler):
+            def emit(self, record):  # noqa: D401
+                log_lines.append(record.getMessage() + " " + repr(getattr(record, "args", "")))
+
+        cap = _Cap()
+        cap.setLevel(logging.DEBUG)
+        root_logger = logging.getLogger()
+        old_level = root_logger.level
+        root_logger.addHandler(cap)
+        root_logger.setLevel(logging.DEBUG)
+        self.addCleanup(lambda: (root_logger.removeHandler(cap), root_logger.setLevel(old_level)))
+
         authorizer, grant = self.issue_on()
+        # стадия 1: после issue (до consume — временное сохранение capability тоже ловится)
+        self._assert_no_secrets_in_profile("issue", (grant.capability, self.SESSION_A))
         validated = authorizer.validate(
             self.SESSION_A, authorizer.epoch, grant.capability,
             grant.policy_generation, 1, self.SINK_MD,
         )
         self.assertTrue(validated.ok, validated)
+        all_secrets = (grant.capability, validated.receipt, self.SESSION_A)
+        self._assert_no_secrets_in_profile("validate", all_secrets)
         self.assertTrue(authorizer.consume_receipt(validated.receipt))
+        self._assert_no_secrets_in_profile("consume", all_secrets)
+
         settings_text = (self.data_dir / "settings.json").read_text(encoding="utf-8")
         parsed = json.loads(settings_text)
-        for secret in (grant.capability, validated.receipt, self.SESSION_A):
+        for secret in all_secrets:
             self.assertNotIn(secret, settings_text)
             self.assertNotIn(secret, json.dumps(parsed))
         # Персистентна только internal revision — НЕ secret/capability.
         self.assertIn(module.POLICY_REVISION_KEY, parsed)
         for name in os.listdir(self.data_dir):
             self.assertNotIn(self.SESSION_A, name)
+        # логи не содержат секретов (маркер проверяется по всем записям и уровням)
+        for line in log_lines:
+            for secret in all_secrets:
+                self.assertNotIn(secret, line, "секрет просочился в лог")
         # repr'ы и сериализации НЕ содержат capability/secret.
         for obj in (
             authorizer,
@@ -2176,6 +2258,28 @@ class TestAuthorizerSerializationHygiene(_AuthorizerFixture):
 
 
 # ── Cross-process fixtures 5a/5b/5c (multiprocessing spawn, без sleep) ──
+
+
+def _tree_snapshot(root) -> dict:
+    """Рекурсивный снимок: относительный путь → (sha256 содержимого, ino, size, mtime_ns, ctime_ns)."""
+    import hashlib
+
+    out = {}
+    root = Path(root)
+    for path in sorted(root.rglob("*")):
+        rel = str(path.relative_to(root))
+        if path.is_file() and not path.is_symlink():
+            st = path.stat()
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if path.suffix == ".lock":
+                # пустой flock-файл: open/flock обновляет его mtime/ctime без записи данных —
+                # сравниваются содержимое, inode и размер (подмена/запись содержимого видна)
+                out[rel] = (digest, st.st_ino, st.st_size)
+            else:
+                out[rel] = (digest, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+        else:
+            out[rel] = None
+    return out
 
 
 def _worker_5a_granter(data_dir_s, ready_evt, done_evt, result_q):
@@ -2206,16 +2310,19 @@ def _worker_5a_granter(data_dir_s, ready_evt, done_evt, result_q):
             result_q.put({"error": "issue_failed"})
             return
         generation_then = grant.policy_generation
-        before = sorted(path.name for path in data_dir.iterdir())
         ready_evt.set()
         if not done_evt.wait(timeout=30.0):
             result_q.put({"error": "b_timeout"})
             return
+        # Снимок берётся ПОСЛЕ завершения разрешённых записей процесса B и ровно перед validate:
+        # «0 writes» относится к самой validation, а не к записям B. Сравниваются пути, байты (sha256)
+        # и метаданные (inode/size/mtime_ns/ctime_ns; atime исключён — меняется от чтения).
+        before = _tree_snapshot(data_dir)
         validated = authorizer.validate(
             "5a-session", authorizer.epoch, grant.capability,
             generation_then, 1, "history-md",
         )
-        after = sorted(path.name for path in data_dir.iterdir())
+        after = _tree_snapshot(data_dir)
         result_q.put({
             "denied": not validated.ok,
             "reason": validated.reason,
@@ -2418,11 +2525,15 @@ class TestCrossProcessAuthorizerFixtures(unittest.TestCase):
 
     def _run_pair(self, target_a, args_a, target_b, args_b):
         ctx = multiprocessing.get_context("spawn")
-        proc_a = ctx.Process(target=target_a, args=args_a)
-        proc_b = ctx.Process(target=target_b, args=args_b)
-        proc_a.start()
-        proc_b.start()
+        started: list = []  # только УСПЕШНО запущенные процессы
         try:
+            # Процесс регистрируется сразу после успешного start(): отказ запуска второго не
+            # оставляет первый без terminate/join/close (раньше оба start() были вне try/finally).
+            for target, args in ((target_a, args_a), (target_b, args_b)):
+                proc = ctx.Process(target=target, args=args)
+                proc.start()
+                started.append(proc)
+            proc_a, proc_b = started
             proc_a.join(timeout=self.JOIN_SEC)
             proc_b.join(timeout=self.JOIN_SEC)
             self.assertFalse(proc_a.is_alive(), "worker A завис (join timeout)")
@@ -2430,11 +2541,18 @@ class TestCrossProcessAuthorizerFixtures(unittest.TestCase):
             self.assertEqual(proc_a.exitcode, 0, "worker A упал")
             self.assertEqual(proc_b.exitcode, 0, "worker B упал")
         finally:
-            for proc in (proc_a, proc_b):
-                if proc.is_alive():
-                    proc.terminate()
-                proc.join(timeout=10.0)
-                proc.close()
+            for proc in started:
+                # ошибка cleanup одного процесса не прерывает cleanup другого
+                try:
+                    if proc.is_alive():
+                        proc.terminate()
+                    proc.join(timeout=10.0)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    proc.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def test_5a_cross_process_supported_off_on_revokes_grant(self):
         """5a: A issue при ON; B supported OFF→ON; первая validation A →

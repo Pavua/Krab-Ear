@@ -129,13 +129,13 @@ def test_model(model_id: str) -> dict:
             "is_cold": i == 0,
         }
 
-        # Quality checks
-        set(phrase["input"].lower().split())
-        set(content.lower().split()) if content else set()
-        # Check if output is drastically different (paraphrase detection)
-        if content and len(content) > len(phrase["input"]) * 2:
+        # Quality checks. Пустой/пробельный ответ отклоняется ДО эвристик длины
+        # (раньше обе отрицательные проверки начинались с `if content` — пустая строка получала OK).
+        if not content or not content.strip():
+            result_entry["quality"] = "EMPTY"
+        elif len(content) > len(phrase["input"]) * 2:
             result_entry["quality"] = "CHATBOT (too long)"
-        elif content and len(content) < len(phrase["input"]) * 0.3:
+        elif len(content) < len(phrase["input"]) * 0.3:
             result_entry["quality"] = "TRUNCATED"
         else:
             result_entry["quality"] = "OK"

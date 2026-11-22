@@ -155,8 +155,11 @@ class TestRealtimePartialPrivacyFailClosed(unittest.TestCase):
 
         warning_records: list[logging.LogRecord] = []
 
+        all_records: list[logging.LogRecord] = []
+
         class _CapturingHandler(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:
+                all_records.append(record)  # ВСЕ уровни — утечка может быть не в WARNING
                 if record.levelno == logging.WARNING:
                     warning_records.append(record)
 
@@ -164,7 +167,7 @@ class TestRealtimePartialPrivacyFailClosed(unittest.TestCase):
         target_logger = logging.getLogger("KrabEar.RealtimePartial")
         target_logger.addHandler(handler)
         original_level = target_logger.level
-        target_logger.setLevel(logging.WARNING)
+        target_logger.setLevel(logging.DEBUG)
 
         class _PermissionError(PermissionError):
             pass
@@ -200,36 +203,57 @@ class TestRealtimePartialPrivacyFailClosed(unittest.TestCase):
         self.assertIn("failing safe", first_warn.getMessage())
         # extra должен содержать 'error' с типом исключения
         self.assertEqual(getattr(first_warn, "error", None), "_PermissionError")
-        # Текст транскрипта НЕ должен быть в сообщении (privacy)
-        self.assertNotIn("конфиденциальные данные", first_warn.getMessage())
+        # Текст транскрипта НЕ должен быть нигде: ни в сообщениях, ни в structured-полях,
+        # ни в exc_info/stack_info — по ВСЕМ записям и уровням.
+        marker = "конфиденциальные данные"
+        self.assertTrue(all_records, "логгер не записал ни одной записи")
+        for rec in all_records:
+            blob = " ".join(
+                [rec.getMessage(), repr(rec.args), repr(rec.exc_info), str(rec.stack_info)]
+                + [repr(v) for k, v in vars(rec).items()
+                   if k not in logging.LogRecord("", 0, "", 0, "", (), None).__dict__]
+            )
+            self.assertNotIn(marker, blob, f"текст транскрипта просочился в лог: {rec.getMessage()!r}")
 
         # Emit всё равно подавлен
         self.assertEqual(bus.partial_call_count(), 0)
 
     def test_privacy_getter_intermittent_raise_suppresses_only_affected_iterations(self):
-        """Getter который чередует False / raise: эмиты происходят только на False.
+        """Getter чередует False / raise: emit происходит ТОЛЬКО на итерациях с False.
 
-        Итерация 1: False → emit разрешён.
-        Итерация 2: raise → emit подавлен.
-        Итерация 3: False → emit разрешён снова.
-        ...
-
-        Тест проверяет что хотя бы один emit прошёл (getter=False) и
-        что за время работы не было эмита непосредственно после raise.
-        Практически это проверяет что fail-closed не блокирует нормальные итерации.
+        Каждый emit связан с решением privacy-проверки той же итерации: транскрайбер выдаёт
+        разный текст на каждой итерации, getter записывает, какой итерации (тексту) какое
+        решение досталось. Итог: множество эмитнутых текстов == тексты итераций с False;
+        итерации с исключением не эмитят, а после них эмит восстанавливается.
         """
         recorder = _make_recorder(initial_duration_sec=3.0)
-        transcriber = _make_transcriber("нормальный текст")
         bus = _SpyBus()
 
-        # Чередуем False → raise → False → raise ...
-        toggle = [0]
+        n_transcriptions = [0]
+
+        def _transcribe(*_a, **_k):
+            n_transcriptions[0] += 1
+            return {"text": f"text-{n_transcriptions[0]}"}
+
+        transcriber = MagicMock()
+        transcriber.transcribe_preview.side_effect = _transcribe
+
+        decisions: list[tuple[int, str]] = []  # (номер итерации/текста, решение)
+        done = threading.Event()
+        calls = [0]
 
         def alternating_getter():
-            toggle[0] += 1
-            if toggle[0] % 2 == 0:
+            calls[0] += 1
+            it = n_transcriptions[0]  # transcribe предшествует getter в той же итерации
+            if calls[0] % 2 == 0:
+                decisions.append((it, "raise"))
+                if len(decisions) >= 8:
+                    done.set()
                 raise ValueError("transient error")
-            return False  # чётные = raise, нечётные = False → emit разрешён
+            decisions.append((it, "ok"))
+            if len(decisions) >= 8:
+                done.set()
+            return False
 
         rpt = RealtimePartialTranscriber(
             transcriber=transcriber,
@@ -241,17 +265,21 @@ class TestRealtimePartialPrivacyFailClosed(unittest.TestCase):
         )
         rpt.start(session_id="sess-w1763-alternating")
         try:
-            # Ждём минимум одного emit (когда getter вернул False)
-            bus.partial_emitted.wait(timeout=3.0)
+            self.assertTrue(done.wait(timeout=5.0), "worker не сделал нужного числа итераций")
         finally:
             rpt.stop(timeout_sec=2.0)
 
-        # Хотя бы один emit должен был пройти (итерации с getter=False)
-        self.assertGreater(
-            bus.partial_call_count(),
-            0,
-            "Expected at least one emit on iterations where privacy_getter returns False",
-        )
+        snapshot = list(decisions)
+        raised = {it for it, d in snapshot if d == "raise"}
+        allowed = {it for it, d in snapshot if d == "ok"}
+        self.assertGreaterEqual(len(raised), 2, "исключение getter не возникало — сценарий не выполнен")
+        self.assertGreaterEqual(len(allowed), 2, "не было итераций с разрешением")
+
+        emitted = {p["text"] for et, p in bus.calls if et == _REALTIME_PARTIAL_TYPE}
+        for it in raised:
+            self.assertNotIn(f"text-{it}", emitted, f"emit на итерации {it}, где getter бросил исключение")
+        for it in allowed:
+            self.assertIn(f"text-{it}", emitted, f"нет emit на итерации {it}, где getter вернул False")
 
 
 if __name__ == "__main__":

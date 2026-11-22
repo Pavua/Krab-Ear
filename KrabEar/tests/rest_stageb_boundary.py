@@ -74,7 +74,58 @@ class Boundary:
             self.deny("unreviewed provider/module: " + fullname)
         return None
 
+    # G2-KET10-T10-03: индексы dir_fd/дескрипторов в аргументах audit-событий.
+    # Путь из аргументов не определяет объект операции, если задан dir_fd
+    # (относительный путь разрешается относительно ДРУГОГО каталога) или вместо
+    # пути передан дескриптор. Такие операции отказываются fail-closed.
+    DIR_FD_ARGS = {
+        "os.mkdir": (2,), "os.remove": (1,), "os.rmdir": (1,), "os.chmod": (2,),
+        "os.rename": (2, 3), "os.link": (2, 3), "os.symlink": (2,),
+        "os.utime": (3,), "os.mkfifo": (2,), "os.mknod": (3,),
+        "os.chown": (3,), "os.chflags": (),
+    }
+    MUTATING = frozenset({
+        "os.mkdir", "os.remove", "os.rmdir", "os.chmod", "os.truncate",
+        "os.utime", "os.chown", "os.chflags", "os.setxattr", "os.removexattr",
+        "os.mkfifo", "os.mknod",
+    })
+
+    @staticmethod
+    def fd_path(fd):
+        """Путь объекта дескриптора (Linux /proc, macOS F_GETPATH) или None."""
+        try:
+            return os.readlink("/proc/self/fd/%d" % fd)
+        except OSError:
+            pass
+        try:
+            import fcntl
+            raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+            return os.fsdecode(raw.split(b"\0", 1)[0]) or None
+        except (OSError, AttributeError, ImportError):
+            return None
+
     def audit(self, event, args):
+        if event in self.MUTATING:
+            for index in self.DIR_FD_ARGS.get(event, ()):
+                if len(args) > index and args[index] not in (None, -1):
+                    self.deny("dir_fd mutation: " + event)
+            if args and isinstance(args[0], int):
+                # Дескриптор допустим, только если он указывает на объект scratch;
+                # путь не определился — отказ (fail-closed).
+                fd_path = self.fd_path(args[0])
+                if fd_path is None or not self.inside(fd_path, [self.scratch]):
+                    self.deny("descriptor mutation: " + event)
+            if args and isinstance(args[0], (str, bytes, os.PathLike)) and not self.inside(args[0], [self.scratch]):
+                self.deny("non-scratch mutation")
+        if event in {"os.rename", "os.link", "os.symlink"}:
+            for index in (2, 3):
+                if len(args) > index and args[index] not in (None, -1):
+                    self.deny("dir_fd mutation: " + event)
+        if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
+            # audit-событие open не содержит dir_fd: относительный путь
+            # неоднозначен (cwd или каталог-дескриптор) — не доверяем ему.
+            if not os.path.isabs(os.fsdecode(args[0])):
+                self.deny("relative open path", path=args[0])
         if event.startswith("socket.") or event in {
             "subprocess.Popen", "os.system", "os.posix_spawn", "os.fork",
             "os.forkpty", "pty.spawn", "os.exec", "os.kill", "os.killpg",

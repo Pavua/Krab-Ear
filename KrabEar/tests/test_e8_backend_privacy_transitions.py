@@ -72,11 +72,17 @@ def epoch_capture(tmp_path):
         live.close()
 
 
-def _chunk(epoch, samples):
+def _chunk(epoch, samples, level=0):
+    # level — int16-значение всех сэмплов: по нему тест отличает, ЧЕЙ звук ушёл в транскрибер.
+    pcm = int(level).to_bytes(2, "little", signed=True) * samples
     return {
-        "audio_chunk": base64.b64encode(bytes(2 * samples)).decode(),
+        "audio_chunk": base64.b64encode(pcm).decode(),
         "live_subs_policy_epoch": epoch,
     }
+
+
+OLD_LEVEL = 1000
+FRESH_LEVEL = 2000
 
 
 def _cycle_privacy(writer):
@@ -116,16 +122,21 @@ def test_old_snapshot_cannot_replace_queued_window_from_new_epoch(epoch_capture)
     def submit_old_after_new(**kwargs):
         _cycle_privacy(writer)
         with patch.object(live, "_submit_window", submit):
-            live.handle_ingest(_chunk(read_epoch(), 48000))
+            live.handle_ingest(_chunk(read_epoch(), 48000, level=FRESH_LEVEL))
         return submit(**kwargs)
 
     with patch.object(live, "_ensure_worker_started"), patch.object(
         live, "_submit_window", side_effect=submit_old_after_new
     ):
-        live.handle_ingest(_chunk(old_epoch, 48000))
+        live.handle_ingest(_chunk(old_epoch, 48000, level=OLD_LEVEL))
     live._ensure_worker_started()
     assert live.wait_until_idle()
     transcriber.transcribe.assert_called_once()
+    # Вызов один, но обработано должно быть СВЕЖЕЕ окно, а не вытесненное старое.
+    audio = transcriber.transcribe.call_args.args[0]
+    assert audio.size > 0
+    assert (audio == FRESH_LEVEL / 32768.0).all(), "в транскрибер ушло не свежее окно"
+    assert not (audio == OLD_LEVEL / 32768.0).any(), "старое окно не должно быть обработано"
 
 
 def test_delayed_final_ingest_does_not_return_new_epoch_result(epoch_capture):

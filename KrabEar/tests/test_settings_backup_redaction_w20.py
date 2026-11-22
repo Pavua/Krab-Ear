@@ -31,7 +31,9 @@ class TestNewSensitiveFieldsRedacted(unittest.TestCase):
     """llm_api_key / smtp_password / ipc_signing_secret must NOT appear in backup."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmp = _tmp_dir.name
         self.backup = SettingsBackup(backup_dir=Path(self.tmp))
 
     def _create_and_read(self, settings: dict) -> dict:
@@ -134,7 +136,9 @@ class TestBackupFilePermissions(unittest.TestCase):
     """Backup files must be created with mode 0o600."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmp = _tmp_dir.name
         self.backup = SettingsBackup(backup_dir=Path(self.tmp))
 
     def test_backup_file_mode_is_0o600(self):
@@ -196,7 +200,9 @@ class TestCollisionProofFilenames(unittest.TestCase):
     """Two same-second backups with the same reason must produce distinct filenames."""
 
     def setUp(self):
-        self.tmp = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmp = _tmp_dir.name
         self.backup = SettingsBackup(backup_dir=Path(self.tmp))
 
     def test_rapid_same_reason_backups_distinct_ids(self):

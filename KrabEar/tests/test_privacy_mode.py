@@ -27,18 +27,25 @@ class TestInitSentryPrivacyMode(unittest.TestCase):
     """init_sentry() must be a no-op when privacy_mode_enabled=True."""
 
     def _call(self, dsn=None, settings=None):
-        # Import fresh each time to avoid _sentry_initialized global pollution.
+        # Флаг _sentry_initialized подменяется с гарантированным восстановлением
+        # (раньше присваивание False оставалось после теста).
         import backend.observability as obs_module
-        obs_module._sentry_initialized = False
-        return obs_module.init_sentry(dsn=dsn, settings=settings)
+        with patch.object(obs_module, "_sentry_initialized", False):
+            return obs_module.init_sentry(dsn=dsn, settings=settings)
 
     def test_init_sentry_no_op_when_privacy_mode(self):
         """privacy_mode=True, valid DSN → returns False, Sentry not initialised."""
-        result = self._call(
-            dsn="https://abc@o123.ingest.sentry.io/456",
-            settings={"privacy_mode_enabled": True},
-        )
+        # SDK присутствует и DSN валиден: False объясняется ТОЛЬКО privacy-гейтом, а не
+        # отсутствием SDK/DSN (раньше SDK не подставлялся и тест не отличал эти причины).
+        fake_sentry = types.ModuleType("sentry_sdk")
+        fake_sentry.init = MagicMock()
+        with patch.dict("sys.modules", {"sentry_sdk": fake_sentry}):
+            result = self._call(
+                dsn="https://abc@o123.ingest.sentry.io/456",
+                settings={"privacy_mode_enabled": True},
+            )
         self.assertFalse(result, "Expected False (privacy mode skips Sentry)")
+        fake_sentry.init.assert_not_called()
 
     def test_init_sentry_normal_when_privacy_mode_false(self):
         """privacy_mode=False, valid DSN → proceeds to Sentry init attempt (True on success)."""

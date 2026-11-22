@@ -200,74 +200,70 @@ class TestReadPathRedactionOnRuntimePrivacyFlip(unittest.TestCase):
 
 
 class TestPrivacyOnTransitionWipe(unittest.TestCase):
-    """FIX (b): the OFF->ON after-save hook wipes the cleartext ring + file.
+    """FIX (b): OFF->ON after-save hook wipes the cleartext ring + file.
 
-    The production hook lives in service.py (registered via
-    SettingsService.register_after_save_hook). It calls EventReplayManager.clear()
-    on the OFF->ON edge. We reimplement the hook's exact body here to validate the
-    contract without constructing the full BackendService.
+    Хук — замыкание в BackendService.__init__, зарегистрированное через
+    SettingsService.register_after_save_hook. Тест строит НАСТОЯЩИЙ BackendService
+    (фейки рекордера/транскрайбера) и гонит переход через настоящий
+    SettingsService._fire_after_save_hooks: проверяются и тело хука, и его подключение
+    (раньше тест вызывал собственную копию тела — потеря регистрации оставалась незамеченной).
     """
 
-    @staticmethod
-    def _on_privacy_mode_wipe(mgr: EventReplayManager, old: dict, new: dict) -> None:
-        old_privacy = bool(old.get("privacy_mode_enabled", False))
-        new_privacy = bool(new.get("privacy_mode_enabled", False))
-        if not old_privacy and new_privacy:
-            mgr.clear()
+    def setUp(self) -> None:
+        from backend.service import BackendService
+        from backend.state_store import StateStore
+        from test_backend_service import FakeRecorder, FakeTranscriber, FakeTranslator
 
-    def test_hook_wipes_ring_and_file_on_off_to_on(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "event_replay.ndjson"
-            mgr = EventReplayManager(persist_path=path, max_buffer=100)
-            try:
-                mgr.record_event("stt.final", {"text": "cleartext-on-disk"})
-                mgr.record_event("stt.partial", {"text": "more-cleartext"})
-                # Cleartext is on disk before the transition.
-                self.assertIn("cleartext-on-disk", path.read_text(encoding="utf-8"))
-                self.assertEqual(mgr.get_event_stats()["total_events"], 2)
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp.cleanup)
+        store = StateStore(Path(self._tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        self.svc = BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+        self.addCleanup(self.svc.close)
+        self.path = store.data_dir / "event_replay.ndjson"
 
-                # Simulate privacy_mode flipping OFF -> ON via the after-save hook.
-                self._on_privacy_mode_wipe(
-                    mgr,
-                    {"privacy_mode_enabled": False},
-                    {"privacy_mode_enabled": True},
-                )
+    def _flip(self, old_privacy: bool, new_privacy: bool) -> None:
+        self.svc._settings_svc._fire_after_save_hooks(
+            {"privacy_mode_enabled": old_privacy},
+            {"privacy_mode_enabled": new_privacy},
+        )
 
-                # Ring + file are wiped (file kept, truncated to empty).
-                self.assertEqual(mgr.get_event_stats()["total_events"], 0)
-                self.assertTrue(path.exists())
-                self.assertEqual(path.read_text(encoding="utf-8"), "")
-            finally:
-                mgr.close()
+    def _record_cleartext(self) -> None:
+        mgr = self.svc._event_replay
+        mgr.record_event("stt.final", {"text": "cleartext-on-disk"})
+        mgr.record_event("stt.partial", {"text": "more-cleartext"})
 
-    def test_hook_noop_on_on_to_off(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            path = Path(tmpdir) / "event_replay.ndjson"
-            mgr = EventReplayManager(persist_path=path, max_buffer=100)
-            try:
-                mgr.record_event("stt.final", {"text": "keep-me"})
-                # ON -> OFF must NOT wipe.
-                self._on_privacy_mode_wipe(
-                    mgr,
-                    {"privacy_mode_enabled": True},
-                    {"privacy_mode_enabled": False},
-                )
-                self.assertEqual(mgr.get_event_stats()["total_events"], 1)
-            finally:
-                mgr.close()
+    def test_registered_hook_wipes_ring_and_file_on_off_to_on(self):
+        mgr = self.svc._event_replay
+        self._record_cleartext()
+        # Cleartext is on disk before the transition.
+        self.assertIn("cleartext-on-disk", self.path.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(mgr.get_event_stats()["total_events"], 2)
 
-    def test_hook_noop_on_no_change(self):
-        mgr = EventReplayManager(max_buffer=100)
-        try:
-            mgr.record_event("ping", {"x": 1})
-            self._on_privacy_mode_wipe(
-                mgr,
-                {"privacy_mode_enabled": True},
-                {"privacy_mode_enabled": True},
-            )
-            self.assertEqual(mgr.get_event_stats()["total_events"], 1)
-        finally:
-            mgr.close()
+        self._flip(False, True)
+
+        # Ring + file are wiped (file kept, truncated to empty).
+        self.assertEqual(mgr.get_event_stats()["total_events"], 0)
+        self.assertTrue(self.path.exists())
+        self.assertEqual(self.path.read_text(encoding="utf-8"), "")
+
+    def test_registered_hook_noop_on_on_to_off(self):
+        self._record_cleartext()
+        before = self.svc._event_replay.get_event_stats()["total_events"]
+        self._flip(True, False)
+        self.assertEqual(self.svc._event_replay.get_event_stats()["total_events"], before)
+        self.assertIn("cleartext-on-disk", self.path.read_text(encoding="utf-8"))
+
+    def test_registered_hook_noop_on_no_change(self):
+        self._record_cleartext()
+        before = self.svc._event_replay.get_event_stats()["total_events"]
+        self._flip(True, True)
+        self.assertEqual(self.svc._event_replay.get_event_stats()["total_events"], before)
 
 
 if __name__ == "__main__":

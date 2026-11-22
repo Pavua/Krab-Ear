@@ -263,14 +263,14 @@ class CompareRecordingsPrivacyModeSearchAndAnalysisTestCase(unittest.TestCase):
 
 
 class CompareRecordingsServicePyDelegationTestCase(unittest.TestCase):
-    """BackendService._handle_compare_recordings delegates to SearchAndAnalysisService (W1710).
+    """compare_recordings: диспетчер BackendService ведёт прямо в SearchAndAnalysisService.
 
-    Verifies that the secondary parity fix (service.py delegation) is wired correctly
-    and also enforces the privacy guard via the same real production handler.
+    У BackendService нет собственного `_handle_compare_recordings` (в диспетчере живёт
+    только строка таблицы), поэтому проводка проверяется по AST реального service.py, а
+    поведение — настоящим SearchAndAnalysisService.handle_compare_recordings.
     """
 
-    def _make_minimal_backend(self, privacy_enabled: bool) -> Any:
-        """Build a minimal BackendService-like object with _search_and_analysis_svc wired."""
+    def _make_service(self, privacy_enabled: bool) -> Any:
         from backend.search_and_analysis_service import SearchAndAnalysisService
         from backend.recording_comparison import RecordingComparison
 
@@ -284,7 +284,7 @@ class CompareRecordingsServicePyDelegationTestCase(unittest.TestCase):
         mock_searcher = MagicMock()
         mock_searcher.is_enabled = False
 
-        svc = SearchAndAnalysisService(
+        return SearchAndAnalysisService(
             store=store,
             semantic_searcher=mock_searcher,
             action_items_extractor=None,
@@ -295,27 +295,36 @@ class CompareRecordingsServicePyDelegationTestCase(unittest.TestCase):
             settings_get=_settings_get,
         )
 
-        class _MinimalBackend:
-            def __init__(self) -> None:
-                self._search_and_analysis_svc = svc
+    def test_dispatch_table_routes_compare_recordings_to_search_service(self) -> None:
+        """Строка диспетчера: "compare_recordings" -> self._search_and_analysis_svc.handle_compare_recordings."""
+        import ast
 
-            def _handle_compare_recordings(self, params: dict) -> dict:
-                """Mirrors the real BackendService._handle_compare_recordings delegation."""
-                return self._search_and_analysis_svc.handle_compare_recordings(params)
+        src = (PROJECT_ROOT / "backend" / "service.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        targets = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if isinstance(key, ast.Constant) and key.value == "compare_recordings":
+                        targets.append(ast.unparse(value))
+        self.assertEqual(
+            targets, ["self._search_and_analysis_svc.handle_compare_recordings"],
+            "compare_recordings must be dispatched straight to SearchAndAnalysisService",
+        )
 
-        return _MinimalBackend()
-
-    def test_service_delegation_privacy_on(self) -> None:
-        """_handle_compare_recordings returns privacy guard response via delegation."""
-        backend = self._make_minimal_backend(privacy_enabled=True)
-        result = backend._handle_compare_recordings({"item_ids": ["a1", "a2"]})
+    def test_service_privacy_on(self) -> None:
+        """Настоящий handle_compare_recordings отдаёт privacy-ответ."""
+        result = self._make_service(privacy_enabled=True).handle_compare_recordings(
+            {"item_ids": ["a1", "a2"]}
+        )
         self.assertEqual(result.get("items"), [])
         self.assertEqual(result.get("reason"), "privacy_mode_active")
 
-    def test_service_delegation_privacy_off(self) -> None:
-        """_handle_compare_recordings returns real data when privacy off."""
-        backend = self._make_minimal_backend(privacy_enabled=False)
-        result = backend._handle_compare_recordings({"item_ids": ["a1", "a2"]})
+    def test_service_privacy_off(self) -> None:
+        """Настоящий handle_compare_recordings отдаёт данные при privacy OFF."""
+        result = self._make_service(privacy_enabled=False).handle_compare_recordings(
+            {"item_ids": ["a1", "a2"]}
+        )
         self.assertEqual(len(result.get("items", [])), 2)
         self.assertIn("text_similarity_matrix", result)
 

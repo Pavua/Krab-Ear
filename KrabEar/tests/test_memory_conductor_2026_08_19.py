@@ -115,11 +115,22 @@ class HysteresisTest(unittest.TestCase):
         c._pressure_fn = lambda: calm["v"]
         c.tick_once()
         c.tick_once()
+        self.assertEqual(c._pressure_streak, 2)
         calm["v"] = 0
         c.tick_once()
+        # сброс — сразу после спокойного тика (раньше проверялось лишь «нет unload»,
+        # что и без сброса гарантирует контракт C1)
+        self.assertEqual(c._pressure_streak, 0)
         calm["v"] = 4
         c.tick_once()
         c.tick_once()
+        self.assertEqual(c._pressure_streak, 2)
+        self.assertEqual(c.get_diagnostics()["residents"]["brain"]["would"], 0,
+                         "после сброса двух новых тиков недостаточно для would")
+        self.assertTrue(c.reload_brain_allowed(), "streak 2 < порога 3 — reload разрешён")
+        c.tick_once()
+        self.assertEqual(c._pressure_streak, 3)
+        self.assertFalse(c.reload_brain_allowed(), "порог достигнут — reload блокируется")
         c.unload_model_fn.assert_not_called()
 
 
@@ -250,9 +261,19 @@ class SequenceTest(unittest.TestCase):
         c.model_loaded_fn.side_effect = lambda *a, **k: order.append("verify") or False
         c.on_recording_start()
         c.wait_workers(2.0)
-        self.assertEqual(order[0], "unload")
-        self.assertIn("verify", order)
-        self.assertEqual(order[-1], "load")
+        # строго: выгрузка → подтверждение → ОДНА загрузка (ранняя/повторная загрузка запрещены)
+        self.assertEqual(order, ["unload", "verify", "load"])
+        c.load_model_fn.assert_called_once()
+
+    def test_rewriter_not_loaded_when_brain_unload_unconfirmed(self):
+        """Выгрузка не подтверждена (модель всё ещё загружена до таймаута) → загрузки rewriter нет."""
+        for still_loaded in (True, None):
+            with self.subTest(verify_result=still_loaded):
+                c = _mk()
+                c.model_loaded_fn.return_value = still_loaded
+                c.on_recording_start()
+                c.wait_workers(2.0)
+                c.load_model_fn.assert_not_called()
 
     def test_sequence_shadow_gated(self):
         c = _mk(_settings(memory_conductor_enforce=False))

@@ -30,7 +30,9 @@ class TestHashChainNewEntries(unittest.TestCase):
     """test_new_entries_have_prev_hash_chain — новые записи имеют корректную цепочку."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp.cleanup)
+        self.tmpdir = _tmp.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         PrivacyAuditLogger.reset_instance()
         self.logger = PrivacyAuditLogger(log_path=self.log_path)
@@ -101,12 +103,28 @@ class TestHashChainNewEntries(unittest.TestCase):
         expected = _compute_entry_hash(secret_key, entry["prev_hash"], body)
         self.assertEqual(expected, entry["entry_hash"])
 
+        # Независимый эталон: стандартный HMAC-SHA256 по ДОКУМЕНТИРОВАННОМУ формату сообщения
+        # "<prev_hash или ''>|<json(sort_keys, ensure_ascii=False)>" — а не тот же production-helper.
+        import hashlib
+        import hmac as _hmac
+        message = ((entry["prev_hash"] or "") + "|" +
+                   json.dumps(body, sort_keys=True, ensure_ascii=False)).encode("utf-8")
+        self.assertEqual(_hmac.new(secret_key, message, hashlib.sha256).hexdigest(),
+                         entry["entry_hash"])
+
+        # Результат зависит от ключа: другой ключ даёт другой digest
+        other_key = bytes(b ^ 0xFF for b in secret_key)
+        self.assertNotEqual(_compute_entry_hash(other_key, entry["prev_hash"], body),
+                            entry["entry_hash"])
+
 
 class TestVerifyChainPassesClean(unittest.TestCase):
     """test_verify_chain_passes_clean_log — чистый лог проходит верификацию."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         PrivacyAuditLogger.reset_instance()
         self.logger = PrivacyAuditLogger(log_path=self.log_path)
@@ -150,7 +168,9 @@ class TestVerifyChainDetectsTampering(unittest.TestCase):
     """test_verify_chain_detects_tampering — подделка обнаруживается."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         PrivacyAuditLogger.reset_instance()
         self.logger = PrivacyAuditLogger(log_path=self.log_path)
@@ -244,7 +264,9 @@ class TestLegacyEntriesCompatible(unittest.TestCase):
     """test_legacy_entries_compatible — старые записи без хешей не ломают цепочку."""
 
     def setUp(self):
-        self.tmpdir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self.tmpdir = _tmp_dir.name
         self.log_path = Path(self.tmpdir) / "audit.log"
         PrivacyAuditLogger.reset_instance()
 

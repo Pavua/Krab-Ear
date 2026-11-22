@@ -23,7 +23,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # ── path setup ────────────────────────────────────────────────────────────────
 _PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -245,6 +245,53 @@ class TestDefaultLambdaIsDetectedW1714(unittest.TestCase):
             "Default lambda correctly returns False — confirming it ignores real settings. "
             "This is exactly the W1714 regression: production privacy guard is dead.",
         )
+
+
+# ── подключение через НАСТОЯЩИЙ BackendService.__init__ ──────────────────────
+
+class TestLiveSubsPrivacyWiringViaRealConstructor(unittest.TestCase):
+    """Фикстура _build_minimal_backend сама передаёт settings_get — удаление этой строки
+    из рабочего конструктора ею не обнаруживается. Здесь строится НАСТОЯЩИЙ
+    BackendService (с фейками тяжёлых коллабораторов), и подключение проверяется на нём."""
+
+    def setUp(self):
+        from backend.service import BackendService
+        from backend.state_store import StateStore
+        from test_backend_service import FakeRecorder, FakeTranscriber, FakeTranslator
+
+        self._tmp = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(self._tmp.cleanup)
+        store = StateStore(Path(self._tmp.name) / "data")
+        store.initialize_startup_plaintext_policy(new_profile=True)
+        self.service = BackendService(
+            store=store,
+            recorder=FakeRecorder(),
+            transcriber=FakeTranscriber(),
+            translator=FakeTranslator(),
+        )
+        self.addCleanup(self.service.close)
+
+    def test_live_subs_settings_get_bound_to_runtime_getter(self):
+        stored = self.service._live_subs._settings_get
+        self.assertIs(getattr(stored, "__func__", None),
+                      type(self.service)._get_runtime_setting,
+                      "settings_get= не передан в LiveSubsService из BackendService.__init__")
+        self.assertIs(getattr(stored, "__self__", None), self.service)
+
+    def test_privacy_on_blocks_stt_through_real_wiring(self):
+        """Включаем privacy через РЕАЛЬНЫЙ путь настроек: ingest пропускается, STT не вызывается."""
+        self.service.store.save_settings({"privacy_mode_enabled": True})
+        self.service._settings_svc.invalidate_cache()
+        live = self.service._live_subs
+        with patch.object(live._transcriber, "transcribe") as stt:
+            result = live.handle_ingest({
+                "audio_chunk": _make_pcm_b64(),
+                "sample_rate": 16000,
+                "target_lang": "off",
+                "is_final": False,
+            })
+        self.assertTrue(result.get("skipped"), result)
+        stt.assert_not_called()
 
 
 if __name__ == "__main__":

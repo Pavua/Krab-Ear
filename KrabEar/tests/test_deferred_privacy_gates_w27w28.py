@@ -203,15 +203,22 @@ def _invoke_handle_get_context_memory(
     """
     import types
 
-    # Stub out heavy modules before importing service
+    # Stub out heavy modules before importing service. Вставленные заглушки снимаются
+    # сразу после импорта: постоянная инъекция в sys.modules делала результат
+    # последующих тестов зависимым от порядка (пустой ModuleType вместо библиотеки).
+    inserted: list[str] = []
     for mod_name in [
         "mlx_whisper", "mlx", "mlx.core",
         "sounddevice", "transformers",
     ]:
         if mod_name not in sys.modules:
             sys.modules[mod_name] = types.ModuleType(mod_name)
-
-    from backend.service import BackendService  # noqa: E402 (deferred import)
+            inserted.append(mod_name)
+    try:
+        from backend.service import BackendService  # noqa: E402 (deferred import)
+    finally:
+        for mod_name in inserted:
+            sys.modules.pop(mod_name, None)
 
     svc = object.__new__(BackendService)
 
@@ -279,18 +286,28 @@ class TestGetContextMemoryPrivacyGate(unittest.TestCase):
         self.assertEqual(mem.words_called, 1)
         self.assertEqual(mem.topics_called, 1)
 
-    def test_clear_param_still_works_in_privacy_mode(self) -> None:
-        """clear=True must work even in privacy mode (clears in-memory state)."""
-        mem = _FakeContextMemory(words=["Кrab", "Ear"], mem_size=2)
-        # In privacy mode, clear=True is NOT reached because the privacy gate
-        # fires first and returns early. Verify the gate fires before the clear
-        # branch — i.e. the returned size reflects the pre-clear state.
+    def test_privacy_gate_fires_before_clear_branch(self) -> None:
+        """Контракт реального обработчика: при privacy ON ответ отдаётся ДО ветки clear —
+        память НЕ очищается (это не проверка работающего clear)."""
+        mem = _FakeContextMemory(words=["Krab", "Ear"], mem_size=2)
         result = _invoke_handle_get_context_memory(
             privacy_mode=True, context_memory=mem, params={"clear": True}
         )
-        # Privacy gate fires first: returns empty words/topics + current size
         self.assertEqual(result.get("context_words"), [])
         self.assertTrue(result.get("privacy_mode"))
+        # состояние памяти не тронуто: размер и содержимое прежние
+        self.assertEqual(mem.size(), 2)
+        self.assertEqual(mem._words, ["Krab", "Ear"])
+        self.assertEqual(result.get("size"), 2)
+
+    def test_clear_param_clears_memory_in_normal_mode(self) -> None:
+        """clear=True при privacy OFF реально обнуляет память (парный тест к gate)."""
+        mem = _FakeContextMemory(words=["Krab", "Ear"], mem_size=2)
+        _invoke_handle_get_context_memory(
+            privacy_mode=False, context_memory=mem, params={"clear": True}
+        )
+        self.assertEqual(mem.size(), 0)
+        self.assertEqual(mem._words, [])
 
     def test_window_size_returned(self) -> None:
         """window_size must appear in both normal and privacy responses."""

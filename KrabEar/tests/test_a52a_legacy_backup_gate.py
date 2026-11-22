@@ -95,13 +95,94 @@ def _store_with_crypto(data_dir: Path, crypto):
     return store
 
 
+# Уникальные синтетические маркеры: ищутся в байтах КАЖДОГО файла снимка.
+_MARKER_A = "synthetic-plaintext-marker-a7f3"
+_MARKER_B = "synthetic-plaintext-marker-b19c"
+
+
 def _write_history(data_dir: Path, crypto) -> None:
-    """Пара записей, зашифрованных ЭТИМ ключом."""
+    """Пара записей с уникальными маркерами, зашифрованных ЭТИМ ключом."""
     (data_dir / "history.ndjson").write_text(
-        crypto.encrypt_line('{"id":"a","text":"one"}') + "\n"
-        + crypto.encrypt_line('{"id":"b","text":"two"}') + "\n",
+        crypto.encrypt_line(json.dumps({"id": "a", "text": _MARKER_A})) + "\n"
+        + crypto.encrypt_line(json.dumps({"id": "b", "text": _MARKER_B})) + "\n",
         encoding="utf-8",
     )
+
+
+def _assert_snapshot_is_encrypted(snapshot_dir: Path, crypto) -> None:
+    """Содержимое снимка, а не только его имя (G2-KET10-T10-02).
+
+    Каталог с разрешённым именем ``auto_snapshot_*`` мог бы содержать plaintext.
+    Проверяем: (1) ни в одном файле нет открытых маркеров (в т.ч. в виде
+    escape-последовательностей JSON — сравниваем байты); (2) каждая непустая
+    строка *.ndjson имеет префикс ENC1; (3) history.ndjson расшифровывается
+    тестовым ключом в исходные записи (маркер лишь «не найден» мог бы
+    означать сжатие или потерю данных).
+    """
+    from backend.history_crypto import HistoryCrypto
+
+    snapshot_dir = Path(snapshot_dir)
+    assert snapshot_dir.is_dir(), snapshot_dir
+    files = [p for p in sorted(snapshot_dir.rglob("*")) if p.is_file()]
+    assert files, "снимок пуст"
+    for path in files:
+        raw = path.read_bytes()
+        for marker in (_MARKER_A, _MARKER_B):
+            assert marker.encode() not in raw, f"открытый маркер в {path.name}"
+        if path.suffix == ".ndjson":
+            for line in raw.decode("utf-8").splitlines():
+                if line.strip():
+                    assert HistoryCrypto.is_encrypted(line), f"не ENC1-строка в {path.name}"
+    hist = snapshot_dir / "history.ndjson"
+    assert hist.is_file(), "в снимке нет history.ndjson"
+    restored = [
+        json.loads(crypto.decrypt_line(line))
+        for line in hist.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert restored == [{"id": "a", "text": _MARKER_A}, {"id": "b", "text": _MARKER_B}]
+
+
+class TestSnapshotOracleDetectsPlaintext:
+    """Негативный контроль оракула: он обязан ПАДАТЬ на plaintext-снимке."""
+
+    def _snap(self, tmp_path, lines):
+        snap = tmp_path / "auto_snapshot_20260101_000000"
+        snap.mkdir()
+        (snap / "history.ndjson").write_text(lines, encoding="utf-8")
+        return snap
+
+    def test_plaintext_history_in_allowed_name_is_rejected(self, tmp_path):
+        crypto = _synthetic_crypto()
+        snap = self._snap(tmp_path, json.dumps({"id": "a", "text": _MARKER_A}) + "\n")
+        with pytest.raises(AssertionError):
+            _assert_snapshot_is_encrypted(snap, crypto)
+
+    def test_plaintext_marker_in_side_file_is_rejected(self, tmp_path):
+        crypto = _synthetic_crypto()
+        _write_history(tmp_path, crypto)
+        snap = tmp_path / "auto_snapshot_20260101_000000"
+        snap.mkdir()
+        (snap / "history.ndjson").write_bytes((tmp_path / "history.ndjson").read_bytes())
+        (snap / "snapshot_manifest.json").write_text(_MARKER_B, encoding="utf-8")
+        with pytest.raises(AssertionError):
+            _assert_snapshot_is_encrypted(snap, crypto)
+
+    def test_encrypted_with_other_key_is_rejected(self, tmp_path):
+        _write_history(tmp_path, _synthetic_crypto())
+        snap = tmp_path / "auto_snapshot_20260101_000000"
+        snap.mkdir()
+        (snap / "history.ndjson").write_bytes((tmp_path / "history.ndjson").read_bytes())
+        with pytest.raises(Exception):
+            _assert_snapshot_is_encrypted(snap, _synthetic_crypto())
+
+    def test_genuinely_encrypted_snapshot_passes(self, tmp_path):
+        crypto = _synthetic_crypto()
+        _write_history(tmp_path, crypto)
+        snap = tmp_path / "auto_snapshot_20260101_000000"
+        snap.mkdir()
+        (snap / "history.ndjson").write_bytes((tmp_path / "history.ndjson").read_bytes())
+        _assert_snapshot_is_encrypted(snap, crypto)
 
 
 def _all_backup_dirs(backups: Path) -> list[str]:
@@ -343,6 +424,7 @@ class TestAutoBackupGate:
 
         assert out["backed_up"] is True
         assert Path(out["backup_path"]).name.startswith("auto_snapshot_")
+        _assert_snapshot_is_encrypted(Path(out["backup_path"]), crypto)
         backups = data_dir / "backups"
         # Ни одного legacy plaintext-каталога — это и есть проверка политики.
         assert not [p for p in _all_backup_dirs(backups) if p.startswith("auto_backup_")]
@@ -473,6 +555,7 @@ class TestAutoBackupGate:
         if out["backed_up"]:
             # Политика ON обнаружена под lock ⇒ допустим только снимок.
             assert Path(out["backup_path"]).name.startswith("auto_snapshot_")
+            _assert_snapshot_is_encrypted(Path(out["backup_path"]), crypto)
         else:
             assert out["skipped_reason"] == REASON
 

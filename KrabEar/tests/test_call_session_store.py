@@ -333,8 +333,10 @@ class TestUnicodeSessionMetadata(unittest.TestCase):
         s = self.store.create(phone, "test")
         fetched = self.store.get(s.id)
         assert fetched is not None
-        # phone_number is stripped at create() level, which removes spaces but not ZWS
-        self.assertIsNotNone(fetched.phone_number)
+        # phone_number is stripped at create() level, which removes spaces but not ZWS:
+        # значение сохраняется ТОЧНО (раньше `is not None` пропускал "" и потерю символов)
+        self.assertEqual(fetched.phone_number, phone.strip())
+        self.assertIn("\u200b", fetched.phone_number, "ZWS-символы не должны теряться")
 
     def test_unicode_transcript_entry_roundtrip(self) -> None:
         s = self.store.create("+1", "unicode transcript")

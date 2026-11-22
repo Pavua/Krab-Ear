@@ -30,18 +30,58 @@ if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
 
+# Откат импортных подмен (T08-06): учёт вставленных заглушек и «отсутствовавших» атрибутов,
+# откат в finally (в т.ч. при исключении импорта rest_server) и teardown_module.
+_MISSING = object()
+_INSERTED_STUBS: list = []
+_PATCHED_ATTRS: list = []  # (module, attr, original-or-_MISSING)
+_REST_WAS_IMPORTED = "backend.rest_server" in sys.modules
+
+
+def _patch_attr(mod, attr, value):
+    _PATCHED_ATTRS.append((mod, attr, getattr(mod, attr, _MISSING)))
+    setattr(mod, attr, value)
+
+
+def _restore_patched_attrs() -> None:
+    while _PATCHED_ATTRS:
+        mod, attr, orig = _PATCHED_ATTRS.pop()
+        if orig is _MISSING:
+            if hasattr(mod, attr):
+                delattr(mod, attr)
+        else:
+            setattr(mod, attr, orig)
+
+
+def teardown_module(module=None):
+    """Снять заглушки sys.modules, вставленные этим файлом, и свежеимпортированный rest_server."""
+    _restore_patched_attrs()
+    if not _REST_WAS_IMPORTED:
+        sys.modules.pop("backend.rest_server", None)
+    for name in reversed(_INSERTED_STUBS):
+        sys.modules.pop(name, None)
+    _INSERTED_STUBS.clear()
+
+
+tearDownModule = teardown_module  # для запуска через unittest
+
+
 def _ensure_real_or_stub(mod_name: str) -> types.ModuleType:
     """Return sys.modules[mod_name], importing the real module if needed.
 
-    Falls back to a bare ModuleType stub ONLY when the real import fails
-    (e.g. missing optional C-extension dependency).
+    Заглушка ModuleType допускается ТОЛЬКО когда реального модуля нет (ModuleNotFoundError
+    именно этого модуля): программная ошибка при импорте больше не маскируется.
     """
     if mod_name in sys.modules:
         return sys.modules[mod_name]
     try:
         importlib.import_module(mod_name)
-    except Exception:
+    except ModuleNotFoundError as exc:
+        if exc.name is None or not (mod_name == exc.name or mod_name.startswith(exc.name + ".")
+                                    or exc.name.split(".")[0] not in ("backend", "core")):
+            raise
         sys.modules[mod_name] = types.ModuleType(mod_name)
+        _INSERTED_STUBS.append(mod_name)
     return sys.modules[mod_name]
 
 
@@ -50,7 +90,6 @@ def _ensure_real_or_stub(mod_name: str) -> types.ModuleType:
 # We save the original and restore it after rest_server is imported so later
 # test files that import from core.engine still see the real AudioEngine.
 _engine_mod = _ensure_real_or_stub("core.engine")
-_orig_AudioEngine = getattr(_engine_mod, "AudioEngine", None)
 
 
 class _FakeEngine:
@@ -63,19 +102,18 @@ class _FakeEngine:
         pass
 
 
-_engine_mod.AudioEngine = _FakeEngine  # type: ignore[attr-defined]
+_patch_attr(_engine_mod, "AudioEngine", _FakeEngine)
 
 # backend.event_bus — real module; ensure bus/sse_stream attrs exist for rest_server.
 _eb = _ensure_real_or_stub("backend.event_bus")
 if not hasattr(_eb, "bus"):
-    _eb.bus = MagicMock()  # type: ignore[attr-defined]
+    _patch_attr(_eb, "bus", MagicMock())
 if not hasattr(_eb, "sse_stream"):
-    _eb.sse_stream = MagicMock(return_value=iter([]))  # type: ignore[attr-defined]
+    _patch_attr(_eb, "sse_stream", MagicMock(return_value=iter([])))
 
 # backend.service — real module; swap BackendService so rest_server /v1/readiness
 # doesn't try to reach a live backend socket.
 _service_mod = _ensure_real_or_stub("backend.service")
-_orig_BackendService = getattr(_service_mod, "BackendService", None)
 
 
 class _FakeBackendService:
@@ -84,11 +122,10 @@ class _FakeBackendService:
         return {"overall_ready": True, "components": {}}
 
 
-_service_mod.BackendService = _FakeBackendService  # type: ignore[attr-defined]
+_patch_attr(_service_mod, "BackendService", _FakeBackendService)
 
 # backend.state_store — real module; swap StateStore so no real file I/O on import.
 _state_store_mod = _ensure_real_or_stub("backend.state_store")
-_orig_StateStore = getattr(_state_store_mod, "StateStore", None)
 
 
 class _FakeStateStore:
@@ -107,11 +144,10 @@ class _FakeStateStore:
         pass
 
 
-_state_store_mod.StateStore = _FakeStateStore  # type: ignore[attr-defined]
+_patch_attr(_state_store_mod, "StateStore", _FakeStateStore)
 
 # backend.transcriber — real module; swap Transcriber so no engine construction.
 _transcriber_mod = _ensure_real_or_stub("backend.transcriber")
-_orig_Transcriber = getattr(_transcriber_mod, "Transcriber", None)
 
 
 class _FakeTranscriber:
@@ -119,12 +155,11 @@ class _FakeTranscriber:
         pass
 
 
-_transcriber_mod.Transcriber = _FakeTranscriber  # type: ignore[attr-defined]
+_patch_attr(_transcriber_mod, "Transcriber", _FakeTranscriber)
 
 # backend.metrics_collector — real module; provide a lightweight fake `metrics`
 # instance so REST endpoints return predictable values in tests.
 _metrics_mod = _ensure_real_or_stub("backend.metrics_collector")
-_orig_metrics = getattr(_metrics_mod, "metrics", None)
 
 
 class _FakeMetrics:
@@ -145,7 +180,7 @@ class _FakeMetrics:
         pass
 
 
-_metrics_mod.metrics = _FakeMetrics()  # type: ignore[attr-defined]
+_patch_attr(_metrics_mod, "metrics", _FakeMetrics())
 
 # flask_smorest stubs (if not installed)
 try:
@@ -188,6 +223,7 @@ except ImportError:
     smorest_mod.Blueprint = _FakeBlueprint
     smorest_mod.abort = MagicMock()
     sys.modules["flask_smorest"] = smorest_mod
+    _INSERTED_STUBS.append("flask_smorest")
 
 # marshmallow stubs
 try:
@@ -213,6 +249,7 @@ except ImportError:
     ma_mod.fields = _Fields()
     ma_mod.validate = _Validate()
     sys.modules["marshmallow"] = ma_mod
+    _INSERTED_STUBS.append("marshmallow")
 
 # werkzeug stub (usually installed with flask, but guard anyway)
 try:
@@ -221,6 +258,7 @@ except ImportError:
     wz_mod = types.ModuleType("werkzeug.utils")
     wz_mod.secure_filename = lambda name: name
     sys.modules["werkzeug.utils"] = wz_mod
+    _INSERTED_STUBS.append("werkzeug.utils")
 
 # ---------------------------------------------------------------------------
 # Now import the app under test
@@ -234,21 +272,12 @@ if _PROJECT_ROOT not in sys.path:
 from core.config import settings  # noqa: E402 — needed after sys.path patch
 
 # Patch TEMP_DIR creation so we don't need a real filesystem during import
-with patch("pathlib.Path.mkdir"):
-    from backend.rest_server import app, require_api_key  # noqa: E402
-
-# Restore original classes/attrs on the real modules so later test files that
-# import from these modules directly see the real implementations.
-if _orig_AudioEngine is not None:
-    _engine_mod.AudioEngine = _orig_AudioEngine  # type: ignore[attr-defined]
-if _orig_BackendService is not None:
-    _service_mod.BackendService = _orig_BackendService  # type: ignore[attr-defined]
-if _orig_StateStore is not None:
-    _state_store_mod.StateStore = _orig_StateStore  # type: ignore[attr-defined]
-if _orig_Transcriber is not None:
-    _transcriber_mod.Transcriber = _orig_Transcriber  # type: ignore[attr-defined]
-if _orig_metrics is not None:
-    _metrics_mod.metrics = _orig_metrics  # type: ignore[attr-defined]
+try:
+    with patch("pathlib.Path.mkdir"):
+        from backend.rest_server import app, require_api_key  # noqa: E402
+finally:
+    # подмены атрибутов возвращаются СРАЗУ после импорта и при исключении импорта
+    _restore_patched_attrs()
 
 
 # ---------------------------------------------------------------------------
@@ -336,11 +365,13 @@ class TestAuthEnabledCorrectKey(unittest.TestCase):
 
     def test_metrics_with_correct_key(self):
         resp = self.client.get("/metrics", headers=self._auth_headers())
-        self.assertNotEqual(resp.status_code, 401)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True)[:200])
+        self.assertIn("status", resp.get_json())
 
     def test_readiness_with_correct_key(self):
         resp = self.client.get("/v1/readiness", headers=self._auth_headers())
-        self.assertNotEqual(resp.status_code, 401)
+        self.assertEqual(resp.status_code, 200, resp.get_data(as_text=True)[:200])
+        self.assertIs(resp.get_json().get("overall_ready"), True)
 
 
 class TestRequireApiKeyDecorator(unittest.TestCase):
@@ -369,13 +400,37 @@ class TestRequireApiKeyDecorator(unittest.TestCase):
         orig = settings.REST_API_KEY
         settings.REST_API_KEY = "mykey"
         try:
+            called = []
+
             @require_api_key
             def view():
+                called.append(True)  # защищённый обработчик не должен выполниться при отказе
                 return "ok", 200
 
             with app.test_request_context("/metrics"):
                 resp, code = view()
             self.assertEqual(code, 401)
+            self.assertEqual(called, [], "view() выполнен до отказа 401")
+        finally:
+            settings.REST_API_KEY = orig
+
+    def test_rejects_wrong_and_malformed_headers(self):
+        """Неверный ключ / не-Bearer схема / пустой Bearer → 401 и обработчик НЕ вызывается."""
+        orig = settings.REST_API_KEY
+        settings.REST_API_KEY = "mykey"
+        try:
+            for header in ("Bearer wrongkey", "Basic mykey", "Bearer ", "mykey", "bearer"):
+                called = []
+
+                @require_api_key
+                def view():
+                    called.append(True)
+                    return "ok", 200
+
+                with app.test_request_context("/metrics", headers={"Authorization": header}):
+                    resp, code = view()
+                self.assertEqual(code, 401, header)
+                self.assertEqual(called, [], f"view() выполнен при заголовке {header!r}")
         finally:
             settings.REST_API_KEY = orig
 
@@ -392,8 +447,9 @@ class TestRequireApiKeyDecorator(unittest.TestCase):
                 return "ok", 200
 
             with app.test_request_context("/metrics", headers={"Authorization": "Bearer mykey"}):
-                view()
+                result = view()
             self.assertTrue(called)
+            self.assertEqual(result, ("ok", 200))
         finally:
             settings.REST_API_KEY = orig
 
@@ -410,7 +466,7 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
         try:
             # Correct token
             good = client.get("/metrics", headers={"Authorization": "Bearer test-fake-key-32ch-aabbccddeeff"})
-            self.assertNotEqual(good.status_code, 401)
+            self.assertEqual(good.status_code, 200, good.get_data(as_text=True)[:200])
             # Wrong token of identical length (would leak timing with plain ==)
             bad = client.get("/metrics", headers={"Authorization": "Bearer test-WRONG-key-32ch-aabbccddee"})
             self.assertEqual(bad.status_code, 401)
@@ -449,14 +505,18 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
         orig = settings.REST_API_KEY
         settings.REST_API_KEY = "somekey"
         try:
+            called = []
+
             @require_api_key
             def view():
+                called.append(True)
                 return "ok", 200
 
             # No Authorization header → empty token path via missing Bearer prefix
             with app.test_request_context("/metrics"):
                 resp, code = view()
             self.assertEqual(code, 401)
+            self.assertEqual(called, [])
         finally:
             settings.REST_API_KEY = orig
 
@@ -465,8 +525,11 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
         orig = settings.REST_API_KEY
         settings.REST_API_KEY = "unicode-key-тест"
         try:
+            called = []
+
             @require_api_key
             def view():
+                called.append(True)
                 return "ok", 200
 
             # Correct unicode key must pass
@@ -475,12 +538,14 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
                 headers={"Authorization": "Bearer unicode-key-тест"},
             ):
                 result = view()
-            # Must not raise; correct key passes through
-            self.assertIsNotNone(result)
+            # Must not raise; точный успешный результат и факт вызова (не непустой отказ)
+            self.assertEqual(result, ("ok", 200))
+            self.assertEqual(called, [True])
 
             # Wrong unicode key must return 401
             @require_api_key
             def view2():
+                called.append("view2")
                 return "ok", 200
 
             with app.test_request_context(
@@ -489,6 +554,7 @@ class TestLegacyConstantTimeCompare(unittest.TestCase):
             ):
                 resp, code = view2()
             self.assertEqual(code, 401)
+            self.assertNotIn("view2", called)
         finally:
             settings.REST_API_KEY = orig
 

@@ -27,30 +27,24 @@ if str(PROJECT_ROOT) not in sys.path:
 
 
 # ---------------------------------------------------------------------------
-# Minimal stub: just the handler under test + _get_runtime_setting
+# Настоящий BackendService._handle_get_learning_stats; заглушками — только зависимости
 # ---------------------------------------------------------------------------
 
-class _StubService:
-    """Minimal stub that replicates only _handle_get_learning_stats logic."""
+def _StubService(privacy_on: bool, learning_result: dict):
+    """Реальный BackendService без конструктора: вызывается production-обработчик
+    (раньше тесты гоняли скопированное тело — удаление gate их не краснило)."""
+    from backend.service import BackendService
 
-    def __init__(self, privacy_on: bool, learning_result: dict) -> None:
-        self._privacy_on = privacy_on
-        self._language_learning = MagicMock()
-        self._language_learning.handle_get_learning_stats.return_value = learning_result
-        self.store = MagicMock()
+    svc = object.__new__(BackendService)
+    svc._language_learning = MagicMock()
+    svc._language_learning.handle_get_learning_stats.return_value = learning_result
+    svc.store = MagicMock()
 
-    def _get_runtime_setting(self, key: str, default):
-        if key == 'privacy_mode_enabled':
-            return self._privacy_on
-        return default
+    def _get_runtime_setting(key: str, default=None):
+        return privacy_on if key == "privacy_mode_enabled" else default
 
-    # Copy of the actual fixed handler body from service.py:
-    def _handle_get_learning_stats(self, params: dict) -> dict:
-        if self._get_runtime_setting('privacy_mode_enabled', False):
-            return {'ok': False, 'reason': 'privacy_mode_active'}
-        params_with_store = dict(params)
-        params_with_store.setdefault("store", self.store)
-        return self._language_learning.handle_get_learning_stats(params_with_store)
+    svc._get_runtime_setting = _get_runtime_setting
+    return svc
 
 
 class TestGetLearningStatsPrivacyGate(unittest.TestCase):
@@ -106,23 +100,6 @@ class TestGetLearningStatsPrivacyGate(unittest.TestCase):
         call_params = svc._language_learning.handle_get_learning_stats.call_args[0][0]
         self.assertEqual(call_params.get("lang"), "ru")
         self.assertEqual(call_params.get("limit"), 10)
-
-    # ------------------------------------------------------------------
-    # Verify the live service.py contains the gate (regression sentinel)
-    # ------------------------------------------------------------------
-
-    def test_service_py_handler_contains_privacy_gate(self):
-        """Smoke: confirms the production file has the gate, not just the stub."""
-        service_py = PROJECT_ROOT / "backend" / "service.py"
-        src = service_py.read_text(encoding="utf-8")
-        # Find the handler definition and the few lines after it.
-        start = src.find("def _handle_get_learning_stats")
-        self.assertGreater(start, 0, "_handle_get_learning_stats not found in service.py")
-        snippet = src[start: start + 400]
-        self.assertIn("privacy_mode_enabled", snippet,
-                      "privacy gate missing from _handle_get_learning_stats in service.py")
-        self.assertIn("privacy_mode_active", snippet,
-                      "privacy_mode_active reason missing from _handle_get_learning_stats")
 
 
 if __name__ == "__main__":

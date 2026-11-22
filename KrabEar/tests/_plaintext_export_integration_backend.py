@@ -111,6 +111,37 @@ def scan_synthetic_secrets(value, secrets, raw_keys=()):
         return True
 
 
+def descriptor_path(fd):
+    """Путь объекта дескриптора (Linux /proc, macOS F_GETPATH) или None."""
+    try:
+        return os.readlink("/proc/self/fd/%d" % fd)
+    except OSError:
+        pass
+    try:
+        import fcntl
+        raw = fcntl.fcntl(fd, fcntl.F_GETPATH, b"\0" * 1024)
+        return os.fsdecode(raw.split(b"\0", 1)[0]) or None
+    except (OSError, AttributeError, ImportError):
+        return None
+
+
+def resolve_mutation_target(target, dir_fd):
+    """Реальный объект операции: путь с учётом dir_fd; None — определить нельзя (отказ).
+
+    shutil.rmtree идёт через dir_fd, поэтому безусловный запрет ломал purge, а
+    безусловное разрешение открывало обход: относительное имя трактуется
+    относительно ЧУЖОГО каталога. Решает объект дескриптора.
+    """
+    text = os.fsdecode(target)
+    if isinstance(dir_fd, int) and dir_fd != -1:
+        base = descriptor_path(dir_fd)
+        if base is None:
+            return None
+        if not os.path.isabs(text):
+            text = os.path.join(base, text)
+    return Path(os.path.normpath(text)).resolve()
+
+
 def run_child(connection, root_string, source_string, crypto_key=None, crypto_key_missing=False):
     """Настоящий IPCServer; control Pipe не пишет auth context в stdout/файлы."""
     root = Path(root_string).resolve()
@@ -183,13 +214,35 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             record_violation("process")
             raise AssertionError("fixture forbids child process spawning")
         elif event in {"os.mkdir", "os.remove", "os.rmdir", "os.rename", "os.link", "os.symlink"}:
-            targets = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]
-            for target in targets:
-                if isinstance(target, (str, bytes, os.PathLike)) and not Path(os.fsdecode(target)).resolve().is_relative_to(fixture_root):
+            # Путь из аргументов не определяет объект операции при dir_fd: объект —
+            # (каталог дескриптора + относительное имя). Разрешаем только внутри fixture.
+            fd_slots = {"os.mkdir": {0: 2}, "os.remove": {0: 1}, "os.rmdir": {0: 1},
+                        "os.rename": {0: 2, 1: 3}, "os.link": {0: 2, 1: 3}, "os.symlink": {1: 2}}[event]
+            count = 2 if event in {"os.rename", "os.link", "os.symlink"} else 1
+            for index in range(count):
+                target = args[index]
+                if not isinstance(target, (str, bytes, os.PathLike)):
+                    continue
+                slot = fd_slots.get(index)
+                fd = args[slot] if slot is not None and len(args) > slot else None
+                resolved = resolve_mutation_target(target, fd)
+                if resolved is None or not resolved.is_relative_to(fixture_root):
                     record_violation("filesystem")
                     raise AssertionError("fixture forbids external filesystem mutation")
 
     sys.addaudithook(audit_isolation)
+    original_os_open = os.open
+
+    def checked_os_open(path, flags, mode=0o777, *, dir_fd=None):
+        # Audit-событие "open" не содержит dir_fd, поэтому descriptor-relative open
+        # проверяется здесь по объекту дескриптора (путь относительно чужого FD — отказ).
+        if dir_fd is not None:
+            resolved = resolve_mutation_target(path, dir_fd)
+            if resolved is None or not resolved.is_relative_to(fixture_root):
+                record_violation("filesystem")
+                raise AssertionError("fixture forbids descriptor-relative open outside fixture")
+            return original_os_open(path, flags, mode, dir_fd=dir_fd)
+        return original_os_open(path, flags, mode)
 
     def isolated_expanduser(value):
         text = os.fsdecode(value)
@@ -233,6 +286,7 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             redirect_stdout(log_file), redirect_stderr(log_file), ExitStack() as stack:
         stack.enter_context(mock.patch.object(Path, "home", return_value=home))
         stack.enter_context(mock.patch("os.path.expanduser", side_effect=isolated_expanduser))
+        stack.enter_context(mock.patch.object(os, "open", checked_os_open))
         stack.enter_context(mock.patch.object(socket.socket, "connect", lambda sock, address: checked_socket(sock, address, original_connect)))
         stack.enter_context(mock.patch.object(socket.socket, "connect_ex", lambda sock, address: checked_socket(sock, address, original_connect_ex)))
         stack.enter_context(mock.patch.object(socket.socket, "bind", lambda sock, address: checked_socket(sock, address, original_bind)))
@@ -447,13 +501,20 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
             def inspect_state():
                 leaked_files = 0
                 marker_paths = []
-                for path in root.rglob("*"):
-                    if not path.is_file() or path.is_symlink():
-                        continue
-                    data = path.read_bytes()
-                    leaked_files += contains_secret(data)
-                    if MARKER.encode() in data:
-                        marker_paths.append(str(path.relative_to(root)))
+                def _walk_failed(exc):
+                    # Недоступный каталог — НЕ «утечек нет»: обход обязан завершиться ошибкой
+                    # (раньше rglob молча пропускал содержимое и инспекция сообщала чистый результат).
+                    raise exc
+
+                for dirpath, _dirnames, filenames in os.walk(root, onerror=_walk_failed, followlinks=False):
+                    for filename in filenames:
+                        path = Path(dirpath) / filename
+                        if path.is_symlink() or not path.is_file():
+                            continue
+                        data = path.read_bytes()
+                        leaked_files += contains_secret(data)
+                        if MARKER.encode() in data:
+                            marker_paths.append(str(path.relative_to(root)))
                 audit = service._audit_logger.get_audit_log()
                 # Structured fields до json.dumps: escaped repr(key) не может
                 # исчезнуть из проверки LocalTransport/audit/logging extras.
@@ -601,7 +662,9 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                 if target is not None and path.is_relative_to(target):
                     state["writes"] += 1
                     if state["revoke_after_first"] and state["writes"] == 1:
-                        revoke(state["context"])
+                        revoked = revoke(state["context"])
+                        if (revoked.get("result") or {}).get("ok") is not True:
+                            raise AssertionError("отзыв после первой записи не подтверждён")
                 return result
             stack.enter_context(mock.patch.object(Path, "write_text", observed_write))
             claim = SocketOwnershipClaim(socket_path)
@@ -665,9 +728,12 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                     reply = reached.wait(15)
                 elif name == "revoke_release":
                     assert state["context"] is not None
-                    revoke(state["context"])
-                    release.set()
-                    reply = True
+                    try:
+                        confirmed = (revoke(state["context"]).get("result") or {}).get("ok") is True
+                    except Exception:  # noqa: BLE001
+                        confirmed = False
+                    release.set()  # барьер снимается всегда (аварийный cleanup), но успех — только при подтверждённом отзыве
+                    reply = confirmed
                 elif name == "revoke_current":
                     assert state["context"] is not None
                     reply = revoke(state["context"])["result"]["ok"] is True

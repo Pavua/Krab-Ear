@@ -430,6 +430,9 @@ class TestPrivacyDashboardNoLeakage(unittest.TestCase):
         self.tmpdir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
         self.addCleanup(self.tmpdir.cleanup)
         store = StateStore(Path(self.tmpdir.name) / "data")
+        # Без инициализации policy нового профиля add_history_item мог молча отказать,
+        # и тесты «нет утечки» проверяли пустую историю.
+        store.initialize_startup_plaintext_policy(new_profile=True)
         PrivacyAuditLogger.reset_instance()
         self._audit = PrivacyAuditLogger(
             log_path=Path(self.tmpdir.name) / "audit.log"
@@ -440,11 +443,25 @@ class TestPrivacyDashboardNoLeakage(unittest.TestCase):
             transcriber=_FakeTranscriber(),
             translator=_FakeTranslator(),
         )
-        # Добавляем запись с секретным текстом
-        self.service.handle_request({
+        # Добавляем запись с секретным текстом и ПОДТВЕРЖДАЕМ, что она сохранена
+        add = self.service.handle_request({
             "id": "add", "method": "add_history_item",
             "params": {"text": self.LEAK_SENTINEL, "language": "ru", "duration": 2.0}
         })
+        assert add.get("ok") is True and (add.get("result") or {}).get("ok", True) is not False, add
+        stored = [str(i) for i in store._load_active_items_unlocked()]
+        assert any(self.LEAK_SENTINEL in item for item in stored), "marker не сохранён в историю"
+
+    def _dashboard(self) -> dict:
+        with patch("backend.service.get_privacy_audit_logger", return_value=self._audit):
+            resp = self.service.handle_request(
+                {"id": "pd", "method": "get_privacy_dashboard", "params": {}}
+            )
+        # Утечку проверяем только на УСПЕШНОМ ответе (раньше ошибка dashboard тоже проходила)
+        self.assertIs(resp.get("ok"), True, resp)
+        self.assertIsInstance(resp.get("result"), dict, resp)
+        self.assertIs(resp["result"].get("ok"), True, resp)
+        return resp
 
     def tearDown(self) -> None:
         self.service.close()
@@ -452,23 +469,23 @@ class TestPrivacyDashboardNoLeakage(unittest.TestCase):
 
     def test_no_transcript_text_in_response(self):
         import json as _json
-        with patch("backend.service.get_privacy_audit_logger", return_value=self._audit):
-            resp = self.service.handle_request(
-                {"id": "pd", "method": "get_privacy_dashboard", "params": {}}
-            )
-        raw = _json.dumps(resp)
+        raw = _json.dumps(self._dashboard())
         self.assertNotIn(self.LEAK_SENTINEL, raw,
                          "Транскрипционный текст просочился в ответ get_privacy_dashboard!")
 
     def test_no_text_key_at_any_level(self):
-        """Ключ 'text' с пользовательским контентом не должен появляться в ответе."""
-        import json as _json
-        with patch("backend.service.get_privacy_audit_logger", return_value=self._audit):
-            resp = self.service.handle_request(
-                {"id": "pd", "method": "get_privacy_dashboard", "params": {}}
-            )
-        raw = _json.dumps(resp)
-        self.assertNotIn(self.LEAK_SENTINEL, raw)
+        """Ключ 'text' (с ЛЮБЫМ содержимым) не должен появляться ни на одном уровне ответа."""
+        def _keys(node, path=""):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    yield f"{path}/{k}", k
+                    yield from _keys(v, f"{path}/{k}")
+            elif isinstance(node, (list, tuple)):
+                for i, v in enumerate(node):
+                    yield from _keys(v, f"{path}[{i}]")
+
+        offenders = [p for p, k in _keys(self._dashboard()) if k == "text"]
+        self.assertEqual(offenders, [], f"ключ 'text' в ответе dashboard: {offenders}")
 
 
 # ---------------------------------------------------------------------------
@@ -501,15 +518,22 @@ class TestPrivacyDashboardGracefulDegradation(unittest.TestCase):
         """storage source raises — остальные поля должны заполниться."""
         import backend.history_service as _hs_mod
 
+        self.storage_failure_calls = []
+
         def boom(self_, params):
+            self.storage_failure_calls.append(1)
             raise RuntimeError("simulated storage failure")
 
         with patch.object(_hs_mod.HistoryService, "handle_get_storage_info", boom):
             with patch("backend.service.get_privacy_audit_logger",
                        return_value=self._audit):
-                return self.service.handle_request(
+                resp = self.service.handle_request(
                     {"id": "pd", "method": "get_privacy_dashboard", "params": {}}
                 )
+        # ошибка источника РЕАЛЬНО возникла — иначе нули совпадают с обычным пустым чтением
+        self.assertGreaterEqual(len(self.storage_failure_calls), 1,
+                                "падающий источник storage не был вызван")
+        return resp
 
     def test_storage_failure_returns_defaults(self):
         resp = self._call_with_storage_failure()
@@ -542,7 +566,10 @@ class TestPrivacyDashboardGracefulDegradation(unittest.TestCase):
             log_path=Path(self.tmpdir.name) / "broken_audit.log"
         )
 
+        summarize_calls = []
+
         def boom_summarize(*a, **kw):
+            summarize_calls.append(1)
             raise OSError("simulated audit failure")
 
         broken_audit.summarize = boom_summarize  # type: ignore[method-assign]
@@ -551,6 +578,7 @@ class TestPrivacyDashboardGracefulDegradation(unittest.TestCase):
             resp = self.service.handle_request(
                 {"id": "pd", "method": "get_privacy_dashboard", "params": {}}
             )
+        self.assertGreaterEqual(len(summarize_calls), 1, "падающий summarize не был вызван")
         data = resp.get("result", resp)
         self.assertIn("audit", data)
         self.assertEqual(data["audit"]["total_events"], 0)

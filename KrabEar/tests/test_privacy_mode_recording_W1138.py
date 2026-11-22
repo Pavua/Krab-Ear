@@ -129,18 +129,17 @@ class TestPrivacyModeRecordingTagging(unittest.TestCase):
     """W1138: verify privacy_mode flag is set on HistoryItem when enabled."""
 
     def setUp(self):
-        self._tmp = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmp = _tmp_dir.name
     def test_recording_in_privacy_mode_tagged(self):
         """When privacy_mode_enabled=True, persisted item must have privacy_mode=True."""
         svc = _make_service(self._tmp, settings={"privacy_mode_enabled": True})
         svc.handle_start_recording({})
         result = svc.handle_stop_recording({})
 
-        # If audio guards kicked in, result may be empty_audio — in that case
-        # we can't verify the history item. Only assert when status=ok.
-        if result.get("status") != "ok":
-            self.skipTest("Audio guard rejected recording, cannot verify privacy tag")
+        # Статус обязан быть ok: ошибка записи/старта/обработки не должна молча превращаться в SKIP.
+        self.assertEqual(result.get("status"), "ok", result)
 
         # The result payload itself should carry the flag
         self.assertTrue(result.get("privacy_mode"), "Result payload must include privacy_mode=True")
@@ -161,8 +160,7 @@ class TestPrivacyModeRecordingTagging(unittest.TestCase):
         svc.handle_start_recording({})
         result = svc.handle_stop_recording({})
 
-        if result.get("status") != "ok":
-            self.skipTest("Audio guard rejected recording, cannot verify privacy tag")
+        self.assertEqual(result.get("status"), "ok", result)
 
         # Result payload should have privacy_mode=False
         self.assertFalse(result.get("privacy_mode"), "Result payload must include privacy_mode=False")
@@ -181,8 +179,7 @@ class TestPrivacyModeRecordingTagging(unittest.TestCase):
         svc.handle_start_recording({})
         result = svc.handle_stop_recording({})
 
-        if result.get("status") != "ok":
-            self.skipTest("Audio guard rejected recording, cannot verify privacy tag")
+        self.assertEqual(result.get("status"), "ok", result)
 
         self.assertFalse(result.get("privacy_mode"))
 
@@ -212,6 +209,12 @@ class TestHistoryItemPrivacyField(unittest.TestCase):
             )
             self.assertTrue(item.privacy_mode, "add_history_item must pass privacy_mode=True")
 
+            # Реально СОХРАНЕНО: новый StateStore на том же каталоге читает запись по ID
+            reloaded, _ = StateStore(data_dir=Path(tmp_dir)).get_history_page(cursor=None, limit=10)
+            matching = [it for it in reloaded if it.get("id") == item.id]
+            self.assertEqual(len(matching), 1, "запись не найдена после перезагрузки store")
+            self.assertIs(matching[0].get("privacy_mode"), True)
+
             # to_dict round-trip
             d = item.to_dict()
             self.assertTrue(d.get("privacy_mode"), "to_dict must include privacy_mode=True")
@@ -226,6 +229,10 @@ class TestHistoryItemPrivacyField(unittest.TestCase):
             store = StateStore(data_dir=Path(tmp_dir))
             item = store.add_history_item(text="normal recording", privacy_mode=False)
             self.assertFalse(item.privacy_mode)
+            reloaded, _ = StateStore(data_dir=Path(tmp_dir)).get_history_page(cursor=None, limit=10)
+            matching = [it for it in reloaded if it.get("id") == item.id]
+            self.assertEqual(len(matching), 1, "запись не найдена после перезагрузки store")
+            self.assertIs(matching[0].get("privacy_mode"), False)
             d = item.to_dict()
             self.assertFalse(d.get("privacy_mode"))
             restored = HistoryItem.from_dict(d)

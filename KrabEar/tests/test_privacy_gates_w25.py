@@ -163,7 +163,9 @@ class TestSharingManagerPrivacyGate(unittest.TestCase):
 
     def _make_store(self) -> Any:
         store = MagicMock()
-        store.data_dir = tempfile.mkdtemp()
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        store.data_dir = _tmp_dir.name
         return store
 
     def test_privacy_on_blocks_prepare_share(self) -> None:
@@ -186,14 +188,19 @@ class TestSharingManagerPrivacyGate(unittest.TestCase):
             privacy_mode_fn=lambda: True,
             plaintext_export_authorizer=off_authorizer(privacy_provider=lambda: True),
         )
-        shares_dir = Path(store.data_dir) / "shares"
-        before = set(os.listdir(shares_dir)) if shares_dir.exists() else set()
+        root = Path(store.data_dir)
+
+        def _snapshot() -> dict:
+            # Рекурсивно ВСЕ пути и содержимое, без фильтра по имени: запись под любым именем
+            # и изменение существующих файлов раньше не обнаруживались.
+            return {
+                str(p.relative_to(root)): (p.read_bytes() if p.is_file() else None)
+                for p in sorted(root.rglob("*"))
+            }
+
+        before = _snapshot()
         mgr.handle_prepare_share({"item_ids": ["id1", "id2"]})
-        after = set(os.listdir(shares_dir)) if shares_dir.exists() else set()
-        # No new files written
-        new_files = after - before
-        share_files = {f for f in new_files if f.startswith("krabear_share_")}
-        self.assertEqual(len(share_files), 0, f"Unexpected share files written: {share_files}")
+        self.assertEqual(_snapshot(), before, "privacy gate обязан вернуться до любой записи на диск")
 
     def test_privacy_off_proceeds_normally(self) -> None:
         """When privacy is off the handler runs (may raise on missing items — that's fine)."""
@@ -357,8 +364,9 @@ class TestPlaybackTrackerWithDisk(unittest.TestCase):
     """Verify privacy gate + cap work correctly with disk persistence."""
 
     def setUp(self):
-        self._tmpdir = tempfile.mkdtemp()
-
+        _tmp_dir = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        self.addCleanup(_tmp_dir.cleanup)
+        self._tmpdir = _tmp_dir.name
     def test_privacy_on_does_not_write_file(self) -> None:
         tracker = PlaybackTracker(
             data_dir=self._tmpdir,
