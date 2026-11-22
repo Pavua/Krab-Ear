@@ -45,7 +45,11 @@ cleanup() {
   fi
   rm -rf "$DATADIR"
 }
-trap cleanup EXIT INT TERM
+# Сигналы обязаны ЗАВЕРШАТЬ скрипт: `trap cleanup EXIT INT TERM` выполнял очистку и
+# продолжал со следующей фазы на уже удалённом data-dir. cleanup сработает по EXIT.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 echo "==> Starting throwaway dev backend (data-dir: $DATADIR)"
 PYTHONPATH="$REPO/KrabEar" "$PY" KrabEar/main.py --data-dir "$DATADIR" > "$LOG" 2>&1 &
@@ -80,6 +84,10 @@ else
   echo "  ❌ E2E SMOKE FAILURE — see output above; backend log: $LOG"
   echo "============================================================"
   # Keep the log on failure for debugging (copy out before cleanup wipes DATADIR).
-  cp "$LOG" "/tmp/krab_ear_e2e_last_failure.log" 2>/dev/null && echo "  (backend log copied to /tmp/krab_ear_e2e_last_failure.log)"
+  # Уникальный приватный файл (mktemp: O_EXCL, 0600), а не фиксированное имя в /tmp,
+  # куда обычный cp пошёл бы по заранее подложенному симлинку.
+  FAIL_LOG="$(mktemp "${TMPDIR:-/tmp}/krab_ear_e2e_failure.XXXXXX")" \
+    && cp "$LOG" "$FAIL_LOG" 2>/dev/null \
+    && echo "  (backend log copied to $FAIL_LOG)"
 fi
 exit "$rc"

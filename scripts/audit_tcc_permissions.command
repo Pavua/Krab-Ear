@@ -112,15 +112,23 @@ echo -e "\n${BOLD}── Key-service summary ──${RESET}"
 SUMMARY_LINES=""
 for SVC in "${SERVICES_OF_INTEREST[@]}"; do
   short=$(svc_short "$SVC")
-  best=$(echo "$ROWS" | { grep "^${SVC}|" || true; } | awk -F'|' '{print $4}' | sort -rn | head -1)
+  # Статус считаем по ТЕКУЩЕМУ приложению (bundle-id): максимум auth_value по всем клиентам
+  # прятал отказ текущему бандлу за старым path-based разрешением. Если записи для бандла
+  # нет — показываем path-based статус с явной пометкой.
+  best=$(echo "$ROWS" | { grep "^${SVC}|${CS_IDENTIFIER}|" || true; } | awk -F'|' '{print $4}' | tail -1)
+  via_path=""
+  if [[ -z "$best" ]]; then
+    best=$(echo "$ROWS" | { grep "^${SVC}|" || true; } | awk -F'|' '{print $4}' | sort -rn | head -1)
+    [[ -z "$best" ]] || via_path=" (path-based only)"
+  fi
   if [[ -z "$best" ]]; then
     echo -e "  ${YELLOW}$(printf '%-20s' "$short")  NOT IN TCC.db  ← needs user grant${RESET}"
     SUMMARY_LINES+="${short}|MISSING"$'\n'
   else
     label=$(auth_label "$best")
     color=$(auth_color "$label")
-    echo -e "  $(printf '%-20s' "$short")  ${color}${label}${RESET}"
-    SUMMARY_LINES+="${short}|${label}"$'\n'
+    echo -e "  $(printf '%-20s' "$short")  ${color}${label}${via_path}${RESET}"
+    SUMMARY_LINES+="${short}|${label}${via_path}"$'\n'
   fi
 done
 
