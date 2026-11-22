@@ -236,9 +236,10 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
         finally:
             np.save = orig_save
 
-        # index_item swallows the save error (returns True), but the error bus
-        # must have received a loud error so the divergence is not silent.
-        self.assertTrue(ok)
+        # G3-P03-01: отказ записи индекса на диск — НЕ успех: index_item
+        # возвращает False (запись в памяти остаётся, но не долговечна), а
+        # error bus получает громкую ошибку, чтобы расхождение не было тихим.
+        self.assertFalse(ok)
         self.assertEqual(len(pushed), 1)
         self.assertEqual(pushed[0].code, "history.write_fail")
 
@@ -261,7 +262,8 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
             ok = searcher.index_item("id1", "текст")  # must not raise
         finally:
             np.save = orig_save
-        self.assertTrue(ok)
+        self.assertFalse(ok)  # G3-P03-01: нет подтверждённой записи на диск
+        self.assertFalse(searcher._embeddings_path.exists())
 
 
 if __name__ == "__main__":
