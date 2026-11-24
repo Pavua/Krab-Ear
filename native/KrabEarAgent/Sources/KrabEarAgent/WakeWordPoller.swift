@@ -34,6 +34,49 @@ enum WakeWordPauseReason: String, CaseIterable, Sendable {
 
 // MARK: - Чистая логика дебаунса
 
+/// Размыкатель «шторма срабатываний».
+/// Живой инцидент 24.11: кастомная krab_ru выдавала score 0.9999 непрерывно, и каждые ~3 с
+/// запускался «Разговор с AI» (шлюз недоступен → голосовая ошибка + мерцание окна).
+/// Реальный человек не зовёт ассистента 4 раза за полминуты: при такой частоте
+/// срабатывания считаем ложными и на `holdSec` перестаём запускать разговор.
+struct WakeWordStormBreaker {
+    static let maxTriggers = 4
+    static let windowSec: TimeInterval = 30
+    static let holdSec: TimeInterval = 600
+
+    private var times: [TimeInterval] = []
+    private var heldUntil: TimeInterval?
+
+    /// Снять удержание и забыть историю срабатываний. Зовётся ТОЛЬКО из activate()
+    /// (тумблер выключили/включили, сменили модель или движок — перезапуск поллера).
+    /// Из resume() — нельзя: цикл «ложное срабатывание → разговор → resume» обнулял бы
+    /// размыкатель каждый раз и он не срабатывал бы никогда.
+    mutating func reset() {
+        times.removeAll()
+        heldUntil = nil
+    }
+
+    /// true — запускать разговор; false — сработал размыкатель.
+    /// `justTripped` ставится на ту проверку, которая его включила (для одного лога).
+    mutating func allow(at now: TimeInterval, justTripped: inout Bool) -> Bool {
+        justTripped = false
+        if let until = heldUntil {
+            if now < until { return false }
+            heldUntil = nil
+            times.removeAll()
+        }
+        times.append(now)
+        times.removeAll { now - $0 > Self.windowSec }
+        if times.count >= Self.maxTriggers {
+            heldUntil = now + Self.holdSec
+            times.removeAll()
+            justTripped = true
+            return false
+        }
+        return true
+    }
+}
+
 /// Решает «была ли НОВАЯ детекция» по последовательности значений last_detection.ts.
 /// Первый вызов только устанавливает baseline (стейл-детекция прошлой сессии
 /// или живого бэкенда при перезапуске агента не триггерит). nil re-arm'ит
@@ -189,6 +232,9 @@ final class WakeWordPoller {
     private let onWedgedGiveUp: (() -> Void)?
 
     private let tracker = WakeWordDetectionTracker()
+    private var stormBreaker = WakeWordStormBreaker()
+    /// Один раз в момент срабатывания размыкателя: владелец иначе не узнает, почему wake word молчит.
+    private let onStormTripped: (() -> Void)?
     private var wedgedTracker = WedgedEscalationTracker()
     /// Give-up уведомление показываем один раз на эпизод исчерпания капа.
     private var gaveUpNotified = false
@@ -209,9 +255,11 @@ final class WakeWordPoller {
         ipcProvider: @escaping () -> IPCClient?,
         isToggleEnabled: @escaping () -> Bool,
         onDetection: @escaping () -> Void,
+        onStormTripped: (() -> Void)? = nil,
         onWedgedEscalation: (() -> Void)? = nil,
         onWedgedGiveUp: (() -> Void)? = nil
     ) {
+        self.onStormTripped = onStormTripped
         self.ipcProvider = ipcProvider
         self.isToggleEnabled = isToggleEnabled
         self.onDetection = onDetection
@@ -226,6 +274,7 @@ final class WakeWordPoller {
     /// Включить: wake_word_start в backend + периодический поллинг статуса.
     func activate(pausedForPrivacy: Bool = false) {
         guard timer == nil else { return }
+        stormBreaker.reset()
         tracker.reset()
         wedgedTracker.reset()
         gaveUpNotified = false
@@ -335,6 +384,18 @@ final class WakeWordPoller {
                 }
                 let ts = (result["last_detection"] as? [String: Any])?["ts"] as? Double
                 if self.tracker.shouldTrigger(lastDetectionTs: ts) {
+                    var justTripped = false
+                    let allowed = self.stormBreaker.allow(
+                        at: ProcessInfo.processInfo.systemUptime, justTripped: &justTripped)
+                    if justTripped {
+                        AgentLogger.shared.warn(
+                            "[WakeWord] шторм срабатываний (\(WakeWordStormBreaker.maxTriggers) за "
+                            + "\(Int(WakeWordStormBreaker.windowSec)) с) — модель, вероятно, срабатывает на шум; "
+                            + "запуск разговора отключён на \(Int(WakeWordStormBreaker.holdSec / 60)) мин. "
+                            + "Смените модель в настройках голосового ассистента.")
+                        self.onStormTripped?()
+                    }
+                    if !allowed { return }
                     AgentLogger.shared.info("[WakeWord] Детекция — запускаю разговор")
                     self.onDetection()
                     return

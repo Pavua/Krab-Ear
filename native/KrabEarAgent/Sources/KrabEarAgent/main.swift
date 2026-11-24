@@ -791,6 +791,11 @@ final class AgentAppDelegate: NSObject, NSApplicationDelegate {
                 onDetection: { [weak self] in
                     self?.historyPanel?.triggerConversationFromWakeWord()
                 },
+                onStormTripped: {
+                    NotificationService().notify(
+                        title: "Слово-пробуждение приостановлено",
+                        body: "Модель срабатывала слишком часто (ложные срабатывания). На 10 минут отключено; смените модель в Настройках → Голосовой ассистент.")
+                },
                 onWedgedEscalation: { [weak self] in
                     guard let self else { return }
                     self.logger.warn("Wake word: backend wedged — принудительный рестарт backend")
