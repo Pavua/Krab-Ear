@@ -1,5 +1,16 @@
 # NOW — что делать сейчас (Krab Ear)
 
+## Оперативный срез — 2026-11-24 (вечер)
+
+- **Влито** в `codex/krab-ear-v2`: #2228, #2230 (G3-P02-02 аудит purge), #2231 (audio-01 ср.1), #2232 (audio-02), #2233 (KEG2-09 maintenance-fence), #2234 (audio-03), #2235 (audio-04), #2237 (audio-06), #2229 (memory-02…07 + Swift ok-контракты).
+- **Открыто:** #2236 (M04-05 legacy restore; ретаргетнут на основную ветку, конфликт после squash #2229 — Opus сливает базу), #2238 (онбординг wake word: `.failed` вместо ложного «включено», G3-P04-03), #2239 (P04-01/02: ключ и verify_chain аудит-журнала), #2240 (Диагностика на всю ширину + `WakeWordStormBreaker`), #2241 (P04-05/07/10: restore_verdict fail-closed, запись циклом, PurgeScheduler), #2243 (скрипт записи голоса для wake word + замер krab_ru).
+- **Wake word «Краб» не работает по существу:** `krab_ru.onnx` даёт score 1.0 на тишине (88% кадров), `krab_ru_v2` — на шуме 82%; позитивы обучения только синтез Silero. Это и вызывало цикл «Голосовой шлюз недоступен» + мерцание окна (срабатывание каждые ~3 с → «Разговор с AI»). Держать wake word на `hey_jarvis` или выключенным. Нужен датасет голоса владельца (`scripts/record_wake_dataset.py`) и дообучение с проверкой на тишине/шуме до установки — см. `wake_word_models/README.md` §8a. Записи грока найти не удалось (личные записи «Торревьеха», «Recording …» — не датасет, не трогать).
+- **Ждёт стороны Voice Gateway:** VG на `127.0.0.1:8090` отвечает «bad response from the server» на WS подключение разговора.
+- **Приватность (ChatGPT privacy-04/05):** отчёты получены 24.11 (UNVERIFIED в `.remember/CHATGPT_privacy04_05_UNVERIFIED.md`); закрыто P04-01/02/05/07/10 (#2239, #2241), у Opus в работе аудитор purge (05-01/02/05/06/10); Swift P04-04, P04-12/13 — за основной сессией.
+- **Решения владельца (не менялись):** (а) молчаливый fallback микрофона; (б) включить `recording_owner_enforce`; (в) закрыть старые draft-PR codex #2165–#2187; (г) KEG2-20; (д) показывать `complete:false` из delete в Swift; (е) визуальный редизайн приложения (Gemini не оплачен — делаем на Claude).
+- Выкат прода — только `scripts/safe_backend_restart.command`, отдельным шагом после мержей; агент (Swift) пересобирается и перезапускается отдельно.
+- Карта: `/Users/pablito/Antigravity_AGENTS/.coordination/review-map/KARTA_ear.md` + `python3 rollup.py` (Ear 48%). Handoff: `.remember/HANDOFF_2026-11-24_ear_sonnet.md`.
+
 ## Оперативный срез — 2026-11-22
 
 - Влито в `codex/krab-ear-v2`: #2222–#2225, #2226 (срезы ревью `tests-01…10`), #2227 (`CLAUDE.md` 109→29 КБ, подробности в `docs/claude/*.md`).
