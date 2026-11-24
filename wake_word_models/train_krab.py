@@ -1466,6 +1466,11 @@ def stage_owner_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
         if out_path.exists() and not args.force:
             logger.info("owner_features: %s уже существует, пропуск", out_name)
             continue
+        # Пишем во временный файл и переименовываем ТОЛЬКО после проверки: упавший прогон
+        # (compute_features_from_generator создаёт memmap заранее) не оставляет под итоговым
+        # именем нулевой массив, который resume потом честно принял бы за готовый.
+        partial = out_path.with_name(out_name + ".partial")
+        partial.unlink(missing_ok=True)
         clip_list = sorted(str(p) for p in (clips_root / set_name).glob("*.wav")) * max(1, rounds)
         logger.info("owner_features: %s — %d окон (%d раундов)", out_name, len(clip_list), rounds)
         gen = augment_clips(
@@ -1474,9 +1479,10 @@ def stage_owner_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
         )
         compute_features_from_generator(
             gen, n_total=len(clip_list), clip_duration=total_length,
-            output_file=str(out_path), device="cpu", ncpu=args.feature_ncpu,
+            output_file=str(partial), device="cpu", ncpu=args.feature_ncpu,
         )
-        _assert_features_sane(out_path)
+        _assert_features_sane(partial)
+        os.replace(partial, out_path)
 
     # features-маркер нужен stage_train/export (длина окна); owner-маркер — только счётчики.
     write_marker(paths.features, "features", {"total_length_samples": total_length, "source": "owner_features"})

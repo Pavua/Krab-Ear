@@ -71,6 +71,16 @@ class OwnerStageWiringTests(unittest.TestCase):
         self.assertLess(src.index("assert_private_work_dir"), src.index("_link_synthetic_inputs"))
 
 
+class PoisonedArtifactGuardTests(unittest.TestCase):
+    def test_features_written_to_partial_and_renamed_after_sanity_check(self) -> None:
+        src = _func_source("stage_owner_features")
+        self.assertIn('out_name + ".partial"', src)
+        self.assertIn("output_file=str(partial)", src)
+        self.assertLess(src.index("_assert_features_sane(partial)"), src.index("os.replace(partial, out_path)"))
+        self.assertLess(src.index("os.replace(partial, out_path)"), src.index("write_marker(paths.features, \"owner_features\""))
+        self.assertNotIn("output_file=str(out_path)", src)
+
+
 class PrivateWorkDirTests(unittest.TestCase):
     def test_inside_repo_rejected_outside_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
