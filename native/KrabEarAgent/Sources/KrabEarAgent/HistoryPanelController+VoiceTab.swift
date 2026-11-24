@@ -102,14 +102,30 @@ extension HistoryPanelController {
     /// повторное чтение вернуло бы прежнее значение (замечание гейта Opus). Параметр `nil` = не менять.
     func refreshConversationGatewayConfig(gatewayURL: String? = nil, apiKey: String? = nil) {
         guard let vc = conversationVC else { return }
-        if let gatewayURL {
-            vc.config = vc.config.updatingGateway(
-                wsURLString: Self.conversationWSURL(fromGatewayURL: gatewayURL),
-                httpBaseURLString: Self.conversationHTTPBase(fromGatewayURL: gatewayURL))
+        vc.config = Self.conversationGatewayConfig(current: vc.config, urlInput: gatewayURL, keyInput: apiKey)
+    }
+
+    /// Плейсхолдер, которым `get_settings` заменяет непустые секреты (wave-35). Enter в нетронутом поле
+    /// ключа присылает именно его: записывать как ключ нельзя, иначе разговор слал бы «REDACTED».
+    static let redactedSecretPlaceholder = "REDACTED"
+
+    /// Чистое правило обновления конфига разговора из введённых значений.
+    /// * `urlInput == nil` — адрес не менять; иначе WS-URL и HTTP-база пересобираются из введённого.
+    /// * `keyInput == nil` или плейсхолдер «REDACTED» — ключ не трогать (нетронутое поле);
+    ///   пустая строка — осознанная очистка; иначе новое значение.
+    /// Применяется к СЛЕДУЮЩЕМУ разговору: уже открытый WS остаётся со старым заголовком.
+    static func conversationGatewayConfig(current: ConversationConfig, urlInput: String?,
+                                          keyInput: String?) -> ConversationConfig {
+        var config = current
+        if let urlInput {
+            config = config.updatingGateway(
+                wsURLString: conversationWSURL(fromGatewayURL: urlInput),
+                httpBaseURLString: conversationHTTPBase(fromGatewayURL: urlInput))
         }
-        if let apiKey {
-            vc.config.apiKey = apiKey
+        if let keyInput, keyInput != redactedSecretPlaceholder {
+            config.apiKey = keyInput
         }
+        return config
     }
 
     // MARK: - URL builder

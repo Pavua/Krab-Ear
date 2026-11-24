@@ -54,8 +54,65 @@ final class ConversationGatewayConfigRefreshTests: XCTestCase {
         XCTAssertFalse(body.contains("settingsProvider()"))
         XCTAssertFalse(body.contains("callAsync"))
         XCTAssertFalse(body.contains("ipcClient"))
-        XCTAssertTrue(body.contains("vc.config.apiKey = apiKey"))
-        XCTAssertTrue(body.contains("updatingGateway("))
+        XCTAssertTrue(body.contains("conversationGatewayConfig(current: vc.config"))
+    }
+
+    // MARK: Поведение чистого правила (не по тексту исходника)
+
+    private func base() -> ConversationConfig {
+        ConversationConfig(wsURLString: "ws://old/v1/sessions/vs_x/conversation", apiKey: "old-key",
+                           languageHint: "ru", engine: "moshi", brain: "b", brainMode: "fast",
+                           httpBaseURLString: "http://old")
+    }
+
+    @MainActor
+    func test_newKeyAppliedImmediately_urlUntouched() {
+        let out = HistoryPanelController.conversationGatewayConfig(current: base(), urlInput: nil, keyInput: "new-key")
+        XCTAssertEqual(out.apiKey, "new-key")
+        XCTAssertEqual(out.wsURLString, base().wsURLString)
+        XCTAssertEqual(out.httpBaseURLString, "http://old")
+    }
+
+    @MainActor
+    func test_redactedPlaceholderNeverOverwritesKey() {
+        let out = HistoryPanelController.conversationGatewayConfig(
+            current: base(), urlInput: nil, keyInput: HistoryPanelController.redactedSecretPlaceholder)
+        XCTAssertEqual(out.apiKey, "old-key", "Enter в нетронутом поле не должен затирать ключ плейсхолдером")
+    }
+
+    @MainActor
+    func test_emptyKeyClearsDeliberately() {
+        XCTAssertEqual(HistoryPanelController.conversationGatewayConfig(
+            current: base(), urlInput: nil, keyInput: "").apiKey, "")
+    }
+
+    @MainActor
+    func test_nilInputsChangeNothing() {
+        let out = HistoryPanelController.conversationGatewayConfig(current: base(), urlInput: nil, keyInput: nil)
+        XCTAssertEqual(out.apiKey, "old-key")
+        XCTAssertEqual(out.wsURLString, base().wsURLString)
+        XCTAssertEqual(out.httpBaseURLString, "http://old")
+    }
+
+    @MainActor
+    func test_newURLRebuildsBothAddresses_keepsKeyAndOtherFields() {
+        let out = HistoryPanelController.conversationGatewayConfig(
+            current: base(), urlInput: " https://gw.example/ ", keyInput: nil)
+        XCTAssertTrue(out.wsURLString.hasPrefix("wss://gw.example/v1/sessions/vs_"))
+        XCTAssertEqual(out.httpBaseURLString, "https://gw.example")
+        XCTAssertEqual(out.apiKey, "old-key")
+        XCTAssertEqual(out.brainMode, "fast")
+        XCTAssertEqual(out.languageHint, "ru")
+        XCTAssertEqual(out.engine, "moshi")
+    }
+
+    @MainActor
+    func test_bothInputsApplyTogether() {
+        let out = HistoryPanelController.conversationGatewayConfig(
+            current: base(), urlInput: "http://127.0.0.1:9000", keyInput: "k2")
+        XCTAssertEqual(out.apiKey, "k2")
+        XCTAssertEqual(out.httpBaseURLString, "http://127.0.0.1:9000")
+        XCTAssertTrue(out.wsURLString.hasPrefix("ws://127.0.0.1:9000/"))
     }
 
     @MainActor
