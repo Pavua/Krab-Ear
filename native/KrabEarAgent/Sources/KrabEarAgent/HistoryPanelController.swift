@@ -1382,7 +1382,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         voiceGatewayRow.addArrangedSubview(voiceGatewayURLField)
 
         voiceGatewayRow.addArrangedSubview(NSTextField(labelWithString: "API key:"))
-        voiceGatewayAPIKeyField.placeholderString = "опционально"
+        voiceGatewayAPIKeyField.placeholderString = "нужен, если шлюз требует ключ"
         voiceGatewayAPIKeyField.target = self
         voiceGatewayAPIKeyField.action = #selector(onVoiceGatewayAPIKeyChanged)
         voiceGatewayAPIKeyField.setContentHuggingPriority(.defaultLow, for: .horizontal)

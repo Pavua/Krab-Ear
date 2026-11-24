@@ -48,6 +48,15 @@ struct ConversationConfig {
         engine:       "auto",
         brain:        "auto"
     )
+
+    /// Копия с новыми адресами шлюза; остальные поля (язык, движок, мозг, режим, ключ) сохраняются.
+    /// Ключ обновляется отдельно: реальное значение приходит по IPC, а не из редактированных настроек.
+    func updatingGateway(wsURLString: String, httpBaseURLString: String) -> ConversationConfig {
+        var copy = self
+        copy.wsURLString = wsURLString
+        copy.httpBaseURLString = httpBaseURLString
+        return copy
+    }
 }
 
 /// Настройки агента, синхронизированные с backend JSON.
