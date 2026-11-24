@@ -89,12 +89,36 @@ def _read_dispatch_source() -> str:
         return f.read()
 
 
-def _dispatch_block(src: str) -> str:
-    """Return the dispatch table source.
+import ast as _ast
 
-    W1769: dispatch table is inline in service.py; src IS the dispatch table.
+
+def _extract_dispatch_table_source(src: str) -> str:
+    """Исходник ТОЛЬКО метода BackendService._build_dispatch_table (G3-audio-03 A03-01).
+
+    Раньше guard искал ключи по ВСЕМУ service.py: ключ, оставшийся лишь в постороннем
+    словаре, засчитывался как зарегистрированный IPC-обработчик, и удаление хендлера
+    из реальной таблицы не краснело.
     """
-    return src
+    tree = _ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, _ast.ClassDef) and n.name == "BackendService")
+    method = next(
+        n for n in cls.body
+        if isinstance(n, _ast.FunctionDef) and n.name == "_build_dispatch_table"
+    )
+    segment = _ast.get_source_segment(src, method)
+    if not segment:
+        raise AssertionError("не удалось извлечь исходник _build_dispatch_table")
+    return segment
+
+
+def _dispatch_block(src: str) -> str:
+    """Return the source of BackendService._build_dispatch_table ONLY.
+
+    W1769: dispatch table is inline in service.py. G3-audio-03 (A03-01) / G3-audio-02
+    (A02-11): раньше возвращался ВЕСЬ service.py — ключ из постороннего словаря
+    засчитывался как обработчик.
+    """
+    return _extract_dispatch_table_source(src)
 
 
 def _all_dispatch_keys(block: str) -> set:
