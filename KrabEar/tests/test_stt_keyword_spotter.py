@@ -395,12 +395,27 @@ class EvalScriptTests(unittest.TestCase):
         label = self.mod.block_label
         self.assertEqual(label("neg_lookalikes", "Краб-салат"), "neg_lookalikes:содержит_слово")
         self.assertEqual(label("neg_lookalikes", "Крабы"), "neg_lookalikes:содержит_слово")
-        for prompt in ("Грабли", "Крап", "Карп", "Брат", "Кран", "Кроб", ""):
+        for prompt in ("Грабли", "Драп", "Кроп", "Карп", "Брат", "Кран", "Кроб", "Крупа", "", None):
             self.assertEqual(label("neg_lookalikes", prompt), "neg_lookalikes")
-        # срабатывание на «Крап» в том же блоке остаётся ложным и валит приёмку
+        # срабатывание на «Драп» в том же блоке остаётся ложным и валит приёмку
         results = {("pos", "pos_normal"): (20, 20), ("neg", "neg_lookalikes"): (13, 1),
                    ("neg", "neg_lookalikes:содержит_слово"): (3, 3)}
         self.assertFalse(self.mod.accepted(self.mod.summarize(results)))
+
+    def test_homophone_krap_is_a_separate_row_not_a_false_fire(self) -> None:
+        label = self.mod.block_label
+        self.assertEqual(label("neg_lookalikes", "Крап"), "neg_lookalikes:омофон")
+        self.assertEqual(label("neg_lookalikes", "эй, крап!"), "neg_lookalikes:омофон")
+        results = {("pos", "pos_normal"): (20, 19), ("neg", "neg_ru_speech"): (24, 0),
+                   ("neg", "neg_lookalikes"): (13, 0), ("neg", "neg_lookalikes:омофон"): (1, 1),
+                   ("neg", "neg_lookalikes:содержит_слово"): (2, 2)}
+        summary = self.mod.summarize(results)
+        self.assertEqual((summary["homophone_fires"], summary["homophone_clips"]), (1, 1))
+        self.assertEqual((summary["neg_fire"], summary["neg_total"]), (0, 37))
+        self.assertTrue(self.mod.accepted(summary))
+        report = self.mod.format_report(results, summary)
+        self.assertIn("Омофон «крап» (звучит как «краб»): сработало 1 из 1", report)
+        self.assertIn("neg_lookalikes:омофон | 1 / 1", report)
 
     def test_accepts_good_run_and_counts_word_blocks_separately(self) -> None:
         results = {("pos", "pos_normal"): (20, 18), ("pos", "pos_short"): (16, 16),
