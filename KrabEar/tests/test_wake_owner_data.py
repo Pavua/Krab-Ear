@@ -203,12 +203,60 @@ class AudioHelpersTests(unittest.TestCase):
                      od.OwnerClip(src / "neg_a_000.wav", "neg", "neg_a")]
             out_pos = root / "out_pos"
             c = od.prepare_owner_clips(clips[:2], out_pos, prefix="owner_pos")
-            self.assertEqual(c, {"in": 2, "out": 1, "skipped_silent": 1})
+            self.assertEqual(c, {"in": 2, "out": 1, "skipped_silent": 1, "segments": 0})
             self.assertEqual([p.name for p in out_pos.iterdir()], ["owner_pos_0000.wav"])
             c = od.prepare_owner_clips(clips[2:], root / "out_neg", prefix="owner_neg")
             self.assertGreaterEqual(c["out"], 2)
             for p in (root / "out_neg").iterdir():
                 self.assertNotIn("neg_a", p.name)  # исходные имена не переносятся
+
+
+class ShortSegmentTests(unittest.TestCase):
+    """Негативы той же формы, что позитивы: короткий отрезок речи, ставимый в КОНЕЦ окна."""
+
+    def _speech(self) -> list[int]:
+        return _silence(0.3) + _tone(1.2, freq=300) + _silence(0.2) + _tone(1.0, freq=700) + _silence(0.3)
+
+    def test_segments_have_requested_length_range_and_count(self) -> None:
+        segs = od.short_segments(self._speech(), count=6, min_len=4800, max_len=12800, seed=1)
+        self.assertEqual(len(segs), 6)
+        for seg in segs:
+            self.assertTrue(4800 <= len(seg) <= 12800, len(seg))
+
+    def test_deterministic_by_seed_and_varies_across_seeds(self) -> None:
+        a = od.short_segments(self._speech(), count=4, seed=7)
+        self.assertEqual(a, od.short_segments(self._speech(), count=4, seed=7))
+        self.assertNotEqual(a, od.short_segments(self._speech(), count=4, seed=8))
+
+    def test_silence_or_too_quiet_gives_nothing(self) -> None:
+        self.assertEqual(od.short_segments(_silence(2.0), count=5, seed=1), [])
+        self.assertEqual(od.short_segments(_tone(2.0, amp=0.004), count=5, seed=1), [])
+
+    def test_segments_carry_speech_not_silence(self) -> None:
+        for seg in od.short_segments(self._speech(), count=8, seed=3):
+            self.assertIsNotNone(od.active_region(seg))
+
+    def test_short_speech_is_taken_whole_when_shorter_than_requested(self) -> None:
+        segs = od.short_segments(_tone(0.2, freq=500), count=2, min_len=4800, max_len=12800, seed=1)
+        self.assertTrue(all(len(s) <= 4800 for s in segs))
+
+    def test_prepare_adds_segments_only_for_requested_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "src"
+            src.mkdir()
+            od.write_wav_mono16(src / "neg_ru_speech_000.wav", self._speech())
+            od.write_wav_mono16(src / "neg_room_silence_000.wav", _tone(2.0, amp=0.05))
+            clips = [od.OwnerClip(src / "neg_ru_speech_000.wav", "neg", "neg_ru_speech"),
+                     od.OwnerClip(src / "neg_room_silence_000.wav", "neg", "neg_room_silence")]
+            c = od.prepare_owner_clips(clips, root / "out", prefix="neg_train", short_per_clip=5,
+                                       short_block_prefixes=("neg_ru_speech",))
+            self.assertEqual(c["segments"], 5)
+            windows = [p for p in (root / "out").iterdir()]
+            self.assertEqual(len(windows), c["out"])
+            c0 = od.prepare_owner_clips(clips, root / "out0", prefix="neg_train")
+            self.assertEqual(c0["segments"], 0)
+            self.assertEqual(c["out"], c0["out"] + 5)
 
 
 class ModuleHygieneTests(unittest.TestCase):

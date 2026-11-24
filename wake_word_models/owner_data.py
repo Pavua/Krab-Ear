@@ -206,15 +206,45 @@ def crop_windows(samples: Sequence[int], *, window: int = 32000, hop: int = 8000
     return out
 
 
-def prepare_owner_clips(clips: Iterable[OwnerClip], out_dir: Path, *, prefix: str) -> dict[str, int]:
+def short_segments(samples: Sequence[int], *, count: int, min_len: int = 4800, max_len: int = 12800,
+                   seed: int = 13) -> list[list[int]]:
+    """Короткие отрезки речи (0.3–0.8 с) — негативы ТОГО ЖЕ вида, что позитив «Краб».
+
+    ``augment_clips`` дополняет короткие клипы слева нулями до окна, то есть ставит их в КОНЕЦ окна.
+    Позитив — короткий всплеск речи в конце окна; если негативы только длинные сплошные окна, модель
+    учит «всплеск речи после паузы», а не слово, и срабатывает на любой речи. Короткие отрезки обычной
+    речи в том же положении снимают этот сдвиг. Отрезок целиком внутри активного участка, без тишины.
+    """
+    region = active_region(samples, pad_ms=0)
+    if region is None or count <= 0:
+        return []
+    start, end = region
+    rng = random.Random(seed)
+    out: list[list[int]] = []
+    for _ in range(count):
+        length = rng.randint(min_len, max_len)
+        if end - start <= length:
+            seg = list(samples[start:end])
+        else:
+            first = rng.randint(start, end - length)
+            seg = list(samples[first:first + length])
+        if seg and active_region(seg) is not None:
+            out.append(seg)
+    return out
+
+
+def prepare_owner_clips(clips: Iterable[OwnerClip], out_dir: Path, *, prefix: str,
+                        short_per_clip: int = 0,
+                        short_block_prefixes: Sequence[str] = ()) -> dict[str, int]:
     """Пишет подготовленные клипы в ``out_dir`` под обезличенными именами ``prefix_NNNN.wav``.
 
-    Позитивы — вырезанный активный участок (тихие/пустые пропускаются), негативы — окна.
-    Возвращает счётчики: ``in``, ``out``, ``skipped_silent``.
+    Позитивы — вырезанный активный участок (тихие/пустые пропускаются), негативы — окна; для негативов
+    из блоков ``short_block_prefixes`` дополнительно ``short_per_clip`` коротких отрезков речи
+    (``short_segments``). Возвращает счётчики: ``in``, ``out``, ``skipped_silent``, ``segments``.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    counters = {"in": 0, "out": 0, "skipped_silent": 0}
+    counters = {"in": 0, "out": 0, "skipped_silent": 0, "segments": 0}
     n = 0
     for clip in clips:
         counters["in"] += 1
@@ -226,6 +256,10 @@ def prepare_owner_clips(clips: Iterable[OwnerClip], out_dir: Path, *, prefix: st
                 counters["skipped_silent"] += 1
         else:
             pieces = crop_windows(samples)
+            if short_per_clip > 0 and clip.block.startswith(tuple(short_block_prefixes)):
+                segs = short_segments(samples, count=short_per_clip, seed=n + 1)
+                counters["segments"] += len(segs)
+                pieces = pieces + segs
         for piece in pieces:
             write_wav_mono16(out_dir / f"{prefix}_{n:04d}.wav", piece)
             n += 1

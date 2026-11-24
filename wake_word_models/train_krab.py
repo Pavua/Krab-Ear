@@ -91,6 +91,8 @@ OWNER_STAGES: tuple[str, ...] = ("owner_features",)
 # (комната, клавиатура, тихая «свободная речь»): берутся ТОЛЬКО из train-части.
 OWNER_BACKGROUND_BLOCKS: frozenset[str] = frozenset(
     {"neg_room_silence", "neg_typing", "neg_self_talk"})
+# Блоки, из речи которых режутся короткие отрезки-негативы (форма позитива: всплеск речи в конце окна).
+OWNER_SHORT_NEG_BLOCKS: tuple[str, ...] = ("neg_ru_speech", "neg_es_speech", "neg_self_talk", "golden_")
 OWNER_FEATURE_FILES: tuple[str, str] = (
     "owner_positive_features_train.npy", "owner_negative_features_train.npy")
 
@@ -778,6 +780,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Раундов аугментации на клип-позитив владельца (train)")
     owner_g.add_argument("--owner-neg-rounds", type=int, default=12,
                          help="Раундов аугментации на клип-негатив владельца и golden (train)")
+    owner_g.add_argument("--owner-short-negs", type=int, default=10,
+                         help="Коротких отрезков речи на клип-негатив (train): негативы формы позитива")
     owner_g.add_argument("--owner-val-rounds", type=int, default=6,
                          help="Раундов аугментации на проверочный клип (чтобы проверка шла и по шуму)")
     owner_g.add_argument(
@@ -1446,7 +1450,10 @@ def stage_owner_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
         if target.exists() and args.force:
             for stale in target.glob("*.wav"):
                 stale.unlink()
-        counters[name] = od.prepare_owner_clips(items, target, prefix=name)
+        counters[name] = od.prepare_owner_clips(
+            items, target, prefix=name,
+            short_per_clip=args.owner_short_negs if name == "neg_train" else 0,
+            short_block_prefixes=OWNER_SHORT_NEG_BLOCKS)
     bg_dir = clips_root / "background"
     bg_items = [c for c in neg_train if c.block in OWNER_BACKGROUND_BLOCKS]
     bg_counters = od.prepare_owner_clips(bg_items, bg_dir, prefix="bg") if bg_items else {"in": 0, "out": 0}
