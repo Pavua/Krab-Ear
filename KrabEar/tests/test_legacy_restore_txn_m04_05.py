@@ -290,6 +290,17 @@ class LegacyRestoreTxnTest(unittest.TestCase):
         self.assertFalse(snapshot.exists(), "снимок эмбеддингов прежней истории пережил докатку")
         self.assertTrue(SemanticSearcher(self.data_dir).status()["needs_reindex"])
 
+    def test_roll_forward_by_module_path_resets_store_caches_in_live_process(self):
+        """В живом процессе кэш id, набранный по частично заменённым файлам, сбрасывается."""
+        from backend.encrypted_snapshot import recover_pending_restore_from_store
+
+        backup = self._backup([_line("n1"), _line("n2")])
+        self._pending_after_failure(backup)
+        self.store._active_ids = {"stale-id"}
+        verdict = recover_pending_restore_from_store(self.store)
+        self.assertTrue(verdict["rolled_forward"], verdict)
+        self.assertNotEqual(self.store._active_ids, {"stale-id"}, "кэш id пережил докатку")
+
     def test_pending_failure_resets_semantic_index_in_memory(self):
         backup = self._backup([_line("n1")])
         self._pending_after_failure(backup)

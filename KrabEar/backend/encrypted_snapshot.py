@@ -3046,6 +3046,18 @@ def recover_pending_restore_from_store(store: Any) -> dict | None:
     except Exception:  # noqa: BLE001 — вызывающий не имеет права упасть
         logger.exception("encrypted_snapshot: restore recovery не выполнен")
         return None
+    if isinstance(verdict, dict) and verdict.get("rolled_forward"):
+        # M04-05: докатка заменила живые журналы мимо RAM этого StateStore —
+        # кэш активных id/поиска мог быть набран по частично заменённым файлам.
+        # Точка общая для всех вызывающих (HistoryService, auto_backup).
+        try:
+            with store._lock():
+                store._active_ids = None
+                reset = getattr(store, "reset_search_caches", None)
+                if callable(reset):
+                    reset()
+        except Exception:  # noqa: BLE001 — вердикт важнее; кэш перечитается при старте
+            logger.warning("encrypted_snapshot: сброс кэшей стора после докатки не удался", exc_info=True)
     return verdict
 
 

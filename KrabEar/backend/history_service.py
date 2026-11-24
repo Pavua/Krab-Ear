@@ -5629,14 +5629,8 @@ class HistoryService:
         """
         verdict = recover_pending_restore_from_store(self.store)
         if isinstance(verdict, dict) and verdict.get("rolled_forward"):
-            # M04-05: докатка заменила живые журналы мимо RAM этого процесса —
-            # кэши активных id/поиска и эмбеддинги прежней истории недействительны.
-            try:
-                with self.store._lock():
-                    self.store._active_ids = None
-                    self.store.reset_search_caches()
-            except Exception:  # noqa: BLE001 — вердикт важнее; кэш перечитается при старте
-                logger.warning("recover: не удалось сбросить кэши после докатки", exc_info=True)
+            # M04-05: кэши стора сбрасывает сама точка входа recovery; здесь —
+            # in-memory эмбеддинги прежней истории (файлы обнулила докатка).
             verdict = {**verdict, "semantic_reindex_required": self._reset_semantic_index_after_restore()}
         return verdict
 
