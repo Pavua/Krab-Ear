@@ -8,7 +8,9 @@ from core.engine import AudioEngine
 
 class TestAudioProcessing(unittest.TestCase):
     def setUp(self):
-        self.engine = AudioEngine()
+        # G3-audio-01 (A01): без skip_gigaam_warmup конструктор при STT_GIGAAM_ENABLED
+        # поднимает фоновый warmup реального GigaAM-subprocess из юнит-теста.
+        self.engine = AudioEngine(skip_gigaam_warmup=True)
 
     def test_normalize_phrase(self):
         """Проверка нормализации текста для сравнения."""

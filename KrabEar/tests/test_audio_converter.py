@@ -32,6 +32,21 @@ def _make_wav(path: str, duration: float = 1.0, sample_rate: int = 16000, channe
     return path
 
 
+
+def _ffmpeg_ok_writing_output(cmd, *args, **kwargs):
+    """Подмена subprocess.run «успешного ffmpeg»: rc=0 И выходной файл создан.
+
+    G3-audio-01 (A03): convert() обязан проверять выход, поэтому успешный мок без
+    файла больше не годится — он закреплял ложный успех. Выход — последний аргумент.
+    """
+    with open(cmd[-1], "wb") as fh:
+        fh.write(b"RIFF" + b"\x00" * 40)
+    result = MagicMock()
+    result.returncode = 0
+    result.stderr = ""
+    return result
+
+
 class TestAudioInfo(unittest.TestCase):
     """Тесты AudioInfo dataclass и get_audio_info."""
 
@@ -210,6 +225,44 @@ class TestConvertMocked(unittest.TestCase):
         result.stderr = ""
         return result
 
+    # ── G3-audio-01 A03: returncode=0 — не доказательство результата ─────────
+
+    def test_zero_exit_without_output_file_raises(self):
+        """ffmpeg rc=0, но выходного файла нет — это НЕ успех конвертации."""
+        src = self._make_src()
+        dst = os.path.join(self.tmp, "missing_output.wav")
+        with patch("subprocess.run", return_value=self._mock_run_ok()):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.converter.convert(src, output_format="wav", sample_rate=16000, output_path=dst)
+        self.assertIn("пуст", str(ctx.exception))
+        self.assertFalse(os.path.exists(dst))
+
+    def test_zero_exit_with_empty_output_file_raises_and_cleans_up(self):
+        """rc=0 и пустой файл: ошибка, мусорный пустой файл не остаётся."""
+        src = self._make_src()
+        dst = os.path.join(self.tmp, "empty_output.wav")
+
+        def run_writes_empty(cmd, *args, **kwargs):
+            open(cmd[-1], "wb").close()
+            return self._mock_run_ok()
+
+        with patch("subprocess.run", side_effect=run_writes_empty):
+            with self.assertRaises(RuntimeError):
+                self.converter.convert(src, output_format="wav", sample_rate=16000, output_path=dst)
+        self.assertFalse(os.path.exists(dst))
+
+    def test_zero_exit_with_real_output_file_returns_path(self):
+        """Парный успех: rc=0 и непустой файл — путь возвращается."""
+        src = self._make_src()
+        dst = os.path.join(self.tmp, "good_output.wav")
+        with patch("subprocess.run", side_effect=self._run_writing_output):
+            result = self.converter.convert(src, output_format="wav", sample_rate=16000, output_path=dst)
+        self.assertEqual(result, dst)
+        self.assertGreater(os.path.getsize(dst), 0)
+
+    def _run_writing_output(self, cmd, *args, **kwargs):
+        return _ffmpeg_ok_writing_output(cmd, *args, **kwargs)
+
     # ── Проверка аргументов subprocess ───────────────────────────────────────
 
     def test_convert_calls_ffmpeg_with_correct_args(self):
@@ -217,7 +270,7 @@ class TestConvertMocked(unittest.TestCase):
         src = self._make_src()
         dst = os.path.join(self.tmp, "out.wav")
 
-        with patch("subprocess.run", return_value=self._mock_run_ok()) as mock_run:
+        with patch("subprocess.run", side_effect=_ffmpeg_ok_writing_output) as mock_run:
             result = self.converter.convert(src, output_format="wav", sample_rate=16000, output_path=dst)
 
         self.assertEqual(result, dst)
@@ -238,7 +291,7 @@ class TestConvertMocked(unittest.TestCase):
         src = self._make_src()
         dst = os.path.join(self.tmp, "out22.wav")
 
-        with patch("subprocess.run", return_value=self._mock_run_ok()) as mock_run:
+        with patch("subprocess.run", side_effect=_ffmpeg_ok_writing_output) as mock_run:
             self.converter.convert(src, output_format="wav", sample_rate=22050, output_path=dst)
 
         cmd = mock_run.call_args[0][0]
@@ -341,7 +394,7 @@ class TestConvertMp3ToWav(unittest.TestCase):
         ok_result.returncode = 0
         ok_result.stderr = ""
 
-        with patch("subprocess.run", return_value=ok_result) as mock_run:
+        with patch("subprocess.run", side_effect=_ffmpeg_ok_writing_output) as mock_run:
             result = self.converter.convert(src, output_format="wav", sample_rate=16000, output_path=dst)
 
         self.assertEqual(result, dst)
@@ -453,7 +506,7 @@ class TestICloudPathCopiestoTmp(unittest.TestCase):
         ok_result.returncode = 0
         ok_result.stderr = ""
 
-        with patch("subprocess.run", return_value=ok_result) as mock_run:
+        with patch("subprocess.run", side_effect=_ffmpeg_ok_writing_output) as mock_run:
             result = self.converter.convert(src, output_format="wav", output_path=dst)
 
         self.assertEqual(result, dst)
