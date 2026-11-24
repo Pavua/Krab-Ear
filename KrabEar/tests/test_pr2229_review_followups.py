@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -125,6 +125,54 @@ class PurgeVerifySnapshotTests(unittest.TestCase):
         errors: list[str] = []
         svc._purge_verify_cleanup(errors, self.root)
         self.assertEqual(errors, [])
+
+
+class _ConfirmedAudit:
+    def log_event_strict(self, **kwargs):
+        return "confirmed"
+
+
+class PurgeTranscriptsTreeTests(unittest.TestCase):
+    """F3 (ревью #2229): purge transcripts/ чистит подкаталоги и симлинки, не трогая их цели."""
+
+    def setUp(self) -> None:
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.root = Path(self._td.name)
+        self.outside = self.root.parent / (self.root.name + "_outside")
+        self.outside.mkdir()
+        (self.outside / "keep.txt").write_text("чужой файл", encoding="utf-8")
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.outside, ignore_errors=True))
+
+    def _purge(self) -> dict:
+        import backend.privacy_audit as pa
+
+        svc = _make_svc(str(self.root), item_ids=["a"])
+        with patch("backend.crypto_keystore.delete_history_key", return_value=True), \
+                patch.object(pa, "get_privacy_audit_logger", lambda **kw: _ConfirmedAudit()):
+            return svc.handle_purge_all_data({"confirm": True})
+
+    def test_nested_subdirectory_and_inner_symlink_are_purged_target_untouched(self) -> None:
+        tdir = self.root / "transcripts"
+        (tdir / "sub" / "deeper").mkdir(parents=True)
+        (tdir / "sub" / "x.md").write_text("секрет 1", encoding="utf-8")
+        (tdir / "sub" / "deeper" / "y.md").write_text("секрет 2", encoding="utf-8")
+        (tdir / "top.md").write_text("секрет 3", encoding="utf-8")
+        (tdir / "link").symlink_to(self.outside, target_is_directory=True)
+
+        result = self._purge()
+
+        self.assertEqual(list(tdir.iterdir()), [])  # всё внутри transcripts/ удалено
+        self.assertEqual((self.outside / "keep.txt").read_text(encoding="utf-8"), "чужой файл")
+        self.assertGreaterEqual(result["transcripts_deleted"], 4)  # top + x + y + link
+        self.assertNotIn("transcripts", result["errors"])
+
+    def test_transcripts_dir_that_is_symlink_is_unlinked_target_untouched(self) -> None:
+        (self.root / "transcripts").symlink_to(self.outside, target_is_directory=True)
+        result = self._purge()
+        self.assertFalse((self.root / "transcripts").exists() or (self.root / "transcripts").is_symlink())
+        self.assertEqual((self.outside / "keep.txt").read_text(encoding="utf-8"), "чужой файл")
+        self.assertNotIn("transcripts", result["errors"])
 
 
 if __name__ == "__main__":

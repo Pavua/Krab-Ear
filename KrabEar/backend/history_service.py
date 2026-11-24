@@ -3291,6 +3291,20 @@ class HistoryService:
                         logger.warning("purge_all_data: could not delete transcript file %s", export_path, exc_info=True)
                 if len(export_files) > transcripts_deleted:
                     secondary_errors.append("transcripts")
+                # Подкаталоги и симлинки ВНУТРИ transcripts/ (ревью #2229 F3): iterdir()+is_file()
+                # выше их не трогал, а _purge_directory_entries (M04-03) нигде не вызывался.
+                # Симлинк удаляется как ссылка (цель не трогаем), каталог — рекурсивно через FD.
+                for sub_entry in transcripts_dir.iterdir():
+                    try:
+                        if sub_entry.is_symlink():
+                            sub_entry.unlink()
+                            transcripts_deleted += 1
+                        elif sub_entry.is_dir():
+                            transcripts_deleted += _purge_directory_entries(sub_entry)
+                            sub_entry.rmdir()
+                    except OSError:
+                        logger.warning("purge_all_data: could not purge transcripts subentry %s", sub_entry, exc_info=True)
+                        _flag_step_error(secondary_errors, "transcripts")
         except Exception:
             logger.warning("purge_all_data: transcript directory deletion failed", exc_info=True)
             secondary_errors.append("transcripts")
