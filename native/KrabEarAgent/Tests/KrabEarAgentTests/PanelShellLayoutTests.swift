@@ -147,6 +147,24 @@ final class PanelShellLayoutTests: XCTestCase {
         }
     }
 
+    func test_keyboardFocus_isVisibleOnSelectedRow() {
+        let shell = makeShell(width: 640).1
+        shell.sidebar.select(.history)
+        XCTAssertTrue(shell.sidebar.acceptsFirstResponder)
+        for row in shell.sidebar.rows { row.showsKeyboardFocus = true }
+        let selected = shell.sidebar.rows.first { $0.tab == .history }!
+        let other = shell.sidebar.rows.first { $0.tab == .dictation }!
+        XCTAssertEqual(selected.layer?.borderWidth, 2, "фокус клавиатуры виден на выбранной строке")
+        XCTAssertEqual(other.layer?.borderWidth, 0)
+        for row in shell.sidebar.rows { row.showsKeyboardFocus = false }
+        XCTAssertEqual(selected.layer?.borderWidth, 0)
+    }
+
+    func test_topInset_fallsBackWithoutWindow_andFollowsSafeArea() {
+        let shell = makeShell(width: 860).1
+        XCTAssertEqual(shell.topInset, PanelShellView.titlebarInset, accuracy: 0.5)
+    }
+
     func test_header_titleIsPageTitleFont() {
         let shell = makeShell(width: 860).1
         shell.header.title = "Диктовка"
