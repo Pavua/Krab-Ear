@@ -288,6 +288,8 @@ public enum SettingsGlossary {
         "voxtral_reasoning_enabled": SettingDescriptor(titleRU: "Рассуждения в Voxtral", groupRU: "Языковые модели и LLM", descriptionRU: "Включить генерацию рассуждений и цепочки мыслей Voxtral"),
         "wake_word_enabled": SettingDescriptor(titleRU: "Голосовая активация (Wake Word)", groupRU: "Wake Word и ассистент", descriptionRU: "Включение фонового прослушивания ключевой фразы активации"),
         "wake_word_engine": SettingDescriptor(titleRU: "Движок голосовой активации", groupRU: "Wake Word и ассистент", descriptionRU: "Используемая библиотека детекции wake word (openwakeword, porcupine)"),
+        "wake_word_oww_mode": SettingDescriptor(titleRU: "openWakeWord: режим", groupRU: "Wake Word и ассистент", descriptionRU: "off — выключен, shadow — только считает срабатывания (никого не будит), live — будит"),
+        "wake_word_stt_mode": SettingDescriptor(titleRU: "Поиск «Краб» по речи: режим", groupRU: "Wake Word и ассистент", descriptionRU: "off — выключен, shadow — только считает срабатывания, live — будит; использует уже загруженный GigaAM, длинную речь не распознаёт"),
         "wake_word_stale_sec": SettingDescriptor(titleRU: "Таймаут зависания Wake Word", groupRU: "Wake Word и ассистент", descriptionRU: "Время отсутствия heartbeat до перезапуска детектора (секунды)"),
         "wake_word_watchdog_enabled": SettingDescriptor(titleRU: "Сторожевой таймер Wake Word", groupRU: "Wake Word и ассистент", descriptionRU: "Мониторинг зависания потока распознавания ключевого слова"),
         "whisper_idle_unload_sec": SettingDescriptor(titleRU: "Выгрузка Whisper при простое", groupRU: "Распознавание речи (STT)", descriptionRU: "Таймаут выгрузки моделей Whisper из памяти MLX/GPU"),
