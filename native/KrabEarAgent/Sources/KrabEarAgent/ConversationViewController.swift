@@ -455,6 +455,12 @@ final class ConversationViewController: NSViewController {
             conversationState = .error(message)
             stopConversation()
 
+        case .voiceFallback(let reason, let fromEngine, let toEngine):
+            AgentLogger.shared.info("[ConversationVC] conv.voice_fallback (\(reason)): \(fromEngine) -> \(toEngine)")
+            appendTranscriptLine(reason.isEmpty
+                ? "— Голос временно упрощён"
+                : "— Голос временно упрощён (\(reason))")
+
         case .interrupted(let reason):
             AgentLogger.shared.info("[ConversationVC] conv.interrupted (\(reason))")
             handleInterrupted(reason: reason)

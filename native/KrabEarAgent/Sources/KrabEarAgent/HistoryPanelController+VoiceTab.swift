@@ -32,7 +32,7 @@ extension HistoryPanelController {
         let config = ConversationConfig(
             wsURLString:  buildConversationWSURL(from: settings),
             apiKey:       settings.voiceGatewayAPIKey,
-            languageHint: "auto",
+            languageHint: ConversationViewController.savedLanguageHint,
             engine:       "auto",
             brain:        "auto",
             brainMode:    ConversationViewController.savedBrainMode,
