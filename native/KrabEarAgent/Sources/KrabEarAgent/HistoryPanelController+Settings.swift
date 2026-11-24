@@ -1449,6 +1449,15 @@ extension HistoryPanelController {
                         if let selected, names.contains(selected) {
                             self.vaWakeWordModelSelector.selectItem(withTitle: selected)
                         }
+                        // Свою модель «Краб» выбираем по умолчанию, пока владелец сам ничего не выбрал:
+                        // иначе слушается встроенная hey_jarvis и «Краб» не срабатывает никогда.
+                        let defaults = UserDefaults.standard
+                        if let preferred = WakeWordModelChoice.preferredDefault(
+                            saved: defaults.string(forKey: "KrabEar_WakeWordModel"), available: names) {
+                            defaults.set(preferred, forKey: "KrabEar_WakeWordModel")
+                            self.vaWakeWordModelSelector.selectItem(withTitle: preferred)
+                            self.restartWakeWordIfEnabled()
+                        }
                     }
                 }
             }
