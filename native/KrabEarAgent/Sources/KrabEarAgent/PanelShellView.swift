@@ -77,9 +77,6 @@ final class PanelSidebarRow: NSView {
         layer?.cornerRadius = KrabEarTheme.Metrics.chipCornerRadius + 2
         layer?.cornerCurve = .continuous
 
-        let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .medium)
-        iconView.image = NSImage(systemSymbolName: tab.symbolName, accessibilityDescription: nil)?
-            .withSymbolConfiguration(config)
         iconView.contentTintColor = KrabEarTheme.Colors.textPrimary
         iconView.translatesAutoresizingMaskIntoConstraints = false
 
@@ -142,6 +139,16 @@ final class PanelSidebarRow: NSView {
         guard selected != isSelected else { return }
         isSelected = selected
         applyState()
+        applyColors()
+    }
+
+    /// Панель в фокусе клавиатуры: у выбранной строки рамка системного цвета фокуса.
+    /// (Системное кольцо AppKit рисует только у самого first responder — им является панель.)
+    var showsKeyboardFocus = false {
+        didSet {
+            guard showsKeyboardFocus != oldValue else { return }
+            applyColors()
+        }
     }
 
     private func applyState() {
@@ -150,6 +157,10 @@ final class PanelSidebarRow: NSView {
             ? .systemFont(ofSize: KrabEarTheme.Typography.bodyLarge.pointSize, weight: .semibold)
             : KrabEarTheme.Typography.bodyLarge
         accentBar.isHidden = !isSelected
+        // В режиме рейки подписи нет — выбор читается по полосе, подложке и жирной иконке.
+        let config = NSImage.SymbolConfiguration(pointSize: isSelected ? 17 : 16, weight: isSelected ? .bold : .medium)
+        iconView.image = NSImage(systemSymbolName: tab.symbolName, accessibilityDescription: nil)?
+            .withSymbolConfiguration(config)
         setAccessibilitySelected(isSelected)
         needsDisplay = true
     }
@@ -166,6 +177,9 @@ final class PanelSidebarRow: NSView {
                 ? NSColor.controlAccentColor.withAlphaComponent(0.18).cgColor
                 : NSColor.clear.cgColor
             accentBar.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
+            let focused = showsKeyboardFocus && isSelected
+            layer?.borderWidth = focused ? 2 : 0
+            layer?.borderColor = NSColor.keyboardFocusIndicatorColor.cgColor
         }
     }
 
@@ -207,6 +221,9 @@ final class PanelSidebarView: NSView {
     private let stack = NSStackView()
     private let separator = NSView()
     private(set) var widthConstraint: NSLayoutConstraint!
+    private var stackTop: NSLayoutConstraint!
+
+    func setTopInset(_ inset: CGFloat) { stackTop.constant = inset }
 
     init(topInset: CGFloat) {
         super.init(frame: .zero)
@@ -239,9 +256,10 @@ final class PanelSidebarView: NSView {
         }
 
         widthConstraint = widthAnchor.constraint(equalToConstant: Self.fullWidth)
+        stackTop = stack.topAnchor.constraint(equalTo: topAnchor, constant: topInset)
         NSLayoutConstraint.activate([
             widthConstraint,
-            stack.topAnchor.constraint(equalTo: topAnchor, constant: topInset),
+            stackTop,
             stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KrabEarTheme.Metrics.standard),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.standard - 1),
             separator.topAnchor.constraint(equalTo: topAnchor),
@@ -279,6 +297,26 @@ final class PanelSidebarView: NSView {
     // MARK: Клавиатура: ↑/↓ в сфокусированной панели
 
     override var acceptsFirstResponder: Bool { true }
+
+    override func becomeFirstResponder() -> Bool {
+        let ok = super.becomeFirstResponder()
+        if ok { setKeyboardFocus(true) }
+        return ok
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let ok = super.resignFirstResponder()
+        if ok { setKeyboardFocus(false) }
+        return ok
+    }
+
+    /// Видимый фокус: кольцо вокруг выбранной строки, пока панель в фокусе клавиатуры.
+    private(set) var hasKeyboardFocus = false
+
+    private func setKeyboardFocus(_ focused: Bool) {
+        hasKeyboardFocus = focused
+        for row in rows { row.showsKeyboardFocus = focused }
+    }
 
     override func keyDown(with event: NSEvent) {
         let tabs = HistoryPanelController.PanelTab.ordered
@@ -364,9 +402,15 @@ final class PanelHeaderView: NSView {
 
 @MainActor
 final class PanelShellView: NSView {
-    /// Отступ сверху под заголовок окна: окно использует fullSizeContentView,
-    /// кнопки светофора занимают верхние ~28 pt.
-    static let titlebarInset: CGFloat = 40
+    /// Отступ сверху под заголовок окна (окно использует fullSizeContentView). Берётся из
+    /// safeAreaInsets (высота заголовка/тулбара); без окна — стандартные 28 pt + зазор 12.
+    static let fallbackTitlebarHeight: CGFloat = 28
+    static let titlebarGap: CGFloat = 12
+    static var titlebarInset: CGFloat { fallbackTitlebarHeight + titlebarGap }
+
+    /// Текущий отступ сверху (обновляется в layout по safeAreaInsets).
+    private(set) var topInset: CGFloat = PanelShellView.titlebarInset
+    private var headerTop: NSLayoutConstraint!
 
     let sidebar: PanelSidebarView
     let header = PanelHeaderView()
@@ -383,12 +427,13 @@ final class PanelShellView: NSView {
         addSubview(contentHost)
 
         let gap = KrabEarTheme.Metrics.comfortable
+        headerTop = header.topAnchor.constraint(equalTo: topAnchor, constant: Self.titlebarInset - 8)
         NSLayoutConstraint.activate([
             sidebar.topAnchor.constraint(equalTo: topAnchor),
             sidebar.leadingAnchor.constraint(equalTo: leadingAnchor),
             sidebar.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-            header.topAnchor.constraint(equalTo: topAnchor, constant: Self.titlebarInset - 8),
+            headerTop,
             header.leadingAnchor.constraint(equalTo: sidebar.trailingAnchor),
             header.trailingAnchor.constraint(equalTo: trailingAnchor),
 
@@ -400,6 +445,18 @@ final class PanelShellView: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) не поддерживается") }
+
+    override func layout() {
+        // Константы меняем до super.layout(): это тот же проход раскладки, без петли.
+        let titlebar = safeAreaInsets.top > 0 ? safeAreaInsets.top : Self.fallbackTitlebarHeight
+        let inset = titlebar + Self.titlebarGap
+        if abs(inset - topInset) > 0.5 {
+            topInset = inset
+            headerTop.constant = inset - 8
+            sidebar.setTopInset(inset)
+        }
+        super.layout()
+    }
 
     /// Пересчёт режима панели при смене размера (без анимации).
     override func setFrameSize(_ newSize: NSSize) {
