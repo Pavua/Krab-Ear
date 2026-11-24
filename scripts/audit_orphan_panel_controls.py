@@ -607,6 +607,14 @@ def _has_hierarchy(decl: ControlDecl, body: str) -> bool:
         arr = _balanced_slice(body, m.end() - 1, "[", "]")
         if arr and re.search(boundary, arr):
             return True
+    # Тот же API NSStackView позиционно: setViews([a, b], in: .leading) и addView(x, in:).
+    # Без этого правила кнопки, поставленные в зону гравитации, считались «без иерархии».
+    for m in re.finditer(r"\bsetViews\(\s*\[", body):
+        arr = _balanced_slice(body, m.end() - 1, "[", "]")
+        if arr and re.search(boundary, arr):
+            return True
+    if re.search(rf"\baddView\(\s*{boundary}\s*,\s*in\s*:", flat):
+        return True
     return False
 
 
@@ -763,6 +771,34 @@ _GOOD_SAMPLES: dict[str, tuple[dict[str, str], str]] = {
             )
         },
         "saveButton",
+    ),
+    "setViews и addView в зону гравитации": (
+        {
+            "A.swift": (
+                "class Panel {\n"
+                "    let openButton = NSButton(title: \"Open\", target: nil, action: nil)\n"
+                "    func setup() {\n"
+                "        openButton.target = self\n"
+                "        openButton.action = #selector(onOpen)\n"
+                "        header.setViews([title, openButton], in: .trailing)\n"
+                "    }\n"
+                "}\n"
+            )
+        },
+        "openButton",
+    ),
+    "addView в зону гравитации": (
+        {
+            "A.swift": (
+                "class Panel {\n"
+                "    let helpButton = NSButton(title: \"?\", target: self, action: #selector(onHelp))\n"
+                "    func setup() {\n"
+                "        header.addView(helpButton, in: .leading)\n"
+                "    }\n"
+                "}\n"
+            )
+        },
+        "helpButton",
     ),
     "конструктор с target/action и addSubview": (
         {

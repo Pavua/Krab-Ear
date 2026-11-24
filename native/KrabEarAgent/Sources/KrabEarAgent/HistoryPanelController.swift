@@ -246,9 +246,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let realtimeStatusLabel = NSTextField(labelWithString: "Realtime: ожидание")
     let callAssistStatusLabel = NSTextField(labelWithString: "Call Assist: idle")
     let realtimeTextView = NSTextView()
-    let dictationHistoryHintLabel = NSTextField(labelWithString: "История пока пустая. После первой транскрибации записи появятся здесь.")
-    let dictationHistoryOpenButton = ThemeSecondaryButton(title: "Открыть историю", target: nil, action: nil)
-    let dictationHistoryPreviewView = NSTextView()
+    // Экран «Диктовка» (редизайн 2026-11, PR 2): кнопка записи + сводка и последние результаты.
+    let dictationHero = DictationHeroView()
+    let recentDictations = RecentDictationsView()
+    /// Подряд неуспешных опросов get_recording_state; ≥ 2 → состояние «Нет связи».
+    var dictationStateFailures = 0
+    /// Последняя известная фаза записи (сводка обновляется и без нового опроса).
+    var dictationPhase: DictationPhase = .idle
     let callAssistStartButton = ThemePrimaryButton(title: "Старт звонка", target: nil, action: nil)
     let callAssistStopButton = ThemeSecondaryButton(title: "Стоп звонка", target: nil, action: nil)
     let callPhrasePresetSelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -320,7 +324,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let settingsRow7 = NSStackView()
     private let aiSettingsRow1 = NSStackView()
     private let aiSettingsRow2 = NSStackView()
-    private let startStopButton = ThemePrimaryButton(title: "Старт/Стоп", target: nil, action: nil)
     private let restartButton = ThemeSecondaryButton(title: "Перезапуск", target: nil, action: nil)
     private let stopButton = ThemeSecondaryButton(title: "Остановить", target: nil, action: nil)
     let loadMoreButton: ThemeSecondaryButton = {
@@ -470,8 +473,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let scrollView = NSScrollView()
     // Promoted from local vars in setupUI() for applyVisualTheme() access
     private let dictationStack = NSStackView()
-    private let dictationHistoryHeaderRow = NSStackView()
-    private let dictationHistoryPreviewScroll = NSScrollView()
     // Width constraints recreated by applyVisualTheme() on each invocation.
     // Tracked here so previous batch can be deactivated before new one is built —
     // иначе после повторного applyVisualTheme() стэйл-constraints держат ссылки на
@@ -1079,9 +1080,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         toolsRow.addArrangedSubview(glossaryStatusLabel)
         toolsRow.addArrangedSubview(NSView())
 
-        startStopButton.target = self
-        startStopButton.action = #selector(onToggleRecordFromPanel)
-        controlRow.addArrangedSubview(startStopButton)
+        // Кнопку записи заменила большая кнопка экрана «Диктовка»; здесь — обслуживание движка.
+        let maintenanceLabel = NSTextField(labelWithString: "Обслуживание движка:")
+        maintenanceLabel.font = KrabEarTheme.Typography.captionLarge
+        maintenanceLabel.textColor = KrabEarTheme.Colors.textSecondary
+        controlRow.addArrangedSubview(maintenanceLabel)
 
         restartButton.target = self
         restartButton.action = #selector(onRestartFromPanel)
@@ -1530,20 +1533,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         realtimeTextView.drawsBackground = false
         realtimeScroll.documentView = realtimeTextView
 
-        dictationHistoryPreviewScroll.translatesAutoresizingMaskIntoConstraints = false
-        dictationHistoryPreviewScroll.drawsBackground = false
-        dictationHistoryPreviewScroll.hasVerticalScroller = true
-        dictationHistoryPreviewScroll.borderType = .noBorder
-        dictationHistoryPreviewScroll.wantsLayer = true
-        dictationHistoryPreviewScroll.layer?.cornerRadius = KrabEarTheme.Metrics.innerCornerRadius
-        dictationHistoryPreviewScroll.layer?.borderWidth = 0.5
-        dictationHistoryPreviewScroll.layer?.borderColor = KrabEarTheme.Colors.border.cgColor
-        dictationHistoryPreviewView.isEditable = false
-        dictationHistoryPreviewView.font = KrabEarTheme.Typography.body
-        dictationHistoryPreviewView.string = "История пока пустая. После первой транскрибации записи появятся здесь."
-        dictationHistoryPreviewView.backgroundColor = .clear
-        dictationHistoryPreviewView.drawsBackground = false
-        dictationHistoryPreviewScroll.documentView = dictationHistoryPreviewView
 
         callAssistOutputScroll.translatesAutoresizingMaskIntoConstraints = false
         callAssistOutputScroll.drawsBackground = false
@@ -1712,35 +1701,32 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // MARK: - Tab Setup Helpers
 
     private func setupDictationTab(_ contentView: NSView) {
-        let dictationTitle = NSTextField(labelWithString: "Быстрые действия диктовки")
-        dictationTitle.font = KrabEarTheme.Typography.sectionTitle
-        dictationHistoryHintLabel.lineBreakMode = .byTruncatingTail
-        dictationHistoryHintLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-        dictationHistoryHeaderRow.orientation = .horizontal
-        dictationHistoryHeaderRow.spacing = KrabEarTheme.Metrics.standard
-        dictationHistoryHeaderRow.alignment = .centerY
-        dictationHistoryHeaderRow.translatesAutoresizingMaskIntoConstraints = false
-        let dictationHistoryTitle = NSTextField(labelWithString: "Последние транскрибации")
-        dictationHistoryTitle.font = KrabEarTheme.Typography.sectionTitle
-        dictationHistoryHeaderRow.addArrangedSubview(dictationHistoryTitle)
-        dictationHistoryHeaderRow.addArrangedSubview(NSView())
-        dictationHistoryOpenButton.target = self
-        dictationHistoryOpenButton.action = #selector(onOpenHistoryTabFromDictation)
-        dictationHistoryHeaderRow.addArrangedSubview(dictationHistoryOpenButton)
+        dictationHero.onRecordPress = { [weak self] in self?.onToggleRecordFromPanel() }
+        dictationHero.onOpenDiagnostics = { [weak self] in self?.selectPanelTab(.diagnostics) }
+        recentDictations.onOpenHistory = { [weak self] in self?.onOpenHistoryTabFromDictation() }
+        recentDictations.onRetry = { [weak self] in
+            // «Повторить» видимо что-то делает: сначала загрузка, повторный сбой снова даст ошибку.
+            self?.recentDictations.apply(.loading)
+            self?.loadInitial()
+        }
+        recentDictations.onCopy = { text in
+            // Как onCopy в истории: отменяем отложенную автовставку до записи в буфер.
+            InputAutomationQueue.shared.invalidatePending()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
 
         dictationStack.orientation = .vertical
-        dictationStack.spacing = KrabEarTheme.Metrics.standard
+        dictationStack.spacing = KrabEarTheme.Metrics.relaxed
         dictationStack.alignment = .leading
         dictationStack.translatesAutoresizingMaskIntoConstraints = false
         dictationStack.setHuggingPriority(.required, for: .vertical)
         dictationStack.setContentCompressionResistancePriority(.required, for: .vertical)
-        dictationStack.addArrangedSubview(dictationTitle)
+        // Состав стека собирает applyVisualTheme() (он очищает и пересобирает вкладку).
+        dictationStack.addArrangedSubview(dictationHero)
+        dictationStack.addArrangedSubview(recentDictations)
         dictationStack.addArrangedSubview(controlRow)
         dictationStack.addArrangedSubview(settingsBar)
-        dictationStack.addArrangedSubview(dictationHistoryHeaderRow)
-        dictationStack.addArrangedSubview(dictationHistoryHintLabel)
-        dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
         dictationStack.addArrangedSubview(NSView())
         let dictationOuterScroll = NSScrollView()
         let dictationClipView = FlippedClipView()
@@ -1767,10 +1753,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             // Activating them here risks "no common ancestor" if the hierarchy hasn't been
             // established yet (KRAB-EAR-AGENT-2). applyVisualTheme loops handle all dictationStack
             // child width constraints uniformly.
-            dictationHistoryHeaderRow.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
-            dictationHistoryHintLabel.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
-            dictationHistoryPreviewScroll.widthAnchor.constraint(equalTo: dictationStack.widthAnchor),
-            dictationHistoryPreviewScroll.heightAnchor.constraint(equalToConstant: 150),
         ])
     }
 
@@ -1978,10 +1960,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         llmModelSelector.action = #selector(onLlmModelChanged)
         self.dictationAISection = llmSection
 
-        // Hero card — Phase 2 IA refactor (Gemini 3.1 Pro design 2026-04-26):
-        // visual hierarchy для частых параметров вверху таба, всегда видим.
-        settingsBar.addArrangedSubview(buildDictationHeroCard())
-
         // Group: Базовые (recording, hotkey, system).
         settingsBar.addArrangedSubview(makeCategoryHeader(text: "Базовые"))
         settingsBar.addArrangedSubview(recordingSection)
@@ -2116,6 +2094,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let clipSection = setupDictationClipboardSection()
         settingsBar.addArrangedSubview(clipSection)
 
+        // Иерархия экрана: 1) кнопка записи и сводка, 2) последние результаты,
+        // 3) обслуживание движка, 4) секции настроек (без изменений до PR 5).
+        dictationStack.addArrangedSubview(dictationHero)
+        dictationStack.addArrangedSubview(recentDictations)
         let controlCard = ThemeCardView()
         controlCard.contentStackView.addArrangedSubview(controlRow)
         dictationStack.addArrangedSubview(controlCard)
@@ -2175,9 +2157,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let (analyticsSection, healthSection) = setupAnalyticsSections()
         dictationStack.addArrangedSubview(analyticsSection)
         dictationStack.addArrangedSubview(healthSection)
-        dictationStack.addArrangedSubview(dictationHistoryHeaderRow)
-        dictationStack.addArrangedSubview(dictationHistoryHintLabel)
-        dictationStack.addArrangedSubview(dictationHistoryPreviewScroll)
 
         // --- LIVE TRANSLATION TAB ---
         // Extracted в HistoryPanelController+ApplyTheme+LiveTab.swift
@@ -2217,7 +2196,6 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         // --- BUTTON STYLING ---
         // Primary action buttons
-        startStopButton.applyThemePrimary()
         callAssistStartButton.applyThemePrimary()
         callPhraseSendButton.applyThemePrimary()
 
@@ -2232,7 +2210,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
                        callDiagnosticsButton, callCostButton, callTimelineButton,
                        callTimelineExportButton, callTimelineToHistoryButton, callTimelineClearButton,
                        helpButton, liveTranslatePresetButton, historyFocusModeButton,
-                       voiceGatewayCheckButton, dictationHistoryOpenButton,
+                       voiceGatewayCheckButton,
                        diagnosticsButton, metricsButton, recordingStatsButton, storageInfoButton,
                        applyProfileButton, testMicButton, clipboardHistoryButton, repasteButton,
                        exportSrtButton, cleanupHistoryButton, vocabSuggestionsButton, glossarySuggestionsButton,
@@ -2400,7 +2378,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         presentAlertSheet(alert, for: self.window) { _ in }
     }
 
-    @objc private func onToggleRecordFromPanel() {
+    @objc func onToggleRecordFromPanel() {
         onToggleRecording()
     }
 
@@ -2409,7 +2387,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         syncSettingsControls()
     }
 
-    @objc private func onOpenHistoryTabFromDictation() {
+    @objc func onOpenHistoryTabFromDictation() {
         // Если история есть, но текущие фильтры её скрывают, сразу сбрасываем фильтры.
         // Stats fetch is async — switch tab immediately, reset filters after stats arrive.
         selectPanelTab(.history)

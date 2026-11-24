@@ -85,6 +85,9 @@ extension HistoryPanelController {
         // Обновляем индикатор STT движка при открытии вкладки «Диктовка».
         if tab == .dictation {
             fetchAndUpdateSTTEngineLabel()
+            // Свежая фаза сразу, а не через тик 0.9 с: иначе после стопа хоткеем на
+            // другой вкладке кнопка показывала бы прошлое «Остановить · 00:12».
+            refreshRealtimePreview()
         }
     }
 
@@ -119,12 +122,47 @@ extension HistoryPanelController {
         previewPollTick = 0
     }
 
+    /// Видна ли сейчас вкладка «Диктовка» (кнопке записи нужно состояние).
+    var isDictationTabVisible: Bool {
+        guard window?.isVisible == true else { return false }
+        return (mainTabView.selectedTabViewItem?.identifier as? String) == PanelTab.dictation.rawValue
+    }
+
+    /// Снимок для карточки «Диктовка»: фаза записи + текущие настройки.
+    func makeDictationHeroSnapshot() -> DictationHeroSnapshot {
+        let settings = settingsProvider()
+        return DictationHeroSnapshot(
+            phase: dictationPhase,
+            hotkey: currentHotkeyLabel(),
+            profile: settings.qualityProfile.capitalized,
+            autoPaste: settings.autoPaste,
+            engine: sttEngineLabel.stringValue
+        )
+    }
+
+    /// Обновляет карточку «Диктовка»; без изменений снимка ничего не перерисовывается.
+    func refreshDictationHero() {
+        dictationHero.apply(makeDictationHeroSnapshot())
+    }
+
+    /// Фаза записи из ответа get_recording_state (логика записи не меняется — только вид).
+    nonisolated static func dictationPhase(from result: [String: Any]) -> DictationPhase {
+        let isRecording = (result["is_recording"] as? Bool) ?? false
+        let isFinalizing = (result["is_finalizing"] as? Bool) ?? false
+        if isRecording { return .recording(durationSec: (result["duration_sec"] as? Double) ?? 0) }
+        return isFinalizing ? .finalizing : .idle
+    }
+
     func refreshRealtimePreview() {
         let settings = settingsProvider()
-        guard settings.realtimePreviewEnabled else {
+        let previewEnabled = settings.realtimePreviewEnabled
+        if !previewEnabled {
             realtimeStatusLabel.stringValue = "Realtime: выключен"
-            return
         }
+        // Один и тот же опрос кормит и превью, и кнопку записи. Когда превью выключено и
+        // «Диктовка» не видна — не опрашиваем вовсе (без новой нагрузки на IPC, урок BACKEND-T).
+        let heroVisible = isDictationTabVisible
+        guard previewEnabled || heroVisible else { return }
 
         // Wave 59: use callAsync to avoid blocking MainActor (was sync IPC every 0.9 s).
         // The timer Task { @MainActor in ... } context is already async — awaiting here
@@ -136,8 +174,18 @@ extension HistoryPanelController {
                     method: "get_recording_state", params: [:]),
                 let result = response["result"] as? [String: Any]
             else {
+                // Нет ответа: после двух подряд — «Нет связи» на кнопке записи.
+                self.dictationStateFailures += 1
+                if self.dictationStateFailures >= 2 {
+                    self.dictationPhase = .offline
+                    self.refreshDictationHero()
+                }
                 return
             }
+            self.dictationStateFailures = 0
+            self.dictationPhase = HistoryPanelController.dictationPhase(from: result)
+            self.refreshDictationHero()
+            guard previewEnabled else { return }
 
             let isRecording = (result["is_recording"] as? Bool) ?? false
             let durationSec = (result["duration_sec"] as? Double) ?? 0.0
