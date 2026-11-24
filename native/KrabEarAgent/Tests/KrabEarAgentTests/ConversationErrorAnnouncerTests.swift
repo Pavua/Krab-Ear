@@ -218,7 +218,7 @@ final class ConversationGatewayAuthFailureTests: XCTestCase {
         XCTAssertEqual(spoken.count, 1)
         XCTAssertTrue(spoken[0].lowercased().contains("ключ"), spoken[0])
         XCTAssertTrue(ConversationViewController.failureDescription(httpStatus: 401, fallback: "bad response")
-            .contains("API-ключ Voice Gateway"))
+            .contains("Live перевод"))
         XCTAssertEqual(ConversationViewController.failureDescription(httpStatus: 500, fallback: "bad response"),
                        "bad response")
         XCTAssertEqual(ConversationViewController.failureDescription(httpStatus: nil, fallback: "x"), "x")

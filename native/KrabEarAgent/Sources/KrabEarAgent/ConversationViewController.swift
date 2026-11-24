@@ -341,8 +341,8 @@ final class ConversationViewController: NSViewController {
     /// Текст ошибки для UI: при 401/403 говорит, что делать, вместо сообщения URLSession.
     static func failureDescription(httpStatus: Int?, fallback: String) -> String {
         if httpStatus == 401 || httpStatus == 403 {
-            return "Voice Gateway отклонил подключение: нужен API-ключ Voice Gateway "
-                + "(Настройки → Звонки и встречи → «API-ключ Voice Gateway»)."
+            return "Voice Gateway отклонил подключение: нужен ключ шлюза. Введите его на вкладке "
+                + "«Live перевод» в поле «API key» рядом с Gateway URL."
         }
         return fallback
     }
