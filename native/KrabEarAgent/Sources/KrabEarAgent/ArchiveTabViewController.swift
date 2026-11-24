@@ -125,6 +125,7 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         emptyIcon.contentTintColor = KrabEarTheme.Colors.textSecondary.withAlphaComponent(0.5)
         let emptyLabel = NSTextField(labelWithString: "Архив пуст")
         emptyStateContainer.addArrangedSubview(emptyIcon)
+        emptyLabel.alignment = .center
         emptyStateContainer.addArrangedSubview(emptyLabel)
         emptyStateContainer.isHidden = true
         
@@ -133,7 +134,10 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         emptyStateContainer.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             emptyStateContainer.centerXAnchor.constraint(equalTo: tableScroll.centerXAnchor),
-            emptyStateContainer.centerYAnchor.constraint(equalTo: tableScroll.centerYAnchor)
+            emptyStateContainer.centerYAnchor.constraint(equalTo: tableScroll.centerYAnchor),
+            // Без ограничения ширины центрированный блок выходил за край узкого окна.
+            emptyStateContainer.widthAnchor.constraint(lessThanOrEqualTo: tableScroll.widthAnchor,
+                                          constant: -2 * KrabEarTheme.Metrics.comfortable)
         ])
         
         // Privacy State
@@ -145,6 +149,7 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         privacyIcon.contentTintColor = KrabEarTheme.Colors.textSecondary
         let privacyLabel = NSTextField(labelWithString: "Недоступно в приватном режиме")
         privacyStateContainer.addArrangedSubview(privacyIcon)
+        privacyLabel.alignment = .center
         privacyStateContainer.addArrangedSubview(privacyLabel)
         privacyStateContainer.isHidden = true
         
@@ -152,7 +157,10 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         privacyStateContainer.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             privacyStateContainer.centerXAnchor.constraint(equalTo: tableScroll.centerXAnchor),
-            privacyStateContainer.centerYAnchor.constraint(equalTo: tableScroll.centerYAnchor)
+            privacyStateContainer.centerYAnchor.constraint(equalTo: tableScroll.centerYAnchor),
+            // Без ограничения ширины центрированный блок выходил за край узкого окна.
+            privacyStateContainer.widthAnchor.constraint(lessThanOrEqualTo: tableScroll.widthAnchor,
+                                          constant: -2 * KrabEarTheme.Metrics.comfortable)
         ])
     }
     

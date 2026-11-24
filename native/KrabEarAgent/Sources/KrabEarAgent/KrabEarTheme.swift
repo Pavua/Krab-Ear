@@ -310,9 +310,17 @@ public extension KrabEarTheme {
     /// Замер ресайза (гейт Opus #2254, все секции раскрыты): подписи до 1052 pt с сопротивлением
     /// сжатию 750 (> windowSizeStayPut 500) распирали окно 640 до 1266–1407 pt. Проход после
     /// сборки вкладок: перенос по словам, сопротивление сжатию 250, ширина ≤ родителя.
-    static func wrapLongLabels(in root: NSView, threshold: CGFloat = 320) {
+    ///
+    /// Стресс-проход (гейт Opus, ~200 символов в каждой подписи): порог по длине пропускал
+    /// подписи, короткие В МОМЕНТ СБОРКИ («—», статусы, ошибки шлюза), и подписи в горизонтальных
+    /// рядах — потом текст удлинялся, и окно распиралось до 3955 pt. Теперь правило — для всех
+    /// подписей, расставленных в стеке; длину текста не смотрим.
+    static func wrapLongLabels(in root: NSView) {
         var stack: [NSView] = [root]
         while let v = stack.popLast() {
+            // Таблицы и горизонтальные скроллы задуманы широкими: свои ячейки, свои строки.
+            if v is NSTableView || v is NSOutlineView { continue }
+            if let sv = v as? NSScrollView, sv.hasHorizontalScroller { continue }
             stack.append(contentsOf: v.subviews)
             // Горизонтальные ряды, собранные «вручную» (не AdaptiveRowStackView): сопротивление
             // обрезке 1000 позволяло ряду кнопок распирать окно. 250 — ряд не расширяет окно.
@@ -320,25 +328,37 @@ public extension KrabEarTheme {
                row.clippingResistancePriority(for: .horizontal) > NSLayoutConstraint.Priority(250) {
                 row.setClippingResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
             }
-            guard let label = v as? NSTextField, !label.isEditable, !label.isBezeled,
-                  let parent = label.superview as? NSStackView, parent.orientation == .vertical,
-                  label.intrinsicContentSize.width > threshold else { continue }
-            // Повторный проход безопасен. Подписи, уже «многострочные» (maxLines 4) с высоким
-            // сопротивлением сжатию, тоже распирали окно — обрабатываем и их; лимит строк сохраняем.
-            // Фиксированная рамка (autoresizing-маска) давала обязательную ширину 1014 pt.
-            label.translatesAutoresizingMaskIntoConstraints = false
-            label.cell?.wraps = true
-            label.cell?.isScrollable = false
-            label.lineBreakMode = .byWordWrapping
-            if label.maximumNumberOfLines == 1 { label.maximumNumberOfLines = 0 }
-            label.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
-            let id = "krab.wrapLongLabel"
-            if !parent.constraints.contains(where: { $0.identifier == id && $0.firstItem === label }) {
-                let c = label.widthAnchor.constraint(lessThanOrEqualTo: parent.widthAnchor,
-                                                     constant: -(parent.edgeInsets.left + parent.edgeInsets.right))
-                c.identifier = id
-                c.isActive = true
-            }
+            if let label = v as? NSTextField { makeLabelYieldWidth(label) }
+        }
+    }
+
+    /// Подпись в стеке не расширяет окно: сопротивление сжатию 240 — ниже windowSizeStayPut
+    /// (500) и ниже сопротивления обрезке рядов (250): при нехватке места сначала переносится
+    /// подпись, а не вылезает за край ряд. Перенос по словам, ширина ≤ стека. Подписи
+    /// с многоточием (.byTruncating*) остаются в одну строку и сокращаются. Подписи вне стеков
+    /// (свои раскладки: боковая панель, кнопка записи) не трогаем. Повторный вызов безопасен.
+    static func makeLabelYieldWidth(_ label: NSTextField) {
+        guard !label.isEditable, !label.isBezeled,
+              let parent = label.superview as? NSStackView,
+              parent.arrangedSubviews.contains(where: { $0 === label }) else { return }
+        label.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(240), for: .horizontal)
+        switch label.lineBreakMode {
+        case .byTruncatingTail, .byTruncatingHead, .byTruncatingMiddle:
+            return
+        default:
+            break
+        }
+        // Подписи, уже «многострочные» (maxLines 4), тоже распирали окно — лимит строк сохраняем.
+        label.cell?.wraps = true
+        label.cell?.isScrollable = false
+        label.lineBreakMode = .byWordWrapping
+        if label.maximumNumberOfLines == 1 { label.maximumNumberOfLines = 0 }
+        let id = "krab.wrapLongLabel"
+        if !parent.constraints.contains(where: { $0.identifier == id && $0.firstItem === label }) {
+            let c = label.widthAnchor.constraint(lessThanOrEqualTo: parent.widthAnchor,
+                                                 constant: -(parent.edgeInsets.left + parent.edgeInsets.right))
+            c.identifier = id
+            c.isActive = true
         }
     }
 
@@ -368,6 +388,9 @@ public final class CardFillingStackView: NSStackView {
     }
 
     private func fillIfContainer(_ view: NSView) {
+        // Секции, пересобранные после applyVisualTheme (проход wrapLongLabels уже был), получают
+        // то же правило подписей при добавлении.
+        KrabEarTheme.wrapLongLabels(in: view)
         guard orientation == .vertical, view is ThemeCardView || view is CollapsibleSectionView else { return }
         // 999, а не required: если место построения уже задало свою ширину, конфликта нет.
         // Снимается при removeFromSuperview (removeArrangedSubview его НЕ снимает — все места
@@ -428,9 +451,25 @@ public final class AdaptiveRowStackView: NSStackView {
     /// Если родитель «обнимает» детей, горизонтальный режим удержит сам себя.
     /// TODO (гейт Opus, не блок): fittingSize детей считается на каждый layout — при лагах
     /// живого перетаскивания кэшировать по (ширина родителя, видимые дети) или замерить signpost.
+    ///
+    /// Стресс-проход: ряд, вложенный в промежуточный стек без привязки ширины, видел ширину
+    /// этого стека (= свою же) и оставался горизонтальным на 1735 pt в разделе 512. Берём
+    /// минимум по всем предкам до contentView окна: место справа от начала ряда в каждом.
     private var availableWidth: CGFloat {
         guard let parent = superview else { return bounds.width }
-        return parent.bounds.width - frame.minX
+        var best = parent.bounds.width - frame.minX
+        var ancestor = parent.superview
+        let stop = window?.contentView
+        while let a = ancestor {
+            let originInA = convert(NSPoint(x: bounds.minX, y: bounds.minY), to: a).x
+            let room = a.bounds.maxX - originInA
+            // Содержимое горизонтальных скроллов задумано шире видимой области.
+            if let sv = a as? NSScrollView, sv.hasHorizontalScroller { break }
+            if room > 0 { best = min(best, room) }
+            if a === stop { break }
+            ancestor = a.superview
+        }
+        return best
     }
 
     public override func layout() {
