@@ -293,7 +293,10 @@ final class DictationHeroView: NSView {
 
         summaryGrid.translatesAutoresizingMaskIntoConstraints = false
         // Сводка компактна: пары стоят рядом, а не растягиваются на всю карточку.
-        summaryGrid.setContentHuggingPriority(.required, for: .horizontal)
+        // Порядок приоритетов: растяжение стеком (250) < hugging сетки (300) < CR подписей
+        // (400) < windowSizeStayPut (500). С .required сетка сжимала ярлыки до «Горячая кл…»
+        // (рендер #2255); ниже 250 — растягивалась на всю карточку.
+        summaryGrid.setContentHuggingPriority(NSLayoutConstraint.Priority(300), for: .horizontal)
         summaryGrid.rowSpacing = KrabEarTheme.Metrics.standard
         summaryGrid.columnSpacing = KrabEarTheme.Metrics.relaxed
 
@@ -418,14 +421,15 @@ final class DictationHeroView: NSView {
             title.lineBreakMode = .byTruncatingTail
             // Сетка не стек — общее правило подписей её не видит. Значение (движок, профиль)
             // приходит из настроек любой длины; с сопротивлением 750 сетка распирала окно
-            // до 3955 pt (стресс-проход). 250 — значение сокращается с многоточием.
-            title.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
+            // до 3955 pt (стресс-проход). 400 (< 500, > hugging сетки 300): окно не растёт,
+            // обычный текст не сокращается, длинный — с многоточием.
+            title.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(400), for: .horizontal)
             let value = valueLabels[pair.key] ?? {
                 let v = NSTextField(labelWithString: "—")
                 v.font = KrabEarTheme.Typography.bodyLarge
                 v.textColor = KrabEarTheme.Colors.textPrimary
                 v.lineBreakMode = .byTruncatingTail
-                v.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
+                v.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(400), for: .horizontal)
                 return v
             }()
             valueLabels[pair.key] = value
