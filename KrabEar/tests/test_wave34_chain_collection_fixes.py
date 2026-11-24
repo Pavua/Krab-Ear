@@ -82,7 +82,9 @@ class TestRecordingChainPrivacyGate(unittest.TestCase):
         result = self._mgr.get_chain(chain_id)
         # items list must be populated
         self.assertTrue(len(result["items"]) > 0)
-        self.assertNotIn("privacy_mode", result)
+        # PR #2229 (review): обычный ответ несёт ЯВНОЕ privacy_mode=False — Swift-потребитель
+        # fail-closed на отсутствие поля (G3-MEM-07 M07-02), иначе любая цепочка скрывалась бы.
+        self.assertIs(result["privacy_mode"], False)
 
     def test_get_chain_returns_empty_items_when_privacy_on(self) -> None:
         chain_id, _ = self._make_chain_with_item()

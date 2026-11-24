@@ -73,6 +73,8 @@ struct PrivacyDashboardData {
         guard confirmedPrivacyFlag(result["ok"]) == true else { return nil }
         privacyMode = confirmedPrivacyFlag(result["privacy_mode"])
         encryptionEnabled = confirmedPrivacyFlag(result["encryption_enabled"])
+        // G3-MEM-07 (M07-09): privacyMode/encryptionEnabled уже Bool? — «не задано» при
+        // отсутствии/некорректности flag'а (не подтверждённый false). См. M07-09 в KARTA.
         let storage = result["storage"] as? [String: Any]
         let retention = result["retention"] as? [String: Any]
         let audit = result["audit"] as? [String: Any]

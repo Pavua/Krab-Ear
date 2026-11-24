@@ -335,9 +335,13 @@ extension HistoryPanelController {
                 }
                 return
             }
-            guard let _ = try? ipcClient.call(method: "repaste_item", params: ["history_id": itemId]) else {
+            // G3-MEM-06 (M06-14): ok==true + receipt обязательны — иначе показываем
+            // отказ, а не ложный «вставлен повторно».
+            let repasteResponse = try? ipcClient.call(method: "repaste_item", params: ["history_id": itemId])
+            let repasteResult = repasteResponse?["result"] as? [String: Any]
+            if repasteResult?["ok"] as? Bool != true {
                 DispatchQueue.main.async {
-                    notificationService.notify(title: "Krab Ear", body: "Ошибка повторной вставки")
+                    notificationService.notify(title: "Krab Ear", body: "Ошибка повторной вставки (результат не подтверждён)")
                 }
                 return
             }

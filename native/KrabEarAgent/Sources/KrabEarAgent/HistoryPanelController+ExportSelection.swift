@@ -254,24 +254,40 @@ extension HistoryPanelController {
             // AGENT-3: IPC off-main. Считаем фактические успехи/сбои —
             // не показываем ложный success-алерт, если бэкенд отклонил запрос.
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                var createFailed = false
                 if isNew {
-                    _ = try? ipcClient.call(
+                    // M06-15: create_collection ok==false — отклоняем.
+                    let resp = try? ipcClient.call(
                         method: "create_collection",
                         params: ["name": name, "description": ""]
                     )
+                    if (resp?["result"] as? [String: Any])?["ok"] as? Bool == false {
+                        createFailed = true
+                    }
                 }
                 var added = 0
                 var failed = 0
                 for id in capturedIds {
                     do {
-                        _ = try ipcClient.call(
+                        let resp = try ipcClient.call(
                             method: "add_to_collection",
                             params: ["collection_name": name, "item_id": id]
                         )
-                        added += 1
+                        // M06-15: ok==true обязателен — иначе считаем ошибку.
+                        if (resp["result"] as? [String: Any])?["ok"] as? Bool == true {
+                            added += 1
+                        } else {
+                            failed += 1
+                        }
                     } catch {
                         failed += 1
                     }
+                }
+                if isNew && createFailed && failed == 0 && added == 0 {
+                    DispatchQueue.main.async {
+                        self?.showInfoAlert(title: "Добавить в коллекцию", body: "Коллекция \"\(name)\" не создана: backend отклонил запрос.")
+                    }
+                    return
                 }
                 DispatchQueue.main.async {
                     let body: String

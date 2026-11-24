@@ -60,7 +60,7 @@ def _make_searcher(tmpdir: str, enabled: bool = True) -> SemanticSearcher:
     s._model = object()
     s._model_loaded = True
     # Inject deterministic fake encode methods so real model is never called
-    s._encode = lambda model, text: _fake_vec()
+    s._encode = lambda model, text, prefix="query: ": _fake_vec()
     s._encode_batch = lambda model, texts: np.stack([_fake_vec() for _ in texts])
     return s
 
@@ -132,10 +132,9 @@ class TestPurgeEpochFirstOrder(unittest.TestCase):
         should NOT overwrite the empty cleared state."""
         searcher = self.searcher
 
-        # Pre-populate disk files
+        # Pre-populate disk files (M05-04: снимок NPZ)
         searcher.index_item("id1", "sensitive transcript text")
-        self.assertTrue(searcher._embeddings_path.exists())
-        self.assertTrue(searcher._index_path.exists())
+        self.assertTrue(searcher._snapshot_path.exists())
 
         # Run purge — epoch bumps FIRST, then files are deleted
         purge_epoch_after = None
@@ -154,8 +153,7 @@ class TestPurgeEpochFirstOrder(unittest.TestCase):
             SemanticSearcher.purge_all = orig_purge
 
         # After purge, disk files should be gone
-        self.assertFalse(searcher._embeddings_path.exists())
-        self.assertFalse(searcher._index_path.exists())
+        self.assertFalse(searcher._snapshot_path.exists())
 
         # The epoch observed right after purge should be the new one
         self.assertEqual(purge_epoch_after, 1)
@@ -170,7 +168,7 @@ class TestPurgeEpochFirstOrder(unittest.TestCase):
             self.assertIsNone(searcher._embeddings)
 
         # And still no files on disk
-        self.assertFalse(searcher._embeddings_path.exists())
+        self.assertFalse(searcher._snapshot_path.exists())
         self.assertFalse(searcher._index_path.exists())
 
     def test_concurrent_purge_then_load_from_disk_no_resurrection(self):
@@ -453,22 +451,20 @@ class TestResetModelErrorScopeInvariant(unittest.TestCase):
                                  "reset_model_error must NOT clear _embeddings")
 
     def test_reset_does_not_delete_disk_files(self):
-        """After reset_model_error(), embeddings.npy / embeddings_index.json must persist."""
+        """After reset_model_error(), embeddings_snapshot.npz must persist (M05-04)."""
         searcher = _make_searcher(self.tmpdir)
         searcher.index_item("disk_item", "should stay on disk")
 
-        self.assertTrue(searcher._embeddings_path.exists(),
-                        "embeddings.npy should exist before reset")
-        self.assertTrue(searcher._index_path.exists(),
-                        "embeddings_index.json should exist before reset")
+        self.assertTrue(searcher._snapshot_path.exists(),
+                        "embeddings_snapshot.npz should exist before reset")
 
         searcher._model_error = "network_timeout"
         searcher.reset_model_error()
 
-        self.assertTrue(searcher._embeddings_path.exists(),
-                        "reset_model_error must NOT delete embeddings.npy")
-        self.assertTrue(searcher._index_path.exists(),
-                        "reset_model_error must NOT delete embeddings_index.json")
+        self.assertTrue(searcher._snapshot_path.exists(),
+                        "reset_model_error must NOT delete embeddings_snapshot.npz")
+        with searcher._index_lock:
+            self.assertIn("disk_item", searcher._index)
 
     def test_reset_returns_expected_shape(self):
         """reset_model_error returns {'reset': True, 'previous_error': <str or None>}."""

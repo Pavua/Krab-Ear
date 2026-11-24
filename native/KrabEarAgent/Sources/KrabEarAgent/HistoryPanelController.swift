@@ -87,6 +87,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         didSet { rowHeightCache.removeAll() }
     }
     var nextCursor: String?
+    /// G3-MEM-06 (M06-03): generation token — ответ старой loadInitial не может
+    /// фиксироваться в новую выборку после смены фильтра/запроса.
+    var historyLoadGeneration = 0
     /// A5.2b2: backend сообщает, что восстановление истории не завершено и
     /// журналы могут быть смесью состояний до/после снимка. Показываем
     /// предупреждение в строке статуса, данные НЕ прячем — просмотр истории
@@ -106,6 +109,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var isImportRunning = false
     var isImportPaused = false
     var importCancellationRequested = false
+    /// G3-MEM-06 (M06-05): отмена была нажата до получения job_id — cancellation
+    /// отправляется сразу после получения ID.
+    var importCancellationPending = false
     var importJobsPlanned = 0
     var importJobsCompleted = 0
     var importProcessedTotal = 0
@@ -127,6 +133,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var transcribeProgressFailCount: Int = 0
     var isSyncingTabs = false
     var previewPollTick = 0
+    /// G3-MEM-07 (M07-11): generation token — старый ответ semantic_search не
+    /// перезаписывает более новый (смена запроса / privacy mode).
+    var semanticSearchGeneration = 0
+    /// G3-MEM-07 (M07-14): snapshot_id последнего успешного apply рекомендованной
+    /// настройки — Undo привязан к конкретной операции, а не к последнему backup.
+    var lastRecommendedSetupSnapshotId: String?
     // True while a Call Assist session is running. Gates the periodic
     // get_call_assist_state poll in the preview timer so it is NOT hammered
     // when no session is active (BACKEND-T over-poll / IPC rate-limit fix).

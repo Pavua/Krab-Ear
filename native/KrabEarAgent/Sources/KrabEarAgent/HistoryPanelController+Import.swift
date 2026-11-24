@@ -57,6 +57,11 @@ extension HistoryPanelController {
                 let client = IPCClient(socketPath: endpoint)
                 _ = try? client.call(method: "cancel_transcribe_job", params: ["job_id": jobID])
             }
+        } else {
+            // G3-MEM-06 (M06-05): job_id ещё не дошёл до backend — ставим флаг,
+            // cancellation отправится сразу после получения job_id в
+            // handleAsyncTranscribeStarted.
+            importCancellationPending = true
         }
     }
 
@@ -91,6 +96,10 @@ extension HistoryPanelController {
             showInfoAlert(title: "Импорт аудио", body: "Очередь переполнена (макс. 30 задач). Дождитесь завершения текущих задач.")
             return
         }
+
+        // G3-MEM-06 (M06-13): резервируем signature ДО IPC preview — пока preview
+        // идёт (1+ сек), другой поток не может дублировать ту же задачу.
+        importJobSignatures.insert(signature)
 
         // Wave 59: preview IPC moved off-main to avoid AppHang (5 s timeout).
         // Show interim status immediately; enqueue job after background fetch completes.
@@ -136,8 +145,17 @@ extension HistoryPanelController {
         preview: ImportPreview
     ) {
         if preview.audioCount == 0 {
+            // M06-13: ничего не откладываем — освобождаем зарезервированный signature.
+            importJobSignatures.remove(signature)
             importStatusLabel.stringValue = "Импорт: готов"
             showInfoAlert(title: "Импорт аудио", body: "Не найдено поддерживаемых аудиофайлов.")
+            return
+        }
+
+        // M06-13: перепроверка перед enqueue — preview мог меняться пока шёл.
+        if importQueue.count >= 30 {
+            importJobSignatures.remove(signature)
+            showInfoAlert(title: "Импорт аудио", body: "Очередь переполнена (макс. 30 задач). Дождитесь завершения текущих задач.")
             return
         }
 
@@ -313,6 +331,17 @@ extension HistoryPanelController {
             return
         }
         currentTranscribeJobID = jobID
+        // M06-05: отмена была запрошена до получения job_id — сразу отправляем
+        // cancellation теперь, когда ID есть.
+        if importCancellationPending {
+            importCancellationPending = false
+            let jobID = jobID
+            let endpoint = endpoint
+            DispatchQueue.global(qos: .userInitiated).async {
+                let client = IPCClient(socketPath: endpoint)
+                _ = try? client.call(method: "cancel_transcribe_job", params: ["job_id": jobID])
+            }
+        }
         startTranscribeProgressTimer(
             jobID: jobID,
             endpoint: endpoint,
@@ -364,16 +393,15 @@ extension HistoryPanelController {
         guard currentTranscribeJobID == jobID else { return }
 
         guard let result = response?["result"] as? [String: Any] else {
+            // G3-MEM-06 (M06-06): потеря связи не равна провалу — backend может
+            // продолжать работу. Состояние unknown/running, очередь приостанавливается,
+            // сверку состояния продолжаем (таймер повторно опрашивает).
             transcribeProgressFailCount += 1
             if transcribeProgressFailCount >= 3 {
-                importErrorMessages.append("Потеряна связь с backend")
-                completeImportJob(
-                    signature: signature,
-                    processed: 0,
-                    errors: 1,
-                    failed: true,
-                    startedAt: startedAt
-                )
+                importStatusLabel.stringValue =
+                    "Импорт: потеряна связь с backend — верификация задачи (не перезапускать)"
+                isImportPaused = true
+                pauseImportButton.title = "Продолжить импорт"
             }
             return
         }

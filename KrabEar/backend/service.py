@@ -5011,7 +5011,17 @@ class BackendService:
         return self._disk_monitor.check_now()
 
     def _handle_get_storage_breakdown(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает разбивку использования диска по компонентам."""
+        """Возвращает разбивку использования диска по компонентам.
+
+        G3-MEM-04 (M04-09): privacy — не раскрываем объёмы и паттерны использования
+        (соседние статистические IPC-методы имеют гейт; согласуем и этот).
+        """
+        if self._history._is_privacy_mode():
+            return {
+                "ndjson_mb": 0.0, "transcripts_mb": 0.0, "audio_mb": 0.0,
+                "total_mb": 0.0, "oldest_item_age_days": None,
+                "reason": "privacy_mode_active",
+            }
         return self.store.get_storage_breakdown()
 
     def _handle_test_microphone(self, params: dict[str, Any]) -> dict[str, Any]:

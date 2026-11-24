@@ -7,7 +7,6 @@ Fallback на keyword search если модель не загружена.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import tempfile
@@ -17,6 +16,17 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# G3-MEM-05 (M05-04): версия формата единого снимка embeddings_snapshot.npz.
+_SNAPSHOT_VERSION = 1
+
+
+class SnapshotNotPersistedError(RuntimeError):
+    """Запись удалена из RAM-индекса, но снимок на диске обновить не удалось.
+
+    Эмбеддинг удалённой записи остаётся в embeddings_snapshot.npz и вернётся после
+    рестарта — вызывающий обязан считать удаление неполным (ревью #2229, F6).
+    """
 
 
 class SemanticSearcher:
@@ -71,6 +81,9 @@ class SemanticSearcher:
 
         self._embeddings_path = self._data_dir / "embeddings.npy"
         self._index_path = self._data_dir / "embeddings_index.json"
+        # G3-MEM-05 (M05-04): единый файл-снимок — две части (npy + json) заменяется
+        # одним NPZ (с версией и согласованностью строк).
+        self._snapshot_path = self._data_dir / "embeddings_snapshot.npz"
 
     # ------------------------------------------------------------------
     # Public API
@@ -98,7 +111,17 @@ class SemanticSearcher:
             "model_name": self._model_name,
             "model_error": self._model_error,
             "indexed_count": indexed_count,
+            # Остались файлы старого формата (embeddings.npy/json): они не читаются (префикс
+            # query:→passage: делает векторы несовместимыми, M05-12), индекс содержит лишь новые
+            # записи до полной перестройки (semantic_search_reindex force=True).
+            "needs_reindex": self._legacy_files_present(),
         }
+
+    def _legacy_files_present(self) -> bool:
+        try:
+            return self._embeddings_path.exists() or self._index_path.exists()
+        except OSError:
+            return False
 
     def index_item(self, item_id: str, text: str) -> bool:
         """Добавляет/обновляет embedding для одного элемента.
@@ -121,7 +144,7 @@ class SemanticSearcher:
             # must NOT re-add this (now-purged) cleartext-derived embedding.
             with self._index_lock:
                 epoch_before = self._purge_epoch
-            embedding = self._encode(model, text)  # shape (D,)
+            embedding = self._encode_passage(model, text)  # shape (D,)
 
             with self._index_lock:
                 if self._purge_epoch != epoch_before:
@@ -177,6 +200,7 @@ class SemanticSearcher:
         indexed = 0
         skipped = 0
         errors = 0
+        persisted = True
 
         try:
             import numpy as np
@@ -221,8 +245,14 @@ class SemanticSearcher:
                                     self._embeddings = np.vstack([self._embeddings, emb[np.newaxis, :]])
                                 self._index.append(eid)
                         self._evict_over_cap_locked()
-                        self._save_locked()
-                    indexed = len(ids_to_encode)
+                        # F9 (ревью #2229): результат записи раньше терялся — indexed=N при отказе
+                        # диска. Полная перестройка (force) заодно снимает legacy-файлы.
+                        persisted = bool(self._save_locked(drop_legacy=force))
+                    if persisted:
+                        indexed = len(ids_to_encode)
+                    else:
+                        errors = len(ids_to_encode)
+                        logger.warning("semantic_search: снимок индекса не записан — indexed не засчитан")
                 except Exception as exc:
                     logger.warning("semantic_search: ошибка batch индексации: %s", exc)
                     errors = len(ids_to_encode)
@@ -252,7 +282,7 @@ class SemanticSearcher:
                 embeddings = self._embeddings.copy()
                 index = list(self._index)
 
-            q_emb = self._encode(model, query)  # shape (D,)
+            q_emb = self._encode_query(model, query)  # shape (D,)
             scores = self._cosine_similarity_batch(q_emb, embeddings)  # shape (N,)
 
             top_k = min(top_k, len(index))
@@ -342,6 +372,9 @@ class SemanticSearcher:
             self._purge_epoch += 1
             self._embeddings = None
             self._index = []
+        # Явные unlink на каждый файл (а не цикл по кортежу): статический гейт
+        # полноты purge (scripts/audit_purge_coverage.py) читает AST и видит
+        # только прямые вызовы с атрибутом пути.
         try:
             if self._embeddings_path.exists():
                 self._embeddings_path.unlink()
@@ -352,10 +385,20 @@ class SemanticSearcher:
                 self._index_path.unlink()
         except Exception as exc:
             logger.warning("semantic_search: не удалось удалить embeddings_index.json: %s", exc)
+        try:
+            if self._snapshot_path.exists():  # G3-MEM-05 (M05-04): единый NPZ-снимок
+                self._snapshot_path.unlink()
+        except Exception as exc:
+            logger.warning("semantic_search: не удалось удалить embeddings_snapshot.npz: %s", exc)
         logger.info("semantic_search: индекс и файлы embeddings очищены (purge_all)")
 
     def remove_item(self, item_id: str) -> bool:
-        """Remove item from index. Returns True if removed, False if not found.
+        """Remove item from index.
+
+        Returns True если удалено, False если записи в индексе не было (контракт прежний).
+        Raises SnapshotNotPersistedError, если запись убрана из RAM, но снимок на диске
+        обновить не удалось: эмбеддинг остался в embeddings_snapshot.npz и вернётся после
+        рестарта — вызывающий обязан показать неполное удаление (ревью #2229, F6).
 
         Thread-safe. Shifts row indices for all items after the removed one.
         Also persists the updated index to disk.
@@ -377,8 +420,13 @@ class SemanticSearcher:
                     self._embeddings = None
                 else:
                     self._embeddings = np.delete(self._embeddings, idx, axis=0)
-            self._save_locked()
-        return True
+            # G3-MEM-05 (M05-04): вернуть статус подтверждения записи на диск.
+            if not self._save_locked():
+                raise SnapshotNotPersistedError(
+                    f"снимок индекса не записан после удаления {item_id}"
+                )
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -415,12 +463,23 @@ class SemanticSearcher:
                 logger.warning("semantic_search: не удалось загрузить модель: %s", exc)
                 return None
 
-    def _encode(self, model: Any, text: str) -> Any:
+    def _encode_query(self, model: Any, text: str) -> Any:
+        """Кодирует запрос (search). Возвращает np.ndarray shape (D,)."""
+        return self._encode(model, text, prefix="query: ")
+
+    def _encode_passage(self, model: Any, text: str) -> Any:
+        """Кодирует документ (index_item/index_all). Возвращает np.ndarray shape (D,).
+
+        G3-MEM-05 (M05-12): документы индексируются passage:, запросы query: —
+        один и тот же документ при разных точках входа даёт одинаковый вектор.
+        """
+        return self._encode(model, text, prefix="passage: ")
+
+    def _encode(self, model: Any, text: str, prefix: str = "query: ") -> Any:
         """Кодирует один текст. Возвращает np.ndarray shape (D,)."""
         # multilingual-e5 рекомендует prefix "query: " / "passage: "
         # mxbai-embed-large рекомендует "Represent this sentence: "
         # Для единообразия используем "query: " (работает с обоими)
-        prefix = "query: "
         result = model.encode(prefix + text, normalize_embeddings=True)
         return result
 
@@ -504,90 +563,111 @@ class SemanticSearcher:
             logger.exception("semantic_search: _push_error failed for code=%s", code)
 
     def _load_from_disk(self) -> None:
-        """Загружает embeddings и индекс с диска (вызывается после загрузки модели)."""
+        """Загружает embeddings и индекс с диска (вызывается после загрузки модели).
+
+        G3-MEM-05 (M05-03): resurrection race — если purge_all() выполнилась
+        пока мы читали с диска, старые embeddings не могут вернуться в RAM.
+        """
         try:
             import numpy as np
-            if self._embeddings_path.exists() and self._index_path.exists():
-                embeddings = np.load(str(self._embeddings_path))
-                with open(self._index_path, encoding="utf-8") as f:
-                    index = json.load(f)
-                # W884 E2: защита от частичной записи — нарушение согласованности
-                # между .npy и .json (краш между двумя сохранениями).
-                if embeddings.shape[0] != len(index):
+            with self._index_lock:
+                epoch_before = self._purge_epoch
+
+            if self._snapshot_path.exists():
+                # G3-MEM-05 (M05-04): единый NPZ — версия формата должна совпадать
+                # с _SNAPSHOT_VERSION; иначе — полная перестройка.
+                with np.load(str(self._snapshot_path), allow_pickle=False) as data:
+                    snap_version = data.get("version", _SNAPSHOT_VERSION)
+                    snap_vectors = data["vectors"] if "vectors" in data else None
+                    snap_ids = data["ids"] if "ids" in data else None
+                version = snap_version
+                if version != _SNAPSHOT_VERSION:
+                    logger.warning(
+                        "semantic_search: неверная версия снимка (%s) — полная перестройка",
+                        version,
+                    )
+                    return
+                if snap_vectors is None or snap_ids is None:
+                    logger.error("semantic_search: в снимке нет vectors/ids — полная перестройка")
+                    return
+                vectors = snap_vectors
+                ids = [str(x) for x in snap_ids]
+                if vectors.shape[0] != len(ids):
                     logger.error(
-                        "semantic_search: несоответствие размеров при загрузке с диска "
-                        "(embeddings=%d, index=%d) — пропускаем загрузку, сброс к пустому индексу",
-                        embeddings.shape[0],
-                        len(index),
+                        "semantic_search: несоответствие размеров снимка "
+                        "(vectors=%d, ids=%d) — полная перестройка",
+                        vectors.shape[0],
+                        len(ids),
                     )
                     return
                 with self._index_lock:
-                    self._embeddings = embeddings
-                    self._index = index
+                    if self._purge_epoch != epoch_before:
+                        logger.info(
+                            "semantic_search: загрузка с диска отменена — purge_all() после чтения"
+                        )
+                        return
+                    # Пустой снимок (удалён последний элемент) хранится как (0, 0) —
+                    # возвращаем в «неинициализированное» состояние, иначе следующий
+                    # index_item не сможет стекнуть D-мерный вектор на 0-колоночную матрицу.
+                    self._embeddings = vectors if len(ids) > 0 else None
+                    self._index = ids
+                logger.info("semantic_search: загружено %d embeddings с диска", len(ids))
+            else:
                 logger.info(
-                    "semantic_search: загружено %d embeddings с диска",
-                    len(index),
+                    "semantic_search: снимок NPZ не найден — полная перестройка из истории"
                 )
         except Exception as exc:
             logger.warning("semantic_search: не удалось загрузить embeddings с диска: %s", exc)
 
-    def _save_locked(self) -> bool:
+    def _save_locked(self, drop_legacy: bool = False) -> bool:
         """Сохраняет embeddings и индекс на диск атомарно. Должен вызываться под _index_lock.
 
-        Возвращает True только если ОБА файла записаны; False — отказ записи
-        (ошибка уже передана в error bus). Вызывающий не вправе докладывать
-        «проиндексировано» без этого подтверждения (G3-P03-01).
+        G3-MEM-05 (M05-04): единый файл-снимок ``embeddings_snapshot.npz`` —
+        ``np.savez(vectors, ids, version)`` во временный файл + fsync +
+        ``os.replace`` (нет состояния, где .npy новее .json или наоборот).
+        Устаревшие ``embeddings.npy``/``embeddings_index.json`` удаляются.
 
-        Использует запись во временные файлы + ``os.replace`` чтобы избежать
-        ситуации, при которой краш между двумя сохранениями оставляет .npy и
-        .json в рассогласованном состоянии (W884 E2 / wave901 fix).
-
-        Важно: ``np.save`` автоматически добавляет расширение ``.npy`` если
-        его нет, поэтому временный файл называется ``*.tmp.npy`` — numpy сохранит
-        в него, а мы делаем ``os.replace(tmp + ".npy", dst)``.
+        Возвращает True только если снимок подтвердён на диск; False — отказ
+        (ошибка уже передана в error bus).
         """
         try:
             import numpy as np
-            dir_str = str(self._data_dir)
-            # Атомарная запись .npy — временный файл в той же директории,
-            # затем os.replace (атомарная замена на POSIX).
-            # np.save добавляет ".npy" к пути если его нет → tmp_npy_base + ".npy"
-            # является реальным путём куда numpy запишет данные.
-            if self._embeddings is not None:
-                fd, tmp_npy_base = tempfile.mkstemp(dir=dir_str, suffix=".tmp")
-                actual_tmp_npy = tmp_npy_base + ".npy"
-                try:
-                    os.close(fd)
-                    np.save(tmp_npy_base, self._embeddings)  # → tmp_npy_base + ".npy"
-                    os.replace(actual_tmp_npy, str(self._embeddings_path))
-                except Exception:
-                    for p in (tmp_npy_base, actual_tmp_npy):
-                        try:
-                            os.unlink(p)
-                        except OSError:
-                            pass
-                    raise
-                finally:
-                    # mkstemp создаёт tmp_npy_base без содержимого; np.save пишет
-                    # в tmp_npy_base + ".npy". Удаляем пустой tmp_npy_base если остался.
-                    try:
-                        if os.path.exists(tmp_npy_base):
-                            os.unlink(tmp_npy_base)
-                    except OSError:
-                        pass
-            # Атомарная запись .json
-            fd, tmp_json = tempfile.mkstemp(dir=dir_str, suffix=".json.tmp")
+            vectors = (
+                self._embeddings
+                if self._embeddings is not None
+                else np.empty((0, 0), dtype=np.float32)
+            )
+            ids = np.asarray(self._index, dtype=np.str_)
+            fd, tmp = tempfile.mkstemp(dir=str(self._data_dir), suffix=".npz")
             try:
                 os.close(fd)
-                with open(tmp_json, "w", encoding="utf-8") as f:
-                    json.dump(self._index, f, ensure_ascii=False)
-                os.replace(tmp_json, str(self._index_path))
+                with os.fdopen(os.open(tmp, os.O_WRONLY), "wb") as f:
+                    np.savez(f, vectors=vectors, ids=ids, version=_SNAPSHOT_VERSION)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, str(self._snapshot_path))
+                dir_fd = os.open(str(self._data_dir), os.O_RDONLY | os.O_DIRECTORY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
             except Exception:
                 try:
-                    os.unlink(tmp_json)
+                    os.unlink(tmp)
                 except OSError:
                     pass
                 raise
+            # G3-MEM-05 (M05-04): устаревшие embeddings.npy/json удаляются ТОЛЬКО после полной
+            # перестройки (drop_legacy=True из index_all(force=True)). Раньше их сносила первая же
+            # единичная индексация — флаг needs_reindex пропадал, хотя индекс содержал лишь новые
+            # записи (ревью #2229, F7). Purge чистит эти файлы так же, как и снимок.
+            if drop_legacy:
+                for p in (self._embeddings_path, self._index_path):
+                    try:
+                        p.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         except Exception as exc:
             logger.warning("semantic_search: не удалось сохранить embeddings: %s", exc)
             # wave-22 LOW: persistence failure was previously swallowed (warning

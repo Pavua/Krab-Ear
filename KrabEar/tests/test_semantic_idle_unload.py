@@ -72,7 +72,7 @@ class SearcherUnloadTests(unittest.TestCase):
         self.assertGreater(self.searcher._last_used_ts, 0.0)
 
     def test_search_after_unload_relazy_loads(self) -> None:
-        self.searcher._encode = lambda model, text: np.ones(4, dtype="float32")
+        self.searcher._encode = lambda model, text, prefix="query: ": np.ones(4, dtype="float32")
         self.searcher._encode_batch = lambda model, texts: np.ones((len(texts), 4), dtype="float32")
         self.searcher.index_item("id1", "текст один")
         self.assertTrue(self.searcher._model_loaded)

@@ -50,6 +50,11 @@ class _FakeStore:
     def _lock(self):
         return self._CM()
 
+    def load_settings(self, lock_timeout_sec=None, nowait=False):
+        # HistoryService._is_privacy_mode fail-closed: без читаемых настроек считает
+        # privacy ON и отвечает до логики теста. Фейк обязан отдавать настройки.
+        return {"privacy_mode_enabled": False}
+
     def _load_active_items_unlocked(self):
         return []
 

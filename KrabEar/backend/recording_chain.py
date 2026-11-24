@@ -293,6 +293,9 @@ class RecordingChainManager:
             "items": items_detail,
             "total_duration_sec": round(total_duration, 2),
             "total_word_count": total_words,
+            # Явное «не приватно»: потребитель (Swift) fail-closed на ОТСУТСТВИЕ поля
+            # (G3-MEM-07 M07-02), поэтому обычный ответ обязан его нести.
+            "privacy_mode": False,
         }
 
     def list_chains(self, limit: int = 20) -> list[dict[str, Any]]:

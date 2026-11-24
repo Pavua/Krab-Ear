@@ -227,7 +227,10 @@ extension HistoryPanelController {
                 let resp = try ipc.call(method: "start_chain", params: ["name": name])
                 let result = resp["result"] as? [String: Any] ?? [:]
 
-                if let ok = result["ok"] as? Bool, !ok {
+                // G3-MEM-07 (M07-06): цепочка создана только с подтверждённым chain_id.
+                // Контракт бэкенда: успех = {"chain_id"} БЕЗ поля ok, отказ = {"ok": false, ...}.
+                let chainID = result["chain_id"] as? String
+                if result["ok"] as? Bool == false || chainID?.isEmpty != false {
                     let reason = result["reason"] as? String
                     let message = self?.chainErrorMessage(result: result, reason: reason) ?? "Не удалось создать цепочку"
                     DispatchQueue.main.async {
@@ -290,7 +293,9 @@ extension HistoryPanelController {
         let endedAt = result["ended_at"] as? String
         let totalDuration = result["total_duration_sec"] as? Double ?? 0.0
         let totalWords = result["total_word_count"] as? Int ?? 0
-        let isPrivacyMode = result["privacy_mode"] as? Bool ?? false
+        // G3-MEM-07 (M07-02): неизвестное/отсутствующее значение считаем privacy ON
+        // (fail-closed) — выдача текста цепочки при неизвестном состоянии нельзя.
+        let isPrivacyMode = result["privacy_mode"] as? Bool != false
 
         let vc = RecordingChainDetailViewController(
             chainId: chainId,
@@ -433,10 +438,11 @@ extension HistoryPanelController {
                             params: ["chain_id": finalChainId, "item_id": id]
                         )
                         let result = resp["result"] as? [String: Any] ?? [:]
-                        if let ok = result["ok"] as? Bool, !ok {
-                            lastFailureMessage = self?.chainErrorMessage(result: result, reason: result["reason"] as? String)
-                        } else {
+                        // G3-MEM-07 (M07-06): запись в цепочку успешна только ok==true.
+                        if result["ok"] as? Bool == true {
                             added += 1
+                        } else {
+                            lastFailureMessage = self?.chainErrorMessage(result: result, reason: result["reason"] as? String)
                         }
                     } catch {
                         lastFailureMessage = "Ошибка IPC: \(error.localizedDescription)"
@@ -628,6 +634,8 @@ final class RecordingChainDetailViewController: NSViewController {
 
         let copyBtn = ThemeSecondaryButton(title: "Копировать объединённый текст", target: self, action: #selector(onCopyMergedText))
         copyBtn.applyThemeSecondary()
+        // G3-MEM-07 (M07-02): при privacy ON — копирование текста запрещено.
+        copyBtn.isEnabled = !isPrivacyMode
         buttonRow.addArrangedSubview(copyBtn)
 
         let spacer = NSView()
@@ -801,8 +809,13 @@ final class RecordingChainDetailViewController: NSViewController {
                         let pb = NSPasteboard.general
                         InputAutomationQueue.shared.invalidatePending()
                         pb.clearContents()
-                        pb.setString(text, forType: .string)
-                        BackendToast.shared.show("Объединённый текст скопирован", duration: 2.5)
+                        // G3-MEM-07 (M07-13): setString возвращает Bool — подтверждаем
+                        // фактическую запись в буфер обмена.
+                        if pb.setString(text, forType: .string) {
+                            BackendToast.shared.show("Объединённый текст скопирован", duration: 2.5)
+                        } else {
+                            BackendToast.shared.show("Ошибка: не удалось записать в буфер обмена", duration: 3.5)
+                        }
                     }
                 }
             } catch {

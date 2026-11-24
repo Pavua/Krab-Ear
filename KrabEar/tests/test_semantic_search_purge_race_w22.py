@@ -69,7 +69,7 @@ class TestPurgeRaceBarrier(unittest.TestCase):
         # Monkeypatch _encode to fire a purge_all() *during* the encode — exactly
         # the window the daemon index thread is vulnerable in. The embedding it
         # returns is therefore "stale" relative to the purge that just happened.
-        def _encode_then_purge(model, text):
+        def _encode_then_purge(model, text, prefix="query: "):
             searcher.purge_all()  # bumps _purge_epoch under _index_lock
             return _fake_vec()
 
@@ -103,24 +103,23 @@ class TestPurgeRaceBarrier(unittest.TestCase):
 
     def test_no_purge_during_encode_indexes_normally(self):
         """Sanity: without a concurrent purge, indexing still works and persists."""
-        self.searcher._encode = lambda model, text: _fake_vec()
+        self.searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         ok = self.searcher.index_item("id1", "обычный текст")
         self.assertTrue(ok)
         with self.searcher._index_lock:
             self.assertIn("id1", self.searcher._index)
-        self.assertTrue(self.searcher._embeddings_path.exists())
-        self.assertTrue(self.searcher._index_path.exists())
+        self.assertTrue(self.searcher._snapshot_path.exists())
 
     def test_purge_clears_files_already_on_disk(self):
         """A purge after a normal persisted index removes the files (baseline that
         the barrier protects — purge itself must win)."""
         searcher = self.searcher
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         self.assertTrue(searcher.index_item("id1", "первый"))
-        self.assertTrue(searcher._embeddings_path.exists())
-        self.assertTrue(searcher._index_path.exists())
+        self.assertTrue(searcher._snapshot_path.exists())
 
         searcher.purge_all()
+        self.assertFalse(searcher._snapshot_path.exists())
         self.assertFalse(searcher._embeddings_path.exists())
         self.assertFalse(searcher._index_path.exists())
         with searcher._index_lock:
@@ -165,7 +164,7 @@ class TestMaxItemsEviction(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir, max_items=3)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
 
         for i in range(6):
             self.assertTrue(searcher.index_item(f"id{i}", f"текст {i}"))
@@ -196,7 +195,7 @@ class TestMaxItemsEviction(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir, max_items=0)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         for i in range(10):
             searcher.index_item(f"id{i}", f"t{i}")
         with searcher._index_lock:
@@ -223,7 +222,7 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
 
         pushed = []
 
@@ -233,10 +232,9 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
 
         searcher._error_bus = _FakeBus()
 
-        # Force _save_locked to raise — monkeypatch np.save to blow up. We patch
-        # the module-level numpy import path used inside _save_locked.
-        # G3-P03-09: patch() вместо ручной глобальной подмены np.save (откат гарантирован).
-        with patch("numpy.save", side_effect=OSError("disk full (simulated)")):
+        # Force _save_locked to raise — monkeypatch np.savez to blow up (M05-04
+        # snapshot format). patch() вместо ручной глобальной подмены (G3-P03-09).
+        with patch("numpy.savez", side_effect=OSError("disk full (simulated)")):
             ok = searcher.index_item("id1", "текст")
 
         # G3-P03-01: отказ записи индекса на диск — НЕ успех: index_item
@@ -245,6 +243,7 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
         self.assertFalse(ok)
         self.assertEqual(len(pushed), 1)
         self.assertEqual(pushed[0].code, "history.write_fail")
+        self.assertFalse(searcher._snapshot_path.exists())
 
     def test_save_failure_no_bus_is_silent(self):
         """When no _error_bus is wired, save failure stays a silent no-op (warning
@@ -253,13 +252,13 @@ class TestSaveFailSurfacedToErrorBus(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         self.assertIsNone(searcher._error_bus)
 
-        with patch("numpy.save", side_effect=OSError("disk full (simulated)")):
+        with patch("numpy.savez", side_effect=OSError("disk full (simulated)")):
             ok = searcher.index_item("id1", "текст")  # must not raise
         self.assertFalse(ok)  # G3-P03-01: нет подтверждённой записи на диск
-        self.assertFalse(searcher._embeddings_path.exists())
+        self.assertFalse(searcher._snapshot_path.exists())
 
 
 if __name__ == "__main__":

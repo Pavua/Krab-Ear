@@ -109,17 +109,21 @@ extension HistoryPanelController {
             do {
                 let response = try client.call(method: "generate_daily_digest", params: params)
                 let result = (response["result"] as? [String: Any]) ?? [:]
-                if (result["ok"] as? Bool) == false {
+                // M06-11: отказ (ok==false) или ответ без сводки не выглядит как «Готово».
+                // Контракт бэкенда: успех = поля дайджеста (markdown, date, ...) БЕЗ ok,
+                // отказ = {"ok": false, "reason": ...}.
+                if (result["ok"] as? Bool) == false || !(result["markdown"] is String) {
                     let privacy = (result["reason"] as? String) == "privacy_mode_active"
+                    let errorMsg = (result["error"] as? String) ?? (result["reason"] as? String) ?? ""
                     DispatchQueue.main.async {
                         self?.dailyRecapStatusLabel.stringValue = privacy
                             ? "Сводка недоступна в режиме приватности"
-                            : "Нет данных за дату"
+                            : "Нет данных за дату\(errorMsg.isEmpty ? "" : " (\(errorMsg))")"
                         self?.clearDailyRecap()
                     }
                     return
                 }
-                
+
                 DispatchQueue.main.async {
                     self?.dailyRecapStatusLabel.stringValue = "Готово"
                     if let container = self?.dailyRecapContentView {

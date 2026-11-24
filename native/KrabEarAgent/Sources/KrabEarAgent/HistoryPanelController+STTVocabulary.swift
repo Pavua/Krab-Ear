@@ -77,15 +77,12 @@ extension HistoryPanelController {
         addButton.setContentHuggingPriority(.required, for: .horizontal)
         addButton.setAccessibilityLabel("Добавить термин в словарь STT")
 
-        let addRow = makeSettingRow(label: "Добавить термин", control: addField)
-
-        // Складываем строку с кнопкой вручную (makeSettingRow поддерживает один control справа,
-        // а нам нужны поле + кнопка). Используем горизонтальный NSStackView.
+        // G3-MEM-07 (M07-15): убран dead `addRow` — строка строится напрямую через
+        // makeSettingRow с составным control (поле + кнопка).
         let addFieldStack = NSStackView(views: [addField, addButton])
         addFieldStack.orientation = .horizontal
         addFieldStack.spacing = KrabEarTheme.Metrics.tight
         addFieldStack.alignment = .centerY
-        _ = addRow // Unused — строим напрямую через makeSettingRow с составным control.
 
         let addCompositeRow = makeSettingRow(
             label: "Добавить термин",
@@ -333,6 +330,19 @@ extension HistoryPanelController {
                 }
             }
         }
+
+        // G3-MEM-07 (M07-03): переключатель авто-словаря — повторно при каждом
+        // rebuild (не допускаем потерю строки при перестроек карточки).
+        if let toggle = objc_getAssociatedObject(
+            self, &STTVocabAssocKeys.autoLearnToggle
+        ) as? NSButton {
+            card.contentStackView.addArrangedSubview(sttVocabMakeSeparator())
+            card.contentStackView.addArrangedSubview(makeSettingRow(
+                label: "Авто-словарь из правок",
+                description: "Когда вы исправляете неверно распознанное слово, оно автоматически добавляется в словарь STT",
+                control: toggle
+            ))
+        }
     }
 
     // MARK: - Перестройка карточки (Claude Design)
@@ -406,6 +416,16 @@ extension HistoryPanelController {
                     card.contentStackView.addArrangedSubview(row)
                 }
             }
+        }
+
+        // G3-MEM-07 (M07-03): переключатель авто-словаря — повторно при rebuild.
+        if let toggle = objc_getAssociatedObject(
+            self, &STTVocabAssocKeys.cdAutoLearnToggle
+        ) as? NSButton {
+            card.contentStackView.addArrangedSubview(cdMakeSeparator())
+            card.contentStackView.addArrangedSubview(
+                cdMakeRow(label: "", control: toggle)
+            )
         }
     }
 
@@ -616,15 +636,23 @@ extension HistoryPanelController {
             do {
                 let resp = try ipc.call(method: "add_stt_hotword", params: ["word": word])
                 let result = resp["result"] as? [String: Any]
+                // G3-MEM-07 (M07-12): требуем подтверждённого добавления в список.
+                // Контракт бэкенда: {"hotwords": [...], "truncated": Bool} БЕЗ ok;
+                // подтверждение = запрошенное слово присутствует в возвращённом списке.
+                let confirmed = (result?["hotwords"] as? [String])?.contains(word) == true
+                if result?["ok"] as? Bool == false || !confirmed { throw NSError(domain: "KrabEar", code: -1) }
                 truncated = result?["truncated"] as? Bool ?? false
             } catch {
+                DispatchQueue.main.async {
+                    BackendToast.shared.show("Не удалось добавить термин в словарь STT", duration: 3.5)
+                }
                 return
             }
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
 
-                // Очищаем поле ввода.
+                // Очищаем поле ввода только после подтверждённой записи.
                 if isClaudeDesign {
                     if let field = objc_getAssociatedObject(
                         self, &STTVocabAssocKeys.cdAddTextField

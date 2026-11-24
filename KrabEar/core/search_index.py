@@ -228,6 +228,11 @@ class SearchIndex:
         """
         h = hashlib.sha1()
         for item in items:
+            # G3-MEM-05 (M05-08): ID участвует в сигнатуре — замена записи на другую
+            # с тем же текстом должна инвалидировать кэш, иначе выдаём старый ID.
+            item_id = str(item.get("id") or "").encode("utf-8")
+            h.update(len(item_id).to_bytes(8, "big"))
+            h.update(item_id)
             h.update((item.get("text") or "").encode("utf-8"))
             h.update(b"\x1f")
             h.update((item.get("source_text") or "").encode("utf-8"))

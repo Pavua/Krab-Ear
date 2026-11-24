@@ -390,6 +390,44 @@ def _ledger_holds_no_ciphertext(ledger_path: Path) -> bool:
         return False
 
 
+def _purge_directory_entries(root: Path) -> int:
+    """G3-MEM-04 (M04-03): рекурсивно удаляет содержимое `root`, не следуя символическим
+    ссылкам. Все разрешения (opendir/open) привязаны к FD каталога (dir_fd),
+    и проверки stat делаются без следования ссылкам — целевая папка, до которой может
+    «сбежать» замена, не может быть изменена через относительный путь.
+
+    Возвращает число удалённых записей (файлов + файлов вложенных каталогов).
+    При OSError оставляет оставшиеся записи и бросает — вызывающая сторона ведёт
+    ошибку каскада.
+    """
+    def wipe(fd: int) -> int:
+        removed = 0
+        for name in os.listdir(fd):
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child_fd = os.open(
+                    name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd,
+                )
+                try:
+                    removed += wipe(child_fd)
+                finally:
+                    os.close(child_fd)
+                os.rmdir(name, dir_fd=fd)
+            else:
+                os.unlink(name, dir_fd=fd)
+                removed += 1
+        if os.listdir(fd):
+            raise OSError("directory purge incomplete")
+        os.fsync(fd)
+        return removed
+
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return wipe(fd)
+    finally:
+        os.close(fd)
+
+
 class HistoryService:
     """Обработчики IPC-команд для истории транскрипций."""
 
@@ -483,10 +521,48 @@ class HistoryService:
         self._search_history_mgr: Any = None  # SearchHistoryManager — in-memory query list (user search PII)
 
     def _write_plaintext_file(self, params: dict[str, Any], path: Path, content: str) -> None:
-        """Одна фиксированная запись; mkdir входит в ту же fresh authorization."""
+        """Одна фиксированная запись; mkdir входит в ту же fresh authorization.
+
+        G3-MEM-04 (M04-02): атомарный temp→fsync→os.replace через dir_fd — не
+        перезаписываем чужой inode (symlink/hardlink на цель) и не оставляем
+        частичный файл при сбое записи.
+        """
         def write() -> None:
+            import secrets
+
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            # Каталог назначения открывается С разрешением симлинков: на macOS /tmp,
+            # /var — симлинки, а Dropbox/iCloud/внешние диски — обычные симлинк-папки;
+            # O_NOFOLLOW на каталоге ломал экспорт туда (ревью #2229, F5). Защита M04-02 —
+            # не перезаписать чужой inode по симлинку на САМ файл — обеспечивается ниже:
+            # temp с O_EXCL|O_NOFOLLOW + os.replace заменяет ссылку, а не её цель.
+            dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                tmp = f".{path.name}.{secrets.token_hex(12)}.tmp"
+                try:
+                    fd = os.open(
+                        tmp,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=dfd,
+                    )
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        f.write(content)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(
+                        tmp, path.name,
+                        src_dir_fd=dfd, dst_dir_fd=dfd,
+                    )
+                    os.fsync(dfd)
+                except BaseException:
+                    try:
+                        os.unlink(tmp, dir_fd=dfd)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                os.close(dfd)
 
         run_export_write(
             self._plaintext_export_authorizer, export_context(params), BackendSink.HISTORY, write,
@@ -529,10 +605,9 @@ class HistoryService:
             value = settings["privacy_mode_enabled"]
             # Не-bool (None, 0, "") — тоже «неизвестно»: ON (как StateStore.load_settings).
             return value if isinstance(value, bool) else True
-        except AttributeError:
-            # Частично сконструированный инстанс (__new__ без __init__ в unit-тестах).
-            return False
         except Exception:  # noqa: BLE001
+            # AttributeError (частично сконструированный инстанс в unit-тестах)
+            # и все IO/lock ошибки — состояние приватности неизвестно: ON (fail-closed).
             logger.warning(
                 "Не удалось прочитать privacy_mode_enabled — считаем privacy ON (fail-closed)",
                 exc_info=True,
@@ -1093,19 +1168,30 @@ class HistoryService:
         # versions).  Вынесено в cascade_delete_artifacts, чтобы RecordingMerger мог
         # переиспользовать тот же путь после собственного атомарного tombstone'а
         # (wave1776 HIGH 1) — DRY: один источник истины для каскадного удаления.
-        self.cascade_delete_artifacts(item_id, item_ts, item=deleted_item, siblings=active)
+        # G3-MEM-02 (M02-03): каскад возвращает список ошибок вторичных шагов, чтобы
+        # удаление из основной истории (уже выполнено) не выдавалось за полное.
+        secondary_errors = self.cascade_delete_artifacts(
+            item_id, item_ts, item=deleted_item, siblings=active, return_errors=True
+        )
 
         add_breadcrumb(
             category="history",
             message="delete_history_item",
             data={"ok": True, "duration_ms": round((_time.monotonic() - _t0) * 1000)},
         )
+        if secondary_errors:
+            # Семантический индекс (или другой каскад) не очищен — частичный статус.
+            # Основная запись удалена; durable retry остаётся на стороне вызывающего.
+            if any("semantic" in str(e).lower() or "remove_item" in str(e) for e in secondary_errors):
+                return {"deleted": True, "complete": False,
+                        "reason": "semantic_index_cleanup_failed"}
+            return {"deleted": True, "complete": False, "reason": "cascade_cleanup_failed"}
         return {"deleted": True}
 
     def cascade_delete_artifacts(
         self, item_id: str, item_ts: str, item: HistoryItem | None = None, *,
-        siblings: list[HistoryItem] | None = None,
-    ) -> None:
+        siblings: list[HistoryItem] | None = None, return_errors: bool = False,
+    ) -> list[str] | None:
         """Выполняет ВСЕ каскады удаления, КРОМE tombstone'а самой записи.
 
         Tombstone должен быть записан вызывающей стороной ДО этого вызова
@@ -1118,31 +1204,51 @@ class HistoryService:
         (W1426 F2), ghost-ссылки в цепочках (W1253 RC-3), playback-статистику
         (W1343), версии транскрипта (W1045 F2).  Каждый шаг отказоустойчив.
         """
+        errors: list[str] = []
+
         # W1762: стираем .md файл транскрипта (privacy gap — файл пережил tombstone).
-        self._erase_transcript_md(item_ts, item_id, item, siblings=siblings)
+        try:
+            self._erase_transcript_md(item_ts, item_id, item, siblings=siblings)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("transcript md erase failed for %s", item_id, exc_info=True)
+            errors.append(f"md_erase: {exc}")
 
         # Удаляем эмбеддинг из семантического индекса, если он подключён (W1426 F2).
         if self._semantic_searcher is not None:
             try:
                 self._semantic_searcher.remove_item(item_id)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "semantic_search remove failed for %s", item_id, exc_info=True
                 )
+                errors.append(f"semantic remove_item: {exc}")
         # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
         if self._recording_chain_mgr is not None:
-            self._recording_chain_mgr.remove_item_from_all_chains(item_id)
+            try:
+                self._recording_chain_mgr.remove_item_from_all_chains(item_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("recording_chain remove failed for %s", item_id, exc_info=True)
+                errors.append(f"recording_chain: {exc}")
         # F4 W1343: cascade-delete orphan playback stats.
         if self._playback_tracker is not None:
-            self._playback_tracker.remove_stats(item_id)
+            try:
+                self._playback_tracker.remove_stats(item_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("playback stats remove failed for %s", item_id, exc_info=True)
+                errors.append(f"playback_stats: {exc}")
         # W1045 F2: cascade-delete transcript versions to prevent privacy bypass.
         if self._transcript_versions is not None:
             try:
                 self._transcript_versions.delete_versions_for(item_id)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning(
                     "transcript_versions cascade delete failed for %s", item_id, exc_info=True
                 )
+                errors.append(f"transcript_versions: {exc}")
+
+        if return_errors:
+            return errors
+        return None
 
     def handle_compact_history(self, params: dict[str, Any]) -> dict[str, Any]:
         stats = self.store.compact_with_stats()
@@ -2440,7 +2546,9 @@ class HistoryService:
         limit = params.get("limit")
         from_ts = params.get("from_ts")
         to_ts = params.get("to_ts")
-        copy_to_clipboard = params.get("copy_to_clipboard", True)
+        # G3-MEM-04 (M04-07): clipboard — OPT-IN (privacy consent; full transcript
+        # goes to the system clipboard otherwise).
+        copy_to_clipboard = self._coerce_bool(params.get("copy_to_clipboard"), default=False)
         save_path = params.get("save_to_file")
 
         items = [i.to_dict() if hasattr(i, 'to_dict') else i
@@ -3176,7 +3284,14 @@ class HistoryService:
         transcripts_deleted = 0
         try:
             transcripts_dir = Path(self.store.data_dir) / "transcripts"
-            if transcripts_dir.is_dir():
+            if transcripts_dir.is_symlink():
+                # G3-MEM-04 (M04-03): симлинк на чужой каталог — отклоняем; не чистим цель.
+                try:
+                    transcripts_dir.unlink()
+                except OSError:
+                    logger.warning("purge_all_data: could not unlink transcripts symlink", exc_info=True)
+                    secondary_errors.append("transcripts")
+            elif transcripts_dir.is_dir():
                 # Явные glob-семейства экспортных артефактов (покрывают каждое расширение
                 # явно для статического guard-а) + полный обход каталога (страховка).
                 export_files = set(transcripts_dir.glob("*.md"))
@@ -3194,6 +3309,20 @@ class HistoryService:
                         logger.warning("purge_all_data: could not delete transcript file %s", export_path, exc_info=True)
                 if len(export_files) > transcripts_deleted:
                     secondary_errors.append("transcripts")
+                # Подкаталоги и симлинки ВНУТРИ transcripts/ (ревью #2229 F3): iterdir()+is_file()
+                # выше их не трогал, а _purge_directory_entries (M04-03) нигде не вызывался.
+                # Симлинк удаляется как ссылка (цель не трогаем), каталог — рекурсивно через FD.
+                for sub_entry in transcripts_dir.iterdir():
+                    try:
+                        if sub_entry.is_symlink():
+                            sub_entry.unlink()
+                            transcripts_deleted += 1
+                        elif sub_entry.is_dir():
+                            transcripts_deleted += _purge_directory_entries(sub_entry)
+                            sub_entry.rmdir()
+                    except OSError:
+                        logger.warning("purge_all_data: could not purge transcripts subentry %s", sub_entry, exc_info=True)
+                        _flag_step_error(secondary_errors, "transcripts")
         except Exception:
             logger.warning("purge_all_data: transcript directory deletion failed", exc_info=True)
             secondary_errors.append("transcripts")
@@ -4110,15 +4239,16 @@ class HistoryService:
         if directory is None:
             _flag_step_error(errors, "purge_verification")
             return
+        # G3-MEM-04 (M04-04): проверяем файловые артефакты НЕЗАВИСИМО от наличия
+        # collaborator — clear() не обязан сглаживать неудачную очистку, а
+        # complete=True допускает «успех при оставленном артефакте».
         checks = (
-            (self._semantic_searcher, ("embeddings.npy", "embeddings_index.json")),
-            (self._vocabulary_store, ("vocabulary.json",)),
-            (self._webhook_manager, ("webhooks.json",)),
-            (self._translation_cache, ("translation_cache.json",)),
+            ("embeddings.npy", "embeddings_index.json", "embeddings_snapshot.npz"),
+            ("vocabulary.json",),
+            ("webhooks.json",),
+            ("translation_cache.json",),
         )
-        for owner, names in checks:
-            if owner is None:
-                continue
+        for names in checks:
             for name in names:
                 try:
                     os.lstat(directory / name)
@@ -4785,6 +4915,9 @@ class HistoryService:
         custom_title: str | None = params.get("title")
         output_dir_param: str | None = params.get("output_dir")
         extra_tags: list[str] = list(params.get("tags") or [])
+        # G3-MEM-04 (M04-11): LLM-резюме — OPT-IN. По умолчанию не отправляем
+        # данные транскриптов внешним LLM-сервисам без явного согласия.
+        include_llm_summary = self._coerce_bool(params.get("include_llm_summary"), default=False)
 
         # --- Загружаем записи ---
         from backend.models import HistoryItem as _HI
@@ -4900,7 +5033,7 @@ class HistoryService:
         summary_text: str | None = None
         key_points: list[str] = []
 
-        if self._llm_rewriter is not None:
+        if include_llm_summary and self._llm_rewriter is not None:
             circuit_state = (
                 self._llm_rewriter._circuit.state
                 if hasattr(self._llm_rewriter, "_circuit")
@@ -5857,6 +5990,11 @@ class HistoryService:
                 # Уже держим store EX-lock, нового flock FD здесь нет.
                 self.store._commit_prepared_settings_unlocked(*settings_to_restore)
 
+            # G3-MEM-04 (M04-06): legacy restore пересоздал журналы — сброс
+            # инвалидируемых RAM-кэшей ПОД store-lock сразу после commit.
+            self.store._active_ids = None
+            self.store.reset_search_caches()
+
         restored_entries = self.store.count_active_items()
         logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)
         return {
@@ -6208,13 +6346,22 @@ class HistoryService:
                 segs = diar.get("speaker_segments", [])
                 speaker_set = {s.get("speaker", "") for s in segs if isinstance(s, dict)}
                 speakers = ", ".join(sorted(speaker_set))
+            # G3-MEM-04 (M04-08): formula-injection neutralization + те же ключи
+            # основного экспорта (source_lang / audio_duration_sec).
+            raw_text = item.get("text", "") or ""
+            raw_translation = translation or ""
+            lang_val = item.get("source_lang", "") or item.get("lang", "") or ""
+            dur_raw = item.get("audio_duration_sec")
+            if dur_raw is None:
+                dur_raw = item.get("duration", "")
+            duration_val = str(dur_raw) if dur_raw not in (None, "") else ""
             writer.writerow([
                 item.get("ts", ""),
-                item.get("text", ""),
-                translation,
-                item.get("lang", ""),
+                self._neutralize_csv(raw_text),
+                self._neutralize_csv(raw_translation),
+                lang_val,
                 item.get("confidence", ""),
-                item.get("duration", ""),
+                duration_val,
                 item.get("paste_status", ""),
                 speakers,
             ])

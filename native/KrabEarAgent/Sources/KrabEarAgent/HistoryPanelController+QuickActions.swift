@@ -398,10 +398,14 @@ extension HistoryPanelController {
                     )
                     nonisolated(unsafe) let result = response["result"] as? [String: Any] ?? [:]
                     // Успех: backend возвращает {message_id, sent_at, chat_title}
-                    // или {ok: false, error: "...", user_msg_ru: "..."}
+                    // или {ok: false, error: "...", user_msg_ru: "..."}.
+                    // G3-MEM-07 (M07-10): отказ должен иметь приоритет — подтверждённый
+                    // message_id НЕ разрешает успех при ok=false.
                     let okFlag = result["ok"] as? Bool
                     let hasMessageId = result["message_id"] != nil
-                    let success = hasMessageId || (okFlag == true)
+                    // Контракт бэкенда: успех = {message_id, sent_at, chat_title} БЕЗ ok;
+                    // отказ = {"ok": false, ...}. ok==false перекрывает message_id.
+                    let success = okFlag != false && hasMessageId
 
                     DispatchQueue.main.async {
                         if success {

@@ -35,6 +35,13 @@ logger = logging.getLogger("KrabEar.Backend.AutoDedup")
 
 # Порог выше которого запись считается дубликатом
 DEFAULT_DEDUP_THRESHOLD: float = 0.9
+# G3-MEM-03 (R02): нижняя граница безопасного порога. Ниже неё различные тексты
+# начинают считаться дубликатами, и авто-дедупликация молча отбрасывает диктовки
+# (действие при совпадении — skipped: диктовка не сохраняется). При 0.5 уже
+# «да, давай завтра» / «да, давай сегодня» — дубль, поэтому граница 0.8 (ревью #2229, F8).
+# `auto_dedup_threshold` — пользовательская настройка без валидатора, граница держится
+# здесь. Ниже границы (включая 0.0 и отрицательные) → default; выше 1.0 → 1.0.
+MIN_SAFE_DEDUP_THRESHOLD: float = 0.8
 # Порог выше которого схожие записи считаются кандидатами на слияние
 MERGE_THRESHOLD: float = 0.95
 # Настройка-флаг для DEFAULT_SETTINGS / runtime settings
@@ -42,13 +49,15 @@ AUTO_DEDUP_ENABLED: bool = False
 
 
 def _sanitize_threshold(value: object) -> float:
-    """Validate and clamp IPC threshold to [0.0, 1.0].
+    """Validate IPC threshold: допустимо [MIN_SAFE_DEDUP_THRESHOLD, 1.0].
 
     wave-1770 HIGH: IPC handlers previously accepted NaN/Inf/negative threshold
     values which caused data-loss (negative → every recording silently dropped as
     duplicate) or silent dedup bypass (NaN makes all comparisons falsy).
 
-    Returns *value* clamped to [0.0, 1.0], or DEFAULT_DEDUP_THRESHOLD on error.
+    Returns *value* if it is in [MIN_SAFE_DEDUP_THRESHOLD, 1.0]; значения выше 1.0
+    прижимаются к 1.0 («почти никогда не дубликат» — как и намеревался пользователь);
+    NaN/Inf/мусор и значения ниже безопасной границы → DEFAULT_DEDUP_THRESHOLD.
     """
     try:
         v = float(value)
@@ -57,7 +66,13 @@ def _sanitize_threshold(value: object) -> float:
         return DEFAULT_DEDUP_THRESHOLD
     if not math.isfinite(v):
         return DEFAULT_DEDUP_THRESHOLD
-    return max(0.0, min(1.0, v))
+    # G3-MEM-03 (R02): опасный порог — вернуть default, а не прижимать к 0.0.
+    # Порог 0.0 помечает дубликатом любой текст — авто-skip различных диктовок.
+    if v > 1.0:
+        return 1.0
+    if v < MIN_SAFE_DEDUP_THRESHOLD:
+        return DEFAULT_DEDUP_THRESHOLD
+    return v
 
 
 # W1243 F2: максимальное число записей для полного сканирования run_deduplication
@@ -240,6 +255,7 @@ class AutoDeduplicator:
         Returns:
             DedupResult с полями is_duplicate, duplicate_of, similarity, action_taken.
         """
+        threshold = _sanitize_threshold(threshold)
         text = (text or "").strip()
         if not text:
             return DedupResult(
@@ -467,6 +483,8 @@ class AutoDeduplicator:
     ) -> dict[str, Any]:
         """Сканирует историю (с ограничением _MAX_DEDUP_SCAN) и возвращает отчёт о дубликатах.
 
+        G3-MEM-03 (R02): порог валидируется — опасный значения заменяются default.
+
         W1243 F2 HIGH fix:
           - Загружает не более _MAX_DEDUP_SCAN (1000) записей — берёт самые свежие.
           - Записи с пустым/отсутствующим ts получают заглушку _MISSING_TS_PLACEHOLDER,
@@ -487,6 +505,7 @@ class AutoDeduplicator:
               - duplicate_groups: int
               - duplicates: list[dict]  — каждый элемент: {original_id, duplicate_ids, similarity}
         """
+        threshold = _sanitize_threshold(threshold)
         # W1248: пропускаем в режиме приватности — сравнение текстов запрещено.
         if self._privacy_mode_enabled():
             logger.debug("run_deduplication: пропущено — активен режим приватности")
@@ -767,8 +786,9 @@ class AutoDeduplicator:
     def handle_run_deduplication(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик метода run_deduplication.
 
-        W1248: поддерживает _semantic_searcher — если передан, вызывает remove_item
-        для каждого найденного дубликата (исключение логируется и не прокидывается).
+        G3-MEM-03 (R04): _semantic_searcher принимается, но НЕ мутируется —
+        удаление дубликатов из поискового индекса — явная отдельная операция
+        (HistoryService.cascade_delete_artifacts).
 
         W1243 F2: запускает сканирование синхронно и возвращает полный результат.
         Для асинхронного режима используйте run_deduplication_async.
@@ -776,17 +796,16 @@ class AutoDeduplicator:
         Params:
             threshold (float, optional): порог сходства, по умолчанию 0.9.
             store: передаётся из BackendService.
-            _semantic_searcher (optional): объект с методом remove_item(id).
+            _semantic_searcher: принят для совместимости, не используется.
 
         Returns:
             dict с полями из run_deduplication.
         """
-        # wave-1770 HIGH: validate threshold before use.
+        # wave-1770 HIGH: validate threshold before use (G3-MEM-03 R02).
         threshold = _sanitize_threshold(params.get("threshold", DEFAULT_DEDUP_THRESHOLD))
         store = params.get("_store")
         if store is None:
             raise ValueError("store не передан в handle_run_deduplication")
-        semantic_searcher = params.get("_semantic_searcher")
 
         # W1248: privacy mode check must happen before any store access.
         if self._privacy_mode_enabled():
@@ -812,17 +831,9 @@ class AutoDeduplicator:
 
         result = self.run_deduplication(store=store, threshold=threshold)
 
-        # W1248: notify semantic searcher about removed duplicates
-        if semantic_searcher is not None and result.get("duplicates"):
-            for group in result["duplicates"]:
-                for dup_id in group.get("duplicate_ids", []):
-                    try:
-                        semantic_searcher.remove_item(dup_id)
-                    except Exception:
-                        logger.warning(
-                            "handle_run_deduplication: semantic_searcher.remove_item(%s) failed",
-                            dup_id,
-                        )
+        # G3-MEM-03 (R04): отчёт о дубликатах — заглядывать в историю, но не
+        # мутировать поисковый индекс. Удаление записей из индекса — отдельная,
+        # явно подтверждаемая операция (HistoryService cascade).
 
         return result
 

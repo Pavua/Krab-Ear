@@ -134,7 +134,12 @@ class TestRemoveNonexistentReturnsFalse(unittest.TestCase):
 
     def test_remove_last_item_sets_embeddings_none(self):
         """After removing the only item, _embeddings becomes None."""
-        searcher = _make_searcher(self.tmpdir + "_single", [("only", "один единственный")])
+        # Каталог ДОЛЖЕН существовать: раньше сюда подавался несуществующий путь, запись
+        # снимка молча падала, и тест этого не замечал (ревью #2229 F6: теперь отказ записи
+        # при удалении — SnapshotNotPersistedError, а не тихая потеря).
+        single_dir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, single_dir, ignore_errors=True)
+        searcher = _make_searcher(single_dir, [("only", "один единственный")])
         searcher.remove_item("only")
         with searcher._index_lock:
             self.assertIsNone(searcher._embeddings)
