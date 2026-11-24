@@ -91,6 +91,34 @@ extension HistoryPanelController {
         _ = vc.view
     }
 
+    // MARK: - Обновление конфига после смены настроек шлюза
+
+    /// Подтянуть в конфиг «Разговора с AI» актуальные адрес и ключ Voice Gateway.
+    ///
+    /// `setupConversationTab` читает их один раз при запуске, а обработчики полей «Gateway URL» и «API key»
+    /// только сохраняют настройку в бэкенде: без этого вызова разговор продолжает слать прежний ключ до
+    /// перезапуска агента (баг 24.11: верный ключ введён, шлюз по-прежнему отвечал 401). Реальный ключ
+    /// тянется off-main отдельным IPC (get_settings отдаёт его редактированным).
+    func refreshConversationGatewayConfig() {
+        guard let vc = conversationVC else { return }
+        let settings = settingsProvider()
+        let httpBase = settings.voiceGatewayURL
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        vc.config = vc.config.updatingGateway(
+            wsURLString: buildConversationWSURL(from: settings), httpBaseURLString: httpBase)
+        let credentialIPC = self.ipcClient
+        Task { [weak vc] in
+            guard let response = try? await credentialIPC.callAsync(
+                method: "get_voice_gateway_credential", params: [:]
+            ), let result = response["result"] as? [String: Any],
+                  let realKey = result["voice_gateway_api_key"] as? String else { return }
+            await MainActor.run {
+                vc?.config.apiKey = realKey
+            }
+        }
+    }
+
     // MARK: - URL builder
 
     /// Строит WS-URL для Voice Gateway из настроек.
