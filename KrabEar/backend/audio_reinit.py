@@ -189,7 +189,17 @@ class AudioReinitCoordinator:
                             "AudioReinitCoordinator: adapter.stop() упал"
                         )
                         stopped = False
-                    # None — легаси duck-type без возврата: трактуем как успех.
+                    # None — легаси duck-type без возврата. G3-audio-02 (A02-02): None НЕ
+                    # доказывает остановку — подтверждение только независимым is_running()==False;
+                    # слушатель, который всё ещё работает, + Pa_Terminate = крэш PortAudio.
+                    if stopped is None:
+                        try:
+                            stopped = not bool(adapter.is_running())
+                        except Exception:
+                            logger.exception(
+                                "AudioReinitCoordinator: is_running() после легаси stop() упал"
+                            )
+                            stopped = False
                     if stopped is False:
                         logger.error(
                             "AudioReinitCoordinator: тред слушателя не вышел — "
