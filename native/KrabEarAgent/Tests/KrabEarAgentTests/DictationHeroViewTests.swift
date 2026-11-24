@@ -137,6 +137,16 @@ final class DictationHeroViewTests: XCTestCase {
             root.layoutSubtreeIfNeeded()
         }
         XCTAssertEqual(grid.subviews.count, 8, "в сетке 4 пары «ярлык/значение», без лишних вью")
+        // После переключений (рендер настоящей вкладки на 640: «Горяча…», «Авто-в…»).
+        for w in [CGFloat(559), 1280] {
+            width.constant = w
+            root.layoutSubtreeIfNeeded()
+            root.layoutSubtreeIfNeeded()
+            for case let label as NSTextField in grid.subviews {
+                XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width - 1,
+                                            "«\(label.stringValue)» обрезана после переключения на \(w)")
+            }
+        }
     }
 
     /// Офлайн-рендер #2255: сетка с hugging .required сжимала ярлыки и значения (CR 250)

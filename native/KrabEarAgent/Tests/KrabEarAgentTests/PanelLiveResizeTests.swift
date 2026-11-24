@@ -89,6 +89,7 @@ final class PanelLiveResizeTests: XCTestCase {
         var s = String(describing: type(of: v))
         if let t = (v as? ThemeCardView)?.title, !t.isEmpty { s += "«\(t)»" }
         if let f = v as? NSTextField, !f.stringValue.isEmpty { s += "«\(f.stringValue.prefix(40))»" }
+        if let f = v as? NSTextField, f.stringValue.isEmpty, let ph = f.placeholderString, !ph.isEmpty { s += "‹\(ph.prefix(30))›" }
         if let b = v as? NSButton, !b.title.isEmpty { s += "«\(b.title.prefix(30))»" }
         if let id = v.identifier?.rawValue { s += "#\(id)" }
         return s
@@ -131,8 +132,14 @@ final class PanelLiveResizeTests: XCTestCase {
         }
         for v in descendants(root) where isEffectivelyVisible(v, under: root) {
             let f = v.convert(v.bounds, to: root)
-            if f.width <= 0 || f.height <= 0 { continue }
             let hScroll = insideHorizontalScroll(v, under: root)
+            // 0б) Поле ввода сжато до нечитаемого — до пропуска нулевых рамок: поиск «Истории»
+            //     на 640 получал ширину 0 (на экране — один значок лупы под «Сбросить»).
+            if let field = v as? NSTextField, field.isEditable, !hScroll, f.height > 0, field.bounds.width < 40 {
+                issues.append(Issue(tab: tab.title, width: width, theme: theme, kind: "сжато поле",
+                                    detail: "\(name(field)) \(Int(field.bounds.width)) pt; путь: \(path(field, root))"))
+            }
+            if f.width <= 0 || f.height <= 0 { continue }
             // 1) Схлопнутые карточки и секции верхнего уровня.
             if (v is ThemeCardView || v is CollapsibleSectionView), !hScroll,
                !(v.superview is NSStackView && (v.superview as? NSStackView)?.orientation == .horizontal),

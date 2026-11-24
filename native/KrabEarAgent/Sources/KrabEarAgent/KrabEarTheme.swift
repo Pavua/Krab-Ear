@@ -329,7 +329,26 @@ public extension KrabEarTheme {
                 row.setClippingResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
             }
             if let label = v as? NSTextField { makeLabelYieldWidth(label) }
+            if let field = v as? NSTextField { ensureFieldMinimumWidth(field) }
         }
+    }
+
+    /// У редактируемого NSTextField нет собственной ширины: в ряду с гравитацией он получал
+    /// 0 pt (харнесс + офлайн-рендер: поиск «Истории», дата «Дневной сводки», «Реплика»).
+    /// Поле в стеке без своего ограничения ширины получает минимум 160 с приоритетом 490 —
+    /// fittingSize ряда его учитывает (AdaptiveRow встаёт столбиком), окно не растёт.
+    /// Поля с явной шириной (числовые, 50 pt) не трогаем. Повторный вызов безопасен.
+    static func ensureFieldMinimumWidth(_ field: NSTextField) {
+        guard field.isEditable,
+              let parent = field.superview as? NSStackView,
+              parent.arrangedSubviews.contains(where: { $0 === field }),
+              field.intrinsicContentSize.width == NSView.noIntrinsicMetric,
+              !field.constraints.contains(where: { $0.firstItem === field && $0.firstAttribute == .width })
+        else { return }
+        let c = field.widthAnchor.constraint(greaterThanOrEqualToConstant: 160)
+        c.priority = NSLayoutConstraint.Priority(490)
+        c.identifier = "krab.fieldMinWidth"
+        c.isActive = true
     }
 
     /// Подпись в стеке не расширяет окно: сопротивление сжатию 240 — ниже windowSizeStayPut
