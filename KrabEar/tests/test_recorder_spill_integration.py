@@ -30,14 +30,27 @@ class FakeSpill:
         self.discarded = True
 
 
+def _inert_worker(recorder):
+    """Подмена рабочего потока записи: ждёт stop/abort и НЕ трогает аудиоустройство.
+
+    G3-audio-04 (A04-01): настоящий worker при установленном sounddevice открывает живой
+    микрофон прямо из юнит-теста (TCC-запрос, запись голоса на машине разработчика).
+    Тестам старта достаточно потока, который корректно завершается по _stop_event.
+    """
+    return patch.object(recorder, "_worker", lambda: recorder._stop_event.wait(2.0))
+
+
 class RecorderSpillTest(unittest.TestCase):
     def test_start_accepts_spill_kwarg_and_stores_it(self):
         r = AudioRecorder()
         spill = FakeSpill()
-        # sd отсутствует в CI: воркер умрёт сразу, но start() обязан принять kwarg
-        r.start(spill=spill)
-        self.assertIs(r._spill, spill)
-        r.abort(timeout_sec=0.5)
+        with _inert_worker(r), patch("backend.recorder.sd") as fake_sd:
+            self.assertTrue(r.start(spill=spill))
+            try:
+                self.assertIs(r._spill, spill)
+            finally:
+                r.abort(timeout_sec=0.5)
+        fake_sd.InputStream.assert_not_called()  # микрофон не открывался
 
     def test_stop_closes_spill_never_discards(self):
         r = AudioRecorder()
@@ -67,9 +80,13 @@ class RecorderSpillTest(unittest.TestCase):
 
     def test_start_without_spill_backward_compatible(self):
         r = AudioRecorder()
-        r.start()
-        self.assertIsNone(r._spill)
-        r.abort(timeout_sec=0.5)
+        with _inert_worker(r), patch("backend.recorder.sd") as fake_sd:
+            self.assertTrue(r.start())
+            try:
+                self.assertIsNone(r._spill)
+            finally:
+                r.abort(timeout_sec=0.5)
+        fake_sd.InputStream.assert_not_called()
 
     def test_thread_start_failure_rolls_back_state_and_closes_spill(self):
         """Неудача создания worker-а не публикует ложную запись."""

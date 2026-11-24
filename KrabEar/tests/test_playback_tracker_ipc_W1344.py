@@ -144,51 +144,62 @@ class TestGetNeverPlayedViaIPC(unittest.TestCase):
 # W1336 F2 (privacy mode gate)
 # ---------------------------------------------------------------------------
 
-def _handle_get_never_played_impl(self, params):
-    """Копия реализации _handle_get_never_played из BackendService.
-
-    Вынесена сюда, чтобы избежать тяжёлого импорта service.py
-    (который тянет Python 3.10+ зависимости через metadata_enricher).
-    Логика идентична той, что в service.py.
-    """
-    if self._cached_settings().get("privacy_mode_enabled"):
-        return {"items": [], "count": 0, "privacy_mode": True}
-    return self._playback_tracker.handle_get_never_played(params, store=self.store)
-
-
 class TestGetNeverPlayedSkippedInPrivacyMode(unittest.TestCase):
-    """W1336 F2: privacy_mode gate — no history exposed when privacy enabled."""
+    """W1336 F2: privacy_mode gate — no history exposed when privacy enabled.
 
-    def _make_stub_service(self, privacy_enabled: bool):
-        """Returns a minimal stub that exercises _handle_get_never_played logic."""
-        import types
+    G3-audio-04 (A04-02): раньше тест гонял ЛОКАЛЬНУЮ копию несуществующего в service.py
+    метода `_handle_get_never_played` и проверял вымышленное поле ответа `privacy_mode` —
+    регрессия настоящего гейта осталась бы незамеченной. Теперь проверяется реальный
+    `PlaybackTracker.handle_get_never_played` (на него в dispatch указывает лямбда
+    `get_never_played`) и реальная проводка `privacy_mode_fn` в BackendService.
+    """
 
-        svc = MagicMock()
-        svc._cached_settings.return_value = {"privacy_mode_enabled": privacy_enabled}
-        svc._playback_tracker = PlaybackTracker()
-        svc.store = FakeStore(["id1", "id2", "id3"])
-        svc._handle_get_never_played = types.MethodType(_handle_get_never_played_impl, svc)
-        return svc
+    @staticmethod
+    def _tracker(privacy_fn):
+        return PlaybackTracker(privacy_mode_fn=privacy_fn)
 
     def test_privacy_mode_returns_empty_items(self):
-        """When privacy_mode_enabled=True, result items must be empty."""
-        svc = self._make_stub_service(True)
-        result = svc._handle_get_never_played({"limit": 50})
-        self.assertEqual(result["items"], [])
-        self.assertEqual(result["count"], 0)
-
-    def test_privacy_mode_flag_in_response(self):
-        """When privacy_mode_enabled=True, response must include privacy_mode=True."""
-        svc = self._make_stub_service(True)
-        result = svc._handle_get_never_played({})
-        self.assertTrue(result.get("privacy_mode"), "privacy_mode flag must be True")
+        tracker = self._tracker(lambda: True)
+        result = tracker.handle_get_never_played({"limit": 50}, store=FakeStore(["id1", "id2", "id3"]))
+        self.assertEqual(result, {"items": [], "count": 0})
 
     def test_normal_mode_returns_items(self):
-        """When privacy_mode_enabled=False, items are returned normally."""
-        svc = self._make_stub_service(False)
-        result = svc._handle_get_never_played({"limit": 50})
-        self.assertGreater(result["count"], 0)
-        self.assertNotIn("privacy_mode", result)
+        tracker = self._tracker(lambda: False)
+        result = tracker.handle_get_never_played({"limit": 50}, store=FakeStore(["id1", "id2", "id3"]))
+        self.assertEqual(result["count"], 3)
+        self.assertEqual(sorted(i["id"] for i in result["items"]), ["id1", "id2", "id3"])
+
+    def test_privacy_lookup_failure_never_leaks_items(self):
+        """Ошибка чтения privacy не должна превращаться в выдачу истории."""
+        def broken():
+            raise OSError("settings недоступны")
+
+        tracker = self._tracker(broken)
+        with self.assertRaises(OSError):
+            tracker.handle_get_never_played({}, store=FakeStore(["id1"]))
+
+    def test_privacy_mode_is_evaluated_at_call_time(self):
+        state = {"on": False}
+        tracker = self._tracker(lambda: state["on"])
+        store = FakeStore(["id1"])
+        self.assertEqual(tracker.handle_get_never_played({}, store=store)["count"], 1)
+        state["on"] = True
+        self.assertEqual(tracker.handle_get_never_played({}, store=store)["count"], 0)
+
+    def test_backend_service_wires_runtime_privacy_fn_into_tracker(self):
+        """Структурно (AST): BackendService строит PlaybackTracker с privacy_mode_fn, а dispatch
+        `get_never_played` ведёт именно в tracker.handle_get_never_played."""
+        import ast
+
+        src = (Path(__file__).resolve().parents[1] / "backend" / "service.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "PlaybackTracker"
+        ]
+        self.assertEqual(len(calls), 1)
+        self.assertIn("privacy_mode_fn", {kw.arg for kw in calls[0].keywords})
+        self.assertIn('"get_never_played": lambda p: self._playback_tracker.handle_get_never_played(p, store=self.store)', src)
 
 
 # ---------------------------------------------------------------------------
@@ -261,10 +272,22 @@ class TestSaveUsesAtomicTmpRenameRegression(unittest.TestCase):
             tracker = PlaybackTracker(data_dir=tmpdir)
             tracker.record_playback("cleanup_test", duration_listened_sec=1.0)
 
-            tmp_path = Path(tmpdir) / "playback_stats.tmp"
-            self.assertFalse(
-                tmp_path.exists(),
-                f"Temp file {tmp_path} must be removed after successful atomic save",
+            # G3-audio-04 (A04-15): прод создаёт temp через mkstemp(prefix=".playback_stats_tmp_",
+            # suffix=".json"); прежняя проверка искала несуществующее имя playback_stats.tmp
+            # и не увидела бы настоящий остаток.
+            leftovers = sorted(p.name for p in Path(tmpdir).glob(".playback_stats_tmp_*"))
+            self.assertEqual(
+                leftovers, [],
+                f"Temp files {leftovers} must be removed after successful atomic save",
+            )
+
+    def test_tmp_leftover_glob_would_detect_real_leftover(self):
+        """Контроль самой проверки: настоящий остаток с реальным шаблоном имени виден glob-у."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            (Path(tmpdir) / ".playback_stats_tmp_abc123.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(
+                [p.name for p in Path(tmpdir).glob(".playback_stats_tmp_*")],
+                [".playback_stats_tmp_abc123.json"],
             )
 
 

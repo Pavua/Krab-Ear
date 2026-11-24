@@ -235,15 +235,15 @@ class TestSymlinkAndPathEscape(unittest.TestCase):
 
     def test_escape_outside_data_dir_rejected(self) -> None:
         """A model path that resolves outside data_dir must raise ValueError."""
-        outside_file = Path(self._tmp).parent / "outside_model.onnx"
-        outside_file.write_bytes(b"fake content")
-        try:
+        # G3-audio-04 (A04-12): файл «снаружи» создаётся в СВОЁМ уникальном каталоге, а не с
+        # фиксированным именем в общем TMPDIR (раньше тест писал и удалял чужой outside_model.onnx).
+        with tempfile.TemporaryDirectory() as outside_dir:
+            outside_file = Path(outside_dir) / "outside_model.onnx"
+            outside_file.write_bytes(b"fake content")
             with self.assertRaises(ValueError) as ctx:
                 with patch.dict("sys.modules", {"openwakeword": MagicMock(), "openwakeword.model": MagicMock()}):
                     self._adapter._load_model("outside_model", str(outside_file))
             self.assertIn("data_dir", str(ctx.exception))
-        finally:
-            outside_file.unlink(missing_ok=True)
 
     def test_valid_model_inside_data_dir_passes_checks(self) -> None:
         """A real file inside data_dir must pass both symlink and escape checks."""
