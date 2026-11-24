@@ -85,6 +85,9 @@ extension HistoryPanelController {
         // Обновляем индикатор STT движка при открытии вкладки «Диктовка».
         if tab == .dictation {
             fetchAndUpdateSTTEngineLabel()
+            // Свежая фаза сразу, а не через тик 0.9 с: иначе после стопа хоткеем на
+            // другой вкладке кнопка показывала бы прошлое «Остановить · 00:12».
+            refreshRealtimePreview()
         }
     }
 
