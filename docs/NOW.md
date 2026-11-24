@@ -9,7 +9,9 @@
 - **Приватность (ChatGPT privacy-04/05):** отчёты получены 24.11 (UNVERIFIED в `.remember/CHATGPT_privacy04_05_UNVERIFIED.md`); закрыто P04-01/02/05/07/10 (#2239, #2241), у Opus в работе аудитор purge (05-01/02/05/06/10); Swift P04-04, P04-12/13 — за основной сессией.
 - **Решения владельца (не менялись):** (а) молчаливый fallback микрофона; (б) включить `recording_owner_enforce`; (в) закрыть старые draft-PR codex #2165–#2187; (г) KEG2-20; (д) показывать `complete:false` из delete в Swift; (е) визуальный редизайн приложения (Gemini не оплачен — делаем на Claude).
 - Выкат прода — только `scripts/safe_backend_restart.command`, отдельным шагом после мержей; агент (Swift) пересобирается и перезапускается отдельно.
-- Карта: `/Users/pablito/Antigravity_AGENTS/.coordination/review-map/KARTA_ear.md` + `python3 rollup.py` (Ear 48%). Handoff: `.remember/HANDOFF_2026-11-24_ear_sonnet.md`.
+- **Wake word, дообучение на голосе владельца (24.11 ночь):** датасет 273 клипа, прогоны run3–run9 гейт `eval_gate.py` НЕ прошли (лучший — run9: речь 1.17%, негативов владельца 26/120, recall 15/25); причина — нет общего корпуса ACAV100M; fp/час на реальном аудио после `--general-from-fp-val` ~1.5. Модель не установлена. Подробно: `wake_word_models/README.md` §8a.
+- Влито ещё: #2247, #2251, #2253 (ключ VG, 401, язык RU); редизайн #2248, #2252 влиты, #2249/#2250/#2254/#2255 ждут CI (основная ветка красная до #2249).
+- Карта: `/Users/pablito/Antigravity_AGENTS/.coordination/review-map/KARTA_ear.md` + `python3 rollup.py` (Ear 48%). Handoff: `.remember/HANDOFF_2026-11-24_ear_sonnet_v3.md`.
 
 ## Оперативный срез — 2026-11-22
 
