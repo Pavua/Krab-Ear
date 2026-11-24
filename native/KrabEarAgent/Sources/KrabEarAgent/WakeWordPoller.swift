@@ -47,6 +47,15 @@ struct WakeWordStormBreaker {
     private var times: [TimeInterval] = []
     private var heldUntil: TimeInterval?
 
+    /// Снять удержание и забыть историю срабатываний. Зовётся ТОЛЬКО из activate()
+    /// (тумблер выключили/включили, сменили модель или движок — перезапуск поллера).
+    /// Из resume() — нельзя: цикл «ложное срабатывание → разговор → resume» обнулял бы
+    /// размыкатель каждый раз и он не срабатывал бы никогда.
+    mutating func reset() {
+        times.removeAll()
+        heldUntil = nil
+    }
+
     /// true — запускать разговор; false — сработал размыкатель.
     /// `justTripped` ставится на ту проверку, которая его включила (для одного лога).
     mutating func allow(at now: TimeInterval, justTripped: inout Bool) -> Bool {
@@ -224,6 +233,8 @@ final class WakeWordPoller {
 
     private let tracker = WakeWordDetectionTracker()
     private var stormBreaker = WakeWordStormBreaker()
+    /// Один раз в момент срабатывания размыкателя: владелец иначе не узнает, почему wake word молчит.
+    private let onStormTripped: (() -> Void)?
     private var wedgedTracker = WedgedEscalationTracker()
     /// Give-up уведомление показываем один раз на эпизод исчерпания капа.
     private var gaveUpNotified = false
@@ -244,9 +255,11 @@ final class WakeWordPoller {
         ipcProvider: @escaping () -> IPCClient?,
         isToggleEnabled: @escaping () -> Bool,
         onDetection: @escaping () -> Void,
+        onStormTripped: (() -> Void)? = nil,
         onWedgedEscalation: (() -> Void)? = nil,
         onWedgedGiveUp: (() -> Void)? = nil
     ) {
+        self.onStormTripped = onStormTripped
         self.ipcProvider = ipcProvider
         self.isToggleEnabled = isToggleEnabled
         self.onDetection = onDetection
@@ -261,6 +274,7 @@ final class WakeWordPoller {
     /// Включить: wake_word_start в backend + периодический поллинг статуса.
     func activate(pausedForPrivacy: Bool = false) {
         guard timer == nil else { return }
+        stormBreaker.reset()
         tracker.reset()
         wedgedTracker.reset()
         gaveUpNotified = false
@@ -379,6 +393,7 @@ final class WakeWordPoller {
                             + "\(Int(WakeWordStormBreaker.windowSec)) с) — модель, вероятно, срабатывает на шум; "
                             + "запуск разговора отключён на \(Int(WakeWordStormBreaker.holdSec / 60)) мин. "
                             + "Смените модель в настройках голосового ассистента.")
+                        self.onStormTripped?()
                     }
                     if !allowed { return }
                     AgentLogger.shared.info("[WakeWord] Детекция — запускаю разговор")
