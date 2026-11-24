@@ -195,4 +195,21 @@ class AudioConverter:
             raise RuntimeError(
                 f"ffmpeg завершился с кодом {result.returncode}: {result.stderr.strip()}"
             )
+        # G3-audio-01 (A03): код возврата 0 не доказывает результат — ffmpeg мог
+        # не создать выход (или оставить пустой). Возвращать путь можно только к
+        # реально существующему непустому файлу, иначе вызывающий STT-путь получит
+        # «успех» с несуществующим аудио.
+        try:
+            _out = Path(dst)
+            _produced = _out.is_file() and _out.stat().st_size > 0
+        except OSError:
+            _produced = False
+        if not _produced:
+            try:
+                Path(dst).unlink(missing_ok=True)  # пустой огрызок — не оставляем
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"ffmpeg завершился с кодом 0, но выходной файл отсутствует или пуст: {dst}"
+            )
         return dst

@@ -88,9 +88,13 @@ class TestAudioLangIDShortAudio(unittest.TestCase):
         """
         lid = AudioLanguageID()
         audio_1s = _speech(seconds=1.0, sr=16000)
-        # Либо None (если mlx_whisper недоступен) либо строка языка
-        result = lid.detect(audio_1s, sample_rate=16000)
-        self.assertTrue(result is None or isinstance(result, str))
+        # G3-audio-01 (A01): инференс подменён — тест проверяет ТОЛЬКО границу по длине
+        # и не должен грузить реальную MLX-модель (результат раньше зависел от
+        # окружения: None или строка).
+        with patch.object(lid, "_run_detect", return_value="ru") as infer:
+            result = lid.detect(audio_1s, sample_rate=16000)
+        infer.assert_called_once()
+        self.assertEqual(result, "ru")
 
 
 # ---------------------------------------------------------------------------

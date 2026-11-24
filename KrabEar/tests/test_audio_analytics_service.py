@@ -7,6 +7,7 @@ smoke-test exercises them via BackendService.handle_request.
 from __future__ import annotations
 
 import sys
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -311,6 +312,8 @@ class TestProfileNoise(unittest.TestCase):
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             tmp_path = f.name
+        # G3-audio-01 (A13): delete=False раньше оставлял файл в TMPDIR навсегда.
+        self.addCleanup(lambda: os.path.exists(tmp_path) and os.unlink(tmp_path))
 
         svc = _make_service()
         with patch("core.noise_profiler.NoiseProfiler", return_value=fake_profiler), \
@@ -364,17 +367,25 @@ class TestCheckAudioDuplicate(unittest.TestCase):
         self.assertFalse(result["is_duplicate"])
 
     def test_custom_threshold(self) -> None:
+        """G3-audio-01 (A04): после W1063 порог игнорируется — решает только equals().
+
+        Прежняя версия настраивала устаревший compare(), а equals() оставался
+        ненастроенным MagicMock (truthy) — тест проходил по неверной причине.
+        Теперь equals задан явно, а compare не должен вызываться вовсе.
+        """
         audio_fp = MagicMock()
-        audio_fp.fingerprint.return_value = []
-        audio_fp.compare.return_value = 0.80
+        audio_fp.fingerprint.return_value = [1, 2, 3]
+        audio_fp.equals.return_value = False
 
         svc = _make_service(audio_fingerprinter=audio_fp)
         result = svc.handle_check_audio_duplicate({
             "audio1": [0.0],
-            "audio2": [0.0],
-            "threshold": 0.75,
+            "audio2": [0.1],
+            "threshold": 0.0,  # при сравнении по порогу 0.0 всё было бы дубликатом
         })
-        self.assertTrue(result["is_duplicate"])
+        self.assertFalse(result["is_duplicate"])
+        audio_fp.equals.assert_called_once()
+        audio_fp.compare.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
