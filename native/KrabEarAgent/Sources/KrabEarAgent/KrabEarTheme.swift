@@ -93,6 +93,13 @@ public enum KrabEarTheme {
         /// Заголовок экрана (24pt bold). Новый токен: прежние шрифты не затронуты.
         public static var pageTitle: NSFont { .systemFont(ofSize: (24 * scale).rounded(), weight: .bold) }
 
+        /// Текст редизайна (15pt): переделанные экраны берут его вместо `body` (13pt).
+        /// Старые экраны не затронуты, пока их не переведут поэкранно.
+        public static var bodyLarge: NSFont { .systemFont(ofSize: (15 * scale).rounded(), weight: .regular) }
+
+        /// Подписи редизайна (13pt) вместо `caption` (11pt) на переделанных экранах.
+        public static var captionLarge: NSFont { .systemFont(ofSize: (13 * scale).rounded(), weight: .regular) }
+
         /// Наименьший допустимый размер шрифта в интерфейсе (гейт `FontSizeGateTests`).
         public static let minimumPointSize: CGFloat = 12
 

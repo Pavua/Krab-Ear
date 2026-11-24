@@ -638,23 +638,8 @@ extension HistoryPanelController {
 
         isSyncingTabs = true
 
-        let tab = PanelTab.from(settingsValue: settings.uiLastTab)
-        switch tab {
-        case .dictation:
-            mainTabView.selectTabViewItem(at: 0)
-        case .liveTranslation:
-            mainTabView.selectTabViewItem(at: 1)
-        case .history:
-            mainTabView.selectTabViewItem(at: 2)
-        case .conversation:
-            mainTabView.selectTabViewItem(at: 3)
-        case .callAutomation:
-            mainTabView.selectTabViewItem(at: 4)
-        case .diagnostics:
-            mainTabView.selectTabViewItem(at: 5)
-        case .archive:
-            mainTabView.selectTabViewItem(at: 6)
-        }
+        // Тихое восстановление: под isSyncingTabs делегат зеркалит выбор, но не сохраняет его.
+        selectPanelTab(PanelTab.from(settingsValue: settings.uiLastTab))
         isSyncingTabs = false
         applyHistoryFocusMode(settings.historyFocusMode)
         applyHistoryTextDensity(settings.historyTextDensity)

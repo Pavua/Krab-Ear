@@ -1,7 +1,7 @@
 /*
  GlobalStatusBar — Liquid Glass thin pill в верхней части HistoryPanel.
 
- Видим со ВСЕХ вкладок (mounted в windowContentView, выше tabSelector).
+ Видим со ВСЕХ вкладок (встроен справа в шапку PanelShellView).
  Показывает текущую long-running операцию backend:
  - Транскрибация: "Транскрибация · 3/12 · diarization"
  - Obsidian sync:  "Obsidian sync · 4/24"

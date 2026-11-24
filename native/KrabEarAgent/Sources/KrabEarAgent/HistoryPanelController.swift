@@ -485,8 +485,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var historyFiltersSection: CollapsibleSectionView?
     var historyAdvancedSection: CollapsibleSectionView?
     var historyImportSection: CollapsibleSectionView?
-    // MARK: - Tab selector
-    var tabSelector: NSSegmentedControl!
+    // MARK: - Каркас окна
+    /// Боковая панель разделов + шапка (редизайн 2026-11, PR 1) вместо 7-сегментного
+    /// NSSegmentedControl, который на узком окне обрезал вкладки. Источник правды о
+    /// выбранном разделе — mainTabView; панель только зеркалит его.
+    let panelShell = PanelShellView()
     // MARK: - Global status bar (visible on all tabs)
     /// Liquid Glass pill above tabSelector — отображает текущую long-running операцию
     /// backend (transcribe job / Obsidian sync). Подписан на SSE `app.status`.
@@ -571,9 +574,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             defer: false
         )
         window.title = "Krab Ear"
-        // Явно разрешаем сильное сужение по ширине для небольших экранов.
-        window.minSize = NSSize(width: 360, height: 520)
-        window.contentMinSize = NSSize(width: 360, height: 520)
+        // Минимум ширины — из токена: при 640 pt боковая панель в режиме рейки и контент
+        // ещё читаемы (раньше 360 pt обрезало вкладки и Диагностику).
+        window.minSize = NSSize(width: KrabEarTheme.Metrics.windowMinWidth, height: 520)
+        window.contentMinSize = NSSize(width: KrabEarTheme.Metrics.windowMinWidth, height: 520)
         window.setFrameAutosaveName("KrabEarControlPanelFrame")
         super.init(window: window)
         window.delegate = self
@@ -619,9 +623,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         // воспроизведение 02.09.2026: ui_last_tab=dictation → «Диктовка» на
         // экране, «История» в подсветке). Догоняем сегмент явно — источником
         // правды остаётся mainTabView.
-        if let item = mainTabView.selectedTabViewItem {
-            tabSelector.selectedSegment = mainTabView.indexOfTabViewItem(item)
-        }
+        syncTabSelectorFromTabView()
         layoutVisiblePanelTab()
         loadInitial()
         startPreviewPolling()
@@ -661,32 +663,23 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         mainTabView.layer?.backgroundColor = NSColor.clear.cgColor
         mainTabView.layerContentsRedrawPolicy = .onSetNeedsDisplay
 
-        let tabSelector = NSSegmentedControl(labels: ["Диктовка", "Live перевод", "История", "Разговор с AI", "Автозвонки", "Диагностика", "Архив"], trackingMode: .selectOne, target: self, action: #selector(onTabSelectorChanged))
-        tabSelector.selectedSegment = 0
-        tabSelector.translatesAutoresizingMaskIntoConstraints = false
-        tabSelector.segmentStyle = .rounded
-        // Liquid Glass: let cardBackground show through (NSSegmentedControl draws
-        // opaque white by default; кnown workaround — wrap в wantsLayer + clear).
-        tabSelector.wantsLayer = true
-        tabSelector.layer?.backgroundColor = NSColor.clear.cgColor
-        tabSelector.controlSize = .regular
-        self.tabSelector = tabSelector
-
-        windowContentView.addSubview(globalStatusBar)
-        windowContentView.addSubview(tabSelector)
-        windowContentView.addSubview(mainTabView)
+        // Каркас: боковая панель разделов слева, шапка (заголовок раздела + статус-полоса),
+        // контент разделов (mainTabView) — справа. Раскладка и режимы панели — PanelShellView.
+        windowContentView.addSubview(panelShell)
+        panelShell.header.installStatusView(globalStatusBar)
+        panelShell.contentHost.addSubview(mainTabView)
+        panelShell.sidebar.onSelect = { [weak self] tab in
+            self?.selectPanelTab(tab)
+        }
         NSLayoutConstraint.activate([
-            // Global status bar — над tabSelector, видим со всех вкладок.
-            globalStatusBar.topAnchor.constraint(equalTo: windowContentView.topAnchor, constant: 4),
-            globalStatusBar.leadingAnchor.constraint(equalTo: windowContentView.leadingAnchor, constant: 8),
-            globalStatusBar.trailingAnchor.constraint(equalTo: windowContentView.trailingAnchor, constant: -8),
-            // tabSelector — теперь под globalStatusBar (раньше topAnchor шёл к windowContentView).
-            tabSelector.topAnchor.constraint(equalTo: globalStatusBar.bottomAnchor, constant: 4),
-            tabSelector.centerXAnchor.constraint(equalTo: windowContentView.centerXAnchor),
-            mainTabView.topAnchor.constraint(equalTo: tabSelector.bottomAnchor, constant: 8),
-            mainTabView.leadingAnchor.constraint(equalTo: windowContentView.leadingAnchor, constant: 8),
-            mainTabView.trailingAnchor.constraint(equalTo: windowContentView.trailingAnchor, constant: -8),
-            mainTabView.bottomAnchor.constraint(equalTo: windowContentView.bottomAnchor, constant: -8),
+            panelShell.topAnchor.constraint(equalTo: windowContentView.topAnchor),
+            panelShell.leadingAnchor.constraint(equalTo: windowContentView.leadingAnchor),
+            panelShell.trailingAnchor.constraint(equalTo: windowContentView.trailingAnchor),
+            panelShell.bottomAnchor.constraint(equalTo: windowContentView.bottomAnchor),
+            mainTabView.topAnchor.constraint(equalTo: panelShell.contentHost.topAnchor),
+            mainTabView.leadingAnchor.constraint(equalTo: panelShell.contentHost.leadingAnchor),
+            mainTabView.trailingAnchor.constraint(equalTo: panelShell.contentHost.trailingAnchor),
+            mainTabView.bottomAnchor.constraint(equalTo: panelShell.contentHost.bottomAnchor),
         ])
         // Запускаем подписку на SSE — сразу, не ждём показа панели. Если backend
         // ещё не поднят, SSESessionDelegate проигнорирует ошибку connect, heartbeat
@@ -2419,7 +2412,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     @objc private func onOpenHistoryTabFromDictation() {
         // Если история есть, но текущие фильтры её скрывают, сразу сбрасываем фильтры.
         // Stats fetch is async — switch tab immediately, reset filters after stats arrive.
-        mainTabView.selectTabViewItem(withIdentifier: PanelTab.history.rawValue)
+        selectPanelTab(.history)
         window?.makeFirstResponder(searchField)
         if items.isEmpty, hasActiveHistoryFiltersOrQuery() {
             fetchHistoryStatsAsync { [weak self] stats in
