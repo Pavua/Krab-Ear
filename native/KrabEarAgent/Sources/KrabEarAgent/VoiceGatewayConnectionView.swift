@@ -198,12 +198,14 @@ final class VoiceGatewayConnectionView: NSView, NSTextFieldDelegate {
 
     /// Крупный текст редизайна (15/13 pt). После слияния токенов PR 0 заменить на
     /// Typography.bodyLarge / captionLarge — значения те же.
-    private static let bodyFont = NSFont.systemFont(ofSize: 15)
-    private static let captionFont = NSFont.systemFont(ofSize: 13)
+    // Токены редизайна (15/13 pt, следуют переключателю «Размер текста»); храповик шрифтов
+    // (RedesignTokensTests) не допускает литералы и выражения вне KrabEarTheme.
+    private static var bodyFont: NSFont { KrabEarTheme.Typography.bodyLarge }
+    private static var captionFont: NSFont { KrabEarTheme.Typography.captionLarge }
 
     private static func caption(_ text: String) -> NSTextField {
         let l = NSTextField(labelWithString: text)
-        l.font = .systemFont(ofSize: 13, weight: .medium)
+        l.font = .systemFont(ofSize: KrabEarTheme.Typography.captionLarge.pointSize, weight: .medium)
         l.textColor = KrabEarTheme.Colors.textSecondary
         return l
     }
@@ -241,7 +243,7 @@ final class VoiceGatewayConnectionView: NSView, NSTextFieldDelegate {
             string: check.addressLine + "\n" + check.keyLine + "\n",
             attributes: [.font: Self.bodyFont, .foregroundColor: KrabEarTheme.Colors.textPrimary])
         text.append(NSAttributedString(string: check.summaryLine, attributes: [
-            .font: NSFont.systemFont(ofSize: Self.bodyFont.pointSize, weight: .semibold),
+            .font: NSFont.systemFont(ofSize: KrabEarTheme.Typography.bodyLarge.pointSize, weight: .semibold),
             .foregroundColor: check.isReady ? NSColor.systemGreen : KrabEarTheme.Colors.error,
         ]))
         resultLabel.attributedStringValue = text
