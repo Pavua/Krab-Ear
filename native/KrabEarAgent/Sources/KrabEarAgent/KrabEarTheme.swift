@@ -29,6 +29,9 @@ public enum KrabEarTheme {
         /// Liquid Glass card: 0.5 alpha (было 0.65 — Gemini снизил для better vibrancy)
         /// При «Уменьшить прозрачность» — сплошной фон (alpha 1.0): собственные
         /// полупрозрачные цвета AppKit сам не адаптирует.
+        /// Ограничение: потребители, берущие `.cgColor` один раз при создании (≈21 место:
+        /// QuickCapture, GlobalStatusBar, LiveSubtitles, MeetingLive…), увидят смену флага
+        /// только на новых view / после перезапуска; на лету обновляется граница ThemeCardView.
         public static var cardBackground: NSColor {
             NSColor(name: nil) { _ in
                 let alpha: CGFloat = KrabEarAccessibility.reduceTransparency() ? 1.0 : 0.5
