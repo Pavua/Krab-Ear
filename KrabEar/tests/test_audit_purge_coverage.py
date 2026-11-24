@@ -299,8 +299,8 @@ class TestSiblingExtensionDetection(_FixtureMixin):
 
             def purge(self):
                 d = Path(self.store.data_dir) / "transcripts"
-                list(d.glob("*.html"))
-                list(d.glob("*.srt"))
+                for p in list(d.glob("*.html")) + list(d.glob("*.srt")):
+                    p.unlink()
                 for p in d.iterdir():
                     p.unlink()
             """
