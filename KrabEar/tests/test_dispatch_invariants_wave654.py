@@ -111,6 +111,11 @@ class _DispatchBase(unittest.TestCase):
             transcriber=_FakeTranscriber(),
             translator=_FakeTranslator(),
         )
+        # G3-audio-02 (A02-04): без close() демон-потоки BackendService (DiskSpaceMonitor,
+        # RecapScheduler, ExportScheduler) падают на stderr-локе при завершении процесса и
+        # роняют весь chunk (CLAUDE.md «BackendService daemon-thread teardown»). addCleanup
+        # идёт в обратном порядке: close() выполнится ДО удаления временного каталога.
+        self.addCleanup(self.svc.close)
         # Seed history for handlers that need items
         for i in range(3):
             self.svc.handle_request({

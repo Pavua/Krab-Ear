@@ -284,12 +284,48 @@ class GuardTests(unittest.TestCase):
         )
         self.assertEqual(calls, [])  # sd._terminate НЕ вызывался
 
-    def test_legacy_stop_returning_none_is_success(self):
+    def test_legacy_stop_returning_none_is_success_when_listener_really_stopped(self):
+        """Легаси stop()→None допустим, если is_running() независимо подтверждает остановку."""
         adapter = _FakeAdapter()
-        adapter.stop = lambda: adapter.calls.append("stop")  # -> None
+
+        def legacy_stop():
+            adapter.calls.append("stop")
+            adapter._running = False  # слушатель реально остановлен, но stop() ничего не вернул
+
+        adapter.stop = legacy_stop  # -> None
         coord, calls = _make(adapter=adapter)
         self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.OK)
         self.assertEqual(calls, ["reinit"])
+
+    def test_unconfirmed_legacy_stop_blocks_reinit(self):
+        """G3-audio-02 (A02-02): stop()→None при всё ещё работающем слушателе — НЕ успех.
+
+        Прежний тест требовал OK именно здесь: адаптер оставался running=True, и reinit
+        (Pa_Terminate) выполнялся под живым PortAudio-потоком слушателя.
+        """
+        adapter = _FakeAdapter()
+        adapter.stop = lambda: adapter.calls.append("stop")  # -> None, _running остаётся True
+        coord, calls = _make(adapter=adapter)
+        self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.THREAD_HUNG)
+        self.assertEqual(calls, [])  # sd._terminate НЕ вызывался
+        self.assertNotIn("start", adapter.calls)
+
+    def test_legacy_stop_none_with_failing_is_running_blocks_reinit(self):
+        adapter = _FakeAdapter()
+        adapter.stop = lambda: adapter.calls.append("stop")  # -> None
+        n = {"calls": 0}
+        original = adapter.is_running
+
+        def flaky_is_running():
+            n["calls"] += 1
+            if n["calls"] >= 2:  # первый вызов (was_running) успешен, после stop() — падает
+                raise RuntimeError("adapter сломан")
+            return original()
+
+        adapter.is_running = flaky_is_running
+        coord, calls = _make(adapter=adapter)
+        self.assertEqual(coord.reinit_with_wake_word_restore(), ReinitOutcome.THREAD_HUNG)
+        self.assertEqual(calls, [])
 
     def test_busy_when_flight_lock_held(self):
         coord, calls = _make(adapter=None)
