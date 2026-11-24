@@ -103,6 +103,7 @@ class PasteAppMemory:
             raise ValueError(f"Неизвестный профиль вставки: {profile!r}. Допустимые: {sorted(VALID_PROFILES)}")
         with self._lock:
             prev = self._data.get(bundle_id)
+            evicted: tuple[str, dict[str, str]] | None = None
             if bundle_id not in self._data and len(self._data) >= MAX_BUNDLE_IDS:
                 # Лимит достигнут — вытесняем самую старую запись (LRU eviction)
                 oldest_bid = min(
@@ -114,6 +115,7 @@ class PasteAppMemory:
                     MAX_BUNDLE_IDS,
                     oldest_bid,
                 )
+                evicted = (oldest_bid, self._data[oldest_bid])
                 del self._data[oldest_bid]
             self._data[bundle_id] = {
                 "profile": profile,
@@ -125,6 +127,10 @@ class PasteAppMemory:
                     self._data.pop(bundle_id, None)
                 else:
                     self._data[bundle_id] = prev
+                if evicted is not None:
+                    # Вытесненная LRU-запись возвращается: при сбое записи RAM обязана
+                    # совпадать с диском (ревью #2229 F9).
+                    self._data[evicted[0]] = evicted[1]
                 return False
             return True
 
