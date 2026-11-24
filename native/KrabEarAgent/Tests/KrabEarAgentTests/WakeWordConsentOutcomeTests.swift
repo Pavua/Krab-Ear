@@ -6,13 +6,16 @@ final class WakeWordConsentOutcomeTests: XCTestCase {
         XCTAssertEqual(WakeWordConsentOutcome.resolve(response: nil), .failed)
     }
 
-    func testBackendRejectionIsNotEnabled() {
-        XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": true, "result": ["ok": false]]), .failed)
-        XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": false]), .failed)
+    func testMissingOrWrongEngineIsNotEnabled() {
         XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": true]), .failed)
+        XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": true, "result": [:]]), .failed)
+        XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": true, "result": ["wake_word_engine": "disabled"]]), .failed)
+        XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": true, "result": ["translation_mode": "off"]]), .failed)
     }
 
-    func testConfirmedIsEnabled() {
-        XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": true, "result": ["ok": true]]), .enabled)
+    /// Реальная форма ответа set_settings: result — словарь настроек без поля ok.
+    func testRealSetSettingsShapeIsEnabled() {
+        let response: [String: Any] = ["ok": true, "result": ["wake_word_engine": "openwakeword", "translation_mode": "off"]]
+        XCTAssertEqual(WakeWordConsentOutcome.resolve(response: response), .enabled)
     }
 }

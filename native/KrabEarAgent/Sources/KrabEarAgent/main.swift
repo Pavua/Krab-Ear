@@ -1892,9 +1892,15 @@ final class QuickStartWindowController: NSWindowController, NSWindowDelegate {
     }
 
     private func runWakeWordConsentStep(over parent: NSWindow) {
-        let step = WakeWordConsentStepController(ipcClient: ipcClient) { [weak self] _ in
+        let step = WakeWordConsentStepController(ipcClient: ipcClient) { [weak self] outcome in
             guard let self = self else { return }
             self.wakeWordConsentStep = nil
+            if outcome == .failed {
+                // Тихий отказ оставил бы wake word выключенным без объяснения.
+                NotificationService().notify(
+                    title: "Слово-пробуждение не включено",
+                    body: "Не удалось включить. Включите его в Настройках → Голосовой ассистент.")
+            }
             self.onComplete()
         }
         self.wakeWordConsentStep = step

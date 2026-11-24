@@ -31,11 +31,13 @@ enum WakeWordConsentOutcome: Equatable {
     /// Backend не подтвердил включение (транспорт упал / `ok:false`): «включено» утверждать нельзя.
     case failed
 
-    /// Итог по ответу `set_settings`: `enabled` только при подтверждении backend (`ok` на обоих уровнях).
+    /// Итог по ответу `set_settings`. Конверт с `ok:false` уже бросает `IPCWire.parseEnvelope`, поэтому
+    /// сюда доходит только принятая операция; её `result` — словарь настроек (БЕЗ поля `ok`).
+    /// `.enabled` только если backend вернул движок, который мы просили: так ловится и отказ записи,
+    /// и нормализация движка на стороне backend.
     static func resolve(response: [String: Any]?) -> WakeWordConsentOutcome {
-        guard let response, response["ok"] as? Bool == true,
-              let result = response["result"] as? [String: Any],
-              result["ok"] as? Bool == true else { return .failed }
+        guard let result = response?["result"] as? [String: Any],
+              result["wake_word_engine"] as? String == "openwakeword" else { return .failed }
         return .enabled
     }
 }
