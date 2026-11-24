@@ -355,6 +355,11 @@ def roll_forward_legacy_locked(*, data_dir: Path, staging: Path, marker: dict) -
     readback = _replace_and_readback(data_dir=data_dir, staging=staging, files_meta=files_meta,
                                      transaction_id=transaction_id)
     _commit_marker(staging, dict(marker), data_dir)
+    # Эмбеддинги прежней истории не должны подняться в новом процессе: докатка
+    # может идти мимо HistoryService (auto_backup на старте), где RAM-сброса нет.
+    from backend.semantic_search import invalidate_index_files
+
+    invalidate_index_files(data_dir)
     logger.warning("legacy_restore: %s докатан (roll-forward)", transaction_id)
     return {"ok": True, "state": RESTORE_STATE_COMMITTED, "transaction_id": transaction_id,
             "pre_restore_snapshot": marker.get("pre_restore_snapshot"), "readback": readback}

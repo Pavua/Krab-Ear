@@ -272,6 +272,29 @@ class LegacyRestoreTxnTest(unittest.TestCase):
         self.assertTrue(verdict["ok"], verdict)
         self.assertEqual(_ids(self._live("history.ndjson")), ["n1"])
 
+    def test_roll_forward_by_module_path_invalidates_semantic_files(self):
+        """Докатка мимо HistoryService (auto_backup на старте) тоже обнуляет индекс на диске.
+
+        Иначе после краха посреди restore новый процесс поднимал бы снимок
+        эмбеддингов ПРЕЖНЕЙ истории без флага needs_reindex.
+        """
+        from backend.encrypted_snapshot import recover_pending_restore_from_store
+        from backend.semantic_search import SemanticSearcher
+
+        snapshot = self.data_dir / "embeddings_snapshot.npz"
+        snapshot.write_bytes(b"old-history-embeddings")
+        backup = self._backup([_line("n1")])
+        self._pending_after_failure(backup)
+        verdict = recover_pending_restore_from_store(StateStore(self.data_dir))
+        self.assertTrue(verdict["ok"] and verdict["rolled_forward"], verdict)
+        self.assertFalse(snapshot.exists(), "снимок эмбеддингов прежней истории пережил докатку")
+        self.assertTrue(SemanticSearcher(self.data_dir).status()["needs_reindex"])
+
+    def test_pending_failure_resets_semantic_index_in_memory(self):
+        backup = self._backup([_line("n1")])
+        self._pending_after_failure(backup)
+        self.assertEqual(self.semantic.calls, ["purge_all", "mark_reindex_required"])
+
     def test_concurrent_add_from_other_thread_is_serialized_not_mixed(self):
         """Запись из другого потока во время restore ждёт lock и ложится ПОСЛЕ транзакции."""
         import threading

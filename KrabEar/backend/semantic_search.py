@@ -29,6 +29,37 @@ class SnapshotNotPersistedError(RuntimeError):
     """
 
 
+#: M04-05: durable флаг «индекс не соответствует истории» (после restore истории).
+REINDEX_FLAG_NAME = "embeddings_reindex_required.flag"
+
+
+def invalidate_index_files(data_dir: Path) -> bool:
+    """M04-05: обнулить индекс на ДИСКЕ и поставить флаг перестройки (без экземпляра).
+
+    Для докатки restore мимо HistoryService (auto_backup на старте процесса):
+    in-memory индекса там ещё нет, а снимок эмбеддингов прежней истории иначе
+    поднялся бы при первой загрузке модели. True — флаг на диске, снимков нет.
+    """
+    base = Path(data_dir)
+    ok = True
+    for name in ("embeddings_snapshot.npz", "embeddings.npy", "embeddings_index.json"):
+        try:
+            (base / name).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("semantic_search: не удалось удалить %s: %s", name, exc)
+            ok = False
+    try:
+        fd = os.open(str(base / REINDEX_FLAG_NAME), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as exc:
+        logger.warning("semantic_search: флаг перестройки не записан: %s", exc)
+        ok = False
+    return ok
+
+
 class SemanticSearcher:
     """Индексирует и ищет историю транскрипций через sentence embeddings.
 
@@ -86,7 +117,7 @@ class SemanticSearcher:
         self._snapshot_path = self._data_dir / "embeddings_snapshot.npz"
         # M04-05: durable флаг «индекс не соответствует истории» (после restore
         # истории). Снимается только полной перестройкой (index_all force=True).
-        self._reindex_flag_path = self._data_dir / "embeddings_reindex_required.flag"
+        self._reindex_flag_path = self._data_dir / REINDEX_FLAG_NAME
 
     # ------------------------------------------------------------------
     # Public API

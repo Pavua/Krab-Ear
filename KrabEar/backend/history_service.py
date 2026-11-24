@@ -6004,10 +6004,12 @@ class HistoryService:
             except SnapshotOperationRefused as exc:
                 if exc.pending:
                     # После COMMITTING живые журналы могли частично смениться:
-                    # кэши недействительны, докатка — на следующей точке
-                    # обслуживания (_recover_pending_restore).
+                    # кэши и in-memory эмбеддинги недействительны, докатка — на
+                    # следующей точке обслуживания (в т.ч. auto_backup мимо этого
+                    # сервиса), поэтому семантический индекс сбрасываем сразу.
                     self.store._active_ids = None
                     self.store.reset_search_caches()
+                    self._reset_semantic_index_after_restore()
                 logger.error(
                     "handle_restore_history: legacy restore отклонён: %s (pending=%s)",
                     exc.reason, exc.pending,
