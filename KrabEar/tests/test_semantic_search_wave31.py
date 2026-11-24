@@ -132,10 +132,9 @@ class TestPurgeEpochFirstOrder(unittest.TestCase):
         should NOT overwrite the empty cleared state."""
         searcher = self.searcher
 
-        # Pre-populate disk files
+        # Pre-populate disk files (M05-04: снимок NPZ)
         searcher.index_item("id1", "sensitive transcript text")
-        self.assertTrue(searcher._embeddings_path.exists())
-        self.assertTrue(searcher._index_path.exists())
+        self.assertTrue(searcher._snapshot_path.exists())
 
         # Run purge — epoch bumps FIRST, then files are deleted
         purge_epoch_after = None
@@ -154,8 +153,7 @@ class TestPurgeEpochFirstOrder(unittest.TestCase):
             SemanticSearcher.purge_all = orig_purge
 
         # After purge, disk files should be gone
-        self.assertFalse(searcher._embeddings_path.exists())
-        self.assertFalse(searcher._index_path.exists())
+        self.assertFalse(searcher._snapshot_path.exists())
 
         # The epoch observed right after purge should be the new one
         self.assertEqual(purge_epoch_after, 1)
@@ -170,7 +168,7 @@ class TestPurgeEpochFirstOrder(unittest.TestCase):
             self.assertIsNone(searcher._embeddings)
 
         # And still no files on disk
-        self.assertFalse(searcher._embeddings_path.exists())
+        self.assertFalse(searcher._snapshot_path.exists())
         self.assertFalse(searcher._index_path.exists())
 
     def test_concurrent_purge_then_load_from_disk_no_resurrection(self):

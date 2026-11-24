@@ -242,7 +242,7 @@ class TestSemanticSearcherRemoveOnDedup(unittest.TestCase):
         return dedup, store
 
     def test_semantic_searcher_remove_called_for_duplicates(self) -> None:
-        """remove_item must be called for each duplicate_id found."""
+        """G3-MEM-03 (R04): remove_item НЕ вызывается — handle_run_deduplication только отчёт."""
         dedup, store = self._make_deduplicator_with_duplicates()
         semantic_searcher = MagicMock()
 
@@ -253,9 +253,10 @@ class TestSemanticSearcherRemoveOnDedup(unittest.TestCase):
 
         # обнаружение группы обязательно: результат без групп не должен проходить тест
         self.assertEqual(result["duplicate_groups"], 1, result)
-        called_ids = [c.args[0] for c in semantic_searcher.remove_item.call_args_list]
-        # dup-002 удаляется (дубликат orig-001), и только он
-        self.assertEqual(called_ids, ["dup-002"])
+        # G3-MEM-03 (R04): отчёт о дубликатах НЕ мутирует поисковый индекс — записи
+        # остаются в истории, значит и в индексе (иначе они пропали бы из поиска, оставаясь
+        # в журнале). Удаление из индекса — только каскад удаления самой записи.
+        semantic_searcher.remove_item.assert_not_called()
 
     def test_semantic_searcher_not_called_when_no_duplicates(self) -> None:
         """remove_item must NOT be called when no duplicates are found."""
@@ -276,7 +277,8 @@ class TestSemanticSearcherRemoveOnDedup(unittest.TestCase):
         semantic_searcher.remove_item.assert_not_called()
 
     def test_semantic_searcher_exception_does_not_propagate(self) -> None:
-        """If remove_item raises, it must not propagate — log and continue."""
+        """G3-MEM-03 (R04): даже «ядовитый» searcher не может повлиять на отчёт —
+        его remove_item не вызывается вовсе, группа дубликатов найдена."""
         dedup, store = self._make_deduplicator_with_duplicates()
         semantic_searcher = MagicMock()
         semantic_searcher.remove_item.side_effect = RuntimeError("index error")
@@ -287,9 +289,8 @@ class TestSemanticSearcherRemoveOnDedup(unittest.TestCase):
             "_semantic_searcher": semantic_searcher,
         })
         self.assertIn("total_scanned", result)
-        # side_effect действительно сработал: remove_item вызывался, группа найдена
         self.assertEqual(result["duplicate_groups"], 1, result)
-        semantic_searcher.remove_item.assert_called_once_with("dup-002")
+        semantic_searcher.remove_item.assert_not_called()
 
     def test_semantic_searcher_none_does_not_crash(self) -> None:
         """handle_run_deduplication with _semantic_searcher=None must work fine."""

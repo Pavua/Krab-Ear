@@ -177,14 +177,19 @@ class TestHistoryDeleteCallsRemoveItem(unittest.TestCase):
         self.assertEqual(result, {"deleted": True})
 
     def test_history_delete_searcher_exception_does_not_propagate(self):
-        """If remove_item raises, the exception is swallowed (best-effort removal)."""
+        """If remove_item raises, the exception is swallowed, но статус честный:
+        запись удалена (deleted=True), очистка индекса не подтверждена (G3-MEM-02 M02-03)."""
         mock_searcher = MagicMock()
         mock_searcher.remove_item.side_effect = RuntimeError("index corrupt")
 
         svc, _ = self._make_service(semantic_searcher=mock_searcher)
         # Should NOT raise
         result = svc.handle_delete_history_item({"id": "crash-id"})
-        self.assertEqual(result, {"deleted": True})
+        self.assertEqual(
+            result,
+            {"deleted": True, "complete": False, "reason": "semantic_index_cleanup_failed"},
+        )
+        mock_searcher.remove_item.assert_called_once_with("crash-id")
 
     def test_history_service_accepts_semantic_searcher_param(self):
         """HistoryService.__init__ must accept semantic_searcher kwarg (was missing)."""

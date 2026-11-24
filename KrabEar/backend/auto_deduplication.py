@@ -35,6 +35,11 @@ logger = logging.getLogger("KrabEar.Backend.AutoDedup")
 
 # Порог выше которого запись считается дубликатом
 DEFAULT_DEDUP_THRESHOLD: float = 0.9
+# G3-MEM-03 (R02): нижняя граница безопасного порога. Ниже неё различные тексты
+# начинают считаться дубликатами, и авто-дедупликация молча отбрасывает диктовки.
+# `auto_dedup_threshold` пользовательская настройка без валидатора, поэтому граница
+# держится здесь. Значения ниже границы (включая 0.0 и отрицательные) → default.
+MIN_SAFE_DEDUP_THRESHOLD: float = 0.5
 # Порог выше которого схожие записи считаются кандидатами на слияние
 MERGE_THRESHOLD: float = 0.95
 # Настройка-флаг для DEFAULT_SETTINGS / runtime settings
@@ -42,13 +47,14 @@ AUTO_DEDUP_ENABLED: bool = False
 
 
 def _sanitize_threshold(value: object) -> float:
-    """Validate and clamp IPC threshold to [0.0, 1.0].
+    """Validate IPC threshold: допустимо [MIN_SAFE_DEDUP_THRESHOLD, 1.0].
 
     wave-1770 HIGH: IPC handlers previously accepted NaN/Inf/negative threshold
     values which caused data-loss (negative → every recording silently dropped as
     duplicate) or silent dedup bypass (NaN makes all comparisons falsy).
 
-    Returns *value* clamped to [0.0, 1.0], or DEFAULT_DEDUP_THRESHOLD on error.
+    Returns *value* if it is in [MIN_SAFE_DEDUP_THRESHOLD, 1.0]; otherwise
+    DEFAULT_DEDUP_THRESHOLD (NaN/Inf/мусор, ниже безопасной границы, выше 1.0).
     """
     try:
         v = float(value)
@@ -57,9 +63,9 @@ def _sanitize_threshold(value: object) -> float:
         return DEFAULT_DEDUP_THRESHOLD
     if not math.isfinite(v):
         return DEFAULT_DEDUP_THRESHOLD
-    # G3-MEM-03 (R02): опасный (ниже допустимого) порог — вернуть default, не 0.0.
-    # Порог 0.0 допускает автоматический skip различных текстов — потеря данных.
-    if not DEFAULT_DEDUP_THRESHOLD <= v <= 1.0:
+    # G3-MEM-03 (R02): опасный порог — вернуть default, а не прижимать к 0.0.
+    # Порог 0.0 помечает дубликатом любой текст — авто-skip различных диктовок.
+    if not MIN_SAFE_DEDUP_THRESHOLD <= v <= 1.0:
         return DEFAULT_DEDUP_THRESHOLD
     return v
 

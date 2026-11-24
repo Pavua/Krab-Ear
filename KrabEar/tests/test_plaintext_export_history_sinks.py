@@ -125,25 +125,31 @@ def test_batch_stops_after_revocation_without_rollback(profile, monkeypatch):
     store, svc, auth, item, output = profile
     policy(store, encryption=True)
     context = grant(auth)
-    original = Path.write_text
-    written = []
+    import os
 
-    def write_then_revoke(path, content, *args, **kwargs):
-        result = original(path, content, *args, **kwargs)
-        if path.is_relative_to(output):
-            written.append(path)
-            auth.revoke(context["app_session_id"], bytes.fromhex(context["epoch"]), context["capability"])
+    original = os.replace
+    committed = []
+
+    def replace_then_revoke(src, dst, *args, **kwargs):
+        # G3-MEM-04 (M04-02): запись плоского файла — temp → fsync → os.replace через
+        # dir_fd. Отзыв сессии делаем сразу после ПЕРВОЙ зафиксированной записи.
+        result = original(src, dst, *args, **kwargs)
+        if kwargs.get("dst_dir_fd") is not None and not str(dst).endswith(".tmp"):
+            committed.append(str(dst))
+            if len(committed) == 1:
+                auth.revoke(context["app_session_id"], bytes.fromhex(context["epoch"]), context["capability"])
         return result
 
-    monkeypatch.setattr(Path, "write_text", write_then_revoke)
+    monkeypatch.setattr(os, "replace", replace_then_revoke)
     result = svc.handle_batch_export({"formats": ["markdown", "srt", "csv", "obsidian"],
                                       "output_dir": str(output), "plaintext_export": context})
     assert result["partial"] is True
     assert result["reason"] == "plaintext_session_expired"
     assert list(result["files"]) == ["markdown"]
     assert list(result["errors"]) == ["srt"]
-    assert len(written) == 1 and written[0].is_file()
-    assert list(output.rglob("*.*")) == written
+    written = list(output.rglob("*.*"))
+    assert len(committed) == 1 and len(written) == 1 and written[0].is_file()
+    assert written[0].name == committed[0]  # без отката: первый файл остался
 
 
 def test_direct_srt_leaf_denies_without_touching_disk(profile):

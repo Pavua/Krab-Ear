@@ -7,7 +7,6 @@ Fallback на keyword search если модель не загружена.
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import tempfile
@@ -348,6 +347,9 @@ class SemanticSearcher:
             self._purge_epoch += 1
             self._embeddings = None
             self._index = []
+        # Явные unlink на каждый файл (а не цикл по кортежу): статический гейт
+        # полноты purge (scripts/audit_purge_coverage.py) читает AST и видит
+        # только прямые вызовы с атрибутом пути.
         try:
             if self._embeddings_path.exists():
                 self._embeddings_path.unlink()
@@ -358,6 +360,11 @@ class SemanticSearcher:
                 self._index_path.unlink()
         except Exception as exc:
             logger.warning("semantic_search: не удалось удалить embeddings_index.json: %s", exc)
+        try:
+            if self._snapshot_path.exists():  # G3-MEM-05 (M05-04): единый NPZ-снимок
+                self._snapshot_path.unlink()
+        except Exception as exc:
+            logger.warning("semantic_search: не удалось удалить embeddings_snapshot.npz: %s", exc)
         logger.info("semantic_search: индекс и файлы embeddings очищены (purge_all)")
 
     def remove_item(self, item_id: str) -> bool:

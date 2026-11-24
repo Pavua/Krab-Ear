@@ -69,7 +69,7 @@ class TestPurgeRaceBarrier(unittest.TestCase):
         # Monkeypatch _encode to fire a purge_all() *during* the encode — exactly
         # the window the daemon index thread is vulnerable in. The embedding it
         # returns is therefore "stale" relative to the purge that just happened.
-        def _encode_then_purge(model, text):
+        def _encode_then_purge(model, text, prefix="query: "):
             searcher.purge_all()  # bumps _purge_epoch under _index_lock
             return _fake_vec()
 
@@ -103,24 +103,23 @@ class TestPurgeRaceBarrier(unittest.TestCase):
 
     def test_no_purge_during_encode_indexes_normally(self):
         """Sanity: without a concurrent purge, indexing still works and persists."""
-        self.searcher._encode = lambda model, text: _fake_vec()
+        self.searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         ok = self.searcher.index_item("id1", "обычный текст")
         self.assertTrue(ok)
         with self.searcher._index_lock:
             self.assertIn("id1", self.searcher._index)
-        self.assertTrue(self.searcher._embeddings_path.exists())
-        self.assertTrue(self.searcher._index_path.exists())
+        self.assertTrue(self.searcher._snapshot_path.exists())
 
     def test_purge_clears_files_already_on_disk(self):
         """A purge after a normal persisted index removes the files (baseline that
         the barrier protects — purge itself must win)."""
         searcher = self.searcher
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         self.assertTrue(searcher.index_item("id1", "первый"))
-        self.assertTrue(searcher._embeddings_path.exists())
-        self.assertTrue(searcher._index_path.exists())
+        self.assertTrue(searcher._snapshot_path.exists())
 
         searcher.purge_all()
+        self.assertFalse(searcher._snapshot_path.exists())
         self.assertFalse(searcher._embeddings_path.exists())
         self.assertFalse(searcher._index_path.exists())
         with searcher._index_lock:
@@ -165,7 +164,7 @@ class TestMaxItemsEviction(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir, max_items=3)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
 
         for i in range(6):
             self.assertTrue(searcher.index_item(f"id{i}", f"текст {i}"))
@@ -196,7 +195,7 @@ class TestMaxItemsEviction(unittest.TestCase):
         self.addCleanup(_td.cleanup)
         tmpdir = _td.name
         searcher = _make_searcher(tmpdir, max_items=0)
-        searcher._encode = lambda model, text: _fake_vec()
+        searcher._encode = lambda model, text, prefix="query: ": _fake_vec()
         for i in range(10):
             searcher.index_item(f"id{i}", f"t{i}")
         with searcher._index_lock:
