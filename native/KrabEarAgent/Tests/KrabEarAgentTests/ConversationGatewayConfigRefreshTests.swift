@@ -28,33 +28,46 @@ final class ConversationGatewayConfigRefreshTests: XCTestCase {
         XCTAssertEqual(updated.brainMode, "fast")
     }
 
-    func test_settingsHandlers_refreshConversationConfig() throws {
+    func test_settingsHandlers_passTypedValuesDirectly() throws {
         let src = try String(contentsOf: Self.sourceURL("HistoryPanelController+Settings.swift"), encoding: .utf8)
-        for handler in ["func onVoiceGatewayURLChanged()", "func onVoiceGatewayAPIKeyChanged()"] {
+        let cases = [("func onVoiceGatewayURLChanged()", "refreshConversationGatewayConfig(gatewayURL: raw)"),
+                     ("func onVoiceGatewayAPIKeyChanged()", "refreshConversationGatewayConfig(apiKey: raw)")]
+        for (handler, call) in cases {
             let start = try XCTUnwrap(src.range(of: handler), handler)
             let tail = String(src[start.upperBound...])
             let end = tail.range(of: "@objc func")?.lowerBound ?? tail.endIndex
             let body = String(tail[..<end])
             XCTAssertTrue(body.contains("applySettingsPatch("), "\(handler): настройка должна сохраняться")
-            XCTAssertTrue(body.contains("refreshConversationGatewayConfig()"),
-                          "\(handler): после сохранения конфиг разговора обязан обновиться")
+            XCTAssertTrue(body.contains(call), "\(handler): конфиг разговора обязан получить введённое значение")
             XCTAssertLessThan(try XCTUnwrap(body.range(of: "applySettingsPatch(")).lowerBound,
-                              try XCTUnwrap(body.range(of: "refreshConversationGatewayConfig()")).lowerBound,
-                              "\(handler): сначала сохранить, потом обновлять конфиг")
+                              try XCTUnwrap(body.range(of: call)).lowerBound)
         }
     }
 
-    func test_refresh_fetchesRealCredentialOffMain_andUpdatesConfig() throws {
+    func test_refresh_doesNotReadSettingsOrDoIPC() throws {
+        // Гейт Opus: чтение settingsProvider()/IPC сразу после сохранения может вернуть прежнее значение.
         let src = try String(contentsOf: Self.sourceURL("HistoryPanelController+VoiceTab.swift"), encoding: .utf8)
-        let start = try XCTUnwrap(src.range(of: "func refreshConversationGatewayConfig()"))
+        let start = try XCTUnwrap(src.range(of: "func refreshConversationGatewayConfig("))
         let tail = String(src[start.upperBound...])
         let end = tail.range(of: "// MARK:")?.lowerBound ?? tail.endIndex
         let body = String(tail[..<end])
-        XCTAssertTrue(body.contains("get_voice_gateway_credential"))
-        XCTAssertTrue(body.contains("callAsync"), "ключ тянем off-main (AGENT-3), не синхронным IPC")
-        XCTAssertFalse(body.contains("ipcClient.call("), "sync IPC на main запрещён")
-        XCTAssertTrue(body.contains("config.apiKey = realKey"))
+        XCTAssertFalse(body.contains("settingsProvider()"))
+        XCTAssertFalse(body.contains("callAsync"))
+        XCTAssertFalse(body.contains("ipcClient"))
+        XCTAssertTrue(body.contains("vc.config.apiKey = apiKey"))
         XCTAssertTrue(body.contains("updatingGateway("))
+    }
+
+    @MainActor
+    func test_urlBuilders() {
+        typealias P = HistoryPanelController
+        XCTAssertEqual(P.conversationHTTPBase(fromGatewayURL: " http://127.0.0.1:8090/ "), "http://127.0.0.1:8090")
+        XCTAssertTrue(P.conversationWSURL(fromGatewayURL: "http://127.0.0.1:8090/").hasPrefix("ws://127.0.0.1:8090/v1/sessions/vs_"))
+        XCTAssertTrue(P.conversationWSURL(fromGatewayURL: "https://gw.example").hasPrefix("wss://gw.example/v1/sessions/vs_"))
+        XCTAssertTrue(P.conversationWSURL(fromGatewayURL: "10.0.0.5:8090").hasPrefix("ws://10.0.0.5:8090/v1/sessions/vs_"))
+        XCTAssertTrue(P.conversationWSURL(fromGatewayURL: "ws://h:1").hasSuffix("/conversation"))
+        XCTAssertNotEqual(P.conversationWSURL(fromGatewayURL: "http://h"), P.conversationWSURL(fromGatewayURL: "http://h"),
+                          "session id свой на каждый вызов")
     }
 
     private static func sourceURL(_ name: String) -> URL {

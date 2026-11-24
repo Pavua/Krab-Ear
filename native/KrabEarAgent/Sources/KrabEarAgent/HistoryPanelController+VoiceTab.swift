@@ -93,29 +93,22 @@ extension HistoryPanelController {
 
     // MARK: - Обновление конфига после смены настроек шлюза
 
-    /// Подтянуть в конфиг «Разговора с AI» актуальные адрес и ключ Voice Gateway.
+    /// Передать в конфиг «Разговора с AI» новый адрес и/или ключ Voice Gateway, введённые в настройках.
     ///
     /// `setupConversationTab` читает их один раз при запуске, а обработчики полей «Gateway URL» и «API key»
-    /// только сохраняют настройку в бэкенде: без этого вызова разговор продолжает слать прежний ключ до
-    /// перезапуска агента (баг 24.11: верный ключ введён, шлюз по-прежнему отвечал 401). Реальный ключ
-    /// тянется off-main отдельным IPC (get_settings отдаёт его редактированным).
-    func refreshConversationGatewayConfig() {
+    /// только сохраняют настройку в бэкенде: без этого вызова разговор шлёт прежний ключ до перезапуска
+    /// агента (баг 24.11: верный ключ введён, шлюз отвечал 401). Значения берутся ПРЯМО из введённых полей,
+    /// а не из `settingsProvider()`/IPC: сразу после сохранения настройки могут быть ещё не применены, и
+    /// повторное чтение вернуло бы прежнее значение (замечание гейта Opus). Параметр `nil` = не менять.
+    func refreshConversationGatewayConfig(gatewayURL: String? = nil, apiKey: String? = nil) {
         guard let vc = conversationVC else { return }
-        let settings = settingsProvider()
-        let httpBase = settings.voiceGatewayURL
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        vc.config = vc.config.updatingGateway(
-            wsURLString: buildConversationWSURL(from: settings), httpBaseURLString: httpBase)
-        let credentialIPC = self.ipcClient
-        Task { [weak vc] in
-            guard let response = try? await credentialIPC.callAsync(
-                method: "get_voice_gateway_credential", params: [:]
-            ), let result = response["result"] as? [String: Any],
-                  let realKey = result["voice_gateway_api_key"] as? String else { return }
-            await MainActor.run {
-                vc?.config.apiKey = realKey
-            }
+        if let gatewayURL {
+            vc.config = vc.config.updatingGateway(
+                wsURLString: Self.conversationWSURL(fromGatewayURL: gatewayURL),
+                httpBaseURLString: Self.conversationHTTPBase(fromGatewayURL: gatewayURL))
+        }
+        if let apiKey {
+            vc.config.apiKey = apiKey
         }
     }
 
@@ -126,9 +119,18 @@ extension HistoryPanelController {
     /// Пример: http://127.0.0.1:8090 → ws://127.0.0.1:8090/v1/sessions/vs_<uuid>/conversation
     /// session_id свободный (vs_-префикс); `?lang=` добавляется в startWebSocketSession; auth — Bearer apiKey.
     private func buildConversationWSURL(from settings: AgentSettings) -> String {
-        var base = settings.voiceGatewayURL
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        Self.conversationWSURL(fromGatewayURL: settings.voiceGatewayURL)
+    }
+
+    /// HTTP-база шлюза без пробелов и завершающего «/».
+    static func conversationHTTPBase(fromGatewayURL raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// WS-URL из адреса шлюза: http→ws, https→wss, голый хост → ws://, плюс session-scoped путь.
+    static func conversationWSURL(fromGatewayURL raw: String) -> String {
+        var base = conversationHTTPBase(fromGatewayURL: raw)
 
         // Заменяем http(s) → ws(s) если нужно.
         if base.hasPrefix("http://") {

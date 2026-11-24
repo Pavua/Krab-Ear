@@ -413,14 +413,14 @@ extension HistoryPanelController {
         guard !isSyncingSettings else { return }
         let raw = voiceGatewayURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         applySettingsPatch(["voice_gateway_url": raw])
-        refreshConversationGatewayConfig()
+        refreshConversationGatewayConfig(gatewayURL: raw)
     }
 
     @objc func onVoiceGatewayAPIKeyChanged() {
         guard !isSyncingSettings else { return }
         let raw = voiceGatewayAPIKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         applySettingsPatch(["voice_gateway_api_key": raw])
-        refreshConversationGatewayConfig()
+        refreshConversationGatewayConfig(apiKey: raw)
     }
 
     @objc func onCheckVoiceGateway() {
