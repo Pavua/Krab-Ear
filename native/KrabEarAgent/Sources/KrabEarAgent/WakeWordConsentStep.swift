@@ -25,9 +25,21 @@
 import AppKit
 import Foundation
 
-enum WakeWordConsentOutcome {
+enum WakeWordConsentOutcome: Equatable {
     case enabled
     case declined
+    /// Backend не подтвердил включение (транспорт упал / `ok:false`): «включено» утверждать нельзя.
+    case failed
+
+    /// Итог по ответу `set_settings`. Конверт с `ok:false` уже бросает `IPCWire.parseEnvelope`, поэтому
+    /// сюда доходит только принятая операция; её `result` — словарь настроек (БЕЗ поля `ok`).
+    /// `.enabled` только если backend вернул движок, который мы просили: так ловится и отказ записи,
+    /// и нормализация движка на стороне backend.
+    static func resolve(response: [String: Any]?) -> WakeWordConsentOutcome {
+        guard let result = response?["result"] as? [String: Any],
+              result["wake_word_engine"] as? String == "openwakeword" else { return .failed }
+        return .enabled
+    }
 }
 
 @MainActor
@@ -128,17 +140,18 @@ final class WakeWordConsentStepController: NSObject {
         declineButton.isEnabled = false
         let ipc = ipcClient
         Task { [weak self] in
+            var response: [String: Any]?
             do {
-                _ = try await ipc.callAsync(
+                response = try await ipc.callAsync(
                     method: "set_settings",
                     params: ["wake_word_engine": "openwakeword"],
                     timeoutSec: IPCClient.defaultTimeoutSec
                 )
             } catch {
-                // Graceful — модель может быть не забутстрапена; не блокируем онбординг.
                 NSLog("[WakeWordConsentStep] set_settings error: %@", error.localizedDescription)
             }
-            await MainActor.run { [weak self] in self?.finish(.enabled) }
+            let outcome = WakeWordConsentOutcome.resolve(response: response)
+            await MainActor.run { [weak self] in self?.finish(outcome) }
         }
     }
 
