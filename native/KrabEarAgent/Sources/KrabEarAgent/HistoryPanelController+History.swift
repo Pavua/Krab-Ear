@@ -711,7 +711,8 @@ extension HistoryPanelController {
         tableView.reloadData()
         jumpToLatestButton.isEnabled = false
         updateHistoryStatusLabel()
-        updateDictationHistoryPreview()
+        // Последние результаты «Диктовки» не трогаем до ответа: иначе при каждом
+        // обновлении истории мелькало бы пустое состояние. Обновит appendPageAsync.
         updateHistoryFiltersBadge()
         updateHistoryPreviewCard()
 
@@ -732,8 +733,14 @@ extension HistoryPanelController {
         // recoverHistoryIfFiltersHideAllRows должен сработать ПОСЛЕ загрузки
         // первой страницы (раньше работал sync — race condition был скрыт).
         // Теперь зовём из completion callback после async appendPage.
-        appendPageAsync(method: method, params: params, generation: generation) { [weak self] _ in
-            self?.recoverHistoryIfFiltersHideAllRows(limit: pageSize, hadActiveFilters: hadActiveFilters)
+        appendPageAsync(method: method, params: params, generation: generation) { [weak self] ok in
+            guard let self else { return }
+            // Первая загрузка не удалась (не устаревший ответ) — показываем ошибку с «Повторить»;
+            // уже показанные записи при сбое обновления не стираем.
+            if !ok, self.historyLoadGeneration == generation, self.recentDictations.state == .loading {
+                self.recentDictations.apply(.error(message: "Не удалось загрузить последние записи"))
+            }
+            self.recoverHistoryIfFiltersHideAllRows(limit: pageSize, hadActiveFilters: hadActiveFilters)
         }
     }
 
@@ -989,36 +996,37 @@ extension HistoryPanelController {
         return "Обзор: сегодня \(todayCount), 24ч \(last24hCount), вставка ok/err \(pasteOk)/\(pasteFailed), перевод ok/err \(translatedOk)/\(translatedError)"
     }
 
+    /// Последние результаты на экране «Диктовка». Источник — текущая выборка `items`.
+    /// Пустое состояние уточняем статистикой: «нет записей» и «скрыто фильтрами» — разные советы.
     func updateDictationHistoryPreview() {
-        // Snapshot UI-state values on main before going async.
         let currentItems = items
+        if !currentItems.isEmpty {
+            recentDictations.apply(.items(currentItems.prefix(RecentDictationsView.maxRows).map {
+                RecentDictationsView.Item(
+                    id: $0.id,
+                    time: RecentDictationsView.shortTime(from: $0.ts),
+                    text: $0.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }))
+            return
+        }
         let hasFilters = hasActiveHistoryFiltersOrQuery()
-
         fetchHistoryStatsAsync { [weak self] stats in
-            guard let self = self else { return }
+            guard let self else { return }
+            // Пока шёл запрос статистики, могли прийти записи — не затираем их пустым состоянием.
+            guard self.items.isEmpty else { return }
             let activeCount = stats?.activeCount ?? 0
-
-            if currentItems.isEmpty {
-                self.dictationHistoryOpenButton.isEnabled = activeCount > 0
-                if activeCount > 0 {
-                    let suffix = hasFilters ? " (фильтры/поиск активны)" : ""
-                    self.dictationHistoryHintLabel.stringValue = "В истории есть \(activeCount) записей\(suffix)."
-                    self.dictationHistoryPreviewView.string = "Записи есть, но текущая выборка пустая. Нажмите «Открыть историю»."
-                } else {
-                    self.dictationHistoryHintLabel.stringValue = "История пока пустая. После первой транскрибации записи появятся здесь."
-                    self.dictationHistoryPreviewView.string = "Пока нет записей для предпросмотра."
-                }
-                return
+            if activeCount > 0 {
+                self.recentDictations.apply(.empty(
+                    title: hasFilters ? "Записи скрыты фильтрами истории" : "Записи есть, но выборка пуста",
+                    hint: "Нажмите «Вся история», чтобы увидеть все записи (\(activeCount))."
+                ))
+            } else {
+                self.recentDictations.apply(.empty(
+                    title: "Пока нет диктовок",
+                    hint: "Нажмите «Начать диктовку» или \(self.currentHotkeyLabel())."
+                ))
             }
-
-            self.dictationHistoryOpenButton.isEnabled = true
-            self.dictationHistoryHintLabel.stringValue = "Показаны последние \(min(currentItems.count, 5)) из \(max(activeCount, currentItems.count)) записей."
-            let lines = currentItems.prefix(5).enumerated().map { index, item -> String in
-                let raw = item.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                let shortText = raw.count > 120 ? String(raw.prefix(120)) + "…" : raw
-                return "\(index + 1). [\(item.ts)] \(shortText)"
-            }
-            self.dictationHistoryPreviewView.string = lines.joined(separator: "\n")
         }
     }
 

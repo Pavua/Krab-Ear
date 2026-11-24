@@ -1738,6 +1738,7 @@ extension HistoryPanelController {
             let label = self.humanReadableSTTEngine(engineRaw)
             DispatchQueue.main.async { [weak self] in
                 self?.sttEngineLabel.stringValue = label
+                self?.refreshDictationHero()
             }
         }
     }

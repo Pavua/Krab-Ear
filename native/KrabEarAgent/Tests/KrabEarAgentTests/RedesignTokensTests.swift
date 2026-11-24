@@ -152,7 +152,7 @@ final class RedesignTokensTests: XCTestCase {
         "HistoryPanelController+CloudRewriter.swift": 2,
         "HistoryPanelController+CompareRecordings.swift": 1,
         "HistoryPanelController+ConfigPresets.swift": 2,
-        "HistoryPanelController+DictationHeroCard.swift": 2,
+        "HistoryPanelController+DictationHeroCard.swift": 1,  // PR 2: карточка «Быстрый обзор» (9 pt) удалена
         "HistoryPanelController+InlineTranslation.swift": 3,
         "HistoryPanelController+RetentionSettings.swift": 1,
         "HistoryPanelController+STTModelMemory.swift": 1,
