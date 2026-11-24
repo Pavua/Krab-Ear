@@ -258,8 +258,24 @@ def _collect_window_records(*, data_dir: Path, files: dict[str, bytes], staging:
         except (OSError, UnicodeDecodeError) as exc:
             raise SnapshotOperationRefused(REASON_LIVE_LEDGER_UNREADABLE, f"{name} не читается: {exc}") from exc
         is_history = name == HISTORY_NAME
+        window_start = 0
+        if not is_history:
+            # Статус — append-only дельты БЕЗ времени: ok→failed→ok даёт одинаковые
+            # строки, а читатель берёт последнюю по id. Дедуп по тексту потерял бы
+            # переход, поэтому окно = хвост после базы, которой живой файл
+            # начинается (pre-restore байты, если замена не дошла; байты staging,
+            # если дошла), и переносится целиком, по порядку, с повторами.
+            window_start, base_known = _status_window_start(
+                text, bases=[_read_optional(staging / name)]
+                + ([_read_optional(prerestore_dir / name)] if pre_ok else []))
+            if not base_known:
+                warnings.append(f"status_window_base_unknown: {name}")
         for lineno, line in enumerate(text.splitlines(), start=1):
-            if not line.strip() or line in known:
+            if not line.strip():
+                continue
+            if is_history and line in known:
+                continue
+            if not is_history and lineno <= window_start:
                 continue
             try:
                 payload = json.loads(line)
@@ -277,14 +293,47 @@ def _collect_window_records(*, data_dir: Path, files: dict[str, bytes], staging:
             if is_history and item_id in known_ids:
                 continue  # дубль записи по id — две записи одного id в выходе = порча
             carry[name].append(line)
-            known.add(line)
-            known_ids.add(item_id)
+            if is_history:
+                known.add(line)
+                known_ids.add(item_id)
             counters["carried" if is_history else "delta_carried"] += 1
     if any(counters.values()):
         logger.warning("legacy_restore: окно pending — перенесено записей %d, статусов %d, "
                        "исключено удалённых %d, неразбираемых %d", counters["carried"],
                        counters["delta_carried"], counters["excluded_deleted"], counters["unparsable"])
     return carry, counters, warnings
+
+
+def _read_optional(path: Path) -> str | None:
+    """Текст файла; нет файла → пустая база; не читается/symlink → None (не база)."""
+    if path.is_symlink():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def _status_window_start(text: str, *, bases: list[str | None]) -> tuple[int, bool]:
+    """Число строк живого status-журнала, принадлежащих базе (не окну).
+
+    База — самый длинный кандидат, которым живой текст начинается по границе
+    строки. Не нашлось → ``(0, False)``: весь журнал — окно (сохранность важнее
+    точности), вызывающий пишет warning.
+    """
+    best: str | None = None
+    for base in bases:
+        if base is None or not text.startswith(base):
+            continue
+        if base and not base.endswith("\n") and text[len(base):len(base) + 1] not in ("", "\n"):
+            continue  # совпадение посреди строки — не граница
+        if best is None or len(base) > len(best):
+            best = base
+    if best is None:
+        return 0, False
+    return len(best.splitlines()), True
 
 
 def _known_lines_from_bytes(blob: bytes) -> tuple[set[str], set[str]]:

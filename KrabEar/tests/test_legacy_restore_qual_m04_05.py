@@ -103,6 +103,84 @@ class LegacyRestoreQualTest(unittest.TestCase):
                          "статус прежней истории перенесён или изменение окна потеряно")
         self.assertEqual(verdict["delta_records_carried"], 1, verdict)
 
+    def test_repeated_status_transitions_in_window_keep_order(self):
+        """ok → failed → ok в окне: строки идентичны (без времени), last-write-wins по порядку.
+
+        Дедуп по тексту выбросил бы последнее ``ok`` — запись осталась бы ``failed``.
+        Повтор совпадает и со строкой pre-restore набора — её тоже нельзя считать «известной».
+        """
+        status = self._live("history_status.ndjson")
+        ok = json.dumps({"id": "n1", "paste_status": "ok"})
+        failed = json.dumps({"id": "n1", "paste_status": "failed"})
+        status.write_text(ok + "\n", encoding="utf-8")  # pre-restore: n1 уже ok
+        backup = self._backup([_line("n1")], status=[ok])
+        self._pending_after_failure(backup)  # status-журнал ещё прежний
+        with open(status, "a", encoding="utf-8") as fh:
+            fh.write(failed + "\n" + ok + "\n" + failed + "\n" + ok + "\n")
+        verdict = self.svc._recover_pending_restore()
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(status.read_text(encoding="utf-8").splitlines(), [ok, failed, ok, failed, ok])
+        self.assertEqual(verdict["delta_records_carried"], 4, verdict)
+        self.assertEqual(StateStore(self.data_dir)._load_status_overrides_unlocked(), {"n1": "ok"})
+
+    def test_status_window_after_status_already_replaced(self):
+        """Крах после замены status: окно = хвост после байтов staging."""
+        status = self._live("history_status.ndjson")
+        ok = json.dumps({"id": "n1", "paste_status": "ok"})
+        failed = json.dumps({"id": "n1", "paste_status": "failed"})
+        backup = self._backup([_line("n1")], status=[ok])
+        import backend.legacy_restore as lr
+
+        real = lr._commit_marker
+
+        def crash_after_replace(*a, **k):
+            raise lr.SnapshotOperationRefused("snapshot_fsync_failed", "injected", pending=True)
+
+        with patch.object(lr, "_commit_marker", crash_after_replace):
+            self.assertTrue(self._restore(backup).get("pending"))
+        self.assertEqual(status.read_text(encoding="utf-8").splitlines(), [ok])
+        with open(status, "a", encoding="utf-8") as fh:
+            fh.write(failed + "\n" + ok + "\n")
+        self.assertIs(lr._commit_marker, real)
+        verdict = self.svc._recover_pending_restore()
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(status.read_text(encoding="utf-8").splitlines(), [ok, failed, ok])
+        self.assertEqual(verdict["delta_records_carried"], 2, verdict)
+
+    def test_status_window_when_status_journal_absent_before_restore(self):
+        status = self._live("history_status.ndjson")
+        status.unlink(missing_ok=True)  # журнала не было на момент restore
+        from_backup = json.dumps({"id": "n1", "paste_status": "failed"})
+        backup = self._backup([_line("n1")], status=[from_backup])
+        self._pending_after_failure(backup)  # status ещё не заменён (и не существовал)
+        window = json.dumps({"id": "n1", "paste_status": "ok"})
+        status.write_text(window + "\n", encoding="utf-8")
+        verdict = self.svc._recover_pending_restore()
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(status.read_text(encoding="utf-8").splitlines(), [from_backup, window])
+        self.assertNotIn("status_window_base_unknown: history_status.ndjson", verdict["warnings"], verdict)
+
+    def test_prerestore_junk_line_is_not_reported_as_window_record(self):
+        history = self._live("history.ndjson")
+        with open(history, "a", encoding="utf-8") as fh:
+            fh.write("junk line before restore\n")
+        backup = self._backup([_line("n1")])
+        p_os, p_sh = self._fail_on_live("history.ndjson")
+        with p_os, p_sh:
+            self.assertTrue(self._restore(backup).get("pending"))
+        verdict = self.svc._recover_pending_restore()
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(verdict["records_unparsable"], 0, verdict)
+        self.assertEqual(_ids(history), ["n1"])
+
+    def test_status_window_start_boundaries(self):
+        start = legacy_restore._status_window_start
+        self.assertEqual(start("a\nb\nc\n", bases=["a\n", "a\nb\n", None]), (2, True), "самая длинная база")
+        self.assertEqual(start("a\nb\n", bases=["a"]), (1, True), "база без \\n, но граница строки")
+        self.assertEqual(start("ab\n", bases=["a"]), (0, False), "совпадение посреди строки — не база")
+        self.assertEqual(start("x\n", bases=["a\n"]), (0, False))
+        self.assertEqual(start("x\n", bases=[""]), (0, True))
+
     def test_dictation_in_pending_window_survives_delayed_roll_forward(self):
         backup = self._backup([_line("n1")])
         self._pending_after_failure(backup)  # history уже заменена

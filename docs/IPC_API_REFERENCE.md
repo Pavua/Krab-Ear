@@ -742,8 +742,10 @@ read-back → `COMMITTED`. Сбой после маркера → `{ok:false, pe
 объединяется с ТЕКУЩИМ живым ledger (удаления и purge окна не отменяются), а
 записи окна, которых нет ни в staging, ни в pre-restore копии, переносятся
 (H1, как у encrypted-ветки). Вердикт докатки (`restore_recovery`) несёт
-`records_carried`, `delta_records_carried` (строки статусов окна — без дедупа по
-id: статус-дельта применяется last-write-wins по порядку строк),
+`records_carried`, `delta_records_carried` (строки статусов окна = хвост живого
+журнала после базы — pre-restore байтов или байтов staging; переносятся по
+порядку, с повторами и без дедупа: статус-дельта без времени, last-write-wins;
+база не найдена → весь журнал окна + warning `status_window_base_unknown`),
 `records_excluded_deleted`, `records_unparsable`, `warnings` и
 `semantic_reindex_required`. Нет pre-restore копии → переносится всё, чего нет в
 staging, warning `prerestore_copy_unavailable`. Staging без маркера (kill до
