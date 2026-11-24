@@ -55,6 +55,10 @@ enum ConversationEvent {
     /// Ошибка от сервера (conv.error / conv.fatal).
     case error(code: String, message: String)
 
+    /// Голос ответа сменился на другой движок (conv.voice_fallback): клон не успел или упал, и шлюз озвучил
+    /// запасным. Разговор не обрывается; пользователю показываем строку в расшифровке.
+    case voiceFallback(reason: String, fromEngine: String, toEngine: String)
+
     /// Неизвестный/нераспознанный тип события (для forward-compat).
     case unknown(type: String, raw: [String: Any])
 }
@@ -116,6 +120,12 @@ extension ConversationEvent {
                 ?? (raw["message"] as? String)
                 ?? ""
             return .error(code: "conv.fatal", message: message)
+
+        case "conv.voice_fallback":
+            return .voiceFallback(
+                reason: (payload["reason"] as? String) ?? "",
+                fromEngine: (payload["from_engine"] as? String) ?? "",
+                toEngine: (payload["to_engine"] as? String) ?? "")
 
         case "conv.recycled":
             let reason = (payload["reason"] as? String) ?? ""
