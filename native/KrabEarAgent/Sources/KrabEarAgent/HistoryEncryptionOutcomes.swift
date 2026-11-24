@@ -20,6 +20,9 @@ enum HistoryMigrationOutcome: Equatable {
     case backupCleanupFailed
     /// Миграция завершилась отказом (verification_failed, error, ...): «Готово» показывать нельзя.
     case failed(status: String)
+    /// Незашифрованных записей нет, но терминальный итог не подтверждён (статуса нет или он
+    /// ещё «encrypting»): судьбу plaintext .bak установить нечем — «Готово» было бы ложью.
+    case pending
 
     /// Итог берётся из IPC (`last_migration_status`): он переживает пропущенный SSE.
     /// SSE-наблюдатель остаётся запасным источником (например, UI подхватил уже идущую миграцию).
@@ -35,8 +38,11 @@ enum HistoryMigrationOutcome: Equatable {
         if let status = terminalStatus, !status.isEmpty, status != "done", status != "encrypting" {
             return .failed(status: status)
         }
-        if plaintext == 0 { return .done }
-        return .partial(plaintext: plaintext)
+        // G3-P04-04: «Готово» только при подтверждённом терминальном "done". Backend фиксирует
+        // итог всегда, поэтому nil/«encrypting» при plaintext == 0 — это «не подтверждено»
+        // (рестарт backend посреди миграции, чужая миграция), а не успех.
+        if plaintext > 0 { return .partial(plaintext: plaintext) }
+        return terminalStatus == "done" ? .done : .pending
     }
 }
 

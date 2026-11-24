@@ -458,6 +458,23 @@ extension HistoryPanelController {
             if let row = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateRow) as? NSStackView {
                 row.isHidden = false
             }
+        case .pending:
+            // Итог миграции не подтверждён: об успехе не сообщаем, предлагаем перепроверить позже.
+            if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
+                progress.isHidden = true
+            }
+            if let status = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateStatus) as? NSTextField {
+                status.stringValue = "Итог шифрования не подтверждён. Откройте раздел позже: "
+                    + "если резервная копия (.bak) осталась, «Удалить все данные» удалит и её."
+                status.textColor = KrabEarTheme.Colors.warning
+            }
+            if let button = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateButton) as? NSButton {
+                button.isEnabled = false
+                button.isHidden = true
+            }
+            if let row = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateRow) as? NSStackView {
+                row.isHidden = false
+            }
         case .failed(let failure):
             if let progress = objc_getAssociatedObject(self, &SecurityAssocKeys.migrateProgress) as? NSProgressIndicator {
                 progress.isHidden = true
