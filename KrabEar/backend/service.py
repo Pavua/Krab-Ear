@@ -2696,8 +2696,12 @@ class BackendService:
         purge_scheduler = getattr(self, "_purge_scheduler", None)
         if purge_scheduler is not None:
             try:
-                purge_scheduler.stop()
+                # G3-P04-10: False — очистка ещё идёт, поток жив; close() не
+                # вправе рапортовать, что все рабочие потоки остановлены.
+                if purge_scheduler.stop() is False:
+                    all_workers_stopped = False
             except Exception:
+                all_workers_stopped = False
                 logger.exception("PurgeScheduler.stop() raised during close()")
 
         # Stop EventBridge sender daemon thread — mirrors DiskSpaceMonitor/

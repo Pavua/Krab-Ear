@@ -36,6 +36,7 @@ Restore и докатка recovery — b2 (в этом модуле их нет 
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import logging
@@ -128,7 +129,14 @@ def _write_file_durable(path: Path, blob: bytes) -> None:
     fd = -1
     try:
         fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        os.write(fd, blob)
+        # G3-P04-07: os.write вправе записать меньше запрошенного (сигнал,
+        # заполненный диск) — один вызов оставлял усечённый файл без ошибки.
+        view = memoryview(blob)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError(errno.EIO, "os.write не продвинулся")
+            view = view[written:]
         os.fsync(fd)
     except OSError as exc:
         raise SnapshotOperationRefused(
@@ -2962,8 +2970,12 @@ def restore_verdict(data_dir: Any) -> dict | None:
     """
     try:
         from_disk = read_pending_restore_verdict(data_dir)
-    except SnapshotOperationRefused:
-        from_disk = None
+    except SnapshotOperationRefused as exc:
+        # G3-P04-05: диск не прочитан — о маркере ничего не известно. Раньше
+        # здесь брался кэш, и прошлая успешная попытка выдавалась за
+        # pending=False («всё чисто»). Тот же fail-closed, что в
+        # has_pending_restore: не смогли проверить — считаем «есть».
+        return _recovery_result(ok=False, pending=True, reason=exc.reason)
     if from_disk is not None:
         return from_disk
     cached = _RECOVERY_VERDICT_CACHE.get(_profile_key(data_dir))
