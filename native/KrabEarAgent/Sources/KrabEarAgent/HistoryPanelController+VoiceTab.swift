@@ -77,11 +77,20 @@ extension HistoryPanelController {
             }
         }
 
+        // Сверху — карточка подключения к шлюзу (ключ и проверка там, где видна ошибка),
+        // ниже — сам разговор.
+        let gatewayCard = voiceGatewayConnectionView
+        voiceContentView.addSubview(gatewayCard)
+        setupVoiceGatewayCard()
+
         // Встроить view VC в content view таба.
         vc.view.translatesAutoresizingMaskIntoConstraints = false
         voiceContentView.addSubview(vc.view)
         NSLayoutConstraint.activate([
-            vc.view.topAnchor.constraint(equalTo: voiceContentView.topAnchor),
+            gatewayCard.topAnchor.constraint(equalTo: voiceContentView.topAnchor),
+            gatewayCard.leadingAnchor.constraint(equalTo: voiceContentView.leadingAnchor),
+            gatewayCard.trailingAnchor.constraint(equalTo: voiceContentView.trailingAnchor),
+            vc.view.topAnchor.constraint(equalTo: gatewayCard.bottomAnchor, constant: KrabEarTheme.Metrics.standard),
             vc.view.leadingAnchor.constraint(equalTo: voiceContentView.leadingAnchor),
             vc.view.trailingAnchor.constraint(equalTo: voiceContentView.trailingAnchor),
             vc.view.bottomAnchor.constraint(equalTo: voiceContentView.bottomAnchor),
