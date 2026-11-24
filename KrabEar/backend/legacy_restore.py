@@ -288,13 +288,19 @@ def _collect_window_records(*, data_dir: Path, files: dict[str, bytes], staging:
 
 
 def _known_lines_from_bytes(blob: bytes) -> tuple[set[str], set[str]]:
+    """Строки и id выходного набора. Байты собраны нами из строк, прошедших
+    ``_parse_plaintext_journal``, но сравнение не должно падать на инварианте:
+    неразбираемая строка остаётся «известной» по тексту, id не даёт."""
     lines: set[str] = set()
     ids: set[str] = set()
-    for line in blob.decode("utf-8").splitlines():
+    for line in blob.decode("utf-8", errors="replace").splitlines():
         if not line.strip():
             continue
         lines.add(line)
-        payload = json.loads(line)  # байты собраны нами из проверенных строк
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
         raw_id = payload.get("id") if isinstance(payload, dict) else None
         if isinstance(raw_id, str) and raw_id.strip():
             ids.add(raw_id.strip())
