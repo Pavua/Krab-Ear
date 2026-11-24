@@ -30,9 +30,15 @@ def reply(**fields):
     return json.dumps({"id": "1", "ok": True, "result": fields})
 
 
+FENCE_TOKEN = "0123456789abcdef0123456789abcdef"
+FENCE_CLOSED = json.dumps({"id": "1", "ok": True,
+                           "result": {"ok": True, "token": FENCE_TOKEN, "lease_sec": 60.0}})
+
+
 def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
              fragmented=False, wait=False, function_only=False, with_rest=False, force=False,
-             silent=False, oversized=False, check_only=False):
+             silent=False, oversized=False, check_only=False, fence=FENCE_CLOSED,
+             fence_open=None, kickstart_rc=0):
     """Читаем real shell и IPC-код; все mutation-команды замыкаются на marker."""
     marker = tmp_path / "launchctl.log"
     source = (ROOT / "scripts" / script).read_text()
@@ -69,12 +75,19 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
                             if not part:
                                 break
                             data += part
-                        method = json.loads(data).get("method")
-                        if method == "ping":
+                        request = json.loads(data)
+                        method = request.get("method")
+                        if method in ("ping", "maintenance_fence_close", "maintenance_fence_open"):
                             with marker.open("a") as log:
-                                log.write("IPC:ping\n")
+                                extra = ""
+                                if method == "maintenance_fence_open":
+                                    extra = ":" + str(request.get("params", {}).get("token"))
+                                log.write(f"IPC:{method}{extra}\n")
                         value = {"get_recording_state": recording,
                                  "get_meeting_live_state": meeting,
+                                 "maintenance_fence_close": fence,
+                                 "maintenance_fence_open": fence_open or json.dumps(
+                                     {"id": "1", "ok": True, "result": {"ok": True}}),
                                  "ping": reply(status="ok")}[method]
                         if silent and method == "get_recording_state":
                             stopped.wait(6)
@@ -96,7 +109,7 @@ def run_gate(tmp_path, script, recording=None, meeting=None, *, missing=False,
         bindir = tmp_path / "bin"
         bindir.mkdir(exist_ok=True)
         (bindir / "python3").symlink_to(sys.executable)
-        log_launchctl = 'printf "%s\\n" "$*" >> "$GATE_TEST_MARKER"\nexit 0\n'
+        log_launchctl = f'printf "%s\\n" "$*" >> "$GATE_TEST_MARKER"\nexit {int(kickstart_rc)}\n'
         if installer_slice:
             # Загруженный label отвечает на print до первого bootout.
             log_launchctl = (

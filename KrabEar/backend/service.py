@@ -1684,6 +1684,14 @@ class BackendService:
             ),
             data_dir=self.store.data_dir,
         )
+        # KEG2-09: один обратимый admission-fence на ВСЕ пути старта сессии
+        # (запись, встреча, CallAssist). safe_backend_restart.command закрывает
+        # его атомарно с проверкой покоя (maintenance_fence_close) перед kickstart.
+        from backend.maintenance_fence import MaintenanceFence
+        self._maintenance_fence = MaintenanceFence()
+        self._recording_core_svc._maintenance_fence = self._maintenance_fence
+        self._meeting_svc._maintenance_fence = self._maintenance_fence
+        self._call_assist._maintenance_fence = self._maintenance_fence
         self._calendar_linker = CalendarLinker(
             cache_minutes=int(settings.CALENDAR_LINK_CACHE_MIN)
         )
@@ -2514,6 +2522,34 @@ class BackendService:
                 logger.exception("export_scheduler tick failed")
             stop.wait(self._EXPORT_SCHEDULER_INTERVAL_SEC)
 
+    def _handle_maintenance_fence_close(self, params: dict) -> dict:
+        """KEG2-09: атомарно «проверить покой и закрыть допуск новых сессий».
+
+        Успех: ``{"ok": True, "token", "lease_sec"}`` — новые start_recording /
+        meeting_start / start_call_assist отказывают до ``maintenance_fence_open``
+        или истечения lease (новый процесс backend стартует с открытым fence).
+        Отказ: ``{"ok": False, "reason", "busy_reasons"}``; неизвестное = занято.
+        """
+        from backend.maintenance_fence import DEFAULT_LEASE_SEC, activity_busy_reasons
+
+        fence = getattr(self, "_maintenance_fence", None)
+        if fence is None:
+            return {"ok": False, "reason": "fence_unavailable", "busy_reasons": []}
+        components = (
+            ("recording", getattr(self, "_recording_core_svc", None)),
+            ("meeting", getattr(self, "_meeting_svc", None)),
+            ("call_assist", getattr(self, "_call_assist", None)),
+        )
+        lease = (params or {}).get("lease_sec", DEFAULT_LEASE_SEC)
+        return fence.close_if_quiet(lambda: activity_busy_reasons(*components), lease_sec=lease)
+
+    def _handle_maintenance_fence_open(self, params: dict) -> dict:
+        """KEG2-09: открыть допуск по токену close (рестарт не состоялся)."""
+        fence = getattr(self, "_maintenance_fence", None)
+        if fence is not None and fence.reopen((params or {}).get("token")):
+            return {"ok": True}
+        return {"ok": False, "reason": "token_mismatch"}
+
     def _handle_get_memory_ledger(self, params: dict) -> dict:
         """Витрина дирижёра памяти: леджер (nowait — health-probe урок) + диагностика."""
         from backend.activity_diagnostics import ipc_activity_snapshot
@@ -3011,6 +3047,8 @@ class BackendService:
             "meeting_start": self._meeting_svc.handle_meeting_start,  # C2a: старт/повышение live-встречи
             "meeting_stop": self._meeting_svc.handle_meeting_stop,  # C2a: финализация live-встречи
             "get_meeting_live_state": self._meeting_svc.handle_get_meeting_live_state,  # C2a: снимок для панели
+            "maintenance_fence_close": self._handle_maintenance_fence_close,  # KEG2-09: scripts/safe_backend_restart.command
+            "maintenance_fence_open": self._handle_maintenance_fence_open,  # KEG2-09: откат close при сбое kickstart
             "get_last_llm_diff": self._llm_ops_svc.handle_get_last_llm_diff,  # последний word-level diff от LLM rewriter'а
 
             "get_vocabulary_suggestions": self._translation.handle_get_vocabulary_suggestions,

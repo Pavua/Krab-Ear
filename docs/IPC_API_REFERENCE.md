@@ -4042,6 +4042,41 @@ Returns: `{id, ok, summary, summary_is_llm, action_items, decisions, questions, 
 
 ---
 
+## Maintenance fence (KEG2-09, 2026-11-24)
+
+Барьер «проверка покоя → остановка backend». Снимок `get_recording_state` /
+`get_meeting_live_state` не барьер: между ним и `launchctl kickstart -k` новая
+запись стартовала свободно. `scripts/safe_backend_restart.command` закрывает
+fence атомарно с проверкой покоя и только потом делает kickstart. Новый процесс
+backend стартует с открытым fence (состояние только в памяти).
+
+Пока fence закрыт: `start_recording` → `{status: "maintenance_active",
+is_recording: false}`; `meeting_start` → `{ok: false, error: "maintenance_active"}`;
+`start_call_assist` → `{ok: false, error: "maintenance_active", status: "idle"}`.
+Stop/finalize не затрагиваются.
+
+### `maintenance_fence_close`
+*(service.py → maintenance_fence.py)*  
+Params: `lease_sec` (float, default `60`, зажимается в `5`–`600`).  
+Под одним локом: нет стартов «в полёте» → состояние `closing` (новые старты ждут
+≤5 с) → неблокирующая проба `activity_snapshot` записи, встречи и CallAssist →
+idle = закрыть на lease; busy/unknown = открыть обратно.  
+Returns (закрыт): `{ok: true, token: "<32 hex>", lease_sec}`  
+Returns (отказ): `{ok: false, reason: "busy"|"already_closed"|"closing_in_progress"|"fence_unavailable",
+busy_reasons: ["starting_recording", "recording_busy", "meeting_unknown", "call_assist_busy", ...]}`
+— неизвестное состояние считается занятым (fail-closed). Тексты не возвращаются.
+
+```json
+Request:  {"id":"f1","method":"maintenance_fence_close","params":{"lease_sec":60}}
+Response: {"id":"f1","ok":true,"result":{"ok":true,"token":"0123456789abcdef0123456789abcdef","lease_sec":60.0}}
+```
+
+### `maintenance_fence_open`
+*(service.py → maintenance_fence.py)*  
+Params: `token` (str, из `maintenance_fence_close`). Открывает допуск, если
+рестарт не состоялся (скрипт зовёт при сбое kickstart). Lease истекает и сам.  
+Returns: `{ok: true}` | `{ok: false, reason: "token_mismatch"}`
+
 ## Misc
 
 | Метод | Описание |

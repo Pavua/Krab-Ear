@@ -418,7 +418,20 @@ class RecordingCoreService:
     # ------------------------------------------------------------------ #
 
     def handle_start_recording(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Запустить запись, если сервис ещё не вошёл в shutdown."""
+        """Запустить запись, если сервис не в shutdown и не под обслуживанием.
+
+        KEG2-09: допуск maintenance-fence берётся ДО lifecycle-lock и держится
+        до возврата — пока старт в полёте, безопасный рестарт не может закрыть
+        fence (снимок «idle» посреди старта больше не разрешает kickstart).
+        """
+        from backend.maintenance_fence import REASON_MAINTENANCE, optional_admission
+
+        with optional_admission(self, "recording") as admitted:
+            if not admitted:
+                return {"status": REASON_MAINTENANCE, "is_recording": False}
+            return self._handle_start_recording_admitted(params)
+
+    def _handle_start_recording_admitted(self, params: dict[str, Any]) -> dict[str, Any]:
         lifecycle_lock, closed_event = self._ensure_recording_lifecycle_state()
         # Быстрая проверка не даёт новому start встать за уже зависшим setup.
         # Повторная проверка под lock ниже закрывает гонку с началом shutdown.

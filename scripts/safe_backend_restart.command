@@ -9,7 +9,12 @@
 #
 # Скрипт спрашивает get_recording_state / get_meeting_live_state через IPC и
 # отказывается рестартовать, пока идёт запись или живая встреча (можно ждать
-# с --wait). Отсутствующий/неотвечающий сокет — UNKNOWN, не разрешение
+# с --wait). KEG2-09: снимок — только предпроверка; барьер — IPC
+# maintenance_fence_close (backend атомарно с проверкой покоя закрывает допуск
+# новых записи/встречи/CallAssist на 60 с) прямо перед kickstart; сбой
+# kickstart → maintenance_fence_open. Старый backend без метода — громкое
+# WARNING и рестарт по снимку (переходный путь деплоя).
+# Отсутствующий/неотвечающий сокет — UNKNOWN, не разрешение
 # убивать процесс. Восстановление неизвестного endpoint требует отдельного
 # осознанного действия владельца; автоматический recovery здесь запрещён.
 #
@@ -44,10 +49,18 @@ done
 ipc_call() {
   # Состояние выдаётся только после полного валидного ответа IPC. Тексты
   # диктовки/встречи не попадают ни в shell output, ни в аргументы процессов.
-  python3 - "$1" <<'PY' 2>/dev/null
-import json, os, socket, sys, time
+  python3 - "$@" <<'PY' 2>/dev/null
+import json, os, re, socket, sys, time
 method = sys.argv[1]
+arg = sys.argv[2] if len(sys.argv) > 2 else ""
 p = os.path.expanduser("~/Library/Application Support/KrabEar/krabear.sock")
+FENCE = method in ("maintenance_fence_close", "maintenance_fence_open")
+if method == "maintenance_fence_close":
+    params = {"lease_sec": 60}
+elif method == "maintenance_fence_open":
+    params = {"token": arg}
+else:
+    params = {}
 
 def unique_object(pairs):
     result = {}
@@ -62,7 +75,7 @@ try:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(4.0)
         connection.connect(p)
-        connection.sendall((json.dumps({"id": "1", "method": method, "params": {}}) + "\n").encode())
+        connection.sendall((json.dumps({"id": "1", "method": method, "params": params}) + "\n").encode())
         data = bytearray()
         while b"\n" not in data:
             remaining = deadline - time.monotonic()
@@ -74,11 +87,34 @@ try:
                 raise ValueError("incomplete IPC reply")
             data.extend(chunk)
     response = json.loads(data.split(b"\n", 1)[0], object_pairs_hook=unique_object)
-    if not isinstance(response, dict) or response.get("id") != "1" or response.get("ok") is not True:
+    if not isinstance(response, dict) or response.get("id") != "1":
         raise ValueError("invalid RPC envelope")
-    if response.get("error") is not None:
+    error = response.get("error")
+    if (FENCE and response.get("ok") is False and isinstance(error, dict)
+            and error.get("code") == "unknown_method"):
+        # Backend старше KEG2-09: барьера нет (переходный путь деплоя).
+        print("legacy")
+        sys.exit(0)
+    if response.get("ok") is not True:
+        raise ValueError("invalid RPC envelope")
+    if error is not None:
         raise ValueError("RPC error")
     result = response.get("result")
+    if FENCE:
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            raise ValueError("invalid fence result")
+        if method == "maintenance_fence_open":
+            print("opened" if result["ok"] else "unknown")
+        elif result["ok"]:
+            token = result.get("token")
+            if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+                raise ValueError("invalid fence token")
+            print("closed " + token)
+        else:
+            reasons = result.get("busy_reasons") or [result.get("reason")]
+            safe = [r for r in reasons if isinstance(r, str) and re.fullmatch(r"[a-z_]{1,48}", r)]
+            print("busy " + (",".join(safe[:6]) or "unknown"))
+        sys.exit(0)
     if not isinstance(result, dict) or ("ok" in result and result["ok"] is not True):
         raise ValueError("invalid RPC result")
     if method == "ping":
@@ -126,8 +162,30 @@ busy_reason() {
   esac
 }
 
+# KEG2-09: снимок выше — лишь дешёвая предпроверка с понятной причиной.
+# Барьер — maintenance_fence_close: backend атомарно с проверкой покоя
+# закрывает допуск новых записи/встречи/CallAssist (lease 60 с) и отдаёт токен.
+# Между close и kickstart новая сессия стартовать уже не может.
+FENCE_TOKEN=""
 DEADLINE=$(( $(date +%s) + WAIT_SEC ))
-while REASON=$(busy_reason); do
+while :; do
+  if REASON=$(busy_reason); then
+    :
+  elif [ "$CHECK_ONLY" -eq 1 ]; then
+    echo "[safe-restart] IDLE: запись и встреча не активны; runtime не изменён."
+    exit 0
+  else
+    FENCE=$(ipc_call maintenance_fence_close)
+    case "$FENCE" in
+      closed\ *) FENCE_TOKEN="${FENCE#closed }"; break ;;
+      legacy)
+        echo "[safe-restart] WARNING: backend без maintenance_fence (старше KEG2-09) —" \
+             "барьера нет, рестарт по снимку (переходный путь деплоя)." >&2
+        break ;;
+      busy\ *) REASON="fence:${FENCE#busy }" ;;
+      *) REASON="fence-unknown" ;;
+    esac
+  fi
   if [ "$WAIT_SEC" -eq 0 ]; then
     echo "REFUSED: активная сессия ($REASON) или состояние не подтверждено — рестарт запрещён." >&2
     echo "Дождись окончания или запусти с --wait N." >&2
@@ -141,13 +199,15 @@ while REASON=$(busy_reason); do
   sleep 3
 done
 
-if [ "$CHECK_ONLY" -eq 1 ]; then
-  echo "[safe-restart] IDLE: запись и встреча не активны; runtime не изменён."
-  exit 0
-fi
-
 echo "[safe-restart] kickstart $BACKEND_UNIT"
-launchctl kickstart -k "$BACKEND_UNIT"
+if ! launchctl kickstart -k "$BACKEND_UNIT"; then
+  # Рестарт не состоялся — вернуть допуск, иначе записи стоят до конца lease.
+  if [ -n "$FENCE_TOKEN" ]; then
+    ipc_call maintenance_fence_open "$FENCE_TOKEN" >/dev/null
+  fi
+  echo "FAIL: launchctl kickstart не удался; допуск записи возвращён." >&2
+  exit 1
+fi
 
 # Ожидание готовности: ping до 60с (warmup тяжёлых моделей идёт дольше, но
 # сокет поднимается раньше; нам важна IPC-доступность для GUI).
