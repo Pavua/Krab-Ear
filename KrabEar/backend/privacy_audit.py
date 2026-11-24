@@ -19,6 +19,7 @@ import logging
 import os
 import tempfile
 import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -78,63 +79,174 @@ _KEY_FILENAME = "privacy_audit.key"
 # Module-level helpers (W974 / W1533)
 # ---------------------------------------------------------------------------
 
-def _load_or_create_key(data_dir: Path) -> bytes:
-    """Читает ключ из <data_dir>/privacy_audit.key или создаёт новый.
+_KEY_LENGTH = 32
+# Сколько раз переигрываем «прочитать → (карантин | создать)», если соседний
+# процесс успел изменить файл ключа между нашими шагами.
+_KEY_ATTEMPTS = 3
 
-    Файл создаётся с правами 0o600 (только владелец).
-    Запись атомарная: пишем во временный файл, затем rename.
 
-    Args:
-        data_dir: директория, где хранится лог (родительская директория лога).
+class AuditKeyUnavailable(RuntimeError):
+    """Ключ журнала не удалось ни прочитать, ни надёжно сохранить на диск.
 
-    Returns:
-        32-байтный HMAC-ключ.
+    G3-P04-01: раньше при сбое записи возвращался ключ, которого нет на диске.
+    Записи с ним после рестарта не проверить ничем — это хуже, чем отказ:
+    журнал выглядел бы рабочим, а его подписи были бы невоспроизводимы.
     """
-    key_path = data_dir / _KEY_FILENAME
 
-    if key_path.exists():
-        try:
-            key = key_path.read_bytes()
-            if len(key) == 32:
-                return key
-            # Некорректная длина — пересоздаём
-            logger.warning(
-                "PrivacyAuditLogger: ключ имеет неверную длину %d, пересоздаём",
-                len(key),
-            )
-        except OSError:
-            # Временный отказ чтения (EACCES/EIO/...) НЕ повод затирать рабочий
-            # ключ: все прежние записи журнала стали бы невалидными. Ключ на
-            # диске остаётся нетронутым; singleton не создаётся, следующая
-            # попытка прочитает тот же ключ.
-            logger.exception("PrivacyAuditLogger: ошибка чтения ключа, ключ не тронут")
-            raise
-        except Exception:
-            logger.exception("PrivacyAuditLogger: ошибка чтения ключа, пересоздаём")
 
-    # Генерируем новый ключ
-    key = os.urandom(32)
+def _write_all(fd: int, data: bytes) -> None:
+    """os.write может записать меньше запрошенного — дописываем до конца."""
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("os.write вернул 0 байт")
+        view = view[written:]
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Делает долговечной саму запись каталога (link/rename нового ключа)."""
+    dir_fd = os.open(directory, os.O_RDONLY)
     try:
-        # Атомарная запись через временный файл в той же директории
-        fd, tmp_path = tempfile.mkstemp(dir=data_dir, prefix=".privacy_audit.key.")
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
+
+
+def _read_key_file(key_path: Path) -> bytes | None:
+    """Содержимое файла ключа или None, если файла нет.
+
+    Прочие OSError (EACCES/EIO/...) пробрасываются: временный отказ чтения НЕ
+    повод заводить новый ключ — все прежние записи журнала стали бы
+    непроверяемыми, а исправный ключ на диске остался бы брошенным.
+    """
+    try:
+        return key_path.read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _quarantine_key(key_path: Path, bad_len: int) -> str | None:
+    """Убирает ключ неверной длины в сторону, ничего не затирая.
+
+    Возвращает имя карантинного файла или None, если файл уже исчез (его
+    обработал соседний процесс). Испорченный ключ — улика: сохраняем его байты
+    для разбора, а не перетираем новым, как делалось до G3-P04-01.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    name = f"{_KEY_FILENAME}.invalid-{stamp}-{uuid.uuid4().hex[:8]}"
+    try:
+        os.rename(key_path, key_path.parent / name)
+    except FileNotFoundError:
+        return None
+    _fsync_dir(key_path.parent)
+    logger.error(
+        "PrivacyAuditLogger: ключ неверной длины %d отправлен в карантин как %s; "
+        "записи, подписанные прежним ключом, проверить больше нельзя",
+        bad_len,
+        name,
+    )
+    return name
+
+
+def _publish_new_key(key_path: Path) -> bytes | None:
+    """Создаёт новый ключ и публикует его БЕЗ перезаписи существующего.
+
+    Возвращает ключ или None, если соседний процесс опубликовал свой первым
+    (тогда читать нужно его). Публикация через ``os.link``: в отличие от
+    rename она не перетирает чужой файл, иначе два одновременно стартующих
+    процесса (backend и REST) подписывали бы журнал разными ключами.
+    """
+    key = os.urandom(_KEY_LENGTH)
+    fd, tmp_path = tempfile.mkstemp(dir=key_path.parent, prefix=".privacy_audit.key.")
+    try:
         try:
-            os.write(fd, key)
+            _write_all(fd, key)
             os.fchmod(fd, 0o600)
             os.fsync(fd)
         finally:
             os.close(fd)
-        os.rename(tmp_path, key_path)
-        # Устанавливаем права снова на случай если rename сбросил umask
-        key_path.chmod(0o600)
-    except Exception:
-        logger.exception("PrivacyAuditLogger: ошибка записи ключа")
-        # Чистим временный файл если rename не состоялся
         try:
-            Path(tmp_path).unlink(missing_ok=True)
-        except Exception:
-            pass
-
+            os.link(tmp_path, key_path)
+        except FileExistsError:
+            return None
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    _fsync_dir(key_path.parent)
     return key
+
+
+def _load_or_create_key_ex(data_dir: Path) -> tuple[bytes, dict[str, Any] | None]:
+    """Ключ журнала и сведения о карантине (если старый ключ был испорчен).
+
+    Исходы:
+      * файл есть и длина верна — возвращаем его;
+      * длина неверна — файл уходит в карантин, создаётся новый ключ, второй
+        элемент кортежа описывает ротацию (её записывает в журнал конструктор);
+      * файла нет — создаём новый, не перетирая ключ соседа, выигравшего гонку;
+      * ключ не удалось ни прочитать, ни сохранить — ``AuditKeyUnavailable``.
+
+    Каталог блокируется ``flock`` на время всей процедуры: без этого процесс,
+    прочитавший испорченный ключ, мог бы отправить в карантин уже ИСПРАВНЫЙ
+    ключ, опубликованный соседом между чтением и переименованием.
+    """
+    key_path = data_dir / _KEY_FILENAME
+    quarantine: dict[str, Any] | None = None
+    try:
+        dir_fd = os.open(data_dir, os.O_RDONLY)
+    except OSError as exc:
+        raise AuditKeyUnavailable(f"каталог ключа недоступен: {exc.__class__.__name__}") from exc
+    try:
+        fcntl.flock(dir_fd, fcntl.LOCK_EX)
+        for _ in range(_KEY_ATTEMPTS):
+            try:
+                existing = _read_key_file(key_path)
+            except OSError:
+                logger.exception("PrivacyAuditLogger: ошибка чтения ключа, ключ не тронут")
+                raise
+            if existing is not None and len(existing) == _KEY_LENGTH:
+                return existing, quarantine
+            try:
+                if existing is not None:
+                    name = _quarantine_key(key_path, len(existing))
+                    if name is not None:
+                        quarantine = {"key_length": len(existing), "quarantined_as": name}
+                    continue
+                created = _publish_new_key(key_path)
+            except OSError as exc:
+                logger.exception("PrivacyAuditLogger: ошибка записи ключа")
+                raise AuditKeyUnavailable(
+                    f"не удалось сохранить ключ журнала: {exc.__class__.__name__}"
+                ) from exc
+            if created is not None:
+                return created, quarantine
+        raise AuditKeyUnavailable("ключ журнала меняется конкурентно, попытки исчерпаны")
+    finally:
+        os.close(dir_fd)  # закрытие дескриптора снимает flock
+
+
+def _load_or_create_key(data_dir: Path) -> bytes:
+    """Читает ключ из <data_dir>/privacy_audit.key или создаёт новый (0o600)."""
+    return _load_or_create_key_ex(data_dir)[0]
+
+
+# Метка нечитаемой строки в verify_chain (отличается от любого JSON-значения).
+_UNPARSABLE = object()
+
+
+def _log_unparsable(where: str, line_no: int, length: int) -> None:
+    """Сообщает о нечитаемой строке журнала БЕЗ её содержимого (G3-P04-02).
+
+    В строке журнала приватности лежат details событий — сырой текст через %r
+    утекал бы в общий лог процесса, который читают и пересылают куда шире.
+    Номера строки (среди непустых, с 1) и длины достаточно, чтобы найти её.
+    """
+    logger.warning(
+        "PrivacyAuditLogger: %s — нечитаемая строка %d (длина %d байт)",
+        where,
+        line_no,
+        length,
+    )
 
 
 def _compute_entry_hash(secret_key: bytes, prev_hash: str | None, entry_dict: dict) -> str:
@@ -172,12 +284,17 @@ class PrivacyAuditLogger:
         self._log_path: Path = log_path if log_path is not None else _default_log_path()
         self._ensure_parent()
         # Загружаем/создаём HMAC-ключ
-        self._secret_key: bytes = _load_or_create_key(self._log_path.parent)
+        self._secret_key, quarantine = _load_or_create_key_ex(self._log_path.parent)
         # Инстанс-уровневый lock: сериализует весь цикл compute→write→update _last_hash
         # Требуется тестом test_log_lock_exists (W1029 F1)
         self._log_lock: threading.Lock = threading.Lock()
         # Читаем существующий лог и вычисляем текущий tip цепочки
         self._last_hash: str | None = self._read_chain_tip()
+        if quarantine is not None:
+            # G3-P04-01: смена ключа обязана быть видна в САМОМ журнале, а не
+            # только в логе процесса: verify_chain дальше честно покажет обрыв
+            # на старых записях, и эта запись объясняет почему.
+            self._write_event("privacy_audit", "key_quarantined", quarantine)
 
     def _read_chain_tip_locked(self, fh: Any) -> str | None:
         """Хвост цепочки из ФАЙЛА по уже открытому дескриптору под flock.
@@ -227,6 +344,15 @@ class PrivacyAuditLogger:
                 )
                 return None
             window *= 4
+
+    @staticmethod
+    def _tail_is_torn_locked(fh: Any) -> bool:
+        """True, если непустой файл не кончается переводом строки (обрыв записи)."""
+        size = fh.seek(0, os.SEEK_END)
+        if size == 0:
+            return False
+        fh.seek(size - 1)
+        return fh.read(1) != b"\n"
 
     def _read_chain_tip(self) -> str | None:
         """Возвращает entry_hash последней записи с хешем, или None."""
@@ -359,6 +485,12 @@ class PrivacyAuditLogger:
                         entry["entry_hash"] = entry_hash
 
                         line = json.dumps(entry, ensure_ascii=False) + "\n"
+                        if self._tail_is_torn_locked(fh):
+                            # G3-P04-02: после краха посреди записи файл кончается
+                            # обрывком без "\n". Без разделителя новая запись
+                            # склеилась бы с ним в одну нечитаемую строку и
+                            # пропала бы вместе с обрывком.
+                            line = "\n" + line
                         phase = "writing"
                         fh.write(line.encode("utf-8"))
                         fh.flush()
@@ -395,38 +527,49 @@ class PrivacyAuditLogger:
         запись — нарушение. Первая хешированная запись обязана иметь
         prev_hash=None (иначе снесена голова).
 
+        Нечитаемая строка (не JSON, не UTF-8) после начала цепочки — тоже
+        нарушение (G3-P04-02): раньше её молча пропускали, и вставленный мусор
+        или оборванная после краха запись давали valid=True. В легаси-префиксе
+        она допустима наравне с легаси-записями — его цепочка не защищает.
+
         Returns:
             dict с ключами:
               - valid (bool): True если цепочка не нарушена.
-              - first_broken_index (int | None): индекс первой нарушенной записи.
-              - checked (int): количество проверенных записей.
+              - first_broken_index (int | None): индекс первой нарушенной записи
+                среди непустых строк журнала (нечитаемые строки тоже считаются).
+              - checked (int): количество непустых строк.
+              - reason (str | None): причина нарушения (``unparsable_line``,
+                ``unhashed_after_chain``, ``bad_hash_fields``, ``head_missing``,
+                ``prev_hash_mismatch``, ``entry_hash_mismatch``, ``read_error``).
         """
-        if not self._log_path.exists():
-            return {"valid": True, "first_broken_index": None, "checked": 0}
+        def broken(idx: int | None, reason: str, checked: int) -> dict[str, Any]:
+            return {"valid": False, "first_broken_index": idx, "checked": checked, "reason": reason}
 
-        entries: list[dict[str, Any]] = []
+        if not self._log_path.exists():
+            return {"valid": True, "first_broken_index": None, "checked": 0, "reason": None}
+
+        # Каждая непустая строка — либо разобранный объект, либо _UNPARSABLE.
+        entries: list[Any] = []
         try:
-            with self._log_path.open("r", encoding="utf-8") as fh:
+            with self._log_path.open("rb") as fh:
                 fcntl.flock(fh.fileno(), fcntl.LOCK_SH)
                 try:
                     lines = fh.readlines()
                 finally:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
-
-            for raw_line in lines:
-                line = raw_line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    logger.warning(
-                        "PrivacyAuditLogger: verify_chain не может разобрать строку: %r",
-                        line,
-                    )
         except Exception:
             logger.exception("PrivacyAuditLogger: ошибка чтения лога при verify_chain")
-            return {"valid": False, "first_broken_index": None, "checked": 0}
+            return broken(None, "read_error", 0)
+
+        for raw_line in lines:
+            line = raw_line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line.decode("utf-8")))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                _log_unparsable("verify_chain", len(entries) + 1, len(line))
+                entries.append(_UNPARSABLE)
 
         checked = len(entries)
 
@@ -438,6 +581,11 @@ class PrivacyAuditLogger:
         in_chain = False  # True когда мы уже видели хотя бы одну хешированную запись
 
         for idx, entry in enumerate(entries):
+            if entry is _UNPARSABLE:
+                if in_chain:
+                    return broken(idx, "unparsable_line", checked)
+                continue  # обрывок в легаси-префиксе, цепочкой не защищён
+
             has_hash_fields = isinstance(entry, dict) and "entry_hash" in entry and "prev_hash" in entry
 
             if not has_hash_fields:
@@ -445,51 +593,41 @@ class PrivacyAuditLogger:
                     # Запись без хеш-полей ПОСЛЕ первой хешированной: писатель
                     # всегда ставит оба поля, значит это стёртые хеши (подделка
                     # без ключа) или вставка. Легаси допустим только ПРЕФИКСОМ.
-                    return {
-                        "valid": False,
-                        "first_broken_index": idx,
-                        "checked": checked,
-                    }
+                    return broken(idx, "unhashed_after_chain", checked)
                 # Легаси-префикс (журнал до появления хеш-цепочки)
                 continue
 
             # Запись с хеш-полями
-            stored_entry_hash: str = entry["entry_hash"]
-            stored_prev_hash: str | None = entry["prev_hash"]
+            stored_entry_hash = entry["entry_hash"]
+            stored_prev_hash = entry["prev_hash"]
+            # Писатель кладёт только hex-строки (prev_hash ещё и None у головы).
+            # Иной тип — подделка; compare_digest на нём бросил бы TypeError.
+            if not isinstance(stored_entry_hash, str) or not (
+                stored_prev_hash is None or isinstance(stored_prev_hash, str)
+            ):
+                return broken(idx, "bad_hash_fields", checked)
 
             # Первая хешированная запись начинает цепочку с prev_hash=None
             # (писатель так и делает, в т.ч. после легаси-префикса). Иное —
             # снесена голова журнала.
             if not in_chain and stored_prev_hash is not None:
-                return {
-                    "valid": False,
-                    "first_broken_index": idx,
-                    "checked": checked,
-                }
+                return broken(idx, "head_missing", checked)
 
             # Дальше prev_hash обязан совпасть с entry_hash предыдущей записи
             if in_chain and stored_prev_hash != expected_prev:
-                return {
-                    "valid": False,
-                    "first_broken_index": idx,
-                    "checked": checked,
-                }
+                return broken(idx, "prev_hash_mismatch", checked)
 
             # Перевычисляем entry_hash от тела (без хеш-полей)
             body = {k: v for k, v in entry.items() if k not in ("prev_hash", "entry_hash")}
             recomputed = _compute_entry_hash(self._secret_key, stored_prev_hash, body)
 
-            if not hmac.compare_digest(recomputed, stored_entry_hash):
-                return {
-                    "valid": False,
-                    "first_broken_index": idx,
-                    "checked": checked,
-                }
+            if not hmac.compare_digest(recomputed.encode("ascii"), stored_entry_hash.encode("utf-8")):
+                return broken(idx, "entry_hash_mismatch", checked)
 
             expected_prev = stored_entry_hash
             in_chain = True
 
-        return {"valid": True, "first_broken_index": None, "checked": checked}
+        return {"valid": True, "first_broken_index": None, "checked": checked, "reason": None}
 
     def read_entries(self, limit: int = 100) -> list[dict[str, Any]]:
         """Читает последние *limit* записей из лога.
@@ -513,16 +651,16 @@ class PrivacyAuditLogger:
                 finally:
                     fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
+            line_no = 0
             for line in lines:
                 line = line.strip()
                 if not line:
                     continue
+                line_no += 1
                 try:
                     entries.append(json.loads(line))
                 except json.JSONDecodeError:
-                    logger.warning(
-                        "PrivacyAuditLogger: не удалось разобрать строку: %r", line
-                    )
+                    _log_unparsable("read_entries", line_no, len(line))
         except Exception:
             logger.exception("PrivacyAuditLogger: ошибка чтения лога")
 
@@ -613,10 +751,7 @@ class PrivacyAuditLogger:
                 try:
                     entry = json.loads(line)
                 except json.JSONDecodeError:
-                    logger.warning(
-                        "PrivacyAuditLogger: не удалось разобрать строку в summarize: %r",
-                        line,
-                    )
+                    _log_unparsable("summarize", summary["total"], len(line))
                     continue
                 action = str(entry.get("action", "unknown"))
                 summary["by_type"][action] = summary["by_type"].get(action, 0) + 1
