@@ -1097,27 +1097,47 @@ def _reachable_helpers(func: ast.FunctionDef) -> list[ast.FunctionDef]:
     снос невидимым гейту, и все proof-gated журналы «выпали» из покрытия. Поиск
     только по телу purge означал бы: любая рефакторинг-выноска способна тихо
     обнулить требование доказательства.
+
+    G3-privacy-05 (05-05): раньше хелпер находился по одному ИМЕНИ среди всех
+    функций модуля (включая методы чужих классов), а «вызовом» считался и
+    ``from X import name``. Тогда ``self.store.compact()`` или импорт одноимённой
+    чужой функции засчитывали тело совсем другой функции. Теперь: голый вызов
+    ``name(...)`` — только функция верхнего уровня модуля; ``self.name(...)`` —
+    только метод класса, которому принадлежит purge (``_krab_owner``). Импорт
+    вызовом не является.
     """
     tree_module = getattr(func, "_krab_module", None)
     if tree_module is None:
         return []
-    called: set[str] = set()
+    owner = getattr(func, "_krab_owner", None)
+    bare_calls: set[str] = set()
+    self_calls: set[str] = set()
     for node in ast.walk(func):
-        if isinstance(node, ast.Call):
-            name = _name_of(node.func)
-            if name is not None:
-                called.add(name)
-        elif isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                called.add(alias.asname or alias.name)
-    out: list[ast.FunctionDef] = []
-    for candidate in ast.walk(tree_module):
-        if (
-            isinstance(candidate, ast.FunctionDef)
-            and candidate.name in called
-            and candidate.name != func.name
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name):
+            bare_calls.add(node.func.id)
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "self"
         ):
-            out.append(candidate)
+            self_calls.add(node.func.attr)
+    out: list[ast.FunctionDef] = [
+        candidate
+        for candidate in tree_module.body
+        if isinstance(candidate, ast.FunctionDef)
+        and candidate.name in bare_calls
+        and candidate.name != func.name
+    ]
+    if owner is not None:
+        out.extend(
+            candidate
+            for candidate in owner.body
+            if isinstance(candidate, ast.FunctionDef)
+            and candidate.name in self_calls
+            and candidate.name != func.name
+        )
     return out
 
 
@@ -1154,6 +1174,126 @@ def _has_proof_in(func: ast.FunctionDef, store_id: str, proofs: tuple[str, ...])
         ):
             return True
     return False
+
+
+# G3-privacy-05 (05-01/05-02): упоминание пути — не удаление. Раньше
+# ``base / "x.json"`` засчитывался покрытием, даже если по пути только читали
+# (``read_text``/``exists``), а ``d.glob(...)``/``d.iterdir()`` — даже если
+# перечисление ничего не удаляло. Теперь путь (или перечисление) засчитывается,
+# только если по потоку данных он доходит до удаляющего вызова.
+_DELETE_ATTRS: frozenset[str] = frozenset(
+    {"unlink", "rmdir", "rmtree", "remove", "replace", "rename", "truncate"}
+)
+# Хелперы удаления по имени (``_unlink_quiet``, ``_wipe_journal_ciphertext``,
+# ``rmtree_strict``, ``_secure_delete``...). Список — по глаголу удаления.
+_DELETE_NAME_RE = re.compile(
+    r"(?:^|_)(?:unlink|remove|delete|wipe|purge|shred|rmtree|erase|scrub|destroy)",
+    re.IGNORECASE,
+)
+# Перезапись содержимого (опустошение файла) — тоже уничтожение данных.
+_OVERWRITE_ATTRS: frozenset[str] = frozenset({"write_text", "write_bytes"})
+# Обёртки, которые передают путь/перечисление дальше без изменения смысла.
+_PASSTHROUGH_CALLS: frozenset[str] = frozenset(
+    {"Path", "str", "fspath", "sorted", "list", "tuple", "reversed", "set", "frozenset",
+     "fromkeys", "chain"}
+)
+
+
+def _callee_name(call: ast.Call) -> str | None:
+    fn = call.func
+    if isinstance(fn, ast.Name):
+        return fn.id
+    if isinstance(fn, ast.Attribute):
+        return fn.attr
+    return None
+
+
+def _is_delete_name(name: str | None) -> bool:
+    return name is not None and (name in _DELETE_ATTRS or bool(_DELETE_NAME_RE.search(name)))
+
+
+def _is_truncating_open(call: ast.Call) -> bool:
+    """``open(path, "w")`` / ``path.open("w")`` — файл опустошается."""
+    mode_nodes = list(call.args[1:2]) if isinstance(call.func, ast.Name) else list(call.args[:1])
+    mode_nodes += [kw.value for kw in call.keywords if kw.arg == "mode"]
+    return any(
+        isinstance(m, ast.Constant) and isinstance(m.value, str) and "w" in m.value
+        for m in mode_nodes
+    )
+
+
+class _DeletionFlow:
+    """Доходит ли выражение внутри функции до удаляющего вызова.
+
+    Внутрипроцедурный поток данных: прямой приёмник (``p.unlink()``), аргумент
+    (``rmtree_strict(p)``, ``_unlink_quiet(p)``), через обёртки (``Path(p)``,
+    ``sorted(d.glob(..))``), контейнеры, присваивание локальной переменной и
+    переменную цикла/генератора (``for p in d.glob("*"): p.unlink()``).
+    """
+
+    def __init__(self, func: ast.AST) -> None:
+        self.parent: dict[ast.AST, ast.AST] = {}
+        self.loads: dict[str, list[ast.Name]] = {}
+        for node in ast.walk(func):
+            for child in ast.iter_child_nodes(node):
+                self.parent[child] = node
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                self.loads.setdefault(node.id, []).append(node)
+
+    def _names_flow(self, target: ast.AST, seen: set[int]) -> bool:
+        names = [n.id for n in ast.walk(target) if isinstance(n, ast.Name)]
+        return any(self.reaches(load, seen) for name in names for load in self.loads.get(name, []))
+
+    def _call_consumes(self, call: ast.Call, node: ast.AST, seen: set[int]) -> bool:
+        name = _callee_name(call)
+        # Доказательства уничтожения шифротекста (``_ledger_holds_no_ciphertext``
+        # и др.) по имени не глаголы удаления, но именно они — уничтожение.
+        if _is_delete_name(name) or name in _ALL_WIPE_PROOFS:
+            return True
+        if name == "open" and _is_truncating_open(call):
+            return True
+        if name in _PASSTHROUGH_CALLS:
+            return self.reaches(call, seen)
+        return False
+
+    def reaches(self, node: ast.AST, seen: set[int] | None = None) -> bool:
+        seen = set() if seen is None else seen
+        if id(node) in seen:
+            return False
+        seen.add(id(node))
+        parent = self.parent.get(node)
+        if parent is None:
+            return False
+        if isinstance(parent, ast.Attribute) and parent.value is node:
+            call = self.parent.get(parent)
+            if not (isinstance(call, ast.Call) and call.func is parent):
+                return False
+            if _is_delete_name(parent.attr) or parent.attr in _OVERWRITE_ATTRS:
+                return True
+            return parent.attr == "open" and _is_truncating_open(call)
+        if isinstance(parent, ast.Call):
+            return node is not parent.func and self._call_consumes(parent, node, seen)
+        if isinstance(parent, ast.keyword):
+            call = self.parent.get(parent)
+            return isinstance(call, ast.Call) and self._call_consumes(call, node, seen)
+        if isinstance(parent, (ast.Tuple, ast.List, ast.Set, ast.Starred, ast.BoolOp)):
+            return self.reaches(parent, seen)
+        # Склейка коллекций (``list(a) + list(b)``, ``set(a) | set(b)``). Деление
+        # (``base / name``) сюда НЕ относится: база пути сама не удаляется.
+        if isinstance(parent, ast.BinOp) and isinstance(parent.op, (ast.Add, ast.BitOr)):
+            return self.reaches(parent, seen)
+        if isinstance(parent, (ast.ListComp, ast.SetComp, ast.GeneratorExp)) and parent.elt is node:
+            return self.reaches(parent, seen)
+        if isinstance(parent, ast.AugAssign) and parent.value is node:
+            return self._names_flow(parent.target, seen)
+        if isinstance(parent, ast.IfExp) and node is not parent.test:
+            return self.reaches(parent, seen)
+        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and parent.value is node:
+            targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+            return any(self._names_flow(t, seen) for t in targets)
+        if isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension)) and parent.iter is node:
+            return self._names_flow(parent.target, seen)
+        return False
 
 
 def _has_call_to(func: ast.FunctionDef, names: tuple[str, ...]) -> bool:
@@ -1223,6 +1363,7 @@ def _loop_carried_store_ids(func: ast.FunctionDef) -> set[str]:
     любым константам рядом с циклом.
     """
     found: set[str] = set()
+    flow = _DeletionFlow(func)
     for node in ast.walk(func):
         if not isinstance(node, (ast.For, ast.AsyncFor)):
             continue
@@ -1236,6 +1377,7 @@ def _loop_carried_store_ids(func: ast.FunctionDef) -> set[str]:
         if not loop_vars:
             continue
         body_nodes = [sub for stmt in node.body for sub in ast.walk(stmt)]
+        # 05-01: путь из переменной цикла засчитывается, только если удаляется.
         uses_path = any(
             isinstance(sub, ast.BinOp)
             and isinstance(sub.op, ast.Div)
@@ -1243,6 +1385,7 @@ def _loop_carried_store_ids(func: ast.FunctionDef) -> set[str]:
                 isinstance(leaf, ast.Name) and leaf.id in loop_vars
                 for leaf in ast.walk(sub)
             )
+            and flow.reaches(sub)
             for sub in body_nodes
         )
         uses_proof = any(
@@ -1266,6 +1409,20 @@ def _loop_carried_store_ids(func: ast.FunctionDef) -> set[str]:
     return found
 
 
+def _enumerated_dir_name(
+    receiver: ast.AST, consts: dict[str, str], assignments: dict[str, ast.AST]
+) -> str | None:
+    """Имя каталога (без точки) у приёмника ``iterdir``/``glob``: ``base / "rescue"``
+    напрямую или через локальную переменную."""
+    if isinstance(receiver, ast.Name) and receiver.id in assignments:
+        receiver = assignments[receiver.id]
+    if isinstance(receiver, ast.BinOp) and isinstance(receiver.op, ast.Div):
+        rhs = _resolve_rhs_name(receiver.right, consts)
+        if rhs is not None and "." not in rhs:
+            return rhs.rstrip("/")
+    return None
+
+
 def _collect_removed_names_in_function(
     func: ast.FunctionDef, consts: dict[str, str], module_attrs: dict[str, str]
 ) -> set[str]:
@@ -1278,10 +1435,17 @@ def _collect_removed_names_in_function(
     delete/empty it, so any addressed store id counts as covered.
     """
     removed: set[str] = set()
+    flow = _DeletionFlow(func)
+    assignments = _assigned_values(func)
 
     for node in ast.walk(func):
-        # base / "name"  (literal or constant)
-        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        # base / "name"  (literal or constant) — только если путь доходит до
+        # удаления (05-01): чтение/проверка существования покрытием не являются.
+        if (
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, ast.Div)
+            and flow.reaches(node)
+        ):
             rhs = _resolve_rhs_name(node.right, consts)
             if rhs is not None:
                 canon = _canonicalize(rhs)
@@ -1297,11 +1461,27 @@ def _collect_removed_names_in_function(
                 if family is not None:
                     removed.add(family)
 
+        # <dir>.iterdir() / <dir>.glob("*"), чьё содержимое удаляется, — зачистка
+        # каталога (05-01: раньше каталог засчитывался одним упоминанием пути).
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and (
+                node.func.attr == "iterdir"
+                or (node.func.attr == "glob" and node.args and _const_str(node.args[0]) == "*")
+            )
+            and flow.reaches(node)
+        ):
+            dir_name = _enumerated_dir_name(node.func.value, consts, assignments)
+            if dir_name is not None:
+                removed.add(dir_name + "/")
+
         # X.glob("pat") -> family / subdir enumerated for deletion
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             if node.func.attr == "glob" and node.args:
                 pattern = _glob_pattern_const(node.args[0], consts)
-                if pattern is None:
+                # 05-02: перечисление засчитывается, только если найденное удаляется.
+                if pattern is None or not flow.reaches(node):
                     continue
                 # Раньше ведущий ``*`` отбрасывался: голый ``*.ext`` означает
                 # «всё содержимое каталога», и засчитывать его как покрытие
@@ -1391,6 +1571,7 @@ def _dir_extension_coverage(
     exact extension is swept, or the dir carries the ``<subdir>/*`` wipe-all mark.
     """
     covered: set[str] = set()
+    flow = _DeletionFlow(func)
 
     def _subpath_of(node: ast.AST) -> str | None:
         """Subpath under data_dir for a dir expression / dir local-var name."""
@@ -1424,7 +1605,8 @@ def _dir_extension_coverage(
         # <dir>.glob("...") — per-extension sweep OR wipe-all ("*").
         if attr == "glob" and node.args:
             pattern = _const_str(node.args[0])
-            if pattern is None:
+            # 05-02: перечисление без удаления найденного — не зачистка.
+            if pattern is None or not flow.reaches(node):
                 continue
             sub = _subpath_of(recv)
             if not sub:
@@ -1437,7 +1619,7 @@ def _dir_extension_coverage(
                     covered.add(f"{sub}/*.{m.group(1)}")
 
         # <dir>.iterdir() — full enumeration ⇒ every entry removed (wipe-all).
-        elif attr == "iterdir":
+        elif attr == "iterdir" and flow.reaches(node):
             sub = _subpath_of(recv)
             if sub:
                 covered.add(f"{sub}/*")
@@ -1454,7 +1636,15 @@ def _dir_extension_coverage(
 
 # --- collaborator resolution: attr -> module_stem --------------------------
 def _build_service_collaborator_map() -> dict[str, str]:
-    """Parse ``service.py`` and return ``{collaborator_attr: module_stem}``.
+    """``{collaborator_attr: module_stem}`` — см. ``_build_service_collaborator_classes``."""
+    return {attr: mod for attr, (mod, _cls) in _build_service_collaborator_classes().items()}
+
+
+def _build_service_collaborator_classes() -> dict[str, tuple[str, str]]:
+    """Parse ``service.py`` and return ``{collaborator_attr: (module_stem, class_name)}``.
+
+    G3-privacy-05 (05-06): класс нужен, чтобы засчитывать purge-методы именно
+    ЭТОГО коллаборатора, а не любого класса из того же модуля.
 
     Two resolution passes, because a collaborator is instantiated under one
     attribute and then *aliased* onto the history-service attribute that
@@ -1480,7 +1670,7 @@ def _build_service_collaborator_map() -> dict[str, str]:
                 for alias in node.names:
                     class_to_module[alias.asname or alias.name] = mod_stem
 
-    attr_to_module: dict[str, str] = {}
+    attr_to_module: dict[str, tuple[str, str]] = {}
     aliases: list[tuple[str, str]] = []  # (dst_attr, src_attr)
 
     for node in ast.walk(tree):
@@ -1494,7 +1684,7 @@ def _build_service_collaborator_map() -> dict[str, str]:
         if isinstance(val, ast.Call):
             cls_name = val.func.id if isinstance(val.func, ast.Name) else None
             if cls_name and cls_name in class_to_module:
-                attr_to_module[tgt.attr] = class_to_module[cls_name]
+                attr_to_module[tgt.attr] = (class_to_module[cls_name], cls_name)
         # Collect alias candidates  self._history._X = self.vocabulary
         src_attr = _name_of(val)
         if src_attr is not None and isinstance(val, ast.Attribute):
@@ -1517,18 +1707,23 @@ def _build_service_collaborator_map() -> dict[str, str]:
 def _collaborator_purge_calls(func: ast.FunctionDef) -> set[str]:
     """Return collaborator attribute names ``_X`` for ``self._X.<purge>(...)``
     calls inside ``func``."""
-    attrs: set[str] = set()
+    return set(_collaborator_purge_methods(func))
+
+
+def _collaborator_purge_methods(func: ast.FunctionDef) -> dict[str, set[str]]:
+    """``{collaborator_attr: {purge-методы, реально вызванные на нём}}``."""
+    calls: dict[str, set[str]] = {}
     for node in ast.walk(func):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
             if node.func.attr in PURGE_METHOD_NAMES:
                 attr = _name_of(node.func.value)
                 if attr is not None:
-                    attrs.add(attr)
-    return attrs
+                    calls.setdefault(attr, set()).add(node.func.attr)
+    return calls
 
 
 def _save_method_targets(
-    tree: ast.Module, module_attrs: dict[str, str]
+    tree: ast.AST, module_attrs: dict[str, str]
 ) -> dict[str, str]:
     """Map ``_save`` / ``_persist`` / ``_write_*`` method names to the store
     filename they (re)write.
@@ -1573,20 +1768,41 @@ def _save_method_targets(
     return targets
 
 
-def _filenames_cleared_by_module(module_stem: str) -> set[str]:
-    """Parse ``backend/<module_stem>.py`` and collect filenames cleared by any
-    purge method (across the module's classes), including the clear-then-save
-    pattern (purge resets in-memory state then calls ``self._save()``)."""
+def _filenames_cleared_by_module(
+    module_stem: str,
+    class_name: str | None = None,
+    methods: set[str] | None = None,
+) -> set[str]:
+    """Parse ``backend/<module_stem>.py`` and collect filenames cleared by purge
+    methods, including the clear-then-save pattern (purge resets in-memory
+    state then calls ``self._save()``).
+
+    G3-privacy-05 (05-06): с ``class_name``/``methods`` засчитываются только
+    методы этого класса и только реально вызванные purge'ем. Раньше покрытие
+    объединяло ВСЕ purge-методы ВСЕХ классов модуля: вызов ``clear()`` у одного
+    класса засчитывал файлы, которые чистит лишь невызванный ``purge_all()``
+    соседнего. Класс не найден в модуле — покрытие не засчитывается.
+    """
     path = BACKEND_DIR / f"{module_stem}.py"
     if not path.exists():
         return set()
     tree = _parse(path)
     consts = collect_string_constants(tree)
     module_attrs = _module_attr_filenames(tree, consts)
-    save_targets = _save_method_targets(tree, module_attrs)
+    scope: ast.AST = tree
+    if class_name is not None:
+        owner = next(
+            (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == class_name),
+            None,
+        )
+        if owner is None:
+            return set()
+        scope = owner
+    save_targets = _save_method_targets(scope, module_attrs)
+    allowed = PURGE_METHOD_NAMES if methods is None else (PURGE_METHOD_NAMES & methods)
     cleared: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name in PURGE_METHOD_NAMES:
+    for node in ast.walk(scope):
+        if isinstance(node, ast.FunctionDef) and node.name in allowed:
             cleared |= _collect_removed_names_in_function(node, consts, module_attrs)
             # Clear-then-save: credit the file written by any save method the
             # purge method invokes (e.g. delete_all_chains -> _save -> chains).
@@ -1771,6 +1987,18 @@ def extract_purge_coverage() -> set[str]:
     # поэтому функции нужна ссылка на модуль (см. `_reachable_helpers`).
     if purge_fn is not None:
         purge_fn._krab_module = hs_tree  # type: ignore[attr-defined]
+        # 05-05: ``self.<метод>()`` разрешается только в классе-владельце purge.
+        purge_fn._krab_owner = next(  # type: ignore[attr-defined]
+            (
+                cls for cls in ast.walk(hs_tree)
+                if isinstance(cls, ast.ClassDef)
+                and any(
+                    isinstance(n, ast.FunctionDef) and n.name == "handle_purge_all_data"
+                    for n in cls.body
+                )
+            ),
+            None,
+        )
     if purge_fn is None:
         raise SystemExit(
             "audit_purge_coverage: handle_purge_all_data not found in "
@@ -1788,14 +2016,15 @@ def extract_purge_coverage() -> set[str]:
     covered |= _dir_extension_coverage(purge_fn, hs_resolver, hs_consts)
 
     # (b) collaborator purge calls -> parse each collaborator's purge methods.
-    attr_to_module = _build_service_collaborator_map()
-    for attr in _collaborator_purge_calls(purge_fn):
-        module_stem = attr_to_module.get(attr)
-        if module_stem is None:
+    attr_to_class = _build_service_collaborator_classes()
+    for attr, methods in _collaborator_purge_methods(purge_fn).items():
+        resolved = attr_to_class.get(attr)
+        if resolved is None:
             # Unmapped collaborator -> cannot credit its coverage (safe: leaves
             # the store visible as a gap rather than silently passing).
             continue
-        covered |= _filenames_cleared_by_module(module_stem)
+        module_stem, class_name = resolved
+        covered |= _filenames_cleared_by_module(module_stem, class_name, methods)
 
     # (c) state_store compaction (history.ndjson + sidecar journals).
     #
@@ -2074,10 +2303,19 @@ def format_json(result: AuditResult) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    # G3-privacy-05 (05-10): пробел покрытия — это хранилище, переживающее
+    # privacy-purge. Раньше без флага скрипт выходил с 0 при любых пробелах, и
+    # ручной/новый вызов без --fail-on-found молча «проходил». Теперь отказ —
+    # поведение по умолчанию; отчёт без отказа — только явным --report-only.
     parser.add_argument(
         "--fail-on-found",
         action="store_true",
-        help="exit non-zero if any non-allowlisted gap exists",
+        help="exit non-zero if any non-allowlisted gap exists (default; kept for compatibility)",
+    )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        help="print the report but exit 0 even when gaps exist",
     )
     parser.add_argument(
         "--json",
@@ -2093,7 +2331,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         print(format_report(result))
 
-    if args.fail_on_found and result.gaps:
+    if args.fail_on_found and args.report_only:
+        parser.error("--fail-on-found и --report-only взаимоисключающие")
+    if result.gaps and not args.report_only:
         return 1
     return 0
 

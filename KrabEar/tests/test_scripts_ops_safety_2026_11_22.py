@@ -1045,6 +1045,14 @@ class TestE2ePrivacyGates:
         res, _ = _run_gates("{SOCK}", leak_when_private=True)
         assert res.returncode != 0
 
+    def test_leak_report_names_fields_not_content(self):
+        # G3-privacy-05 (05-08): раньше печатались 200 символов сырого ответа IPC —
+        # вместе с ним в лог уходило всё, что backend вернул рядом с канарейкой.
+        res, _ = _run_gates("{SOCK}", leak_when_private=True)
+        out = res.stdout + res.stderr
+        assert "Обычный текст номер" not in out, "сырой текст записи истории попал в вывод"
+        assert "result.items[0]" in out, "место утечки должно называться путём поля"
+
     def test_invisible_canary_fails(self):
         res, _ = _run_gates("{SOCK}", canary_visible=False)
         assert res.returncode != 0

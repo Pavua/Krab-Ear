@@ -86,6 +86,33 @@ def response_contains_secret(resp):
     return SECRET in json.dumps(resp, ensure_ascii=False)
 
 
+def secret_paths(value, path="", limit=5):
+    """Пути полей ответа, где встретилась канарейка (``result.items[0]``).
+
+    G3-privacy-05 (05-08): при утечке печатаем ГДЕ, а не ЧТО. Раньше в вывод
+    шли 200 символов сырого ответа IPC — вместе с канарейкой туда попадало всё,
+    что backend вернул рядом (тексты истории, имена, ключи словаря).
+    """
+    found = []
+
+    def walk(node, where):
+        if len(found) >= limit:
+            return
+        if isinstance(node, dict):
+            for key, child in node.items():
+                if SECRET in str(key):
+                    found.append(f"{where}.<key>" if where else "<key>")
+                walk(child, f"{where}.{key}" if where else str(key))
+        elif isinstance(node, (list, tuple)):
+            for idx, child in enumerate(node):
+                walk(child, f"{where}[{idx}]")
+        elif isinstance(node, str) and SECRET in node:
+            found.append(where or "<root>")
+
+    walk(value, path)
+    return found
+
+
 def refuse(message):
     print(f"REFUSED: {message}", file=sys.stderr)
     sys.exit(2)
@@ -141,7 +168,7 @@ def run(seed_ids):
             continue
         leaked = response_contains_secret(resp)
         check(not leaked, f"{method}: secret NOT leaked under privacy"
-              + (f"  <<< LEAK: {json.dumps(resp, ensure_ascii=False)[:200]}" if leaked else ""))
+              + (f"  <<< LEAK in: {', '.join(secret_paths(resp)) or '<serialized>'}" if leaked else ""))
 
     # Canary validity: with privacy OFF, the secret MUST resurface somewhere
     # (proves the test isn't trivially clean because the secret never made it in).
