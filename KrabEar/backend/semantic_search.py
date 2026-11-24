@@ -84,6 +84,9 @@ class SemanticSearcher:
         # G3-MEM-05 (M05-04): единый файл-снимок — две части (npy + json) заменяется
         # одним NPZ (с версией и согласованностью строк).
         self._snapshot_path = self._data_dir / "embeddings_snapshot.npz"
+        # M04-05: durable флаг «индекс не соответствует истории» (после restore
+        # истории). Снимается только полной перестройкой (index_all force=True).
+        self._reindex_flag_path = self._data_dir / "embeddings_reindex_required.flag"
 
     # ------------------------------------------------------------------
     # Public API
@@ -114,8 +117,33 @@ class SemanticSearcher:
             # Остались файлы старого формата (embeddings.npy/json): они не читаются (префикс
             # query:→passage: делает векторы несовместимыми, M05-12), индекс содержит лишь новые
             # записи до полной перестройки (semantic_search_reindex force=True).
-            "needs_reindex": self._legacy_files_present(),
+            "needs_reindex": self._legacy_files_present() or self._reindex_flag_present(),
         }
+
+    def _reindex_flag_present(self) -> bool:
+        try:
+            return self._reindex_flag_path.exists()
+        except OSError:
+            return True
+
+    def mark_reindex_required(self) -> bool:
+        """M04-05: пометить индекс как требующий полной перестройки (durable).
+
+        Вызывается после restore истории: эмбеддинги прежней истории уже
+        удалены purge_all(), а флаг переживает рестарт, пока пользователь не
+        перестроит индекс. True — флаг на диске.
+        """
+        try:
+            self._data_dir.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(self._reindex_flag_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            return True
+        except OSError as exc:
+            logger.warning("semantic_search: флаг перестройки не записан: %s", exc)
+            return False
 
     def _legacy_files_present(self) -> bool:
         try:
@@ -390,6 +418,11 @@ class SemanticSearcher:
                 self._snapshot_path.unlink()
         except Exception as exc:
             logger.warning("semantic_search: не удалось удалить embeddings_snapshot.npz: %s", exc)
+        try:
+            if self._reindex_flag_path.exists():  # M04-05: история пуста — перестраивать нечего
+                self._reindex_flag_path.unlink()
+        except Exception as exc:
+            logger.warning("semantic_search: не удалось удалить флаг перестройки: %s", exc)
         logger.info("semantic_search: индекс и файлы embeddings очищены (purge_all)")
 
     def remove_item(self, item_id: str) -> bool:
@@ -663,7 +696,7 @@ class SemanticSearcher:
             # единичная индексация — флаг needs_reindex пропадал, хотя индекс содержал лишь новые
             # записи (ревью #2229, F7). Purge чистит эти файлы так же, как и снимок.
             if drop_legacy:
-                for p in (self._embeddings_path, self._index_path):
+                for p in (self._embeddings_path, self._index_path, self._reindex_flag_path):
                     try:
                         p.unlink(missing_ok=True)
                     except OSError:

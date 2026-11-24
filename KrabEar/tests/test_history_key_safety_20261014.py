@@ -324,10 +324,13 @@ def test_legacy_restore_refuses_before_copy_on_provider_failure(profile):
     backup = legacy_backup(store)
     provider.read_failure = True
     before = snapshot(store)
-    with patch("shutil.copy2", wraps=__import__("shutil").copy2) as copy:
+    # M04-05: живые файлы меняет только legacy_restore._replace_live (commit-протокол);
+    # отказ обязан случиться ДО первой замены.
+    import backend.legacy_restore as legacy_restore
+    with patch.object(legacy_restore, "_replace_live", wraps=legacy_restore._replace_live) as replace:
         with pytest.raises(HistoryEncryptionUnavailable):
             HistoryService(store).handle_restore_history({"backup_path": str(backup), "restore_settings": True})
-        copy.assert_not_called()
+        replace.assert_not_called()
     assert snapshot(store) == before
 
 
@@ -335,15 +338,19 @@ def test_legacy_restore_uses_one_prepared_commit_before_copy(profile):
     store, provider = profile
     provider.key = b"K" * 32
     backup = legacy_backup(store)
-    import shutil
-    original = shutil.copy2
+    import backend.legacy_restore as legacy_restore
+    original = legacy_restore._replace_live
+    replaced = []
 
     def copy_once(*args, **kwargs):
         provider.after_copy = True
+        replaced.append(args[1])
         return original(*args, **kwargs)
 
-    with patch.object(shutil, "copy2", copy_once):
+    # M04-05: первая мутация живого файла — _replace_live (а не shutil.copy2).
+    with patch.object(legacy_restore, "_replace_live", copy_once):
         result = HistoryService(store).handle_restore_history({"backup_path": str(backup), "restore_settings": True})
+    assert replaced, "хук первой мутации не сработал — тест был бы вхолостую"
     assert result["restored_entries"] == 1
     assert provider.calls == ["find-generic-password"]
     assert store.load_settings()["history_encryption_enabled"] is True

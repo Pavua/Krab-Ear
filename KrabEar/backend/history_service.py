@@ -18,6 +18,7 @@ import re
 import stat
 import sys
 import tempfile
+import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import logging
@@ -5626,7 +5627,18 @@ class HistoryService:
         ``get_auto_backup_status().restore_recovery`` (отдельного диагностического
         IPC-метода нет — это долг, ``service.py`` в бане волны).
         """
-        return recover_pending_restore_from_store(self.store)
+        verdict = recover_pending_restore_from_store(self.store)
+        if isinstance(verdict, dict) and verdict.get("rolled_forward"):
+            # M04-05: докатка заменила живые журналы мимо RAM этого процесса —
+            # кэши активных id/поиска и эмбеддинги прежней истории недействительны.
+            try:
+                with self.store._lock():
+                    self.store._active_ids = None
+                    self.store.reset_search_caches()
+            except Exception:  # noqa: BLE001 — вердикт важнее; кэш перечитается при старте
+                logger.warning("recover: не удалось сбросить кэши после докатки", exc_info=True)
+            verdict = {**verdict, "semantic_reindex_required": self._reset_semantic_index_after_restore()}
+        return verdict
 
     def _history_crypto_for_snapshot(self):
         """Ключ истории для snapshot'а или ``None`` (без Keychain-логики здесь).
@@ -5832,8 +5844,6 @@ class HistoryService:
             restored_entries (int): количество записей после восстановления
             backup_date (str): timestamp резервной копии
         """
-        import shutil
-
         # A5.2b2 (M2): точка обслуживания №2. Докачка ДО любой работы с журналами:
         # восстановление не имеет права применяться поверх рваного набора.
         self._recover_pending_restore()
@@ -5959,30 +5969,95 @@ class HistoryService:
                         validated_repair=settings_repair,
                         history_paths=prospective_paths,
                     )
-            if history_backup.exists():
-                shutil.copy2(history_backup, self.store.history_path)
+            # M04-05: «всё или ничего». Чтение/проверка бэкапа и живого ledger —
+            # ДО первой записи (битый/ENC1 бэкап → отказ, живые файлы целы);
+            # отсутствующий в бэкапе журнал = пустой (бэкап кладёт файл, только
+            # если он был); tombstones объединяются с живыми; история/статусы
+            # фильтруются по ledger. Дальше — commit-протокол A5.2b2 (staging +
+            # durable маркер + замены + read-back), settings — в той же
+            # транзакции последним файлом.
+            from backend.legacy_restore import (
+                SETTINGS_NAME,
+                apply_legacy_restore_locked,
+                prepare_legacy_restore_set,
+                write_prerestore_backup,
+            )
 
-            for aux_name in ("history_tombstones.ndjson", "history_status.ndjson"):
-                src = backup_dir / aux_name
-                if src.exists():
-                    dst = self.store.data_dir / aux_name
-                    shutil.copy2(src, dst)
+            pre_restore = None
+            try:
+                files, stats = prepare_legacy_restore_set(
+                    backup_dir=backup_dir, data_dir=Path(self.store.data_dir),
+                )
+                if settings_to_restore is not None:
+                    files[SETTINGS_NAME] = settings_to_restore[1].encode("utf-8")
+                transaction_id = f"legacy-restore-{uuid.uuid4().hex}"
+                pre_restore = write_prerestore_backup(
+                    data_dir=Path(self.store.data_dir), transaction_id=transaction_id,
+                )
+                txn = apply_legacy_restore_locked(
+                    data_dir=Path(self.store.data_dir),
+                    files=files,
+                    backup_dir=backup_dir,
+                    pre_restore_backup=str(pre_restore),
+                    transaction_id=transaction_id,
+                )
+            except SnapshotOperationRefused as exc:
+                if exc.pending:
+                    # После COMMITTING живые журналы могли частично смениться:
+                    # кэши недействительны, докатка — на следующей точке
+                    # обслуживания (_recover_pending_restore).
+                    self.store._active_ids = None
+                    self.store.reset_search_caches()
+                logger.error(
+                    "handle_restore_history: legacy restore отклонён: %s (pending=%s)",
+                    exc.reason, exc.pending,
+                )
+                return {
+                    **refusal,
+                    "reason": exc.reason,
+                    "pending": bool(exc.pending),
+                    "pre_restore_backup": str(pre_restore) if pre_restore else None,
+                }
 
             if settings_to_restore is not None:
-                # Уже держим store EX-lock, нового flock FD здесь нет.
-                self.store._commit_prepared_settings_unlocked(*settings_to_restore)
+                # Байты settings уже заменены транзакцией; RAM-часть commit —
+                # тем же кодом, что у обычного commit (ключ/fresh-флаги).
+                self.store._publish_committed_settings_unlocked(settings_to_restore[2])
 
             # G3-MEM-04 (M04-06): legacy restore пересоздал журналы — сброс
             # инвалидируемых RAM-кэшей ПОД store-lock сразу после commit.
             self.store._active_ids = None
             self.store.reset_search_caches()
 
+        semantic_reindex_required = self._reset_semantic_index_after_restore()
         restored_entries = self.store.count_active_items()
         logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)
         return {
+            "ok": True,
             "restored_entries": restored_entries,
             "backup_date": backup_date,
+            "transaction_id": txn["transaction_id"],
+            "pre_restore_backup": str(pre_restore),
+            "filtered_out_lines": stats["filtered_out_lines"],
+            "semantic_reindex_required": semantic_reindex_required,
         }
+
+    def _reset_semantic_index_after_restore(self) -> bool:
+        """M04-05: эмбеддинги прежней истории не должны жить после restore.
+
+        purge + durable флаг «нужна перестройка» (status().needs_reindex).
+        Ошибка не откатывает restore (журналы уже COMMITTED): возвращаем False,
+        и ответ честно говорит, что флаг не поставлен.
+        """
+        searcher = self._semantic_searcher
+        if searcher is None:
+            return False
+        try:
+            searcher.purge_all()
+            return bool(searcher.mark_reindex_required())
+        except Exception:  # noqa: BLE001
+            logger.warning("restore: не удалось сбросить семантический индекс", exc_info=True)
+            return False
 
     def handle_list_backups(self, params: dict[str, Any]) -> dict[str, Any]:
         """Возвращает список доступных резервных копий с метаданными.

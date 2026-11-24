@@ -2735,6 +2735,46 @@ def _recover_pending_restore(
             **common,
         )
 
+    # --- M04-05: COMMITTING legacy-транзакции (Encryption OFF) — докатка из staging. ---
+    # Источник истины — байты staging, сверенные с маркером: ключ не нужен. Если
+    # settings в транзакцию не входили, plaintext-журналы допустимы только при
+    # ДОКАЗАННОЙ policy OFF (иначе докатка понизила бы политику ON).
+    if marker.get("kind") == "legacy_plaintext":
+        try:
+            from backend.legacy_restore import SETTINGS_NAME, roll_forward_legacy_locked
+
+            files = marker.get("files") if isinstance(marker.get("files"), list) else []
+            carries_settings = any(isinstance(f, dict) and f.get("name") == SETTINGS_NAME for f in files)
+            with history_flock(data_dir):
+                if not carries_settings:
+                    try:
+                        policy_on = policy_read()
+                    except Exception:  # noqa: BLE001
+                        policy_on = None
+                    if policy_on is not False:
+                        raise SnapshotOperationRefused(
+                            REASON_POLICY_MISMATCH,
+                            "legacy-докатка plaintext при policy не-OFF запрещена",
+                        )
+                result = roll_forward_legacy_locked(data_dir=data_dir, staging=staging, marker=marker)
+        except SnapshotOperationRefused as exc:
+            return _blocked(exc.reason, **common)
+        except Exception:  # noqa: BLE001 — recovery не имеет права бросить
+            logger.exception("encrypted_snapshot: legacy recovery неожиданно упал")
+            return _blocked(REASON_RECOVERY_PENDING, **common)
+        return _recovery_result(
+            ok=True,
+            pending=False,
+            reason=None,
+            state=result["state"],
+            transaction_id=result["transaction_id"],
+            snapshot_dir=common["snapshot_dir"],
+            pre_restore_snapshot=common["pre_restore_snapshot"],
+            rolled_forward=True,
+            extra_markers=extra,
+            snapshot_pending=b1_pending,
+        )
+
     # --- Маркер COMMITTING: докатка целевого снимка. ---
     try:
         # Fail-closed: без доказанной ON-политики расшифровка была бы понижением
