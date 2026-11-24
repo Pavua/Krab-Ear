@@ -243,6 +243,106 @@ class SttKeywordModelTests(unittest.TestCase):
         self.assertFalse(model.is_alive())
 
 
+class ReviewFixesTests(unittest.TestCase):
+    """Правки по гейту Opus (#2257): призрачное срабатывание после reset, глухота под внезапным шумом."""
+
+    def test_reset_during_inflight_transcription_discards_its_result(self) -> None:
+        gate = threading.Event()
+        started = threading.Event()
+
+        def slow(_samples):
+            started.set()
+            gate.wait(5.0)
+            return "краб"
+
+        model = sk.SttKeywordModel(slow, name="krab_stt", cooldown_sec=0.0)
+        burst = _silence(10) + _tone(6) + _silence(8)
+        for i in range(0, len(burst) - FRAME + 1, FRAME):
+            model.predict(burst[i:i + FRAME])
+        self.assertTrue(started.wait(2.0))
+        model.reset()           # пауза/запись: результат ещё летящего распознавания устарел
+        gate.set()
+        model.drain(timeout=2.0)
+        self.assertLess(model.predict(_silence(1)[:FRAME])["krab_stt"], 0.5)
+        self.assertEqual(model.stats()["matched"], 0)
+        model.close()
+
+    def test_result_after_reset_for_a_new_utterance_still_fires(self) -> None:
+        model = sk.SttKeywordModel(lambda _s: "краб", name="krab_stt", cooldown_sec=0.0)
+        model.reset()
+        burst = _silence(10) + _tone(6) + _silence(8)
+        fired = []
+        for i in range(0, len(burst) - FRAME + 1, FRAME):
+            fired.append(model.predict(burst[i:i + FRAME])["krab_stt"])
+            model.drain(timeout=2.0)
+        self.assertEqual(sum(1 for v in fired if v >= 0.5), 1)
+        model.close()
+
+    @staticmethod
+    def _noise(frames: int, rms: float, seed: int = 1) -> list[int]:
+        state = seed
+        amp = rms * math.sqrt(3)
+        out = []
+        for _ in range(FRAME * frames):
+            state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+            out.append(int((state / 0x7FFFFFFF * 2 - 1) * amp))
+        return out
+
+    def test_segmenter_recovers_after_sudden_steady_noise(self) -> None:
+        seg = sk.UtteranceSegmenter()
+        word = [a + b for a, b in zip(_tone(6, amp=2500), self._noise(6, 150.0, seed=7))]
+        fan = lambda n, seed: self._noise(n, 150.0, seed=seed)  # noqa: E731
+        samples = self._noise(60, 20.0) + fan(300, 3)
+        for k in range(5):  # пять слов с паузами «только вентилятор» (не цифровая тишина)
+            samples += word + fan(12, 10 + k)
+        emitted = _feed(seg, samples)
+        self.assertGreaterEqual(len(emitted), 1)
+
+    def test_same_words_in_quiet_room_still_work(self) -> None:
+        seg = sk.UtteranceSegmenter()
+        samples = self._noise(60, 20.0)
+        for k in range(5):
+            samples += _tone(6, amp=2500) + self._noise(12, 20.0, seed=20 + k)
+        self.assertEqual(len(_feed(seg, samples)), 5)
+
+    def test_floor_does_not_creep_up_on_a_genuinely_long_speech(self) -> None:
+        # длинная речь не должна «поднять пол» до уровня речи и оглушить сегментатор
+        seg = sk.UtteranceSegmenter()
+        _feed(seg, self._noise(60, 20.0) + _tone(80, amp=2500) + self._noise(30, 20.0, seed=5))
+        self.assertGreaterEqual(len(_feed(seg, _silence(10) + _tone(6, amp=2500) + _silence(8))), 1)
+
+    def test_floor_recovers_quickly_after_loud_period(self) -> None:
+        # после долгого шума/речи глухота не должна длиться секундами: пол падает быстрее, чем растёт
+        seg = sk.UtteranceSegmenter()
+        _feed(seg, self._noise(60, 20.0) + _tone(80, amp=2500))
+        got = _feed(seg, self._noise(14, 20.0, seed=9) + _tone(6, amp=2500) + self._noise(8, 20.0, seed=10))
+        self.assertGreaterEqual(len(got), 1)
+
+    def test_drain_timeout_uses_real_time_not_injected_clock(self) -> None:
+        gate = threading.Event()
+        model = sk.SttKeywordModel(lambda _s: gate.wait(5.0) or "краб", name="krab_stt", clock=lambda: 0.0)
+        burst = _silence(10) + _tone(6) + _silence(8)
+        for i in range(0, len(burst) - FRAME + 1, FRAME):
+            model.predict(burst[i:i + FRAME])
+        start = time.monotonic()
+        self.assertFalse(model.drain(timeout=0.3))
+        self.assertLess(time.monotonic() - start, 2.0)
+        gate.set()
+        model.close()
+
+    def test_fragment_hits_are_counted_separately_without_text(self) -> None:
+        for text, key in (("Краб", "matched_word"), ("Раб", "matched_fragment")):
+            model = sk.SttKeywordModel(lambda _s, t=text: t, name="krab_stt", cooldown_sec=0.0)
+            burst = _silence(10) + _tone(6) + _silence(12)
+            for i in range(0, len(burst) - FRAME + 1, FRAME):
+                model.predict(burst[i:i + FRAME])
+                model.drain(timeout=2.0)
+            stats = model.stats()
+            self.assertEqual(stats[key], 1, (text, stats))
+            self.assertEqual(stats["matched"], 1)
+            model.close()
+
+
 class PrivacyContractTests(unittest.TestCase):
     """Аудио и тексты реплик живут только в памяти: модуль не пишет на диск и не логирует транскрипт."""
 

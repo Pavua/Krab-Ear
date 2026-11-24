@@ -47,6 +47,12 @@ MAX_SPEECH_FRAMES = 30   # длиннее — разговор, а не обра
 ABS_RMS_THRESHOLD = 60.0    # int16; ниже — тишина при любом шумовом поле (40 уже разваливает VAD на шуме микрофона)
 NOISE_FLOOR_FACTOR = 3.0    # речь = rms выше 3× шумового пола
 NOISE_FLOOR_ALPHA = 0.05
+# Внезапный устойчивый шум (вентилятор, кондиционер, посудомойка): сегмент становится «длинным» и не кончается,
+# а пол в простое не обновляется → сегментатор глух. В таком сегменте пол подтягивается к НИЖНЕМУ уровню окна
+# (минимум rms за последние кадры), а не к среднему: речь поверх шума пол не поднимает.
+FLOOR_WINDOW_FRAMES = 12
+FLOOR_FALL_ALPHA = 0.3
+FLOOR_RISE_ALPHA = 0.25
 
 DEFAULT_NAME = "krab_stt"
 DEFAULT_COOLDOWN_SEC = 3.0
@@ -90,13 +96,21 @@ class KeywordMatcher:
         cleaned = _NON_WORD.sub(" ", text.lower().replace("ё", "е"))
         return cleaned.split()
 
-    def matches(self, text: Optional[str]) -> bool:
+    def kind(self, text: Optional[str]) -> Optional[str]:
+        """``"word"`` — слово «краб*», ``"fragment"`` — только обрубок/искажение, ``None`` — не совпало."""
         if not isinstance(text, str) or not text.strip():
-            return False
+            return None
         words = self.normalize(text)
         if not words or len(words) > self._max_words:
-            return False
-        return any(w.startswith(self._prefix) or w in self._fragments for w in words)
+            return None
+        if any(w.startswith(self._prefix) for w in words):
+            return "word"
+        if any(w in self._fragments for w in words):
+            return "fragment"
+        return None
+
+    def matches(self, text: Optional[str]) -> bool:
+        return self.kind(text) is not None
 
 
 class UtteranceSegmenter:
@@ -110,6 +124,7 @@ class UtteranceSegmenter:
         self._silent_run = 0
         self._pre: Deque[list[int]] = deque(maxlen=PRE_ROLL_FRAMES)
         self._active: Optional[dict[str, Any]] = None
+        self._recent: Deque[float] = deque(maxlen=FLOOR_WINDOW_FRAMES)
 
     def _threshold(self) -> float:
         return max(ABS_RMS_THRESHOLD, NOISE_FLOOR_FACTOR * self._floor)
@@ -134,10 +149,22 @@ class UtteranceSegmenter:
                 self._silent_run = 0
                 self._pre.clear()
             else:
-                self._floor = (1 - NOISE_FLOOR_ALPHA) * self._floor + NOISE_FLOOR_ALPHA * rms
+                alpha = FLOOR_FALL_ALPHA if rms < self._floor else NOISE_FLOOR_ALPHA  # вниз быстро, вверх медленно
+                self._floor = (1 - alpha) * self._floor + alpha * rms
                 self._silent_run = min(self._silent_run + 1, 10_000)
                 self._pre.append(samples)
             return None
+
+        if not active["valid"] and active["span"] > MAX_SPEECH_FRAMES:
+            # сегмент давно не реплика: подтягиваем пол к нижнему уровню окна, чтобы выйти из него, когда шум стих
+            # до «ровного» (или поднять порог над устойчивым шумом); только вверх — понижает пол простой.
+            self._recent.append(rms)
+            if len(self._recent) >= FLOOR_WINDOW_FRAMES:
+                low = min(self._recent)
+                if low > self._floor:
+                    self._floor += FLOOR_RISE_ALPHA * (low - self._floor)
+        else:
+            self._recent.clear()
 
         if is_speech:
             gap = active["gap"]
@@ -195,10 +222,11 @@ class SttKeywordModel:
         self._lock = threading.Lock()
         self._pending = 0
         self._fired = False
+        self._gen = 0  # reset() увеличивает: результат распознавания, запущенного до reset, устарел
         self._cooldown_until = 0.0
         self._starts: Deque[float] = deque()
-        self._stats = {"utterances": 0, "transcribed": 0, "matched": 0, "errors": 0,
-                       "dropped_busy": 0, "dropped_rate": 0, "suppressed_cooldown": 0}
+        self._stats = {"utterances": 0, "transcribed": 0, "matched": 0, "matched_word": 0, "matched_fragment": 0, "errors": 0,
+                       "dropped_busy": 0, "dropped_rate": 0, "suppressed_cooldown": 0, "stale_discarded": 0}
         self._cond = threading.Condition(self._lock)
         self._queue: Deque[Any] = deque()
         self._closed = False
@@ -218,6 +246,7 @@ class SttKeywordModel:
         self._segmenter.reset()
         with self._lock:
             self._fired = False
+            self._gen += 1
 
     # ------------------------------------------------------------------ служебное
     def stats(self) -> dict[str, int]:
@@ -229,10 +258,10 @@ class SttKeywordModel:
 
     def drain(self, timeout: float = 5.0) -> bool:
         """Ждёт, пока воркер закончит текущее распознавание (для тестов и остановки)."""
-        deadline = self._clock() + timeout
+        deadline = time.monotonic() + timeout  # реальное время: инжектируемые часы в тестах могут стоять
         with self._cond:
             while self._pending > 0:
-                remaining = deadline - self._clock()
+                remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return False
                 self._cond.wait(min(remaining, 0.05))
@@ -264,7 +293,7 @@ class SttKeywordModel:
                 return
             self._starts.append(now)
             self._pending += 1
-            self._queue.append(utterance)
+            self._queue.append((self._gen, utterance))
             self._cond.notify_all()
 
     def _run(self) -> None:
@@ -274,12 +303,12 @@ class SttKeywordModel:
                     self._cond.wait(0.2)
                 if self._closed:
                     return
-                utterance = self._queue.popleft()
-            matched = False
+                gen, utterance = self._queue.popleft()
+            kind = None
             try:
                 samples = self._as_audio(utterance)
                 text = self._transcribe(samples)
-                matched = self._matcher.matches(text)
+                kind = self._matcher.kind(text)
                 with self._lock:
                     self._stats["transcribed"] += 1
             except Exception as exc:  # noqa: BLE001 — сбой распознавания = «не совпало», воркер живёт
@@ -288,12 +317,15 @@ class SttKeywordModel:
                 logger.warning("SttKeywordSpotter: распознавание реплики не удалось (%s)", type(exc).__name__)
             finally:
                 with self._cond:
-                    if matched:
+                    if kind is not None and gen != self._gen:
+                        self._stats["stale_discarded"] += 1  # reset() случился, пока шло распознавание
+                    elif kind is not None:
                         now = self._clock()
                         if now < self._cooldown_until:
                             self._stats["suppressed_cooldown"] += 1
                         else:
                             self._stats["matched"] += 1
+                            self._stats["matched_word" if kind == "word" else "matched_fragment"] += 1
                             self._fired = True
                             self._cooldown_until = now + self._cooldown
                     self._pending -= 1
