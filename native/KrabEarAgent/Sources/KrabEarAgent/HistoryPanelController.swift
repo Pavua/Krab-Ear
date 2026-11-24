@@ -1701,7 +1701,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         dictationHero.onRecordPress = { [weak self] in self?.onToggleRecordFromPanel() }
         dictationHero.onOpenDiagnostics = { [weak self] in self?.selectPanelTab(.diagnostics) }
         recentDictations.onOpenHistory = { [weak self] in self?.onOpenHistoryTabFromDictation() }
-        recentDictations.onRetry = { [weak self] in self?.loadInitial() }
+        recentDictations.onRetry = { [weak self] in
+            // «Повторить» видимо что-то делает: сначала загрузка, повторный сбой снова даст ошибку.
+            self?.recentDictations.apply(.loading)
+            self?.loadInitial()
+        }
         recentDictations.onCopy = { text in
             // Как onCopy в истории: отменяем отложенную автовставку до записи в буфер.
             InputAutomationQueue.shared.invalidatePending()

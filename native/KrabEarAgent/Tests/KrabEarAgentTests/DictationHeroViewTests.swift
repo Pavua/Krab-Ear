@@ -57,11 +57,24 @@ final class DictationHeroViewTests: XCTestCase {
         XCTAssertEqual(button.accessibilityRole(), .button)
     }
 
+    /// Гейт Opus #2250: 17 pt — не «крупный» текст WCAG, нужен ≥ 4.5:1 во всех фазах и темах.
+    /// Системные синий/красный давали белому 3.4–4.0 — заливка обязана затемняться.
+    func test_recordButton_textContrastAtLeast4_5_allPhasesBothThemes() {
+        for ap in [NSAppearance(named: .aqua)!, NSAppearance(named: .darkAqua)!] {
+            for phase in [DictationPhase.idle, .recording(durationSec: 3), .finalizing] {
+                guard let fill = RecordButtonView.resolvedFill(for: phase, appearance: ap) else { return XCTFail("нет заливки") }
+                XCTAssertEqual(RecordButtonView.bestTextColor(on: fill), .white, "белый текст сохраняется (\(phase))")
+                let r = RecordButtonView.whiteContrast(on: fill)
+                XCTAssertGreaterThanOrEqual(r, 4.5, "контраст текста кнопки \(phase) в \(ap.name.rawValue): \(r)")
+            }
+        }
+        // Регресс-якорь: исходный системный красный сам по себе НЕ проходит.
+        XCTAssertLessThan(RecordButtonView.whiteContrast(on: NSColor(srgbRed: 1, green: 0.271, blue: 0.227, alpha: 1)), 4.5)
+    }
+
     func test_bestTextColor_picksContrastingColor() {
         XCTAssertEqual(RecordButtonView.bestTextColor(on: .black), .white)
         XCTAssertEqual(RecordButtonView.bestTextColor(on: .white), .black)
-        // Красный (запись): белый проходит порог крупного текста 3:1 — оставляем привычный белый.
-        XCTAssertEqual(RecordButtonView.bestTextColor(on: NSColor(srgbRed: 1, green: 0.23, blue: 0.19, alpha: 1)), .white)
         // Жёлтый акцент: белый текст был бы нечитаем.
         XCTAssertEqual(RecordButtonView.bestTextColor(on: NSColor(srgbRed: 1, green: 0.8, blue: 0, alpha: 1)), .black)
     }

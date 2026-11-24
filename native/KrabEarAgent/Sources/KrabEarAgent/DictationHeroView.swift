@@ -134,7 +134,10 @@ final class RecordButtonView: NSView {
             case .recording: fill = .systemRed
             case .offline: fill = nil
             }
-            if let fill {
+            if let base = fill {
+                // Заливка затемняется, пока белый текст не даст ≥ 4.5:1 (гейт Opus #2250:
+                // 17 pt — не «крупный» по WCAG, а системные синий/красный дают 3.4–4.0).
+                let fill = Self.fillForReadableWhiteText(base)
                 layer?.backgroundColor = fill.cgColor
                 layer?.borderWidth = 0
                 let text = Self.bestTextColor(on: fill)
@@ -150,17 +153,58 @@ final class RecordButtonView: NSView {
         }
     }
 
-    /// Цвет текста на заливке. Текст кнопки крупный (17 pt semibold), для него порог WCAG 3:1:
-    /// белый, если он его проходит (привычно на красном и синем), иначе — что контрастнее
-    /// (чёрный на жёлтом/светлом акценте).
-    static func bestTextColor(on fill: NSColor) -> NSColor {
-        guard let c = fill.usingColorSpace(.sRGB) else { return .white }
+    /// Требуемый контраст текста кнопки: 4.5:1 (17 pt не дотягивает до «крупного» WCAG).
+    static let minimumTextContrast: CGFloat = 4.5
+
+    /// Относительная яркость WCAG.
+    static func luminance(_ color: NSColor) -> CGFloat? {
+        guard let c = color.usingColorSpace(.sRGB) else { return nil }
         func lin(_ v: CGFloat) -> CGFloat { v <= 0.03928 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4) }
-        let l = 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
-        let whiteContrast = 1.05 / (l + 0.05)
-        let blackContrast = (l + 0.05) / 0.05
-        if whiteContrast >= 3.0 { return .white }
-        return whiteContrast >= blackContrast ? .white : .black
+        return 0.2126 * lin(c.redComponent) + 0.7152 * lin(c.greenComponent) + 0.0722 * lin(c.blueComponent)
+    }
+
+    /// Контраст белого текста к заливке.
+    static func whiteContrast(on fill: NSColor) -> CGFloat {
+        guard let l = luminance(fill) else { return 1 }
+        return 1.05 / (l + 0.05)
+    }
+
+    /// Затемняет заливку шагами по 5 % (смешение с чёрным), пока белый текст не даст ≥ 4.5:1.
+    /// Красная кнопка с белым текстом — привычный сигнал записи, поэтому темним, а не
+    /// меняем текст на чёрный. Светлые акценты (жёлтый) уходят в чёрный текст в bestTextColor.
+    static func fillForReadableWhiteText(_ fill: NSColor) -> NSColor {
+        guard let base = fill.usingColorSpace(.sRGB) else { return fill }
+        var fraction: CGFloat = 0
+        var result = base
+        while whiteContrast(on: result) < minimumTextContrast, fraction < 0.6 {
+            fraction += 0.05
+            result = base.blended(withFraction: fraction, of: .black) ?? base
+        }
+        // Светлый акцент, которому не помогло затемнение до 60 % (жёлтый): оставляем как есть,
+        // текст станет чёрным в bestTextColor.
+        return whiteContrast(on: result) >= minimumTextContrast ? result : base
+    }
+
+    /// Цвет текста на (уже подобранной) заливке: белый при ≥ 4.5:1, иначе — что контрастнее.
+    static func bestTextColor(on fill: NSColor) -> NSColor {
+        guard let l = luminance(fill) else { return .white }
+        let white = 1.05 / (l + 0.05)
+        let black = (l + 0.05) / 0.05
+        if white >= minimumTextContrast { return .white }
+        return white >= black ? .white : .black
+    }
+
+    /// Фактическая заливка фазы в данном оформлении (для тестов контраста).
+    static func resolvedFill(for phase: DictationPhase, appearance: NSAppearance) -> NSColor? {
+        var out: NSColor?
+        appearance.performAsCurrentDrawingAppearance {
+            switch phase {
+            case .idle, .finalizing: out = NSColor.controlAccentColor.usingColorSpace(.sRGB)
+            case .recording: out = NSColor.systemRed.usingColorSpace(.sRGB)
+            case .offline: out = nil
+            }
+        }
+        return out.map { fillForReadableWhiteText($0) }
     }
 
     override func viewDidChangeEffectiveAppearance() {
