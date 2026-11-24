@@ -130,8 +130,8 @@ final class ConversationErrorAnnouncerWiringTests: XCTestCase {
         // иначе озвучка «шлюз недоступен/связь потеряна» мертва в проде
         // (класс test-validates-the-hole: setupErrorBus/setupHealthMonitor).
         let src = try String(contentsOf: Self.wsSwiftURL, encoding: .utf8)
-        XCTAssertTrue(src.contains("classifyAndAnnounceWSFailure()"),
-                      "startReceiveLoop failure-ветка должна вызывать classifyAndAnnounceWSFailure()")
+        XCTAssertTrue(src.contains("classifyAndAnnounceWSFailure(httpStatus: status)"),
+                      "startReceiveLoop failure-ветка должна вызывать classifyAndAnnounceWSFailure(httpStatus:)")
     }
 
     func test_sourceContract_receiveLoopSuccessBranch_gatedByGenerationAndTask() throws {
@@ -159,5 +159,79 @@ final class ConversationErrorAnnouncerWiringTests: XCTestCase {
         url.deleteLastPathComponent()              // native/KrabEarAgent
         return url
             .appendingPathComponent("Sources/KrabEarAgent/ConversationViewController+WebSocket.swift")
+    }
+}
+
+// MARK: - 401/403 при рукопожатии WS: «нужен ключ», а не «шлюз недоступен»
+
+@MainActor
+final class ConversationGatewayAuthFailureTests: XCTestCase {
+
+    func test_failureClass_401and403_isAuthRequired_regardlessOfState() {
+        for status in [401, 403] {
+            for state: ConversationState in [.connecting, .listening] {
+                XCTAssertEqual(
+                    ConversationViewController.failureClass(httpStatus: status, state: state),
+                    .gatewayAuthRequired, "status \(status), state \(state)")
+            }
+        }
+    }
+
+    func test_failureClass_otherStatusesKeepOldBehaviour() {
+        for status: Int? in [nil, 200, 404, 500, 502] {
+            XCTAssertEqual(ConversationViewController.failureClass(httpStatus: status, state: .connecting),
+                           .gatewayUnreachable, "status \(String(describing: status))")
+            XCTAssertEqual(ConversationViewController.failureClass(httpStatus: status, state: .listening),
+                           .connectionLost, "status \(String(describing: status))")
+        }
+    }
+
+    func test_authPhrase_namesTheKeyAndHasNoWakeWord() throws {
+        let phrase = try XCTUnwrap(ConversationErrorAnnouncer.phrases[.gatewayAuthRequired])
+        XCTAssertTrue(phrase.lowercased().contains("ключ"))
+        XCTAssertFalse(phrase.lowercased().contains("краб"))
+    }
+
+    func test_authDebounce_isMuchLongerThanOtherClasses() {
+        let announcer = ConversationErrorAnnouncer()
+        var spoken: [String] = []
+        var now = Date(timeIntervalSince1970: 1_000_000)
+        announcer.now = { now }
+        announcer.speak = { spoken.append($0) }
+        XCTAssertTrue(announcer.announce(.gatewayAuthRequired))
+        now = now.addingTimeInterval(120)      // ошибки соединения за это время уже повторились бы
+        XCTAssertFalse(announcer.announce(.gatewayAuthRequired), "ошибка конфигурации не должна повторяться голосом каждые 30 с")
+        now = now.addingTimeInterval(ConversationErrorAnnouncer.authDebounceInterval)
+        XCTAssertTrue(announcer.announce(.gatewayAuthRequired))
+        XCTAssertEqual(spoken.count, 2)
+    }
+
+    func test_wiring_authFailure_announcesKeyPhrase_and_showsActionableError() {
+        let vc = ConversationViewController(config: .default)
+        vc.loadView()
+        vc.viewDidLoad()
+        var spoken: [String] = []
+        vc.errorAnnouncer.speak = { spoken.append($0) }
+        vc.isSessionActive = true
+        vc.conversationState = .connecting
+        vc.classifyAndAnnounceWSFailure(httpStatus: 401)
+        XCTAssertEqual(spoken.count, 1)
+        XCTAssertTrue(spoken[0].lowercased().contains("ключ"), spoken[0])
+        XCTAssertTrue(ConversationViewController.failureDescription(httpStatus: 401, fallback: "bad response")
+            .contains("Live перевод"))
+        XCTAssertEqual(ConversationViewController.failureDescription(httpStatus: 500, fallback: "bad response"),
+                       "bad response")
+        XCTAssertEqual(ConversationViewController.failureDescription(httpStatus: nil, fallback: "x"), "x")
+    }
+
+    func test_sourceContract_receiveFailureReadsHandshakeStatus() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent/ConversationViewController+WebSocket.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        XCTAssertTrue(src.contains("(task.response as? HTTPURLResponse)?.statusCode"),
+                      "receive-failure должна читать HTTP-статус рукопожатия")
+        XCTAssertTrue(src.contains("classifyAndAnnounceWSFailure(httpStatus: status)"))
+        XCTAssertTrue(src.contains("failureDescription(httpStatus: status, fallback: desc)"))
     }
 }

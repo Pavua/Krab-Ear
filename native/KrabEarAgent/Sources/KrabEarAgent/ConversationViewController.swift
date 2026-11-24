@@ -326,10 +326,25 @@ final class ConversationViewController: NSViewController {
 
     /// Классифицировать провал WS по текущему состоянию и озвучить.
     /// .connecting = не смогли подключиться; иначе — обрыв посреди сессии.
-    func classifyAndAnnounceWSFailure() {
-        let cls: ConversationErrorAnnouncer.ErrorClass =
-            (conversationState == .connecting) ? .gatewayUnreachable : .connectionLost
-        errorAnnouncer.announce(cls)
+    func classifyAndAnnounceWSFailure(httpStatus: Int? = nil) {
+        errorAnnouncer.announce(Self.failureClass(httpStatus: httpStatus, state: conversationState))
+    }
+
+    /// Класс сбоя WS. 401/403 при рукопожатии = «нужен ключ шлюза» независимо от фазы:
+    /// Voice Gateway отвечает так fail-closed, когда ключ не передан или неверен, и клиент
+    /// видит безликое «bad response from the server». Остальное — прежняя логика по фазе.
+    static func failureClass(httpStatus: Int?, state: ConversationState) -> ConversationErrorAnnouncer.ErrorClass {
+        if httpStatus == 401 || httpStatus == 403 { return .gatewayAuthRequired }
+        return state == .connecting ? .gatewayUnreachable : .connectionLost
+    }
+
+    /// Текст ошибки для UI: при 401/403 говорит, что делать, вместо сообщения URLSession.
+    static func failureDescription(httpStatus: Int?, fallback: String) -> String {
+        if httpStatus == 401 || httpStatus == 403 {
+            return "Voice Gateway отклонил подключение: нужен ключ шлюза. Введите его на вкладке "
+                + "«Live перевод» в поле «API key» рядом с Gateway URL."
+        }
+        return fallback
     }
 
     // MARK: - Status overlay (Волна 3c)
