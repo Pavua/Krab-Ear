@@ -12,9 +12,10 @@
 Управление: Enter — записать; r — переписать предыдущий; s — пропустить блок;
 q — выйти (прогресс сохранён).
 
-Приватность: записи остаются локально в `~/Documents/KrabEar_wake_dataset/` (вне репозитория
-и вне worktree: не пропадут при его удалении и не попадут в git), никуда не отправляются.
-ВНИМАНИЕ: privacy-purge Krab Ear этот каталог НЕ чистит — удалить его при необходимости нужно вручную.
+Приватность: записи остаются локально в `~/Library/Application Support/KrabEar/wake_dataset/` (вне
+репозитория и worktree, не синхронизируется iCloud, без отдельного запроса доступа к «Документам»),
+никуда не отправляются. ВНИМАНИЕ: privacy-purge Krab Ear этот каталог НЕ чистит — при необходимости
+удалить его нужно вручную (`rm -r`). Голос — биометрия: не копируйте каталог в облако.
 
 Запуск (из корня репозитория):
     .venv_krab_ear/bin/python scripts/record_wake_dataset.py
@@ -38,7 +39,7 @@ MIN_RMS = 0.004
 CLIP_PEAK = 0.98
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = Path.home() / "Documents" / "KrabEar_wake_dataset"
+DEFAULT_OUT = Path.home() / "Library" / "Application Support" / "KrabEar" / "wake_dataset"
 
 
 @dataclass(frozen=True)
@@ -126,11 +127,15 @@ def pending_indices(block: Block, out_dir: Path) -> list[int]:
 
 
 def write_wav(path: Path, samples_int16: bytes) -> None:
-    with wave.open(str(path), "wb") as wav:
+    """Атомарно: пишем во временный файл и переименовываем, иначе прерывание посреди записи оставило бы
+    усечённый WAV, который pending_indices счёл бы готовым."""
+    tmp = path.with_name(path.name + ".tmp")
+    with wave.open(str(tmp), "wb") as wav:
         wav.setnchannels(1)
         wav.setsampwidth(2)
         wav.setframerate(SAMPLE_RATE)
         wav.writeframes(samples_int16)
+    tmp.replace(path)
 
 
 def append_manifest(out_dir: Path, record: dict) -> None:
@@ -151,7 +156,9 @@ def remove_manifest_entry(out_dir: Path, filename: str) -> None:
         except ValueError:
             pass
         kept.append(line)
-    path.write_text("".join(f"{ln}\n" for ln in kept), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("".join(f"{ln}\n" for ln in kept), encoding="utf-8")
+    tmp.replace(path)
 
 
 def is_unusable_positive(block: Block, quality: dict) -> bool:
@@ -187,14 +194,17 @@ def run(out_dir: Path) -> int:
     if problem:
         print(f"Ошибка: {problem}")
         return 2
-    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        print(f"Ошибка: не удалось создать каталог записей {out_dir}: {exc}\nУкажите другой путь: --out /путь/к/каталогу")
+        return 2
     plan = build_plan()
     total = sum(len(b.prompts) for b in plan)
     done = total - sum(len(pending_indices(b, out_dir)) for b in plan)
     print(f"Каталог записей: {out_dir}\nГотово {done} из {total}. Enter — записать, r — переписать предыдущий, s — пропустить блок, q — выйти.\n")
     last: tuple[Block, int] | None = None
     skipped: set[str] = set()
-    first_clip = done == 0
     while True:
         progressed = False
         for block in plan:
@@ -245,11 +255,10 @@ def run(out_dir: Path) -> int:
                 print(" готово")
                 values = samples.tolist()
                 quality = assess_clip(values)
-                if first_clip and values and max(abs(v) for v in values) == 0:
-                    print("\n⚠ Микрофон отдал полную тишину (нули). Вероятно, у Терминала нет доступа к микрофону:\n"
+                if values and max(abs(v) for v in values) == 0:
+                    print("\n⚠ Микрофон отдал полную тишину (точные нули — так бывает при запрете доступа, а не в тихой комнате). Вероятно, у Терминала нет доступа к микрофону:\n"
                           "  Системные настройки → Конфиденциальность → Микрофон → разрешить Терминалу, и запустите скрипт заново.")
                     return 4
-                first_clip = False
                 for w in quality["warnings"]:
                     print(f"  ⚠ {w}")
                 if is_unusable_positive(block, quality):

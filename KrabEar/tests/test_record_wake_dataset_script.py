@@ -87,3 +87,15 @@ def test_silent_positive_is_not_saved_but_silent_negative_is():
     assert m.is_unusable_positive(plan["pos_normal"], silent) is True
     assert m.is_unusable_positive(plan["neg_room_silence"], silent) is False
     assert m.is_unusable_positive(plan["pos_normal"], m.assess_clip([4000, -4000] * 500)) is False
+
+
+def test_default_dir_not_in_icloud_synced_documents():
+    m = _load()
+    assert "Documents" not in m.DEFAULT_OUT.parts and "Desktop" not in m.DEFAULT_OUT.parts
+
+
+def test_write_wav_is_atomic_no_tmp_left(tmp_path):
+    m = _load()
+    target = tmp_path / "x.wav"
+    m.write_wav(target, b"\x01\x00" * 160)
+    assert target.exists() and not list(tmp_path.glob("*.tmp"))
