@@ -125,9 +125,12 @@ extension ConversationViewController {
                           self.acceptsConversationCallback(generation),
                           self.wsHolder.task === task else { return }
                     let desc = (error as NSError).localizedDescription
-                    AgentLogger.shared.info("[WS] Receive error: \(desc)")
-                    self.classifyAndAnnounceWSFailure()
-                    self.conversationState = .error(desc)
+                    // HTTP-статус отклонённого рукопожатия (401/403 = нет/неверный ключ шлюза).
+                    let status = (task.response as? HTTPURLResponse)?.statusCode
+                    AgentLogger.shared.info("[WS] Receive error: \(desc)" + (status.map { " (HTTP \($0))" } ?? ""))
+                    self.classifyAndAnnounceWSFailure(httpStatus: status)
+                    self.conversationState = .error(
+                        ConversationViewController.failureDescription(httpStatus: status, fallback: desc))
                     self.stopConversation()
                 }
             }

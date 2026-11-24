@@ -358,23 +358,37 @@ final class PanelLiveResizeTests: XCTestCase {
     }
 
     /// Поле ключа Voice Gateway обязано быть на экране (владелец не нашёл, где его вводить).
+    /// После #2252 ключ вводится в карточке подключения вкладки «Разговор с AI»; старая строка
+    /// на «Live перевод» скрыта, вместо неё — кнопка-ссылка (не шире раздела на 640).
     func test_voiceGatewayKeyField_isReachableOnScreen() {
         let controller = makeController()
         guard let window = controller.window else { return XCTFail("нет окна") }
-        window.setContentSize(NSSize(width: 860, height: 820))
-        var found: [String] = []
-        for tab in Tab.ordered {
-            controller.selectPanelTab(tab)
-            window.contentView?.layoutSubtreeIfNeeded()
-            guard let root = controller.mainTabView.selectedTabViewItem?.view else { continue }
-            let field = controller.voiceGatewayAPIKeyField
-            if field.window != nil, isEffectivelyVisible(field, under: root), field.bounds.width > 40 {
-                found.append(tab.title)
+        let verbose = ProcessInfo.processInfo.environment["KRAB_RESIZE_REPORT"] != nil
+        for w: CGFloat in [860, 640] {
+            window.setContentSize(NSSize(width: w, height: 820))
+            var found: [String] = []
+            for tab in Tab.ordered {
+                controller.selectPanelTab(tab)
+                window.contentView?.layoutSubtreeIfNeeded()
+                window.contentView?.layoutSubtreeIfNeeded()
+                guard let root = controller.mainTabView.selectedTabViewItem?.view else { continue }
+                let field = controller.voiceGatewayConnectionView.keyField
+                if field.window != nil, isEffectivelyVisible(field, under: root), field.bounds.width > 40 {
+                    found.append(tab.title)
+                }
+                // Ссылка на «Live перевод»: длинная надпись на .rounded не выходит за раздел.
+                if tab == .liveTranslation {
+                    let link = descendants(root).compactMap { $0 as? NSButton }
+                        .first { $0.title.contains("Разговор с AI") && $0.action == #selector(HistoryPanelController.selectVoiceGatewayCardTab) }
+                    XCTAssertNotNil(link, "нет ссылки на карточку ключа на «Live перевод»")
+                    if let link, isEffectivelyVisible(link, under: root) {
+                        let f = link.convert(link.bounds, to: root)
+                        XCTAssertLessThanOrEqual(f.maxX, root.bounds.width + 1, "ссылка за границей на \(Int(w)): \(f.maxX)")
+                    }
+                }
             }
+            if verbose { print("=== Поле ключа Voice Gateway видно (\(Int(w))): \(found)") }
+            XCTAssertEqual(found, [Tab.conversation.title], "поле ключа — в «Разговор с AI» и только там (\(Int(w)))")
         }
-        if ProcessInfo.processInfo.environment["KRAB_RESIZE_REPORT"] != nil {
-            print("=== Поле API key Voice Gateway видно в разделах: \(found)")
-        }
-        XCTAssertFalse(found.isEmpty, "поле ключа Voice Gateway не видно ни в одном разделе")
     }
 }

@@ -233,6 +233,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let voiceGatewayURLField = NSTextField(frame: .zero)
     let voiceGatewayAPIKeyField = NSTextField(frame: .zero)
     let voiceGatewayCheckButton = ThemeSecondaryButton(title: "Проверить Gateway", target: nil, action: nil)
+    /// Карточка «Подключение к Voice Gateway» во вкладке «Разговор с AI» (+VoiceGatewayCard).
+    let voiceGatewayConnectionView = VoiceGatewayConnectionView()
+    /// Сырой отчёт последней проверки шлюза — показывается только по «Подробности».
+    var lastVoiceGatewayCheckDetails = ""
     let autoStartButton = NSButton(checkboxWithTitle: "Автозапуск", target: nil, action: nil)
     let dockIconButton = NSButton(checkboxWithTitle: "Иконка в Dock", target: nil, action: nil)
     let hotkeySelector = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -1392,7 +1396,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         voiceGatewayRow.addArrangedSubview(voiceGatewayURLField)
 
         voiceGatewayRow.addArrangedSubview(NSTextField(labelWithString: "API key:"))
-        voiceGatewayAPIKeyField.placeholderString = "опционально"
+        voiceGatewayAPIKeyField.placeholderString = "нужен, если шлюз требует ключ"
         voiceGatewayAPIKeyField.target = self
         voiceGatewayAPIKeyField.action = #selector(onVoiceGatewayAPIKeyChanged)
         voiceGatewayAPIKeyField.setContentHuggingPriority(.defaultLow, for: .horizontal)
