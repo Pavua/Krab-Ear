@@ -369,6 +369,7 @@ final class PanelLiveResizeTests: XCTestCase {
             var found: [String] = []
             for tab in Tab.ordered {
                 controller.selectPanelTab(tab)
+                expandAllSections(in: controller)
                 window.contentView?.layoutSubtreeIfNeeded()
                 window.contentView?.layoutSubtreeIfNeeded()
                 guard let root = controller.mainTabView.selectedTabViewItem?.view else { continue }
@@ -381,6 +382,9 @@ final class PanelLiveResizeTests: XCTestCase {
                     let link = descendants(root).compactMap { $0 as? NSButton }
                         .first { $0.title.contains("Разговор с AI") && $0.action == #selector(HistoryPanelController.selectVoiceGatewayCardTab) }
                     XCTAssertNotNil(link, "нет ссылки на карточку ключа на «Live перевод»")
+                    // Свёрнутая секция (состояние из UserDefaults) не должна молча пропускать
+                    // проверку (нит гейта): секции раскрыты, ссылка обязана быть видна.
+                    if let link { XCTAssertTrue(isEffectivelyVisible(link, under: root), "ссылка скрыта на \(Int(w))") }
                     if let link, isEffectivelyVisible(link, under: root) {
                         let f = link.convert(link.bounds, to: root)
                         XCTAssertLessThanOrEqual(f.maxX, root.bounds.width + 1, "ссылка за границей на \(Int(w)): \(f.maxX)")
