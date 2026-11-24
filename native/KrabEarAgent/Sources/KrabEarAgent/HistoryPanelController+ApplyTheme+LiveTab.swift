@@ -96,6 +96,13 @@ extension HistoryPanelController {
             isExpanded: true
         )
         gatewaySection.contentStackView.addArrangedSubview(gatewayCard)
+        // Адрес и ключ шлюза переехали в «Разговор с AI» (строка здесь скрыта) — оставляем ссылку.
+        let gatewayMovedButton = NSButton(
+            title: "Адрес и ключ Voice Gateway — во вкладке «Разговор с AI»",
+            target: self, action: #selector(selectVoiceGatewayCardTab))
+        gatewayMovedButton.bezelStyle = .rounded
+        gatewayMovedButton.controlSize = .large
+        gatewayCard.contentStackView.addArrangedSubview(gatewayMovedButton)
 
         // Call Assist section — reparenting 5 control rows + output scroll.
         let callAssistCard = ThemeCardView()

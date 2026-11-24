@@ -222,7 +222,8 @@ extension ConversationViewController {
         styleLabel(langLabel, font: KrabEarTheme.Typography.body)
         langLabel.textColor = KrabEarTheme.Colors.textSecondary
         langLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        langHintSelector.addItems(withTitles: ["Авто", "RU", "EN", "ES"])
+        langHintSelector.addItems(withTitles: ["Авто (как RU)", "RU", "EN", "ES"])
+        langHintSelector.selectItem(at: ConversationViewController.languageHintValues.firstIndex(of: config.languageHint) ?? 0)
         langHintSelector.target  = self
         langHintSelector.action  = #selector(onLangHintChanged)
         langRow.addArrangedSubview(langLabel)
@@ -280,9 +281,10 @@ extension ConversationViewController {
     // MARK: - Settings actions
 
     @objc func onLangHintChanged() {
-        let titles = ["auto", "ru", "en", "es"]
+        let titles = ConversationViewController.languageHintValues
         let idx = langHintSelector.indexOfSelectedItem
         config.languageHint = (idx >= 0 && idx < titles.count) ? titles[idx] : "auto"
+        ConversationViewController.saveLanguageHint(config.languageHint, in: userDefaults)
     }
 
     @objc func onEngineChanged() {
