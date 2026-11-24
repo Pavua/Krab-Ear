@@ -667,6 +667,25 @@ def run_child(connection, root_string, source_string, crypto_key=None, crypto_ke
                             raise AssertionError("отзыв после первой записи не подтверждён")
                 return result
             stack.enter_context(mock.patch.object(Path, "write_text", observed_write))
+            original_replace = os.replace
+
+            def observed_replace(src, dst, *args, **kwargs):
+                # G3-MEM-04 (M04-02): плоский файл пишется temp → os.replace через dir_fd, а не
+                # Path.write_text, поэтому счётчик записей вешается и на этот шов. Считается
+                # только ФИНАЛЬНАЯ фиксация внутри каталога вывода (temp-имя не в счёт).
+                result = original_replace(src, dst, *args, **kwargs)
+                dst_dir_fd = kwargs.get("dst_dir_fd")
+                target = state["output"]
+                if target is not None and isinstance(dst_dir_fd, int) and not os.fsdecode(dst).endswith(".tmp"):
+                    final = resolve_mutation_target(dst, dst_dir_fd)
+                    if final is not None and final.is_relative_to(Path(target).resolve()):
+                        state["writes"] += 1
+                        if state["revoke_after_first"] and state["writes"] == 1:
+                            revoked = revoke(state["context"])
+                            if (revoked.get("result") or {}).get("ok") is not True:
+                                raise AssertionError("отзыв после первой записи не подтверждён")
+                return result
+            stack.enter_context(mock.patch.object(os, "replace", observed_replace))
             claim = SocketOwnershipClaim(socket_path)
             claim.acquire()
             ready = threading.Event()
