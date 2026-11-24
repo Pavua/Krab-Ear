@@ -311,8 +311,21 @@ class MeetingSessionService:
         return nonblocking_snapshot(locks, read)
 
     def handle_meeting_start(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Сериализовать полный setup встречи со stop и следующим start."""
+        """Сериализовать полный setup встречи со stop и следующим start.
+
+        KEG2-09: допуск maintenance-fence — ДО резервации сессии и preflight
+        worker; вложенный старт записи (RecordingCore) берёт свой допуск, что
+        безопасно: пока этот допуск выдан, fence не может закрыться.
+        """
+        from backend.maintenance_fence import REASON_MAINTENANCE, optional_admission
+
         self._raise_if_closed()
+        with optional_admission(self, "meeting") as admitted:
+            if not admitted:
+                return {"ok": False, "error": REASON_MAINTENANCE}
+            return self._handle_meeting_start_admitted(params)
+
+    def _handle_meeting_start_admitted(self, params: dict[str, Any]) -> dict[str, Any]:
         with self._transition_lock:
             self._raise_if_closed()
             return self._handle_meeting_start_serialized(params)

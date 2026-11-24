@@ -68,10 +68,18 @@ wait_for_bootout() {
 ipc_call() {
   # Состояние выдаётся только после полного валидного ответа IPC. Тексты
   # диктовки/встречи не попадают ни в shell output, ни в аргументы процессов.
-  python3 - "$1" <<'PY' 2>/dev/null
-import json, os, socket, sys, time
+  python3 - "$@" <<'PY' 2>/dev/null
+import json, os, re, socket, sys, time
 method = sys.argv[1]
+arg = sys.argv[2] if len(sys.argv) > 2 else ""
 p = os.path.expanduser("~/Library/Application Support/KrabEar/krabear.sock")
+FENCE = method in ("maintenance_fence_close", "maintenance_fence_open")
+if method == "maintenance_fence_close":
+    params = {"lease_sec": 60}
+elif method == "maintenance_fence_open":
+    params = {"token": arg}
+else:
+    params = {}
 
 def unique_object(pairs):
     result = {}
@@ -86,7 +94,7 @@ try:
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
         connection.settimeout(4.0)
         connection.connect(p)
-        connection.sendall((json.dumps({"id": "1", "method": method, "params": {}}) + "\n").encode())
+        connection.sendall((json.dumps({"id": "1", "method": method, "params": params}) + "\n").encode())
         data = bytearray()
         while b"\n" not in data:
             remaining = deadline - time.monotonic()
@@ -98,11 +106,34 @@ try:
                 raise ValueError("incomplete IPC reply")
             data.extend(chunk)
     response = json.loads(data.split(b"\n", 1)[0], object_pairs_hook=unique_object)
-    if not isinstance(response, dict) or response.get("id") != "1" or response.get("ok") is not True:
+    if not isinstance(response, dict) or response.get("id") != "1":
         raise ValueError("invalid RPC envelope")
-    if response.get("error") is not None:
+    error = response.get("error")
+    if (FENCE and response.get("ok") is False and isinstance(error, dict)
+            and error.get("code") == "unknown_method"):
+        # Backend старше KEG2-09: барьера нет (переходный путь деплоя).
+        print("legacy")
+        sys.exit(0)
+    if response.get("ok") is not True:
+        raise ValueError("invalid RPC envelope")
+    if error is not None:
         raise ValueError("RPC error")
     result = response.get("result")
+    if FENCE:
+        if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+            raise ValueError("invalid fence result")
+        if method == "maintenance_fence_open":
+            print("opened" if result["ok"] else "unknown")
+        elif result["ok"]:
+            token = result.get("token")
+            if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+                raise ValueError("invalid fence token")
+            print("closed " + token)
+        else:
+            reasons = result.get("busy_reasons") or [result.get("reason")]
+            safe = [r for r in reasons if isinstance(r, str) and re.fullmatch(r"[a-z_]{1,48}", r)]
+            print("busy " + (",".join(safe[:6]) or "unknown"))
+        sys.exit(0)
     if not isinstance(result, dict) or ("ok" in result and result["ok"] is not True):
         raise ValueError("invalid RPC result")
     if method == "ping":
