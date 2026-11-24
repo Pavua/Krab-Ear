@@ -298,6 +298,15 @@ class ReviewFixesTests(unittest.TestCase):
         emitted = _feed(seg, samples)
         self.assertGreaterEqual(len(emitted), 1)
 
+    def test_starting_under_noise_above_initial_threshold_recovers(self) -> None:
+        # замечание Codex: фон rms≈100 выше начального порога 60, пол в простое не обновляется (пол=0 с начала)
+        seg = sk.UtteranceSegmenter()
+        samples = self._noise(200, 100.0, seed=2)
+        for k in range(4):
+            word = [a + b for a, b in zip(_tone(6, amp=2500), self._noise(6, 100.0, seed=30 + k))]
+            samples += word + self._noise(12, 100.0, seed=40 + k)
+        self.assertGreaterEqual(len(_feed(seg, samples)), 1)
+
     def test_same_words_in_quiet_room_still_work(self) -> None:
         seg = sk.UtteranceSegmenter()
         samples = self._noise(60, 20.0)
@@ -382,9 +391,20 @@ class EvalScriptTests(unittest.TestCase):
         sys.modules[spec.name] = cls.mod
         spec.loader.exec_module(cls.mod)
 
+    def test_word_exemption_is_per_clip_not_per_block(self) -> None:
+        label = self.mod.block_label
+        self.assertEqual(label("neg_lookalikes", "Краб-салат"), "neg_lookalikes:содержит_слово")
+        self.assertEqual(label("neg_lookalikes", "Крабы"), "neg_lookalikes:содержит_слово")
+        for prompt in ("Грабли", "Крап", "Карп", "Брат", "Кран", "Кроб", ""):
+            self.assertEqual(label("neg_lookalikes", prompt), "neg_lookalikes")
+        # срабатывание на «Крап» в том же блоке остаётся ложным и валит приёмку
+        results = {("pos", "pos_normal"): (20, 20), ("neg", "neg_lookalikes"): (13, 1),
+                   ("neg", "neg_lookalikes:содержит_слово"): (3, 3)}
+        self.assertFalse(self.mod.accepted(self.mod.summarize(results)))
+
     def test_accepts_good_run_and_counts_word_blocks_separately(self) -> None:
         results = {("pos", "pos_normal"): (20, 18), ("pos", "pos_short"): (16, 16),
-                   ("neg", "neg_ru_speech"): (24, 0), ("neg", "neg_lookalikes"): (16, 3)}
+                   ("neg", "neg_ru_speech"): (24, 0), ("neg", "neg_lookalikes:содержит_слово"): (16, 3)}
         summary = self.mod.summarize(results)
         self.assertEqual((summary["pos_hit"], summary["pos_total"]), (34, 36))
         self.assertEqual(summary["neg_fire"], 0)

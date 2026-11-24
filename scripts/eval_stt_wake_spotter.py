@@ -5,8 +5,10 @@
 (секунда тишины до и после), считается, сработала ли модель. В отчёт попадают ТОЛЬКО числа по блокам: ни имён
 файлов, ни транскриптов (записи — биометрия владельца, см. память reference-wake-dataset-owner-voice).
 
-Приёмка (решение владельца 24.11): recall >= 85% на позитивах и 0 ложных на негативах, кроме блоков, где в самом
-клипе произнесено «краб» (в `neg_lookalikes` — «Краб-салат», «Крабы»): они считаются отдельной строкой.
+Приёмка (решение владельца 24.11): recall >= 85% на позитивах и 0 ложных на негативах. Исключение — НЕ целым блоком,
+а по клипу: негативный клип, в подсказке (`prompt` manifest) которого есть слово на «краб» («Краб-салат», «Крабы»),
+считается отдельной строкой `<блок>:содержит_слово`; остальные клипы того же блока («Грабли», «Крап», «Карп»)
+остаются обычными негативами и обязаны не срабатывать.
 
 Запуск (из корня репозитория, нужны mlx и gigaam-mlx из .venv_krab_ear; микрофон не используется):
     PYTHONPATH=KrabEar .venv_krab_ear/bin/python scripts/eval_stt_wake_spotter.py [--dataset DIR] [--seed 5]
@@ -17,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import re
 import sys
 import wave
 from collections import defaultdict
@@ -25,18 +28,24 @@ from typing import Mapping
 
 DEFAULT_DATASET = Path.home() / "Library" / "Application Support" / "KrabEar" / "wake_dataset"
 MIN_RECALL = 0.85
-# Блоки, где в самом негативном клипе по замыслу звучит слово «краб» — срабатывание там не ложное.
-CONTAINS_WORD_BLOCKS = frozenset({"neg_lookalikes"})
+# Суффикс блока для негативных клипов, где по подсказке звучит слово «краб» — срабатывание там не ложное.
+CONTAINS_WORD_SUFFIX = ":содержит_слово"
+
+
+def block_label(block: str, prompt: str) -> str:
+    """Блок результата: клип с подсказкой, содержащей слово на «краб», выделяется в отдельную строку."""
+    words = re.sub(r"[^\w\s]", " ", prompt.lower().replace("ё", "е")).split()
+    return block + CONTAINS_WORD_SUFFIX if any(w.startswith("краб") for w in words) else block
 
 
 def summarize(results: Mapping[tuple[str, str], tuple[int, int]]) -> dict[str, float]:
     """``{(label, block): (всего, сработало)}`` → итоговые числа. Чистая функция (тесты без аудио)."""
     pos_total = sum(t for (label, _), (t, _) in results.items() if label == "pos")
     pos_hit = sum(h for (label, _), (_, h) in results.items() if label == "pos")
-    neg_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and b not in CONTAINS_WORD_BLOCKS)
-    neg_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and b not in CONTAINS_WORD_BLOCKS)
-    word_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and b in CONTAINS_WORD_BLOCKS)
-    word_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and b in CONTAINS_WORD_BLOCKS)
+    neg_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and not b.endswith(CONTAINS_WORD_SUFFIX))
+    neg_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and not b.endswith(CONTAINS_WORD_SUFFIX))
+    word_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and b.endswith(CONTAINS_WORD_SUFFIX))
+    word_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and b.endswith(CONTAINS_WORD_SUFFIX))
     return {
         "pos_total": pos_total, "pos_hit": pos_hit,
         "recall": (pos_hit / pos_total) if pos_total else 0.0,
@@ -104,7 +113,8 @@ def main(argv: list[str] | None = None) -> int:
                 model.drain(10)
         model.drain(10)
         fired |= model.predict(np.zeros(frame, np.int16))[sk.DEFAULT_NAME] >= 0.5
-        entry = stats[(row["label"], row["block"])]
+        block = block_label(row["block"], row.get("prompt", "")) if row["label"] == "neg" else row["block"]
+        entry = stats[(row["label"], block)]
         entry[0] += 1
         entry[1] += int(fired)
     model.close()
