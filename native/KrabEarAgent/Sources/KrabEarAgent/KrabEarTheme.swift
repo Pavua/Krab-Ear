@@ -391,7 +391,17 @@ public final class CardFillingStackView: NSStackView {
         // Секции, пересобранные после applyVisualTheme (проход wrapLongLabels уже был), получают
         // то же правило подписей при добавлении.
         KrabEarTheme.wrapLongLabels(in: view)
-        guard orientation == .vertical, view is ThemeCardView || view is CollapsibleSectionView else { return }
+        guard orientation == .vertical else { return }
+        // Вложенный вертикальный стек (обёртка формы) иначе «обнимал» самый узкий контрол,
+        // и подписи в нём складывались столбиком слов (стресс-харнесс, нит гейта #2255).
+        // 490: горизонтальные ряды не трогаем — растянулись бы кнопки.
+        if let inner = view as? NSStackView, inner.orientation == .vertical {
+            let c = KrabEarTheme.fillWidth(inner, of: self)
+            c.constant = -(edgeInsets.left + edgeInsets.right)
+            c.isActive = true
+            return
+        }
+        guard view is ThemeCardView || view is CollapsibleSectionView else { return }
         // 999, а не required: если место построения уже задало свою ширину, конфликта нет.
         // Снимается при removeFromSuperview (removeArrangedSubview его НЕ снимает — все места
         // удаления зовут оба). Ограничения: setViews(_:in:) и NSStackView(views:) обходят этот
@@ -463,8 +473,10 @@ public final class AdaptiveRowStackView: NSStackView {
         while let a = ancestor {
             let originInA = convert(NSPoint(x: bounds.minX, y: bounds.minY), to: a).x
             let room = a.bounds.maxX - originInA
-            // Содержимое горизонтальных скроллов задумано шире видимой области.
+            // Содержимое горизонтальных скроллов задумано шире видимой области. Останов — уже
+            // на NSClipView: иначе видимая ширина клипа успела бы прижать ряд (нит гейта #2255).
             if let sv = a as? NSScrollView, sv.hasHorizontalScroller { break }
+            if a is NSClipView, (a.superview as? NSScrollView)?.hasHorizontalScroller == true { break }
             if room > 0 { best = min(best, room) }
             if a === stop { break }
             ancestor = a.superview
@@ -480,9 +492,30 @@ public final class AdaptiveRowStackView: NSStackView {
             if orientation != target {
                 orientation = target
                 alignment = vertical ? .leading : .centerY
+                updateVerticalFills(vertical)
             }
         }
         super.layout()
+    }
+
+    /// В столбике вложенные стеки (формы, ряды «подпись + контрол») растягиваются на ширину
+    /// ряда с приоритетом 490 — иначе стек «обнимал» самый узкий контрол, и подписи в нём
+    /// складывались столбиком слов (стресс-харнесс: форма «Запланировать» 145 pt в разделе
+    /// 512). Кнопки и прочие контролы не растягиваются. 490 < windowSizeStayPut: окно не растёт.
+    private var verticalFills: [NSLayoutConstraint] = []
+
+    private func updateVerticalFills(_ vertical: Bool) {
+        NSLayoutConstraint.deactivate(verticalFills)
+        verticalFills = []
+        guard vertical else { return }
+        // Сам ряд в столбике тоже не «обнимает» контрол: занимает ширину родительского стека.
+        if let parent = superview as? NSStackView, parent.orientation == .vertical {
+            verticalFills.append(KrabEarTheme.fillWidth(self, of: parent))
+        }
+        for child in arrangedSubviews where child is NSStackView {
+            verticalFills.append(KrabEarTheme.fillWidth(child, of: self))
+        }
+        NSLayoutConstraint.activate(verticalFills)
     }
 }
 
