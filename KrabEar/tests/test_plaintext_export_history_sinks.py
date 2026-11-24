@@ -227,3 +227,53 @@ def test_empty_file_request_still_rejects_unusable_authority(profile, route, on)
     result = call_route(profile, route, {} if on else {"plaintext_export": {}})
     assert result.get("reason") == ("plaintext_confirmation_required" if on else "plaintext_session_expired")
     assert filesystem_snapshot(profile) == before
+
+
+# --- ревью #2229: безопасность записи экспорта (M04-02) и каталог-симлинк (F5) ---------------
+
+def test_export_into_symlinked_output_directory_works(profile, tmp_path):
+    """/tmp, Dropbox, iCloud, внешние диски — симлинк-каталоги: экспорт туда не должен падать.
+
+    Симлинком должен быть САМ каталог назначения (path.parent): именно на нём срабатывал
+    O_NOFOLLOW (batch-маршрут пишет в реальный подкаталог и этого не ловит).
+    """
+    svc = profile[1]
+    real = tmp_path / "real_out"
+    real.mkdir()
+    link = tmp_path / "link_out"
+    link.symlink_to(real, target_is_directory=True)
+    svc._write_plaintext_file({"confirm": True, "force": True}, link / "export.md", "содержимое")
+    assert (real / "export.md").read_text(encoding="utf-8") == "содержимое"
+
+
+def test_symlink_at_destination_file_is_replaced_not_followed(profile, tmp_path):
+    """M04-02: ссылка на САМ файл назначения не даёт перезаписать чужой файл-цель."""
+    svc = profile[1]
+    out = tmp_path / "outputs"
+    out.mkdir()
+    victim = tmp_path / "victim.txt"
+    victim.write_text("НЕ ТРОГАТЬ", encoding="utf-8")
+    dest = out / "export.md"
+    dest.symlink_to(victim)
+    svc._write_plaintext_file({"confirm": True, "force": True}, dest, "новое содержимое")
+    assert victim.read_text(encoding="utf-8") == "НЕ ТРОГАТЬ"      # цель цела
+    assert not dest.is_symlink() and dest.read_text(encoding="utf-8") == "новое содержимое"
+    assert [p.name for p in out.iterdir()] == ["export.md"]       # temp не остался
+
+
+def test_failed_write_leaves_no_partial_or_temp_file(profile, tmp_path, monkeypatch):
+    svc = profile[1]
+    out = tmp_path / "outputs"
+    out.mkdir()
+    dest = out / "export.md"
+    dest.write_text("прежнее", encoding="utf-8")
+    import os as _os
+
+    def boom(*a, **k):
+        raise OSError("диск полон")
+
+    monkeypatch.setattr(_os, "fsync", boom)
+    with pytest.raises(OSError):
+        svc._write_plaintext_file({"confirm": True, "force": True}, dest, "новое")
+    assert dest.read_text(encoding="utf-8") == "прежнее"           # не затёрт частично
+    assert [p.name for p in out.iterdir()] == ["export.md"]       # temp убран

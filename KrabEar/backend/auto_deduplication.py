@@ -36,10 +36,12 @@ logger = logging.getLogger("KrabEar.Backend.AutoDedup")
 # Порог выше которого запись считается дубликатом
 DEFAULT_DEDUP_THRESHOLD: float = 0.9
 # G3-MEM-03 (R02): нижняя граница безопасного порога. Ниже неё различные тексты
-# начинают считаться дубликатами, и авто-дедупликация молча отбрасывает диктовки.
-# `auto_dedup_threshold` пользовательская настройка без валидатора, поэтому граница
-# держится здесь. Значения ниже границы (включая 0.0 и отрицательные) → default.
-MIN_SAFE_DEDUP_THRESHOLD: float = 0.5
+# начинают считаться дубликатами, и авто-дедупликация молча отбрасывает диктовки
+# (действие при совпадении — skipped: диктовка не сохраняется). При 0.5 уже
+# «да, давай завтра» / «да, давай сегодня» — дубль, поэтому граница 0.8 (ревью #2229, F8).
+# `auto_dedup_threshold` — пользовательская настройка без валидатора, граница держится
+# здесь. Ниже границы (включая 0.0 и отрицательные) → default; выше 1.0 → 1.0.
+MIN_SAFE_DEDUP_THRESHOLD: float = 0.8
 # Порог выше которого схожие записи считаются кандидатами на слияние
 MERGE_THRESHOLD: float = 0.95
 # Настройка-флаг для DEFAULT_SETTINGS / runtime settings
@@ -53,8 +55,9 @@ def _sanitize_threshold(value: object) -> float:
     values which caused data-loss (negative → every recording silently dropped as
     duplicate) or silent dedup bypass (NaN makes all comparisons falsy).
 
-    Returns *value* if it is in [MIN_SAFE_DEDUP_THRESHOLD, 1.0]; otherwise
-    DEFAULT_DEDUP_THRESHOLD (NaN/Inf/мусор, ниже безопасной границы, выше 1.0).
+    Returns *value* if it is in [MIN_SAFE_DEDUP_THRESHOLD, 1.0]; значения выше 1.0
+    прижимаются к 1.0 («почти никогда не дубликат» — как и намеревался пользователь);
+    NaN/Inf/мусор и значения ниже безопасной границы → DEFAULT_DEDUP_THRESHOLD.
     """
     try:
         v = float(value)
@@ -65,7 +68,9 @@ def _sanitize_threshold(value: object) -> float:
         return DEFAULT_DEDUP_THRESHOLD
     # G3-MEM-03 (R02): опасный порог — вернуть default, а не прижимать к 0.0.
     # Порог 0.0 помечает дубликатом любой текст — авто-skip различных диктовок.
-    if not MIN_SAFE_DEDUP_THRESHOLD <= v <= 1.0:
+    if v > 1.0:
+        return 1.0
+    if v < MIN_SAFE_DEDUP_THRESHOLD:
         return DEFAULT_DEDUP_THRESHOLD
     return v
 

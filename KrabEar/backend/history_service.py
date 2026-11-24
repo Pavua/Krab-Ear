@@ -531,9 +531,12 @@ class HistoryService:
             import secrets
 
             path.parent.mkdir(parents=True, exist_ok=True)
-            dfd = os.open(
-                path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-            )
+            # Каталог назначения открывается С разрешением симлинков: на macOS /tmp,
+            # /var — симлинки, а Dropbox/iCloud/внешние диски — обычные симлинк-папки;
+            # O_NOFOLLOW на каталоге ломал экспорт туда (ревью #2229, F5). Защита M04-02 —
+            # не перезаписать чужой inode по симлинку на САМ файл — обеспечивается ниже:
+            # temp с O_EXCL|O_NOFOLLOW + os.replace заменяет ссылку, а не её цель.
+            dfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
             try:
                 tmp = f".{path.name}.{secrets.token_hex(12)}.tmp"
                 try:
