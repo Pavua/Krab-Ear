@@ -101,6 +101,35 @@ def build_plan() -> list[Block]:
     ]
 
 
+def build_extra_plan() -> list[Block]:
+    """Дополнительный набор (24.11, после прогонов run3–run7): ~104 клипа, ~9 минут.
+
+    Что не получалось у модели: очень короткое «Краб» (~0,45 с) не ловилось, а похожие слова и короткие
+    реплики владельца давали ложные срабатывания. Блоки подобраны под эти два провала; ключи блоков новые,
+    уже записанные клипы основного плана не трогаются (в тот же каталог и manifest.jsonl)."""
+    return [
+        Block("pos_short", "pos", "ОЧЕНЬ коротко и резко, одним ударом: «Краб!» (не тяните)", tuple(["Краб"] * 16)),
+        Block("pos_intonation", "pos", "разная интонация, по подсказке в скобках", tuple(
+            ["Краб (вопросительно?)"] * 5 + ["Краб (приказом!)"] * 5 + ["Краб (устало, вполголоса)"] * 3
+            + ["Эй, Краб (коротко)"] * 3)),
+        Block("pos_natural", "pos", "естественно, как зовёте мимоходом, не глядя на экран", tuple(["Краб"] * 8 + ["Эй, Краб"] * 4)),
+        Block("neg_lookalikes2", "neg", "ещё созвучные слова — НЕ «Краб»; говорите чётко, по одному", (
+            "Краска", "Скраб", "Кролик", "Крыша", "Кремль", "Кран", "Грамм", "Храп", "Карабин", "Каравай", "Кабан",
+            "Скрип", "Скрепка", "Права", "Драма", "Кроссовки", "Эй, Кролик", "Эй, Кран", "Эй, Краска", "Эй, Крыша",
+            "Градус", "Прибор", "Кредит", "Кварц")),
+        Block("neg_commands", "neg", "команды той же формы, но БЕЗ слова «Краб» (говорите, как с ассистентом)", (
+            "Открой историю", "Который час", "Запиши заметку", "Что на сегодня", "Переведи это", "Включи диктовку",
+            "Найди вчерашнюю запись", "Помоги мне", "Ты меня слышишь", "Продиктую текст", "Напомни про встречу",
+            "Прочитай сообщение", "Останови запись", "Где мои заметки", "Сколько времени", "Давай начнём")),
+        Block("neg_short_words", "neg", "короткие реплики из одного-двух слов, обычным голосом", (
+            "Да", "Нет", "Ага", "Привет", "Эй", "Слушай", "Окей", "Ладно", "Стоп", "Давай", "Алло", "Так", "Ну",
+            "Эй, ты", "Эй, слушай", "Эй, Карл", "Эй, Паша", "Пабло", "Эй, Пабло", "Эй, брат")),
+    ]
+
+
+PLANS = {"base": build_plan, "extra": build_extra_plan}
+
+
 def assess_clip(samples_int16: list[int] | "object") -> dict:
     """Качество клипа: rms/peak (доли шкалы) и предупреждения. Чистая функция для тестов."""
     values = list(samples_int16)
@@ -189,7 +218,7 @@ def _check_microphone_stack() -> str | None:
     return None
 
 
-def run(out_dir: Path) -> int:
+def run(out_dir: Path, plan_name: str = "base") -> int:
     problem = _check_microphone_stack()
     if problem:
         print(f"Ошибка: {problem}")
@@ -199,7 +228,7 @@ def run(out_dir: Path) -> int:
     except OSError as exc:
         print(f"Ошибка: не удалось создать каталог записей {out_dir}: {exc}\nУкажите другой путь: --out /путь/к/каталогу")
         return 2
-    plan = build_plan()
+    plan = PLANS[plan_name]()
     total = sum(len(b.prompts) for b in plan)
     done = total - sum(len(pending_indices(b, out_dir)) for b in plan)
     print(f"Каталог записей: {out_dir}\nГотово {done} из {total}. Enter — записать, r — переписать предыдущий, s — пропустить блок, q — выйти.\n")
@@ -284,13 +313,15 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="каталог для WAV и manifest.jsonl")
     parser.add_argument("--plan", action="store_true", help="только показать план, микрофон не открывать")
+    parser.add_argument("--set", dest="plan_name", choices=sorted(PLANS), default="base",
+                        help="base — основной набор (169 клипов), extra — дополнительный (короткие «Краб», похожие слова)")
     args = parser.parse_args(argv)
     if args.plan:
-        for b in build_plan():
+        for b in PLANS[args.plan_name]():
             print(f"{b.key:18s} {b.label}  {len(b.prompts):3d} клипов × {b.clip_sec:g} с — {b.hint}")
         return 0
     try:
-        return run(args.out)
+        return run(args.out, args.plan_name)
     except KeyboardInterrupt:
         print("\nПрервано. Прогресс сохранён.")
         return 130

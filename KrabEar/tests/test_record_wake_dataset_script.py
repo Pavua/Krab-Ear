@@ -99,3 +99,39 @@ def test_write_wav_is_atomic_no_tmp_left(tmp_path):
     target = tmp_path / "x.wav"
     m.write_wav(target, b"\x01\x00" * 160)
     assert target.exists() and not list(tmp_path.glob("*.tmp"))
+
+
+def test_extra_plan_is_disjoint_from_base_and_balanced():
+    """Дополнительный набор пишет в тот же каталог: ключи блоков не должны совпасть с основными,
+    иначе pending_indices сочтёт новые клипы уже записанными (или затрёт старые)."""
+    m = _load()
+    base_keys = {b.key for b in m.build_plan()}
+    extra = m.build_extra_plan()
+    assert len({b.key for b in extra}) == len(extra)
+    assert not base_keys & {b.key for b in extra}
+    assert all(b.label in ("pos", "neg") and b.prompts for b in extra)
+    pos = sum(len(b.prompts) for b in extra if b.label == "pos")
+    neg = sum(len(b.prompts) for b in extra if b.label == "neg")
+    assert pos >= 30 and neg >= 50
+    # позитивы дополнительного набора — именно «Краб»: слово есть в каждой подсказке
+    assert all("Краб" in p for b in extra if b.label == "pos" for p in b.prompts)
+    # негативы не содержат слово «Краб» как отдельное слово (иначе обучим ложные «не Краб»)
+    for b in extra:
+        if b.label == "neg":
+            assert all(p.split("(")[0].strip().lower().split(", ")[-1] != "краб" for p in b.prompts)
+            assert not any(w.strip(",.!?").lower() == "краб" for p in b.prompts for w in p.split())
+
+
+def test_cli_set_extra_prints_extra_plan_without_microphone(capsys):
+    m = _load()
+    assert m.main(["--plan", "--set", "extra"]) == 0
+    out = capsys.readouterr().out
+    assert "pos_short" in out and "neg_short_words" in out and "pos_normal" not in out
+
+
+def test_run_uses_chosen_plan_name():
+    tree = ast.parse(SCRIPT.read_text(encoding="utf-8"))
+    run_def = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run")
+    assert [a.arg for a in run_def.args.args] == ["out_dir", "plan_name"]
+    src = ast.get_source_segment(SCRIPT.read_text(encoding="utf-8"), run_def)
+    assert "PLANS[plan_name]()" in src
