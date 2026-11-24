@@ -300,12 +300,7 @@ extension HistoryPanelController {
 
         // Переключаемся на History tab и скроллим к найденной строке.
         if mainTabView.selectedTabViewItem?.identifier as? String != PanelTab.history.rawValue {
-            // Поиск индекса History tab; в default layout = 1 (Dictation=0, History=1).
-            for (idx, tab) in mainTabView.tabViewItems.enumerated() where (tab.identifier as? String) == PanelTab.history.rawValue {
-                mainTabView.selectTabViewItem(at: idx)
-                tabSelector?.setSelected(true, forSegment: idx)
-                break
-            }
+            selectPanelTab(.history)
         }
         tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
         tableView.scrollRowToVisible(row)

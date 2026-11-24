@@ -112,8 +112,7 @@ extension HistoryPanelController {
         diagnosticsSection?.setExpanded(true, animated: true)
         // Switch to Dictation tab if not already there
         if mainTabView.selectedTabViewItem?.identifier as? String != PanelTab.dictation.rawValue {
-            mainTabView.selectTabViewItem(at: 0)
-            tabSelector?.setSelected(true, forSegment: 0)
+            selectPanelTab(.dictation)
         }
     }
 
@@ -383,6 +382,4 @@ extension HistoryPanelController {
         _ = vc.view
     }
 
-    /// Индекс сегмента «Диагностика» в tabSelector (после «Автозвонки», index 5).
-    var diagnosticsTabSegmentIndex: Int { 5 }
 }

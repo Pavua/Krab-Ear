@@ -24,39 +24,38 @@ extension HistoryPanelController {
         keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self, self.window?.isKeyWindow == true else { return event }
 
+            // Ctrl+⌘S — показать/свернуть боковую панель (стандартное сочетание macOS).
+            if event.modifierFlags.contains([.command, .control]),
+               event.charactersIgnoringModifiers?.lowercased() == "s" {
+                self.panelShell.toggleSidebarMode()
+                return nil
+            }
+
             if event.modifierFlags.contains(.command) {
                 switch event.charactersIgnoringModifiers {
                 case "1":
-                    self.tabSelector.selectedSegment = 0
-                    self.mainTabView.selectTabViewItem(at: 0)
+                    self.selectPanelTab(.dictation)
                     return nil
                 case "2":
-                    self.tabSelector.selectedSegment = 1
-                    self.mainTabView.selectTabViewItem(at: 1)
+                    self.selectPanelTab(.liveTranslation)
                     return nil
                 case "3":
-                    self.tabSelector.selectedSegment = 2
-                    self.mainTabView.selectTabViewItem(at: 2)
+                    self.selectPanelTab(.history)
                     return nil
                 case "4":
-                    self.tabSelector.selectedSegment = 3
-                    self.mainTabView.selectTabViewItem(at: 3)
+                    self.selectPanelTab(.conversation)
                     return nil
                 case "5":
-                    self.tabSelector.selectedSegment = 4
-                    self.mainTabView.selectTabViewItem(at: 4)
+                    self.selectPanelTab(.callAutomation)
                     return nil
                 case "6":
-                    self.tabSelector.selectedSegment = 5
-                    self.mainTabView.selectTabViewItem(at: 5)
+                    self.selectPanelTab(.diagnostics)
                     return nil
                 case "7":
-                    self.tabSelector.selectedSegment = 6
-                    self.mainTabView.selectTabViewItem(at: 6)
+                    self.selectPanelTab(.archive)
                     return nil
                 case "f":
-                    self.tabSelector.selectedSegment = 2
-                    self.mainTabView.selectTabViewItem(at: 2)
+                    self.selectPanelTab(.history)
                     self.window?.makeFirstResponder(self.searchField)
                     return nil
                 case "r":
@@ -126,6 +125,7 @@ extension HistoryPanelController {
         ⌘I  Хранилище
         Esc  Закрыть
         ⌘/  Эта справка
+        Ctrl+⌘S  Боковая панель
         """
     }
 }

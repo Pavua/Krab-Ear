@@ -44,6 +44,4 @@ extension HistoryPanelController {
 
     // MARK: - Segment index helper
 
-    /// Индекс сегмента «Автозвонки» в tabSelector (после «Разговор с AI»).
-    var callAutomationSegmentIndex: Int { 4 }
 }

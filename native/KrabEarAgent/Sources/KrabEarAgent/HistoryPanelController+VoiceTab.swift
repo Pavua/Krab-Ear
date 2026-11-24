@@ -146,8 +146,7 @@ extension HistoryPanelController {
         // async tab-sync block. Без этого showPanel resets to History tab.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }
-            self.mainTabView.selectTabViewItem(at: 3)
-            self.tabSelector.selectedSegment = 3
+            self.selectPanelTab(.conversation)
             self.conversationVC?.startConversation()
         }
     }

@@ -121,6 +121,13 @@ final class RedesignTokensTests: XCTestCase {
         XCTAssertEqual(KrabEarTheme.Typography.pageTitle.pointSize, 28, accuracy: 0.6)
     }
 
+    func test_largeTextTokens_are15and13_andFollowScale() {
+        XCTAssertEqual(KrabEarTheme.Typography.bodyLarge.pointSize, 15, accuracy: 0.1)
+        XCTAssertEqual(KrabEarTheme.Typography.captionLarge.pointSize, 13, accuracy: 0.1)
+        KrabEarTheme.Typography.scale = 1.15
+        XCTAssertEqual(KrabEarTheme.Typography.bodyLarge.pointSize, 17, accuracy: 0.6)
+    }
+
     func test_scale_defaultIsOne_soExistingFontsUnchanged() {
         XCTAssertEqual(KrabEarTheme.Typography.scale, 1.0)
         XCTAssertEqual(KrabEarTheme.Typography.body.pointSize, 13, accuracy: 0.1)

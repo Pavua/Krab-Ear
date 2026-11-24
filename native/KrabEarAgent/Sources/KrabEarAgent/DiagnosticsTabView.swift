@@ -151,8 +151,18 @@ final class DiagnosticsTabViewController: NSViewController {
             outerStack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             outerStack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
 
-            root.widthAnchor.constraint(greaterThanOrEqualToConstant: Layout.minWidth),
-            root.heightAnchor.constraint(greaterThanOrEqualToConstant: Layout.minHeight),
+            // Минимумы — НЕ обязательные (749): окно допускает контент уже 650 pt
+            // (рейка при 640), обязательный констрейнт давал конфликт раскладки.
+            {
+                let c = root.widthAnchor.constraint(greaterThanOrEqualToConstant: Layout.minWidth)
+                c.priority = NSLayoutConstraint.Priority(749)
+                return c
+            }(),
+            {
+                let c = root.heightAnchor.constraint(greaterThanOrEqualToConstant: Layout.minHeight)
+                c.priority = NSLayoutConstraint.Priority(749)
+                return c
+            }(),
 
             // Все секции — на всю ширину стека минус внешние поля.
             filtersBar.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -2 * Layout.outerPadding),

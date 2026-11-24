@@ -22,17 +22,26 @@ extension HistoryPanelController {
         )
     }
 
-    @objc func onTabSelectorChanged() {
-        let index = tabSelector.selectedSegment
-        guard index >= 0, index < mainTabView.numberOfTabViewItems else { return }
-        // Disable implicit animation при переключении табов —
-        // уменьшает мерцание NSVisualEffectView (Liquid Glass) карточек,
-        // которые иначе re-render во время анимации.
+    /// Единственный путь смены раздела. Источник правды — mainTabView; делегат
+    /// tabView(_:didSelect:) пинует размер, зеркалит выбор в каркас и сохраняет ui_last_tab.
+    func selectPanelTab(_ tab: PanelTab) {
+        let index = mainTabView.indexOfTabViewItem(withIdentifier: tab.rawValue)
+        guard index != NSNotFound else { return }
+        // Без неявной анимации: иначе мерцают NSVisualEffectView карточек.
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0
             ctx.allowsImplicitAnimation = false
             mainTabView.selectTabViewItem(at: index)
         }
+    }
+
+    /// Зеркалит выбор mainTabView в боковую панель и заголовок шапки.
+    /// Чистое представление (без IPC и сохранения) — безопасно звать под isSyncingTabs.
+    func syncTabSelectorFromTabView() {
+        let raw = String(describing: mainTabView.selectedTabViewItem?.identifier ?? PanelTab.history.rawValue)
+        let tab = PanelTab.from(settingsValue: raw)
+        panelShell.sidebar.select(tab)
+        panelShell.header.title = tab.title
     }
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
@@ -59,10 +68,10 @@ extension HistoryPanelController {
             contentView.needsLayout = true
             contentView.layoutSubtreeIfNeeded()
         }
+        // Зеркалим всегда (и при тихом восстановлении ui_last_tab): иначе подсветка
+        // раздела расходится с показанным содержимым. Сохранение — только по действию пользователя.
+        syncTabSelectorFromTabView()
         guard !isSyncingTabs, !isSyncingSettings else { return }
-        if let item = tabViewItem {
-            tabSelector.selectedSegment = mainTabView.indexOfTabViewItem(item)
-        }
         let raw = String(describing: tabViewItem?.identifier ?? PanelTab.history.rawValue)
         let tab = PanelTab.from(settingsValue: raw)
         // Сохраняем последнюю вкладку вне main thread — sync IPC read() на main вызывал AppHang
