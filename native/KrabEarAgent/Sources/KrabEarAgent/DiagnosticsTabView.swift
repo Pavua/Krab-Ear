@@ -151,16 +151,17 @@ final class DiagnosticsTabViewController: NSViewController {
             outerStack.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             outerStack.bottomAnchor.constraint(equalTo: root.bottomAnchor),
 
-            // Минимумы — НЕ обязательные (749): окно допускает контент уже 650 pt
-            // (рейка при 640), обязательный констрейнт давал конфликт раскладки.
+            // Минимумы — ниже windowSizeStayPut (500): с приоритетом выше 500 AppKit РАСШИРЯЕТ
+            // окно под них (замер: окно 640 оставалось 858 pt на «Диагностике»). Обязательный
+            // констрейнт давал конфликт раскладки.
             {
                 let c = root.widthAnchor.constraint(greaterThanOrEqualToConstant: Layout.minWidth)
-                c.priority = NSLayoutConstraint.Priority(749)
+                c.priority = NSLayoutConstraint.Priority(490)
                 return c
             }(),
             {
                 let c = root.heightAnchor.constraint(greaterThanOrEqualToConstant: Layout.minHeight)
-                c.priority = NSLayoutConstraint.Priority(749)
+                c.priority = NSLayoutConstraint.Priority(490)
                 return c
             }(),
 
@@ -278,8 +279,8 @@ final class DiagnosticsTabViewController: NSViewController {
         // Configure table columns
         let colTime = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("time"))
         colTime.title = "Время"
-        colTime.width = 100
-        colTime.minWidth = 80
+        colTime.width = 90
+        colTime.minWidth = 70
 
         let colSeverity = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("severity"))
         colSeverity.title = "Серьёзность"
@@ -289,17 +290,22 @@ final class DiagnosticsTabViewController: NSViewController {
         let colComponent = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("component"))
         colComponent.title = "Компонент"
         colComponent.width = 110
-        colComponent.minWidth = 80
+        colComponent.minWidth = 70
 
         let colMessage = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("message"))
         colMessage.title = "Сообщение"
-        colMessage.resizingMask = .autoresizingMask
-        colMessage.minWidth = 150
+        colMessage.resizingMask = [.autoresizingMask, .userResizingMask]
+        colMessage.minWidth = 100
+        // Под ширину подстраиваются «Сообщение» и «Компонент»; время/серьёзность/действие —
+        // фиксированные. Минимум таблицы ≈ 450 pt — помещается при окне 640.
+        for col in [colTime, colSeverity] { col.resizingMask = .userResizingMask }
+        colComponent.resizingMask = [.autoresizingMask, .userResizingMask]
 
         let colAction = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("action"))
         colAction.title = "Действие"
         colAction.width = 90
         colAction.minWidth = 70
+        colAction.resizingMask = .userResizingMask
 
         tableView.addTableColumn(colTime)
         tableView.addTableColumn(colSeverity)
@@ -315,8 +321,14 @@ final class DiagnosticsTabViewController: NSViewController {
         tableView.usesAlternatingRowBackgroundColors = true
         tableView.backgroundColor = .clear
         tableView.headerView?.wantsLayer = true
-        tableView.translatesAutoresizingMaskIntoConstraints = false
-        tableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
+        // Таблица — документ скролла под его управлением (autoresizing), колонки сжимаются под
+        // ширину карточки: раньше ширина = сумма колонок и таблица вылезала за край на 20 pt.
+        tableView.columnAutoresizingStyle = .uniformColumnAutoresizingStyle
+        // Стиль .inset (по умолчанию с macOS 11) добавляет ~20 pt полей на колонку: минимум
+        // таблицы был 640 pt при 588 доступных. .plain укладывает те же колонки в ~555 pt.
+        tableView.style = .plain
+        // Межколоночный зазор по умолчанию 17 pt: 540 + 5×17 = 625 pt при 586 доступных.
+        tableView.intercellSpacing = NSSize(width: 8, height: 0)
 
         let scrollView = NSScrollView()
         scrollView.documentView = tableView

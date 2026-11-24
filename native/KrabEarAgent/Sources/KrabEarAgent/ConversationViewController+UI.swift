@@ -211,6 +211,26 @@ extension ConversationViewController {
         settingsCard.contentStackView.addArrangedSubview(disclosureRow)
         settingsCard.contentStackView.addArrangedSubview(settingsDrawer)
         root.addArrangedSubview(settingsCard)
+
+        // Явные ширины (урок #2240, класс «схлопнутой карточки»): вертикальный стек с
+        // alignment .leading ставит детей по их intrinsic size — «Диалог» был 72 pt из 652.
+        // Карточки — во всю ширину корня минус поля; строки и блоки внутри карточек —
+        // во всю ширину содержимого карточки (подписи оставляем по своему размеру).
+        // Приоритет 490 (< windowSizeStayPut 500): заполняем ширину, но широкий ряд кнопок
+        // не распирает окно (замер: окно 640 оставалось 960 pt на «Разговоре»).
+        let inset = root.edgeInsets.left + root.edgeInsets.right
+        func fill(_ v: NSView, _ container: NSView, _ constant: CGFloat) {
+            let c = v.widthAnchor.constraint(equalTo: container.widthAnchor, constant: constant)
+            c.priority = NSLayoutConstraint.Priority(490)
+            c.isActive = true
+        }
+        for card in root.arrangedSubviews {
+            fill(card, root, -inset)
+            guard let themed = card as? ThemeCardView else { continue }
+            for child in themed.contentStackView.arrangedSubviews where !(child is NSTextField) {
+                fill(child, themed.contentStackView, 0)
+            }
+        }
     }
 
     // MARK: - Settings drawer content

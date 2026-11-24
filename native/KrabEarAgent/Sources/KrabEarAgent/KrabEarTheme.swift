@@ -295,16 +295,94 @@ public extension KrabEarTheme {
         }
     }
     
+    /// «Растянуть на ширину контейнера», но с приоритетом НИЖЕ windowSizeStayPut (500).
+    /// Обязательная привязка позволяла длинной однострочной подписи (сопротивление сжатию 750)
+    /// распирать карточку, а через неё — окно: замер ресайза — окно 640 оставалось 1266–1407 pt.
+    /// С приоритетом 490 карточка заполняет ширину, но содержимое не может расширить окно.
+    static func fillWidth(_ view: NSView, of container: NSView) -> NSLayoutConstraint {
+        let c = view.widthAnchor.constraint(equalTo: container.widthAnchor)
+        c.priority = NSLayoutConstraint.Priority(490)
+        return c
+    }
+
     static func styleCheckbox(_ checkbox: NSButton) {
         checkbox.setButtonType(.switch)
         checkbox.font = Typography.body
     }
 }
 
+/// Вертикальный стек, который сам растягивает вложенные карточки и секции на всю ширину.
+///
+/// Корень «схлопнутых карточек» (#2240, редизайн 2026-11): NSStackView с alignment .leading
+/// ставит детей по их intrinsic size, и каждая карточка/секция без отдельного констрейнта
+/// сжималась до содержимого (замер: «Быстрые пресеты» 498 из 1392 pt). Теперь ширина задаётся
+/// при добавлении — декларативно, без поштучных правок в каждом месте построения. Подписи,
+/// кнопки и прочие контролы остаются по своему размеру (их растягивание исказило бы вид).
+@MainActor
+public final class CardFillingStackView: NSStackView {
+    public override func addArrangedSubview(_ view: NSView) {
+        super.addArrangedSubview(view)
+        fillIfContainer(view)
+    }
+
+    public override func insertArrangedSubview(_ view: NSView, at index: Int) {
+        super.insertArrangedSubview(view, at: index)
+        fillIfContainer(view)
+    }
+
+    private func fillIfContainer(_ view: NSView) {
+        guard orientation == .vertical, view is ThemeCardView || view is CollapsibleSectionView else { return }
+        // 999, а не required: если место построения уже задало свою ширину, конфликта нет.
+        // Констрейнт снимется сам, когда view уберут из стека (AppKit удаляет связи с уходящим view).
+        let c = view.widthAnchor.constraint(equalTo: widthAnchor, constant: -(edgeInsets.left + edgeInsets.right))
+        c.priority = NSLayoutConstraint.Priority(999)
+        c.isActive = true
+    }
+}
+
+/// Горизонтальная строка контролов, которая встаёт столбиком, когда ей не хватает ширины.
+///
+/// Корень «сжатых подписей» (замер ресайза 2026-11): строки «Gateway URL: [поле] API key: [поле]
+/// [Проверить]», «Источник звонка: [выбор] [флажок] [флажок]» не помещались в узкий раздел, и
+/// AppKit сжимал подписи до 4 pt. Решение принимается по фактической потребности строки
+/// (сумма собственных ширин элементов) против доступной ширины родителя — потребность не
+/// зависит от ориентации, поэтому переключение не «мигает» туда-обратно.
+@MainActor
+public final class AdaptiveRowStackView: NSStackView {
+    /// Ширина, нужная строке в одну линию.
+    public var requiredHorizontalWidth: CGFloat {
+        let visible = arrangedSubviews.filter { !$0.isHidden }
+        let widths = visible.map { v -> CGFloat in
+            let w = v.intrinsicContentSize.width
+            return w != NSView.noIntrinsicMetric ? w : v.fittingSize.width
+        }
+        return widths.reduce(0, +) + spacing * CGFloat(max(visible.count - 1, 0)) + edgeInsets.left + edgeInsets.right
+    }
+
+    /// Доступная ширина — от родителя (строка в стеке с .leading сама не растянута).
+    private var availableWidth: CGFloat {
+        guard let parent = superview else { return bounds.width }
+        return parent.bounds.width - frame.minX
+    }
+
+    public override func layout() {
+        let available = availableWidth
+        if available > 0 {
+            let vertical = requiredHorizontalWidth > available + 0.5
+            let target: NSUserInterfaceLayoutOrientation = vertical ? .vertical : .horizontal
+            if orientation != target {
+                orientation = target
+                alignment = vertical ? .leading : .centerY
+            }
+        }
+        super.layout()
+    }
+}
+
 @MainActor
 public class ThemeCardView: NSVisualEffectView {
 
-    public let contentStackView = NSStackView()
+    public let contentStackView: NSStackView = CardFillingStackView()
     private let titleLabel = NSTextField(labelWithString: "")
     private let containerStack = NSStackView()
 
@@ -390,6 +468,10 @@ public class ThemeCardView: NSVisualEffectView {
         addSubview(containerStack)
 
         NSLayoutConstraint.activate([
+            // Корень схлопывания карточек: containerStack выравнивает по .leading, и без явной
+            // ширины contentStackView сжимался до intrinsic size содержимого — растянуть
+            // строку или поле во всю карточку было нельзя. Содержимое — всегда во всю карточку.
+            KrabEarTheme.fillWidth(contentStackView, of: containerStack),
             containerStack.topAnchor.constraint(equalTo: topAnchor, constant: KrabEarTheme.Metrics.cardPadding),
             containerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KrabEarTheme.Metrics.cardPadding),
             containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.cardPadding),
@@ -704,7 +786,8 @@ public class CollapsibleSectionView: NSView {
     public let disclosureButton = NSButton(frame: .zero)
     public let titleLabel = NSTextField(labelWithString: "")
     public let headerStack = NSStackView()
-    public let contentStackView = NSStackView()
+    /// Карточки и вложенные секции растягиваются на всю ширину сами (CardFillingStackView).
+    public let contentStackView: NSStackView = CardFillingStackView()
     private let containerStack = NSStackView()
     private let headerSeparator = NSBox()
     /// Хранилище состояния раскрытия; `.standard` сохраняет production-поведение.
@@ -836,6 +919,9 @@ public class CollapsibleSectionView: NSView {
         addSubview(containerStack)
 
         NSLayoutConstraint.activate([
+            // Как в ThemeCardView: без явной ширины стек содержимого секции сжимался до
+            // intrinsic size и тянул за собой карточки внутри (замер: 498 из 1392 pt).
+            KrabEarTheme.fillWidth(contentStackView, of: containerStack),
             containerStack.topAnchor.constraint(equalTo: topAnchor),
             containerStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             containerStack.trailingAnchor.constraint(equalTo: trailingAnchor),
