@@ -413,70 +413,27 @@ extension HistoryPanelController {
         guard !isSyncingSettings else { return }
         let raw = voiceGatewayURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         applySettingsPatch(["voice_gateway_url": raw])
+        refreshConversationGatewayConfig(gatewayURL: raw)
     }
 
     @objc func onVoiceGatewayAPIKeyChanged() {
         guard !isSyncingSettings else { return }
         let raw = voiceGatewayAPIKeyField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         applySettingsPatch(["voice_gateway_api_key": raw])
+        refreshConversationGatewayConfig(apiKey: raw)
+        voiceGatewayConnectionView.apply(keyStatus: raw.isEmpty ? .missing : .saved)
     }
 
+    /// Кнопка проверки старой строки: тот же честный итог, что в карточке
+    /// (раньше показывала сырой JSON /health как «Gateway доступен», хотя /health — без ключа).
     @objc func onCheckVoiceGateway() {
-        var url = voiceGatewayURLField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        if url.isEmpty {
-            url = "http://127.0.0.1:8090"
-        }
-        if url.hasSuffix("/") {
-            url.removeLast()
-        }
-        guard let healthURL = URL(string: "\(url)/health") else {
-            showInfoAlert(title: "Voice Gateway", body: "Некорректный URL: \(url)")
-            return
-        }
+        selectVoiceGatewayCardTab()
+        runVoiceGatewayCheck()
+    }
 
-        voiceGatewayCheckButton.isEnabled = false
-        voiceGatewayCheckButton.title = "Проверяю..."
-
-        var request = URLRequest(url: healthURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 3.0)
-        request.httpMethod = "GET"
-
-        let task = URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.voiceGatewayCheckButton.isEnabled = true
-                self.voiceGatewayCheckButton.title = "Проверить Gateway"
-
-                if let error {
-                    self.showInfoAlert(title: "Voice Gateway", body: "Связь не установлена: \(error.localizedDescription)")
-                    return
-                }
-
-                guard let http = response as? HTTPURLResponse else {
-                    self.showInfoAlert(title: "Voice Gateway", body: "Gateway вернул некорректный ответ.")
-                    return
-                }
-
-                let payloadPreview: String
-                if let data, let text = String(data: data, encoding: .utf8), !text.isEmpty {
-                    payloadPreview = text
-                } else {
-                    payloadPreview = "(пустой ответ)"
-                }
-
-                if 200 <= http.statusCode && http.statusCode < 300 {
-                    self.showInfoAlert(
-                        title: "Voice Gateway",
-                        body: "Gateway доступен.\nURL: \(healthURL.absoluteString)\nHTTP: \(http.statusCode)\nОтвет: \(payloadPreview)"
-                    )
-                } else {
-                    self.showInfoAlert(
-                        title: "Voice Gateway",
-                        body: "Gateway ответил с ошибкой.\nURL: \(healthURL.absoluteString)\nHTTP: \(http.statusCode)\nОтвет: \(payloadPreview)"
-                    )
-                }
-            }
-        }
-        task.resume()
+    /// Открывает вкладку «Разговор с AI», где живёт карточка подключения.
+    @objc func selectVoiceGatewayCardTab() {
+        mainTabView.selectTabViewItem(withIdentifier: PanelTab.conversation.rawValue)
     }
 
     // MARK: - applySettingsPatch
