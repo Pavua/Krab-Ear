@@ -29,14 +29,25 @@ from backend.service import BackendService
 
 class TestSharedRecorderConstructorHasNoCap(unittest.TestCase):
     def test_audio_recorder_construction_has_no_max_recording_samples_kwarg(self):
-        source = inspect.getsource(BackendService.__init__)
-        match = re.search(r"AudioRecorder\(([^)]*)\)", source, re.DOTALL)
-        self.assertIsNotNone(
-            match, "AudioRecorder(...) construction call not found in __init__"
-        )
+        # G3-audio-06 (A06-12): прежний regex ``AudioRecorder\(([^)]*)\)`` обрывался на первой
+        # вложенной «)» и не увидел бы max_recording_samples в усложнённом конструкторе.
+        import ast
+        import textwrap
+
+        tree = ast.parse(textwrap.dedent(inspect.getsource(BackendService.__init__)))
+        calls = [
+            n for n in ast.walk(tree)
+            if isinstance(n, ast.Call)
+            and (
+                (isinstance(n.func, ast.Name) and n.func.id == "AudioRecorder")
+                or (isinstance(n.func, ast.Attribute) and n.func.attr == "AudioRecorder")
+            )
+        ]
+        self.assertTrue(calls, "AudioRecorder(...) construction call not found in __init__")
+        kwarg_names = {kw.arg for call in calls for kw in call.keywords}
         self.assertNotIn(
             "max_recording_samples",
-            match.group(1),
+            kwarg_names,
             "Shared AudioRecorder must NOT get a constructor-level "
             "max_recording_samples override — it is shared with meeting "
             "(C2 Live Meeting Overlay), which must not be capped "
