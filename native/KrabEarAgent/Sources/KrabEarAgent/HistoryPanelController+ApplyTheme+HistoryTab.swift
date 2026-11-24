@@ -85,7 +85,7 @@ extension HistoryPanelController {
         advancedCard.contentStackView.addArrangedSubview(secondaryActionsRow)
 
         // Second row for overflow buttons.
-        let secondaryActionsRow2 = NSStackView()
+        let secondaryActionsRow2 = AdaptiveRowStackView()  // встаёт столбиком на узком окне
         secondaryActionsRow2.orientation = .horizontal
         secondaryActionsRow2.spacing = KrabEarTheme.Metrics.standard
         secondaryActionsRow2.alignment = .centerY

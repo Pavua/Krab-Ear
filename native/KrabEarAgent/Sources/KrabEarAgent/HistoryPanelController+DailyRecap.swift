@@ -78,7 +78,8 @@ extension HistoryPanelController {
             isExpanded: false
         )
         
-        let sectionContainer = NSStackView()
+        // CardFillingStackView: карточка во всю ширину (была 258 pt из 1392 — замер ресайза).
+        let sectionContainer = CardFillingStackView()
         sectionContainer.orientation = .vertical
         sectionContainer.addArrangedSubview(card)
         sectionContainer.translatesAutoresizingMaskIntoConstraints = false

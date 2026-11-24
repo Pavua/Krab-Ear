@@ -523,12 +523,14 @@ final class CallAutomationController: NSViewController {
         historyScrollView.heightAnchor.constraint(equalToConstant: 200).isActive = true
         outerStack.addArrangedSubview(historyScrollView)
 
-        // Set widths
+        // Ширины детей — ширина стека МИНУС его поля (12+12): без вычета блоки выходили
+        // за правый край раздела (замер ресайза 2026-11: «ПОСЛЕДНИЕ ЗВОНКИ» за границей).
+        let inset = outerStack.edgeInsets.left + outerStack.edgeInsets.right
         for sub in [inputCard, configBannerCard, activeCallCard, historyScrollView] {
-            sub.widthAnchor.constraint(equalTo: outerStack.widthAnchor).isActive = true
+            sub.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -inset).isActive = true
         }
         for sub in [historyLabel, providerRow, emergencyStopButton] {
-            sub.widthAnchor.constraint(equalTo: outerStack.widthAnchor).isActive = true
+            sub.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -inset).isActive = true
         }
 
         // Embed in outer scroll
@@ -577,7 +579,8 @@ final class CallAutomationController: NSViewController {
 
     private func makeRow(label: NSView, control: NSView) -> NSStackView {
         label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        let row = NSStackView(views: [label, control])
+        let row = AdaptiveRowStackView()  // строка встаёт столбиком на узком окне
+        row.setViews([label, control], in: .leading)
         row.orientation = .horizontal
         row.spacing = KrabEarTheme.Metrics.standard
         row.alignment = .centerY

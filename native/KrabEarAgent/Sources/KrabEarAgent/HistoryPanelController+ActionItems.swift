@@ -71,7 +71,9 @@ extension HistoryPanelController {
         helpLabel.font = KrabEarTheme.Typography.caption
         helpLabel.textColor = NSColor.tertiaryLabelColor
 
-        let actionsRow = NSStackView(views: [extractButton, exportButton, actionItemsLanguageSelector, helpLabel, NSView()])
+        // Ряд встаёт столбиком на узком окне (подсказка уходила за край на 200 pt).
+        let actionsRow = AdaptiveRowStackView()
+        actionsRow.setViews([extractButton, exportButton, actionItemsLanguageSelector, helpLabel, NSView()], in: .leading)
         actionsRow.orientation = .horizontal
         actionsRow.spacing = KrabEarTheme.Metrics.standard
         actionsRow.distribution = .fill

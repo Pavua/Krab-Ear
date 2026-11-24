@@ -285,8 +285,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let vaWakeWordThresholdSlider = NSSlider(value: 0.5, minValue: 0.05, maxValue: 1.0, target: nil, action: nil)
 
     private let topBar = NSStackView()
-    let topSearchRow = NSStackView()
-    let topActionsRow = NSStackView()
+    let topSearchRow = AdaptiveRowStackView()
+    let topActionsRow = AdaptiveRowStackView()
     let helpButton: ThemeSecondaryButton = {
         let b = ThemeSecondaryButton(title: "Справка", target: nil, action: nil)
         b.isTransparentStyle = true
@@ -303,27 +303,28 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         b.isTransparentStyle = true
         return b
     }()
-    let filterRow1 = NSStackView()
-    let filterRow2 = NSStackView()
-    let historyQuickPresetRow = NSStackView()
-    let importRow = NSStackView()
-    let toolsRow = NSStackView()
-    private let controlRow = NSStackView()
-    private let bottomBar1 = NSStackView()
-    private let bottomBar2 = NSStackView()
+    let filterRow1 = AdaptiveRowStackView()
+    let filterRow2 = AdaptiveRowStackView()
+    let historyQuickPresetRow = AdaptiveRowStackView()
+    let importRow = AdaptiveRowStackView()
+    let toolsRow = AdaptiveRowStackView()
+    private let controlRow = AdaptiveRowStackView()
+    private let bottomBar1 = AdaptiveRowStackView()
+    private let bottomBar2 = AdaptiveRowStackView()
     private let settingsBar = NSStackView()
     /// Claude Design A/B variant stack (populated by buildClaudeDesignSettingsSections).
     /// Kept as a var so buildClaudeDesignSettingsSections can replace it on toggle.
     var settingsBarCD = NSStackView()
-    private let settingsRow1 = NSStackView()
-    private let settingsRow2 = NSStackView()
-    private let settingsRow3 = NSStackView()
-    private let settingsRow4 = NSStackView()
-    private let settingsRow5 = NSStackView()
-    private let settingsRow6 = NSStackView()
-    private let settingsRow7 = NSStackView()
-    private let aiSettingsRow1 = NSStackView()
-    private let aiSettingsRow2 = NSStackView()
+    // Строки контролов встают столбиком на узком окне (AdaptiveRowStackView), а не сжимают подписи.
+    private let settingsRow1 = AdaptiveRowStackView()
+    private let settingsRow2 = AdaptiveRowStackView()
+    private let settingsRow3 = AdaptiveRowStackView()
+    private let settingsRow4 = AdaptiveRowStackView()
+    private let settingsRow5 = AdaptiveRowStackView()
+    private let settingsRow6 = AdaptiveRowStackView()
+    private let settingsRow7 = AdaptiveRowStackView()
+    private let aiSettingsRow1 = AdaptiveRowStackView()
+    private let aiSettingsRow2 = AdaptiveRowStackView()
     private let restartButton = ThemeSecondaryButton(title: "Перезапуск", target: nil, action: nil)
     private let stopButton = ThemeSecondaryButton(title: "Остановить", target: nil, action: nil)
     let loadMoreButton: ThemeSecondaryButton = {
@@ -460,13 +461,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     private let liveSettingsBar = NSStackView()
     let liveStack = NSStackView()
     let historyStack = NSStackView()
-    let liveHeaderRow = NSStackView()
-    let voiceGatewayRow = NSStackView()
-    let callAssistConfigRow = NSStackView()
-    let callAssistControlRow = NSStackView()
-    let callPhrasePresetRow = NSStackView()
-    let callPhraseActionRow = NSStackView()
-    let callTimelineRow = NSStackView()
+    let liveHeaderRow = AdaptiveRowStackView()
+    let voiceGatewayRow = AdaptiveRowStackView()
+    let callAssistConfigRow = AdaptiveRowStackView()
+    let callAssistControlRow = AdaptiveRowStackView()
+    let callPhrasePresetRow = AdaptiveRowStackView()
+    let callPhraseActionRow = AdaptiveRowStackView()
+    let callTimelineRow = AdaptiveRowStackView()
     let callAssistOutputScroll = NSScrollView()
     let realtimeScroll = NSScrollView()
     let historyPreviewContainer = NSStackView()
@@ -501,16 +502,16 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     /// и убирает monitor.
     nonisolated(unsafe) var keyboardMonitor: Any?
     // MARK: - Reorganized History action rows
-    let primaryActionsRow = NSStackView()
-    let secondaryActionsRow = NSStackView()
-    let statusRow = NSStackView()
+    let primaryActionsRow = AdaptiveRowStackView()
+    let secondaryActionsRow = AdaptiveRowStackView()
+    let statusRow = AdaptiveRowStackView()
     // MARK: - Diagnostics & Metrics
     var diagnosticsSection: CollapsibleSectionView?
     let diagnosticsButton = ThemeSecondaryButton(title: "Диагностика", target: nil, action: nil)
     let metricsButton = ThemeSecondaryButton(title: "Метрики", target: nil, action: nil)
     let recordingStatsButton = ThemeSecondaryButton(title: "Статистика", target: nil, action: nil)
     let storageInfoButton = ThemeSecondaryButton(title: "Хранилище", target: nil, action: nil)
-    let diagnosticsRow = NSStackView()
+    let diagnosticsRow = AdaptiveRowStackView()
     let diagnosticsOutputScroll = NSScrollView()
     let diagnosticsOutputView = NSTextView()
     // MARK: - Profile Presets & Audio Devices
@@ -520,13 +521,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let audioDeviceSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let testMicButton = ThemeSecondaryButton(title: "Тест микрофона", target: nil, action: nil)
     let micTestResultLabel = NSTextField(labelWithString: "")
-    let profileRow = NSStackView()
-    let audioDeviceRow = NSStackView()
+    let profileRow = AdaptiveRowStackView()
+    let audioDeviceRow = AdaptiveRowStackView()
     // MARK: - Clipboard History
     var clipboardSection: CollapsibleSectionView?
     let clipboardHistoryButton = ThemeSecondaryButton(title: "Буфер обмена", target: nil, action: nil)
     let repasteButton = ThemeSecondaryButton(title: "Вставить повторно", target: nil, action: nil)
-    let clipboardRow = NSStackView()
+    let clipboardRow = AdaptiveRowStackView()
     // MARK: - History enhancements
     let exportSrtButton = ThemeSecondaryButton(title: "Экспорт SRT", target: nil, action: nil)
     let cleanupHistoryButton = ThemeSecondaryButton(title: "Очистка старых", target: nil, action: nil)
@@ -538,7 +539,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let createCalendarEventButton = ThemeSecondaryButton(title: "В Календарь", target: nil, action: nil)
     let sendToImessageButton = ThemeSecondaryButton(title: "iMessage", target: nil, action: nil)
     let sendToTelegramButton = ThemeSecondaryButton(title: "Отправить в Telegram", target: nil, action: nil)
-    let historyEnhancementsRow = NSStackView()
+    let historyEnhancementsRow = AdaptiveRowStackView()
 
     // MARK: - Glossary search (GlossarySearch extension)
     /// Search field placed above the glossary list in the Live Translation tab.
@@ -2194,6 +2195,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
             themeWidthConstraints.append(c)
         }
 
+        // Длинные пояснения в настройках переносятся по словам и не распирают окно.
+        // NSTabView держит в иерархии только выбранную вкладку — обходим все явно.
+        for item in mainTabView.tabViewItems {
+            if let view = item.view { KrabEarTheme.wrapLongLabels(in: view) }
+        }
+
         // --- BUTTON STYLING ---
         // Primary action buttons
         callAssistStartButton.applyThemePrimary()
@@ -2646,15 +2653,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         let width = window?.frame.width ?? 0
         let isVeryNarrow = width < 900
         
-        topSearchRow.orientation = isVeryNarrow ? .vertical : .horizontal
-        topSearchRow.alignment = isVeryNarrow ? .leading : .centerY
-        
-        filterRow1.orientation = isVeryNarrow ? .vertical : .horizontal
-        filterRow2.orientation = isVeryNarrow ? .vertical : .horizontal
-        historyQuickPresetRow.orientation = isVeryNarrow ? .vertical : .horizontal
-        importRow.orientation = isVeryNarrow ? .vertical : .horizontal
-        bottomBar1.orientation = isVeryNarrow ? .vertical : .horizontal
-        bottomBar2.orientation = isVeryNarrow ? .vertical : .horizontal
+        // Ориентацию строк фильтров/импорта/нижних панелей решают сами строки
+        // (AdaptiveRowStackView) по фактической нехватке ширины. Порог «окно < 900» давал
+        // замкнутый круг: широкая строка распирала окно, и оно никогда не становилось < 900.
         
         // Повышаем читаемость: скрываем лишний статус при узком окне
         historyOverviewLabel.isHidden = isVeryNarrow

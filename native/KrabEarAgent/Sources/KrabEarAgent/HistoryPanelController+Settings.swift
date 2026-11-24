@@ -681,7 +681,7 @@ extension HistoryPanelController {
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         spacer.setAccessibilityElement(false)
 
-        let hStack = NSStackView()
+        let hStack = AdaptiveRowStackView()  // строка встаёт столбиком на узком окне
         hStack.orientation = .horizontal
         hStack.distribution = .fill
         hStack.alignment = .centerY

@@ -143,7 +143,8 @@ extension HistoryPanelController {
         trailingStack.spacing = KrabEarTheme.Metrics.tight
         trailingStack.alignment = .centerY
 
-        let row = NSStackView(views: [labelStack, spacer, trailingStack])
+        let row = AdaptiveRowStackView()  // строка встаёт столбиком на узком окне
+        row.setViews([labelStack, spacer, trailingStack], in: .leading)
         row.orientation = .horizontal
         row.distribution = .fill
         row.alignment = .centerY
