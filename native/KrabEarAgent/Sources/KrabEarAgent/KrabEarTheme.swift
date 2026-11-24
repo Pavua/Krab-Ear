@@ -2,6 +2,20 @@ import AppKit
 import CoreText
 import QuartzCore
 
+/// Источник системных флагов доступности. Вынесен отдельно, чтобы тесты могли
+/// подменять значения: реальные настройки Mac разработчика не должны влиять на результат.
+/// Читается из провайдеров динамических цветов (в момент отрисовки), поэтому без `@MainActor`.
+public enum KrabEarAccessibility {
+    /// «Увеличить контраст» в Системных настройках.
+    nonisolated(unsafe) public static var increaseContrast: () -> Bool = {
+        NSWorkspace.shared.accessibilityDisplayShouldIncreaseContrast
+    }
+    /// «Уменьшить прозрачность» в Системных настройках.
+    nonisolated(unsafe) public static var reduceTransparency: () -> Bool = {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
+    }
+}
+
 @MainActor
 public enum KrabEarTheme {
     
@@ -13,26 +27,42 @@ public enum KrabEarTheme {
         public static var windowBackground: NSColor { .clear }
 
         /// Liquid Glass card: 0.5 alpha (было 0.65 — Gemini снизил для better vibrancy)
+        /// При «Уменьшить прозрачность» — сплошной фон (alpha 1.0): собственные
+        /// полупрозрачные цвета AppKit сам не адаптирует.
+        /// Ограничение: потребители, берущие `.cgColor` один раз при создании (≈21 место:
+        /// QuickCapture, GlobalStatusBar, LiveSubtitles, MeetingLive…), увидят смену флага
+        /// только на новых view / после перезапуска; на лету обновляется граница ThemeCardView.
         public static var cardBackground: NSColor {
-            NSColor.controlBackgroundColor.withAlphaComponent(0.5)
+            NSColor(name: nil) { _ in
+                let alpha: CGFloat = KrabEarAccessibility.reduceTransparency() ? 1.0 : 0.5
+                return NSColor.controlBackgroundColor.withAlphaComponent(alpha)
+            }
         }
         // MARK: - Interactive
         public static var accent: NSColor { .controlAccentColor }
 
         // MARK: - Typography colors
         public static var textPrimary: NSColor { .labelColor }
-        public static var textSecondary: NSColor { .secondaryLabelColor }
+        /// Системный `secondaryLabelColor` в светлой теме даёт контраст ≈ 3.9:1 (< 4.5 WCAG AA),
+        /// что плохо для слабого зрения. Берём `labelColor` с alpha 0.70: ≥ 4.5:1 в обеих темах
+        /// (замер — `RedesignTokensTests`), оттенок остаётся «вторичным».
+        public static var textSecondary: NSColor {
+            NSColor(name: nil) { _ in NSColor.labelColor.withAlphaComponent(0.70) }
+        }
         /// Disabled / muted text (replaces legacy textTertiary)
         public static var textDisabled: NSColor { .tertiaryLabelColor }
 
         // MARK: - Borders & Dividers
         /// Dynamic border: white 0.15 в dark mode, black 0.10 в light mode.
         /// Unifies legacy alphas 0.18 (card), 0.12 (overlay), 0.3 (grid) в один semantic token.
+        /// При «Увеличить контраст» граница плотная (alpha 0.60 — заметно ≥ 3:1 к фону).
         public static var border: NSColor {
             NSColor(name: nil) { appearance in
-                appearance.name == .darkAqua
-                    ? NSColor.white.withAlphaComponent(0.15)
-                    : NSColor.black.withAlphaComponent(0.10)
+                let strong = KrabEarAccessibility.increaseContrast()
+                if appearance.name == .darkAqua {
+                    return NSColor.white.withAlphaComponent(strong ? 0.60 : 0.15)
+                }
+                return NSColor.black.withAlphaComponent(strong ? 0.60 : 0.10)
             }
         }
         /// Keep separator alias for backward-compat в нескольких local call sites.
@@ -55,6 +85,17 @@ public enum KrabEarTheme {
     /// Unified typography system designed by Gemini 3.1 Pro (2026-04-16).
     /// 6 tokens покрывают все UI слои. См. docs/FONT_SYSTEM.md для migration notes.
     public enum Typography {
+        /// Множитель размера текста для режима «Размер текста» (1.0 / 1.07 / 1.15).
+        /// Переключатель в панели появится в PR 1 вместе с ростом шрифтов; в PR 0 всегда 1.0,
+        /// поэтому внешний вид не меняется. Применяется только к новым токенам ниже.
+        nonisolated(unsafe) public static var scale: CGFloat = 1.0
+
+        /// Заголовок экрана (24pt bold). Новый токен: прежние шрифты не затронуты.
+        public static var pageTitle: NSFont { .systemFont(ofSize: (24 * scale).rounded(), weight: .bold) }
+
+        /// Наименьший допустимый размер шрифта в интерфейсе (гейт `FontSizeGateTests`).
+        public static let minimumPointSize: CGFloat = 12
+
         /// Primary RealtimeOverlay transcription text (17pt regular)
         public static var display: NSFont { .systemFont(ofSize: 17, weight: .regular) }
 
@@ -187,7 +228,18 @@ public extension KrabEarTheme {
         /// Window root padding, external margins (24pt, был sectionSpacing=16 — shifted к 24pt Gemini recommendation).
         public static let spacious: CGFloat = 24.0
 
+        /// Расширенные ступени сетки 4 pt для экранов редизайна.
+        public static let relaxed: CGFloat = 16.0
+        public static let roomy: CGFloat = 32.0
+
+        // MARK: - Window
+        /// Минимальная ширина главного окна, при которой навигация и вкладки читаемы
+        /// (используется каркасом окна начиная с PR 1; сейчас окно допускает 360 pt).
+        public static let windowMinWidth: CGFloat = 640.0
+
         // MARK: - Radii
+        /// Мелкие чипы и бейджи.
+        public static let chipCornerRadius: CGFloat = 6.0
         public static let cardCornerRadius: CGFloat = 12.0
         /// Концентрический радиус для внутренних элементов (scroll views, text views внутри карточек).
         /// Apple's rule: inner radius = outer radius - padding/3.
@@ -296,6 +348,16 @@ public class ThemeCardView: NSVisualEffectView {
         // dynamic color that matches the Figma `border` token in both appearances.
         layer?.borderColor = KrabEarTheme.Colors.border.cgColor
         layer?.masksToBounds = true
+        // CGColor границы фиксируется в момент присваивания, поэтому смену системных
+        // «Увеличить контраст» / «Уменьшить прозрачность» ловим уведомлением.
+        // Уведомление приходит через центр NSWorkspace; селекторная подписка
+        // снимается сама при деините (блочные подписки копились бы по числу карточек).
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self,
+            selector: #selector(accessibilityOptionsDidChange),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
+            object: nil
+        )
         // Note: drop shadow не применён сознательно — при masksToBounds=true
         // (нужно для rounded corners clipping) layer shadow не рендерится.
         // Для shadow нужен wrapper container view — избыточно для subtle edge.
@@ -326,6 +388,17 @@ public class ThemeCardView: NSVisualEffectView {
             containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.cardPadding),
             containerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -KrabEarTheme.Metrics.cardPadding)
         ])
+    }
+
+    @objc private func accessibilityOptionsDidChange(_ note: Notification) {
+        refreshBorderForAccessibility()
+    }
+
+    /// Пересчитывает границу после смены системных флагов доступности.
+    func refreshBorderForAccessibility() {
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            layer?.borderColor = KrabEarTheme.Colors.border.cgColor
+        }
     }
 
     public override func viewDidChangeEffectiveAppearance() {
