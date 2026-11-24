@@ -710,9 +710,10 @@ Returns: `{path, size_bytes, ts}`
 *(history_service.py)*  
 Восстанавливает историю из резервной копии (текущий файл заменяется).  
 Params: `{backup_path, restore_settings?}`  
-Returns (legacy, OFF-профиль): `{ok: true, restored_entries, backup_date, transaction_id,
-pre_restore_backup, filtered_out_lines, semantic_reindex_required}` либо
-`{ok: false, reason, restored_entries: 0, backup_date: "unknown", pending?, pre_restore_backup?}`.
+Returns (legacy, OFF-профиль): `{ok: true, history_committed: true, restored_entries, backup_date,
+transaction_id, pre_restore_backup, filtered_out_lines, semantic_reindex_required}` либо
+`{ok: false, reason, restored_entries: 0, backup_date: "unknown", pending?, pre_restore_backup?,
+history_committed: false, semantic_reindex_required}` (протокольный отказ legacy-транзакции).
 
 **Два пути, выбираются по текущей `history_encryption_enabled`.**
 
@@ -729,6 +730,26 @@ read-back → `COMMITTED`. Сбой после маркера → `{ok:false, pe
 с маркером; без settings в транзакции — только при доказанной policy OFF).
 Семантический индекс после restore очищается, `semantic_search_status.needs_reindex`
 = true до полной перестройки.
+
+Статусы истории и индекса раздельные (ревью EAR2236-RESTORE-QUAL, C):
+`history_committed` — журналы зафиксированы (COMMITTED); `semantic_reindex_required`
+— индекс обнулён и durable-флаг перестройки стоит (`false` при успехе = сбой сброса
+индекса, история при этом уже зафиксирована; при отказе до маркера = «не
+требуется»: история не менялась). Searcher не загружен → индекс обнуляется на диске.
+
+Докатка legacy (B): точка обслуживания может прийти не сразу после краха
+(auto_backup выключен / privacy ON), процесс в это окно работает. Поэтому staging
+объединяется с ТЕКУЩИМ живым ledger (удаления и purge окна не отменяются), а
+записи окна, которых нет ни в staging, ни в pre-restore копии, переносятся
+(H1, как у encrypted-ветки). Вердикт докатки (`restore_recovery`) несёт
+`records_carried`, `delta_records_carried` (строки статусов окна = хвост живого
+журнала после базы — pre-restore байтов или байтов staging; переносятся по
+порядку, с повторами и без дедупа: статус-дельта без времени, last-write-wins;
+база не найдена → весь журнал окна + warning `status_window_base_unknown`),
+`records_excluded_deleted`, `records_unparsable`, `warnings` и
+`semantic_reindex_required`. Нет pre-restore копии → переносится всё, чего нет в
+staging, warning `prerestore_copy_unavailable`. Staging без маркера (kill до
+маркера) убирает следующий restore под тем же lock.
 
 Исторически (до M04-05) — legacy `copy2`. Принимает **только
 legacy-бэкапы** (`backup_*`, `auto_backup_*`). Каталоги encrypted snapshot'ов,

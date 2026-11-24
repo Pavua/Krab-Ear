@@ -2551,6 +2551,7 @@ def _recovery_result(
     records_excluded_deleted: int = 0,
     records_unparsable: int = 0,
     warnings: list[str] | None = None,
+    semantic_reindex_required: bool | None = None,
 ) -> dict:
     """Единая форма ответа recovery (одно место → один словарь полей).
 
@@ -2558,7 +2559,7 @@ def _recovery_result(
     обязан быть датирован — иначе «последняя попытка» неинтерпретируема: не
     отличить свежий разбор от вчерашнего.
     """
-    return {
+    result = {
         "ok": ok,
         "attempted_at": datetime.now(timezone.utc).isoformat(),
         "pending": pending,
@@ -2581,6 +2582,11 @@ def _recovery_result(
         "extra_markers": list(extra_markers or []),
         "snapshot_pending": snapshot_pending,
     }
+    if semantic_reindex_required is not None:
+        # M04-05 (C): статус индекса отдельно от статуса истории — только там,
+        # где докатка его действительно сбрасывала.
+        result["semantic_reindex_required"] = bool(semantic_reindex_required)
+    return result
 
 
 def recover_pending_restore(
@@ -2781,6 +2787,13 @@ def _recover_pending_restore(
             rolled_forward=True,
             extra_markers=extra,
             snapshot_pending=b1_pending,
+            records_carried=result["records_carried"],
+            delta_records_carried=result["delta_records_carried"],
+            records_at_risk=result["records_at_risk"],
+            records_excluded_deleted=result["records_excluded_deleted"],
+            records_unparsable=result["records_unparsable"],
+            warnings=result["warnings"],
+            semantic_reindex_required=result["semantic_reindex_required"],
         )
 
     # --- Маркер COMMITTING: докатка целевого снимка. ---

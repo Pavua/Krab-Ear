@@ -6014,6 +6014,7 @@ class HistoryService:
                     transaction_id=transaction_id,
                 )
             except SnapshotOperationRefused as exc:
+                index_reset = False
                 if exc.pending:
                     # После COMMITTING живые журналы могли частично смениться:
                     # кэши и in-memory эмбеддинги недействительны, докатка — на
@@ -6021,7 +6022,7 @@ class HistoryService:
                     # сервиса), поэтому семантический индекс сбрасываем сразу.
                     self.store._active_ids = None
                     self.store.reset_search_caches()
-                    self._reset_semantic_index_after_restore()
+                    index_reset = self._reset_semantic_index_after_restore()
                 logger.error(
                     "handle_restore_history: legacy restore отклонён: %s (pending=%s)",
                     exc.reason, exc.pending,
@@ -6030,6 +6031,10 @@ class HistoryService:
                     **refusal,
                     "reason": exc.reason,
                     "pending": bool(exc.pending),
+                    # C: история и индекс — раздельные статусы. До маркера история
+                    # не тронута и индекс не сбрасывался (False = «не требуется»).
+                    "history_committed": False,
+                    "semantic_reindex_required": index_reset,
                     "pre_restore_backup": str(pre_restore) if pre_restore else None,
                 }
 
@@ -6048,6 +6053,7 @@ class HistoryService:
         logger.info("История восстановлена из %s: %d записей", backup_dir, restored_entries)
         return {
             "ok": True,
+            "history_committed": True,
             "restored_entries": restored_entries,
             "backup_date": backup_date,
             "transaction_id": txn["transaction_id"],
@@ -6061,11 +6067,15 @@ class HistoryService:
 
         purge + durable флаг «нужна перестройка» (status().needs_reindex).
         Ошибка не откатывает restore (журналы уже COMMITTED): возвращаем False,
-        и ответ честно говорит, что флаг не поставлен.
+        и ответ честно говорит, что флаг не поставлен. Searcher не загружен →
+        индекс обнуляется на диске (иначе снимок эмбеддингов прежней истории
+        поднялся бы при первой загрузке).
         """
         searcher = self._semantic_searcher
         if searcher is None:
-            return False
+            from backend.semantic_search import invalidate_index_files
+
+            return bool(invalidate_index_files(Path(self.store.data_dir)))
         try:
             searcher.purge_all()
             return bool(searcher.mark_reindex_required())
