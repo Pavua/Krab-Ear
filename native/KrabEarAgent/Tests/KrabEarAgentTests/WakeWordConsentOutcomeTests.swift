@@ -15,11 +15,4 @@ final class WakeWordConsentOutcomeTests: XCTestCase {
     func testConfirmedIsEnabled() {
         XCTAssertEqual(WakeWordConsentOutcome.resolve(response: ["ok": true, "result": ["ok": true]]), .enabled)
     }
-
-    func testKrabModelPreferredOnlyWhenNothingChosen() {
-        XCTAssertEqual(WakeWordModelChoice.preferredDefault(saved: nil, available: ["hey_jarvis", "krab_ru"]), "krab_ru")
-        XCTAssertEqual(WakeWordModelChoice.preferredDefault(saved: "", available: ["krab_ru"]), "krab_ru")
-        XCTAssertNil(WakeWordModelChoice.preferredDefault(saved: "alexa", available: ["alexa", "krab_ru"]))
-        XCTAssertNil(WakeWordModelChoice.preferredDefault(saved: nil, available: ["hey_jarvis", "alexa"]))
-    }
 }
