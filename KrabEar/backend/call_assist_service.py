@@ -323,8 +323,39 @@ class CallAssistService:
     # Handlers (сигнатуры совпадают с BackendService._handle_*)
     # ------------------------------------------------------------------
 
+    def activity_snapshot(self) -> dict:
+        """Неблокирующая metadata сессии звонка (KEG2-09 проба покоя), без текста."""
+        from backend.activity_diagnostics import nonblocking_snapshot
+
+        def read():
+            reasons = []
+            if self._state.get("active"):
+                reasons.append("call_session")
+            if self._capture_gen is not None:
+                reasons.append("call_capture")
+            if self._stop_owner is not None:
+                reasons.append("call_stopping")
+            return {"known": True, "state": "busy" if reasons else "idle", "busy_reasons": reasons}
+
+        return nonblocking_snapshot((self._lock,), read)
+
     def handle_start(self, params: dict[str, Any]) -> dict[str, Any]:
-        """Запускает сессию ассистента звонка с интеграцией Voice Gateway."""
+        """Запускает сессию ассистента звонка с интеграцией Voice Gateway.
+
+        KEG2-09: допуск через общий maintenance-fence берётся ДО любого
+        побочного эффекта (recorder.start, gateway) — CallAssist стартует
+        recorder напрямую, мимо RecordingCoreService, и без этого обходил бы
+        барьер безопасного рестарта.
+        """
+        from backend.maintenance_fence import REASON_MAINTENANCE, optional_admission
+
+        with optional_admission(self, "call_assist") as admitted:
+            if not admitted:
+                logger.warning("handle_start: отклонено — идёт обслуживание backend")
+                return {"ok": False, "error": REASON_MAINTENANCE, "status": "idle"}
+            return self._handle_start_admitted(params)
+
+    def _handle_start_admitted(self, params: dict[str, Any]) -> dict[str, Any]:
         gen = object()
         session_id = f"call_{uuid.uuid4().hex[:12]}"
         old_capture_gen: object | None = None

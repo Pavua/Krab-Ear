@@ -55,6 +55,33 @@ class _FakeSettingsSvc:
 # Tests — atomic apply (W1339 F1)
 # ---------------------------------------------------------------------------
 
+class TestApplyPresetNeverClaimsAppliedOnSaveFailure(unittest.TestCase):
+    """G3-audio-02 (A02-08): фейк раньше ВСЕГДА сохранял успешно — «applied=True» при отказе
+    записи настроек был бы ложью, но тест этого не проверял."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmpdir.cleanup)
+
+    def _lib_with_failing_save(self, exc: Exception) -> ConfigPresetsLibrary:
+        class _FailingSettingsSvc(_FakeSettingsSvc):
+            def handle_set_settings(self, params: dict) -> dict:
+                self.calls.append(dict(params))
+                raise exc
+
+        return ConfigPresetsLibrary(data_dir=self._tmpdir.name, settings_svc=_FailingSettingsSvc())
+
+    def test_validation_failure_propagates_and_is_not_reported_as_applied(self) -> None:
+        lib = self._lib_with_failing_save(ValueError("Настройки содержат ошибки: stt_model"))
+        with self.assertRaises(ValueError):
+            lib.handle_apply_config_preset({"name": "meeting"})
+
+    def test_io_failure_propagates_and_is_not_reported_as_applied(self) -> None:
+        lib = self._lib_with_failing_save(OSError("диск полон"))
+        with self.assertRaises(OSError):
+            lib.handle_apply_config_preset({"name": "meeting"})
+
+
 class TestApplyConfigPresetAtomicWritesSettings(unittest.TestCase):
     """F1: handle_apply_config_preset должен атомарно записывать настройки."""
 

@@ -30,48 +30,51 @@ class TestRecorderErrorBusInjectedInBackendService(unittest.TestCase):
     """BackendService.__init__ must wire self._error_bus into self.recorder._error_bus."""
 
     def _build_minimal_service(self):
-        """Construct BackendService with all heavy deps mocked out."""
+        """BackendService с лёгкими фейками коллабораторов (как в test_dispatch_invariants_wave654).
+
+        G3-audio-04 (A04-03): прежняя сборка патчила ``backend.service.AudioEngine`` — имени там
+        давно нет; AttributeError глотался ``skipTest``, и проводка ErrorBus не проверялась
+        НИКОГДА. Теперь — реальный конструктор с инжектированными фейками, без патча несуществующих
+        имён и без blanket-skip.
+        """
         import tempfile
-        from unittest.mock import MagicMock, patch
+        from pathlib import Path
 
-        tmp_dir = tempfile.mkdtemp()
+        from backend.service import BackendService
+        from backend.state_store import StateStore
+        from test_dispatch_invariants_wave654 import (
+            _FakeRecorder, _FakeTranscriber, _FakeTranslator,
+        )
 
-        # Patch all heavy imports / constructors that would fail in CI
-        patches = [
-            patch("backend.service.AudioEngine", MagicMock()),
-            patch("backend.service.Transcriber", MagicMock()),
-            patch("backend.service.Translator", MagicMock()),
-            patch("backend.service.LLMRewriter", MagicMock()),
-            patch("backend.service.StateStore", MagicMock()),
-            patch("backend.service.MetricsCollector", MagicMock()),
-            patch("backend.service.AudioRecorder", MagicMock()),
-            patch("backend.service.EventBus", MagicMock()),
-        ]
-        started = []
-        for p in patches:
-            started.append(p.start())
-
-        try:
-            from backend.service import BackendService
-            svc = BackendService(data_dir=tmp_dir)
-        finally:
-            for p in patches:
-                p.stop()
-
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = StateStore(Path(tmp.name) / "data")
+        svc = BackendService(
+            store=store,
+            recorder=_FakeRecorder(),
+            transcriber=_FakeTranscriber(),
+            translator=_FakeTranslator(),
+        )
+        # BackendService поднимает демон-потоки (DiskSpaceMonitor и др.): без close() они
+        # роняют chunk на shutdown (CLAUDE.md «BackendService daemon-thread teardown»).
+        # addCleanup — LIFO: close() выполнится ДО удаления временного каталога.
+        self.addCleanup(svc.close)
         return svc
 
     def test_recorder_error_bus_injected(self):
-        """After __init__, recorder._error_bus must equal service._error_bus."""
-        try:
-            svc = self._build_minimal_service()
-        except Exception:
-            self.skipTest("BackendService construction failed in CI environment")
+        """After __init__, recorder._error_bus must BE service._error_bus.
 
-        # The recorder mock should have had _error_bus set on it
-        recorder = svc.recorder
-        self.assertIsNotNone(
-            getattr(recorder, "_error_bus", None),
-            "recorder._error_bus must be wired in BackendService.__init__ (W1652 F1)",
+        G3-audio-04 (A04-03): раньше проверялось лишь isNotNone у атрибута MagicMock (он создаётся
+        автоматически при обращении — тест был зелёным и без проводки), а любое исключение
+        конструктора превращалось в skip. Теперь — тождество объектов, без skip.
+        """
+        svc = self._build_minimal_service()
+
+        self.assertIsNotNone(svc._error_bus, "BackendService must create an ErrorBus")
+        self.assertIs(
+            svc.recorder._error_bus,
+            svc._error_bus,
+            "recorder._error_bus must be the exact service ErrorBus (W1652 F1)",
         )
 
 

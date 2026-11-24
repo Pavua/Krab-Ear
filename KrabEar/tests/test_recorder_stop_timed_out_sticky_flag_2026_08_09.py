@@ -39,6 +39,7 @@ import sys
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 
@@ -142,9 +143,13 @@ class StopTimedOutFlagClearedTest(unittest.TestCase):
         rec = AudioRecorder()
         with rec._lock:
             rec._stop_timed_out = True
-        self.assertTrue(rec.start())
-        self.assertFalse(rec.is_stop_timed_out)
-        rec.stop()
+        # G3-audio-04 (A04-01): worker подменён — иначе start() открывал бы живой микрофон.
+        with patch.object(rec, "_worker", lambda: rec._stop_event.wait(2.0)):
+            self.assertTrue(rec.start())
+            try:
+                self.assertFalse(rec.is_stop_timed_out)
+            finally:
+                rec.stop()
 
     def test_cleared_by_pending_result_early_return_branch(self) -> None:
         """Mutation-coverage (Fable-ревью LOW): ветка early-return с уже

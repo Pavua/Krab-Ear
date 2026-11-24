@@ -154,6 +154,8 @@ def _make_service(tmp_dir, recorder=None, transcriber=None):
 class AudioSelfHealWiringTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.mkdtemp()
+        # G3-audio-02 (A02-12): каталог раньше оставался в TMPDIR после теста.
+        self.addCleanup(__import__("shutil").rmtree, self._tmp, ignore_errors=True)
 
     def test_defaults_to_none_when_not_wired(self):
         """A service that never got _audio_selfheal injected must behave

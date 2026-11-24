@@ -2926,10 +2926,16 @@ class HistoryService:
             )
 
         # --- C. W1734: Audit log entry ---
+        # G3-P02-02: обязательная запись идёт через строгий вызов с тремя исходами.
+        # Реальный логгер ловит ошибку записи ВНУТРИ и ничего не бросает, поэтому
+        # одного try/except вокруг log_event мало: complete=True мог выдаваться без
+        # подтверждённой записи. Факт удаления (счётчики выше) и итог аудита
+        # хранятся раздельно: сбой аудита не означает, что удаление не прошло.
+        privacy_audit_outcome = "unknown"
         try:
             from backend.privacy_audit import get_privacy_audit_logger
             audit = get_privacy_audit_logger()
-            audit.log_event(
+            privacy_audit_outcome = audit.log_event_strict(
                 category="privacy",
                 action="purge_all_data",
                 details={
@@ -2953,9 +2959,18 @@ class HistoryService:
                 },
             )
         except Exception:
+            # Исключение на самом вызове (нет логгера/метода, сбой импорта): о записи
+            # ничего не известно — трактуем как «unknown», fail-closed.
             logger.warning("purge_all_data: privacy audit log failed", exc_info=True)
-            # G3-P02-02: комплаенс-запись не легла — «complete» без неё было бы
-            # ложным all-clear. Удаление уже выполнено (повтор purge идемпотентен).
+            privacy_audit_outcome = "unknown"
+        if privacy_audit_outcome not in ("confirmed", "not_written"):
+            # Неожиданный возврат (не одна из констант) — не угадываем: «unknown».
+            privacy_audit_outcome = "unknown"
+        if privacy_audit_outcome != "confirmed":
+            # Комплаенс-запись не подтверждена — «complete» без неё было бы ложным
+            # all-clear. Удаление уже выполнено (повтор purge идемпотентен), откат
+            # не обещаем. Код "privacy_audit" сохранён для прежних потребителей;
+            # различие not_written/unknown — в поле ответа `privacy_audit`.
             secondary_errors.append("privacy_audit")
 
         add_breadcrumb(
@@ -3037,6 +3052,9 @@ class HistoryService:
             "encryption_key_shredded": encryption_key_shredded,
             # Флаг политики purge НЕ меняет — сообщаем состояние пост-фактум.
             "history_encryption_enabled_after": history_encryption_enabled_after,
+            # G3-P02-02: итог ОБЯЗАТЕЛЬНОГО аудита отдельно от факта удаления:
+            # "confirmed" | "not_written" (доказанно нет записи) | "unknown".
+            "privacy_audit": privacy_audit_outcome,
             "complete": len(secondary_errors) == 0,
             "errors": secondary_errors,
         }
