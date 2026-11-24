@@ -222,7 +222,7 @@ extension ConversationViewController {
         styleLabel(langLabel, font: KrabEarTheme.Typography.body)
         langLabel.textColor = KrabEarTheme.Colors.textSecondary
         langLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
-        langHintSelector.addItems(withTitles: ["Авто", "RU", "EN", "ES"])
+        langHintSelector.addItems(withTitles: ["Авто (как RU)", "RU", "EN", "ES"])
         langHintSelector.selectItem(at: ConversationViewController.languageHintValues.firstIndex(of: config.languageHint) ?? 0)
         langHintSelector.target  = self
         langHintSelector.action  = #selector(onLangHintChanged)

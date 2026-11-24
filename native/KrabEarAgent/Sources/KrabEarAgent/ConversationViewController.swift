@@ -324,6 +324,19 @@ final class ConversationViewController: NSViewController {
         conversationState = .listening
     }
 
+    /// Строка расшифровки о смене голоса; известные причины шлюза — по-русски, неизвестные — как есть.
+    static func voiceFallbackLine(reason: String) -> String {
+        let known = [
+            "clone_timeout": "клон не успел ответить",
+            "clone_busy": "клон занят",
+            "clone_error": "сбой голосового клона",
+            "clone_unavailable": "клон недоступен",
+        ]
+        let trimmed = reason.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return "— Голос временно упрощён" }
+        return "— Голос временно упрощён (\(known[trimmed] ?? trimmed))"
+    }
+
     /// Классифицировать провал WS по текущему состоянию и озвучить.
     /// .connecting = не смогли подключиться; иначе — обрыв посреди сессии.
     func classifyAndAnnounceWSFailure() {
@@ -457,9 +470,7 @@ final class ConversationViewController: NSViewController {
 
         case .voiceFallback(let reason, let fromEngine, let toEngine):
             AgentLogger.shared.info("[ConversationVC] conv.voice_fallback (\(reason)): \(fromEngine) -> \(toEngine)")
-            appendTranscriptLine(reason.isEmpty
-                ? "— Голос временно упрощён"
-                : "— Голос временно упрощён (\(reason))")
+            appendTranscriptLine(Self.voiceFallbackLine(reason: reason))
 
         case .interrupted(let reason):
             AgentLogger.shared.info("[ConversationVC] conv.interrupted (\(reason))")

@@ -91,6 +91,22 @@ final class ConversationLanguageAndVoiceFallbackTests: XCTestCase {
         XCTAssertEqual([reason, from, to], ["", "", ""])
     }
 
+    func test_voiceFallbackLine_translatesKnownReasons_keepsUnknownAndEmpty() {
+        typealias C = ConversationViewController
+        XCTAssertEqual(C.voiceFallbackLine(reason: "clone_busy"), "— Голос временно упрощён (клон занят)")
+        XCTAssertEqual(C.voiceFallbackLine(reason: " clone_error "), "— Голос временно упрощён (сбой голосового клона)")
+        XCTAssertEqual(C.voiceFallbackLine(reason: "brand_new_reason"), "— Голос временно упрощён (brand_new_reason)")
+        XCTAssertEqual(C.voiceFallbackLine(reason: ""), "— Голос временно упрощён")
+        XCTAssertEqual(C.voiceFallbackLine(reason: "  "), "— Голос временно упрощён")
+    }
+
+    func test_autoLanguageLabel_isHonest() {
+        let vc = ConversationViewController(config: .default)
+        vc.loadView()
+        vc.viewDidLoad()
+        XCTAssertEqual(vc.langHintSelector.itemTitles.first, "Авто (как RU)")
+    }
+
     func test_voiceFallback_appendsTranscriptLine_keepsState_noSpeech() {
         let vc = ConversationViewController(config: .default)
         vc.loadView()
@@ -101,7 +117,7 @@ final class ConversationLanguageAndVoiceFallbackTests: XCTestCase {
         vc.conversationState = .speaking
         vc.handleDownlinkEvent(.voiceFallback(reason: "clone_timeout", fromEngine: "local_clone", toEngine: "kokoro"))
         XCTAssertTrue(vc.transcriptBuffer.contains("Голос временно упрощён"), vc.transcriptBuffer)
-        XCTAssertTrue(vc.transcriptBuffer.contains("clone_timeout"))
+        XCTAssertTrue(vc.transcriptBuffer.contains("клон не успел ответить"), vc.transcriptBuffer)
         XCTAssertEqual(vc.conversationState, .speaking, "смена голоса не обрывает разговор")
         XCTAssertTrue(spoken.isEmpty, "не озвучиваем, иначе фраза сама ломает голос ответа")
     }
