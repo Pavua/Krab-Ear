@@ -42,6 +42,9 @@ extension HistoryPanelController {
         let tab = PanelTab.from(settingsValue: raw)
         panelShell.sidebar.select(tab)
         panelShell.header.title = tab.title
+        // Содержимое, собранное после applyVisualTheme (ленивые вью, пересборки), получает
+        // правило подписей при показе вкладки. Повторный проход идемпотентен.
+        if let view = mainTabView.selectedTabViewItem?.view { KrabEarTheme.wrapLongLabels(in: view) }
     }
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {

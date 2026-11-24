@@ -28,6 +28,9 @@ extension HistoryPanelController {
         label.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
         label.textColor = KrabEarTheme.Colors.textSecondary
         label.translatesAutoresizingMaskIntoConstraints = false
+        // Подпись вне стека (в обёртке): общее правило подписей её не видит — сокращаем сами.
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
 
         let container = NSView()
         container.translatesAutoresizingMaskIntoConstraints = false

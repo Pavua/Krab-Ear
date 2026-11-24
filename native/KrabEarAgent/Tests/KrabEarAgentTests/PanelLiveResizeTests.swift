@@ -9,6 +9,9 @@
    - AppKit не пишет «Unable to simultaneously satisfy constraints» (stderr перехватывается);
    - однострочные подписи не обрезаны без многоточия.
  KRAB_RESIZE_REPORT=1 печатает полный отчёт (для расследования), не только нарушения.
+ Стресс (test_liveResize_longTextStress): все подписи ~200 символов + проверка обрезки
+ перенесённого текста по высоте. KRAB_STRESS_DIAG=1 — самые широкие «листья» на 640 и их
+ горизонтальные констрейнты с приоритетом > 500 (так найден виновник «окно не сжалось»).
 */
 
 import XCTest
@@ -140,7 +143,7 @@ final class PanelLiveResizeTests: XCTestCase {
             // 2) Выход за правую границу раздела.
             if !hScroll, f.maxX > rootW + 1, !(v is NSScroller) {
                 issues.append(Issue(tab: tab.title, width: width, theme: theme, kind: "за границей",
-                                    detail: "\(name(v)) maxX \(Int(f.maxX)) > \(Int(rootW))"))
+                                    detail: "\(name(v)) maxX \(Int(f.maxX)) > \(Int(rootW)); путь: \(path(v, root))"))
             }
             // 3) Однострочная подпись обрезана без многоточия.
             if let label = v as? NSTextField, !label.isEditable, !hScroll,
@@ -207,6 +210,73 @@ final class PanelLiveResizeTests: XCTestCase {
         }
         XCTAssertEqual(conflicts, 0, "конфликты констрейнтов при ресайзе: \(conflicts)")
         XCTAssertTrue(unique.isEmpty, "нарушения раскладки при ресайзе (\(unique.count)):\n" + unique.prefix(40).map(\.description).joined(separator: "\n"))
+    }
+
+    /// Подпись с переносом, у которой текст не помещается по высоте (видна только часть строк).
+    private func heightClipped(_ label: NSTextField) -> Bool {
+        guard !label.isEditable, label.cell?.wraps == true, label.maximumNumberOfLines == 0,
+              label.bounds.width > 0, let cell = label.cell else { return false }
+        let need = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.bounds.width,
+                                                   height: .greatestFiniteMagnitude)).height
+        return need > label.bounds.height + 2
+    }
+
+    /// Стресс (гейт Opus #2254): текст подписей меняется в рантайме (статусы, ошибки шлюза,
+    /// пояснения). Все подписи получают ~200 символов — окно всё равно сжимается до 640,
+    /// ничто не выходит за границу, перенесённый текст не обрезан по высоте.
+    func test_liveResize_longTextStress() {
+        let controller = makeController()
+        guard let window = controller.window else { return XCTFail("нет окна") }
+        let long = String(repeating: "очень длинное пояснение ", count: 9)
+        var issues: [Issue] = []
+        var conflictLog = ""
+        for tab in Tab.ordered {
+            conflictLog += captureStderr {
+                controller.selectPanelTab(tab)
+                expandAllSections(in: controller)
+                guard let root = controller.mainTabView.selectedTabViewItem?.view else { return }
+                for case let label as NSTextField in descendants(root)
+                where !label.isEditable && !label.stringValue.isEmpty && !insideHorizontalScroll(label, under: root) {
+                    label.stringValue = long
+                }
+                for w: CGFloat in [860, 640, 1100, 640] {
+                    window.setContentSize(NSSize(width: w, height: 820))
+                    window.contentView?.layoutSubtreeIfNeeded()
+                    window.contentView?.layoutSubtreeIfNeeded()
+                    issues += inspect(tab: tab, controller: controller, width: w, theme: "стресс")
+                    if ProcessInfo.processInfo.environment["KRAB_STRESS_DIAG"] != nil, w == 640 {
+                        for v in descendants(root) where isEffectivelyVisible(v, under: root)
+                            && v.subviews.isEmpty == false && v.frame.width > 700 && !insideHorizontalScroll(v, under: root) {
+                            let kids = v.subviews.filter { $0.frame.width > 700 }
+                            if kids.isEmpty {
+                                print("DIAG[\(tab.title)] \(name(v)) w=\(Int(v.frame.width)) TAMIC=\(v.translatesAutoresizingMaskIntoConstraints) путь: \(path(v, root))")
+                                for c in v.constraintsAffectingLayout(for: .horizontal) where c.priority.rawValue > 500 {
+                                    print("   C \(c)")
+                                }
+                                for s in v.subviews {
+                                    print("   KID \(name(s)) w=\(Int(s.frame.width)) intr=\(Int(s.intrinsicContentSize.width)) fit=\(Int(s.fittingSize.width)) CR=\(s.contentCompressionResistancePriority(for: .horizontal).rawValue)")
+                                }
+                            }
+                        }
+                    }
+                    for case let label as NSTextField in descendants(root)
+                    where isEffectivelyVisible(label, under: root) && !insideHorizontalScroll(label, under: root)
+                        && heightClipped(label) {
+                        issues.append(Issue(tab: tab.title, width: w, theme: "стресс", kind: "обрезана по высоте",
+                                            detail: "\(name(label)) высота \(Int(label.bounds.height)); путь: \(path(label, root))"))
+                    }
+                }
+            }
+        }
+        let conflicts = conflictLog.components(separatedBy: "Unable to simultaneously satisfy").count - 1
+        var seen = Set<String>()
+        let unique = issues.filter { seen.insert("\($0.tab)|\($0.kind)|\($0.detail)").inserted }
+        if ProcessInfo.processInfo.environment["KRAB_RESIZE_REPORT"] != nil {
+            print("=== Стресс длинного текста: нарушений \(unique.count), конфликтов \(conflicts)")
+            unique.forEach { print("  \($0)") }
+        }
+        XCTAssertEqual(conflicts, 0, "конфликты констрейнтов (стресс): \(conflicts)")
+        XCTAssertTrue(unique.isEmpty, "нарушения при длинном тексте (\(unique.count)):\n" + unique.prefix(40).map(\.description).joined(separator: "\n"))
     }
 
     /// Перенесённая длинная подпись получает высоту нескольких строк (а не обрезается по высоте).

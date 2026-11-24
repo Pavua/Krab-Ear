@@ -390,6 +390,10 @@ final class DiagnosticsTabViewController: NSViewController {
         memoryStatsLabel.textColor = KrabEarTheme.Colors.textSecondary
         memoryStatsLabel.translatesAutoresizingMaskIntoConstraints = false
         memoryStatsLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // Полоса фиксированной высоты (28 pt): строка памяти — в одну строку с многоточием,
+        // перенос обрезался бы по высоте (стресс-проход ресайза).
+        memoryStatsLabel.lineBreakMode = .byTruncatingTail
+        memoryStatsLabel.maximumNumberOfLines = 1
         stack.addArrangedSubview(memoryStatsLabel)
 
         return stack

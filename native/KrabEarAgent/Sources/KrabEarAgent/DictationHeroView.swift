@@ -258,6 +258,7 @@ final class DictationHeroView: NSView {
     private var buttonPreferredWidth: NSLayoutConstraint!
     private var buttonFullWidth: NSLayoutConstraint!
     private var valueLabels: [String: NSTextField] = [:]
+    private var titleLabels: [String: NSTextField] = [:]
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -274,6 +275,7 @@ final class DictationHeroView: NSView {
         statusLabel.font = KrabEarTheme.Typography.captionLarge
         statusLabel.textColor = KrabEarTheme.Colors.textSecondary
         statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(250), for: .horizontal)
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
@@ -291,7 +293,10 @@ final class DictationHeroView: NSView {
 
         summaryGrid.translatesAutoresizingMaskIntoConstraints = false
         // Сводка компактна: пары стоят рядом, а не растягиваются на всю карточку.
-        summaryGrid.setContentHuggingPriority(.required, for: .horizontal)
+        // Порядок приоритетов: растяжение стеком (250) < hugging сетки (300) < CR подписей
+        // (400) < windowSizeStayPut (500). С .required сетка сжимала ярлыки до «Горячая кл…»
+        // (рендер #2255); ниже 250 — растягивалась на всю карточку.
+        summaryGrid.setContentHuggingPriority(NSLayoutConstraint.Priority(300), for: .horizontal)
         summaryGrid.rowSpacing = KrabEarTheme.Metrics.standard
         summaryGrid.columnSpacing = KrabEarTheme.Metrics.relaxed
 
@@ -407,14 +412,24 @@ final class DictationHeroView: NSView {
         let perRow = isNarrow ? 1 : 2
         var row: [NSView] = []
         for pair in pairs {
-            let title = NSTextField(labelWithString: pair.title)
+            // Переиспользуем, как и значения: NSGridView.removeRow не убирает вью из иерархии,
+            // и новые ярлыки на каждом переключении узко/широко оставляли старые «призраками».
+            let title = titleLabels[pair.key] ?? NSTextField(labelWithString: pair.title)
+            titleLabels[pair.key] = title
             title.font = KrabEarTheme.Typography.captionLarge
             title.textColor = KrabEarTheme.Colors.textSecondary
+            title.lineBreakMode = .byTruncatingTail
+            // Сетка не стек — общее правило подписей её не видит. Значение (движок, профиль)
+            // приходит из настроек любой длины; с сопротивлением 750 сетка распирала окно
+            // до 3955 pt (стресс-проход). 400 (< 500, > hugging сетки 300): окно не растёт,
+            // обычный текст не сокращается, длинный — с многоточием.
+            title.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(400), for: .horizontal)
             let value = valueLabels[pair.key] ?? {
                 let v = NSTextField(labelWithString: "—")
                 v.font = KrabEarTheme.Typography.bodyLarge
                 v.textColor = KrabEarTheme.Colors.textPrimary
                 v.lineBreakMode = .byTruncatingTail
+                v.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(400), for: .horizontal)
                 return v
             }()
             valueLabels[pair.key] = value

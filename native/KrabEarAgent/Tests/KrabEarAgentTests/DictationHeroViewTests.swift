@@ -121,6 +121,39 @@ final class DictationHeroViewTests: XCTestCase {
         XCTAssertLessThan(f.width, 900, "сводка растянута на всю карточку: \(f.width)")
     }
 
+    /// Стресс-проход ресайза: при переключении узко/широко подписи-ярлыки создавались заново,
+    /// а старые оставались в сетке с прежней рамкой — «призраки» поверх новой раскладки.
+    func test_summary_narrowWideToggle_leavesNoOrphanLabels() {
+        let hero = DictationHeroView()
+        hero.apply(snapshot(.idle))
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1280, height: 900))
+        root.addSubview(hero)
+        let width = hero.widthAnchor.constraint(equalToConstant: 1280)
+        NSLayoutConstraint.activate([hero.topAnchor.constraint(equalTo: root.topAnchor),
+                                     hero.leadingAnchor.constraint(equalTo: root.leadingAnchor), width])
+        guard let grid = Self.find(NSGridView.self, in: hero) else { return XCTFail("нет сетки") }
+        for w in [CGFloat(559), 1280, 559, 1280] {
+            width.constant = w
+            root.layoutSubtreeIfNeeded()
+        }
+        XCTAssertEqual(grid.subviews.count, 8, "в сетке 4 пары «ярлык/значение», без лишних вью")
+    }
+
+    /// Офлайн-рендер #2255: сетка с hugging .required сжимала ярлыки и значения (CR 250)
+    /// до «Горячая кл…», «Движо…», «…». При обычном тексте и достаточной ширине — без многоточий.
+    func test_summary_shortTextNotTruncated_atNormalWidths() {
+        for width in [CGFloat(559), 860, 1280] {
+            let hero = DictationHeroView()
+            hero.apply(snapshot(.idle))
+            _ = host(hero, width: width)
+            guard let grid = Self.find(NSGridView.self, in: hero) else { return XCTFail("нет сетки") }
+            for case let label as NSTextField in grid.subviews {
+                XCTAssertGreaterThanOrEqual(label.bounds.width, label.intrinsicContentSize.width - 1,
+                                            "«\(label.stringValue)» обрезана при \(width): \(label.bounds.width) < \(label.intrinsicContentSize.width)")
+            }
+        }
+    }
+
     private static func find<T: NSView>(_ type: T.Type, in view: NSView) -> T? {
         if let v = view as? T { return v }
         for s in view.subviews { if let v = find(type, in: s) { return v } }

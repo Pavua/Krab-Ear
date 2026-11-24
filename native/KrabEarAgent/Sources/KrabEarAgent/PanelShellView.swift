@@ -130,9 +130,17 @@ final class PanelSidebarRow: NSView {
         guard rail != isRail else { return }
         isRail = rail
         label.isHidden = rail
-        labelLeading.isActive = !rail
-        iconLeading.isActive = !rail
-        iconCenterX.isActive = rail
+        // Сначала снимаем, потом ставим: иначе при выходе из рейки iconLeading и iconCenterX
+        // на миг активны вместе — конфликт констрейнтов (XCTest: «Conflicting constraints»).
+        if rail {
+            labelLeading.isActive = false
+            iconLeading.isActive = false
+            iconCenterX.isActive = true
+        } else {
+            iconCenterX.isActive = false
+            iconLeading.isActive = true
+            labelLeading.isActive = true
+        }
     }
 
     func setSelected(_ selected: Bool) {
