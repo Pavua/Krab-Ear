@@ -60,11 +60,19 @@ final class DictationHeroViewTests: XCTestCase {
     /// Гейт Opus #2250: 17 pt — не «крупный» текст WCAG, нужен ≥ 4.5:1 во всех фазах и темах.
     /// Системные синий/красный давали белому 3.4–4.0 — заливка обязана затемняться.
     func test_recordButton_textContrastAtLeast4_5_allPhasesBothThemes() {
+        // Меряем НАСТОЯЩУЮ отрисованную кнопку (layer + цвет подписи), а не копию логики цветов:
+        // смена цвета фазы в applyColors без затемнения сделает тест красным.
         for ap in [NSAppearance(named: .aqua)!, NSAppearance(named: .darkAqua)!] {
             for phase in [DictationPhase.idle, .recording(durationSec: 3), .finalizing] {
-                guard let fill = RecordButtonView.resolvedFill(for: phase, appearance: ap) else { return XCTFail("нет заливки") }
-                XCTAssertEqual(RecordButtonView.bestTextColor(on: fill), .white, "белый текст сохраняется (\(phase))")
-                let r = RecordButtonView.whiteContrast(on: fill)
+                let button = RecordButtonView()
+                button.appearance = ap
+                button.apply(phase: phase)
+                guard let fill = button.renderedFillColor?.usingColorSpace(.sRGB),
+                      let text = button.renderedTextColor?.usingColorSpace(.sRGB),
+                      let lf = RecordButtonView.luminance(fill), let lt = RecordButtonView.luminance(text)
+                else { return XCTFail("нет цветов кнопки") }
+                XCTAssertEqual(text, NSColor.white.usingColorSpace(.sRGB), "белый текст сохраняется (\(phase))")
+                let r = (max(lf, lt) + 0.05) / (min(lf, lt) + 0.05)
                 XCTAssertGreaterThanOrEqual(r, 4.5, "контраст текста кнопки \(phase) в \(ap.name.rawValue): \(r)")
             }
         }

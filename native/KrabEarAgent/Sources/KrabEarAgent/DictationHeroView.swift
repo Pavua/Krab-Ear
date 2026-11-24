@@ -194,18 +194,9 @@ final class RecordButtonView: NSView {
         return white >= black ? .white : .black
     }
 
-    /// Фактическая заливка фазы в данном оформлении (для тестов контраста).
-    static func resolvedFill(for phase: DictationPhase, appearance: NSAppearance) -> NSColor? {
-        var out: NSColor?
-        appearance.performAsCurrentDrawingAppearance {
-            switch phase {
-            case .idle, .finalizing: out = NSColor.controlAccentColor.usingColorSpace(.sRGB)
-            case .recording: out = NSColor.systemRed.usingColorSpace(.sRGB)
-            case .offline: out = nil
-            }
-        }
-        return out.map { fillForReadableWhiteText($0) }
-    }
+    /// Для тестов контраста: фактические заливка и цвет текста отрисованной кнопки.
+    var renderedFillColor: NSColor? { layer?.backgroundColor.flatMap { NSColor(cgColor: $0) } }
+    var renderedTextColor: NSColor? { titleLabel.textColor }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
