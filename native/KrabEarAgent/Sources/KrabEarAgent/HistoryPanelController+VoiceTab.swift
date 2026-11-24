@@ -77,11 +77,20 @@ extension HistoryPanelController {
             }
         }
 
+        // Сверху — карточка подключения к шлюзу (ключ и проверка там, где видна ошибка),
+        // ниже — сам разговор.
+        let gatewayCard = voiceGatewayConnectionView
+        voiceContentView.addSubview(gatewayCard)
+        setupVoiceGatewayCard()
+
         // Встроить view VC в content view таба.
         vc.view.translatesAutoresizingMaskIntoConstraints = false
         voiceContentView.addSubview(vc.view)
         NSLayoutConstraint.activate([
-            vc.view.topAnchor.constraint(equalTo: voiceContentView.topAnchor),
+            gatewayCard.topAnchor.constraint(equalTo: voiceContentView.topAnchor),
+            gatewayCard.leadingAnchor.constraint(equalTo: voiceContentView.leadingAnchor),
+            gatewayCard.trailingAnchor.constraint(equalTo: voiceContentView.trailingAnchor),
+            vc.view.topAnchor.constraint(equalTo: gatewayCard.bottomAnchor, constant: KrabEarTheme.Metrics.standard),
             vc.view.leadingAnchor.constraint(equalTo: voiceContentView.leadingAnchor),
             vc.view.trailingAnchor.constraint(equalTo: voiceContentView.trailingAnchor),
             vc.view.bottomAnchor.constraint(equalTo: voiceContentView.bottomAnchor),
@@ -97,7 +106,7 @@ extension HistoryPanelController {
     /// Контракт VG (verified live 2026-06-20): `WS /v1/sessions/{session_id}/conversation`.
     /// Пример: http://127.0.0.1:8090 → ws://127.0.0.1:8090/v1/sessions/vs_<uuid>/conversation
     /// session_id свободный (vs_-префикс); `?lang=` добавляется в startWebSocketSession; auth — Bearer apiKey.
-    private func buildConversationWSURL(from settings: AgentSettings) -> String {
+    func buildConversationWSURL(from settings: AgentSettings) -> String {
         var base = settings.voiceGatewayURL
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
