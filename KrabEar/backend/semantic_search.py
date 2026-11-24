@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 _SNAPSHOT_VERSION = 1
 
 
+class SnapshotNotPersistedError(RuntimeError):
+    """Запись удалена из RAM-индекса, но снимок на диске обновить не удалось.
+
+    Эмбеддинг удалённой записи остаётся в embeddings_snapshot.npz и вернётся после
+    рестарта — вызывающий обязан считать удаление неполным (ревью #2229, F6).
+    """
+
+
 class SemanticSearcher:
     """Индексирует и ищет историю транскрипций через sentence embeddings.
 
@@ -103,7 +111,17 @@ class SemanticSearcher:
             "model_name": self._model_name,
             "model_error": self._model_error,
             "indexed_count": indexed_count,
+            # Остались файлы старого формата (embeddings.npy/json): они не читаются (префикс
+            # query:→passage: делает векторы несовместимыми, M05-12), индекс содержит лишь новые
+            # записи до полной перестройки (semantic_search_reindex force=True).
+            "needs_reindex": self._legacy_files_present(),
         }
+
+    def _legacy_files_present(self) -> bool:
+        try:
+            return self._embeddings_path.exists() or self._index_path.exists()
+        except OSError:
+            return False
 
     def index_item(self, item_id: str, text: str) -> bool:
         """Добавляет/обновляет embedding для одного элемента.
@@ -182,6 +200,7 @@ class SemanticSearcher:
         indexed = 0
         skipped = 0
         errors = 0
+        persisted = True
 
         try:
             import numpy as np
@@ -226,8 +245,14 @@ class SemanticSearcher:
                                     self._embeddings = np.vstack([self._embeddings, emb[np.newaxis, :]])
                                 self._index.append(eid)
                         self._evict_over_cap_locked()
-                        self._save_locked()
-                    indexed = len(ids_to_encode)
+                        # F9 (ревью #2229): результат записи раньше терялся — indexed=N при отказе
+                        # диска. Полная перестройка (force) заодно снимает legacy-файлы.
+                        persisted = bool(self._save_locked(drop_legacy=force))
+                    if persisted:
+                        indexed = len(ids_to_encode)
+                    else:
+                        errors = len(ids_to_encode)
+                        logger.warning("semantic_search: снимок индекса не записан — indexed не засчитан")
                 except Exception as exc:
                     logger.warning("semantic_search: ошибка batch индексации: %s", exc)
                     errors = len(ids_to_encode)
@@ -368,7 +393,12 @@ class SemanticSearcher:
         logger.info("semantic_search: индекс и файлы embeddings очищены (purge_all)")
 
     def remove_item(self, item_id: str) -> bool:
-        """Remove item from index. Returns True if removed, False if not found.
+        """Remove item from index.
+
+        Returns True если удалено, False если записи в индексе не было (контракт прежний).
+        Raises SnapshotNotPersistedError, если запись убрана из RAM, но снимок на диске
+        обновить не удалось: эмбеддинг остался в embeddings_snapshot.npz и вернётся после
+        рестарта — вызывающий обязан показать неполное удаление (ревью #2229, F6).
 
         Thread-safe. Shifts row indices for all items after the removed one.
         Also persists the updated index to disk.
@@ -391,7 +421,11 @@ class SemanticSearcher:
                 else:
                     self._embeddings = np.delete(self._embeddings, idx, axis=0)
             # G3-MEM-05 (M05-04): вернуть статус подтверждения записи на диск.
-            return bool(self._save_locked())
+            if not self._save_locked():
+                raise SnapshotNotPersistedError(
+                    f"снимок индекса не записан после удаления {item_id}"
+                )
+            return True
         return False
 
     # ------------------------------------------------------------------
@@ -542,16 +576,22 @@ class SemanticSearcher:
             if self._snapshot_path.exists():
                 # G3-MEM-05 (M05-04): единый NPZ — версия формата должна совпадать
                 # с _SNAPSHOT_VERSION; иначе — полная перестройка.
-                data = np.load(str(self._snapshot_path), allow_pickle=False)
-                version = data.get("version", _SNAPSHOT_VERSION)
+                with np.load(str(self._snapshot_path), allow_pickle=False) as data:
+                    snap_version = data.get("version", _SNAPSHOT_VERSION)
+                    snap_vectors = data["vectors"] if "vectors" in data else None
+                    snap_ids = data["ids"] if "ids" in data else None
+                version = snap_version
                 if version != _SNAPSHOT_VERSION:
                     logger.warning(
                         "semantic_search: неверная версия снимка (%s) — полная перестройка",
                         version,
                     )
                     return
-                vectors = data["vectors"]
-                ids = [str(x) for x in data["ids"]]
+                if snap_vectors is None or snap_ids is None:
+                    logger.error("semantic_search: в снимке нет vectors/ids — полная перестройка")
+                    return
+                vectors = snap_vectors
+                ids = [str(x) for x in snap_ids]
                 if vectors.shape[0] != len(ids):
                     logger.error(
                         "semantic_search: несоответствие размеров снимка "
@@ -579,7 +619,7 @@ class SemanticSearcher:
         except Exception as exc:
             logger.warning("semantic_search: не удалось загрузить embeddings с диска: %s", exc)
 
-    def _save_locked(self) -> bool:
+    def _save_locked(self, drop_legacy: bool = False) -> bool:
         """Сохраняет embeddings и индекс на диск атомарно. Должен вызываться под _index_lock.
 
         G3-MEM-05 (M05-04): единый файл-снимок ``embeddings_snapshot.npz`` —
@@ -618,12 +658,16 @@ class SemanticSearcher:
                 except OSError:
                     pass
                 raise
-            # G3-MEM-05 (M05-04): очищаем устаревшие файлы после успешного снимка.
-            for p in (self._embeddings_path, self._index_path):
-                try:
-                    p.unlink(missing_ok=True)
-                except OSError:
-                    pass
+            # G3-MEM-05 (M05-04): устаревшие embeddings.npy/json удаляются ТОЛЬКО после полной
+            # перестройки (drop_legacy=True из index_all(force=True)). Раньше их сносила первая же
+            # единичная индексация — флаг needs_reindex пропадал, хотя индекс содержал лишь новые
+            # записи (ревью #2229, F7). Purge чистит эти файлы так же, как и снимок.
+            if drop_legacy:
+                for p in (self._embeddings_path, self._index_path):
+                    try:
+                        p.unlink(missing_ok=True)
+                    except OSError:
+                        pass
         except Exception as exc:
             logger.warning("semantic_search: не удалось сохранить embeddings: %s", exc)
             # wave-22 LOW: persistence failure was previously swallowed (warning

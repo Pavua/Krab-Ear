@@ -127,6 +127,64 @@ class PurgeVerifySnapshotTests(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class RemoveItemPersistenceTests(unittest.TestCase):
+    """F6/F7 (ревью #2229): отказ записи снимка и путь деградации после апгрейда."""
+
+    def setUp(self) -> None:
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        self.root = self._td.name
+
+    def test_remove_item_raises_when_snapshot_not_persisted(self) -> None:
+        from backend.semantic_search import SnapshotNotPersistedError
+
+        s = _searcher(self.root)
+        self.assertTrue(s.index_item("a", "один"))
+        s._save_locked = lambda drop_legacy=False: False  # диск отказал
+        with self.assertRaises(SnapshotNotPersistedError):
+            s.remove_item("a")
+
+    def test_remove_item_missing_returns_false_without_raising(self) -> None:
+        s = _searcher(self.root)
+        self.assertFalse(s.remove_item("нет такого"))
+
+    def test_cascade_delete_reports_partial_status_when_snapshot_not_persisted(self) -> None:
+        from backend.semantic_search import SnapshotNotPersistedError
+
+        searcher = MagicMock()
+        searcher.remove_item.side_effect = SnapshotNotPersistedError("диск отказал")
+        svc = _make_svc(self.root, item_ids=["x"], semantic=searcher)
+        errors = svc.cascade_delete_artifacts("x", "2020-01-01T00:00:00+00:00", return_errors=True)
+        self.assertTrue(any("semantic" in e for e in errors))
+
+    def test_legacy_files_flag_needs_reindex_and_survive_until_full_rebuild(self) -> None:
+        s = _searcher(self.root)
+        (Path(self.root) / "embeddings.npy").write_bytes(b"legacy")
+        (Path(self.root) / "embeddings_index.json").write_text("[]", encoding="utf-8")
+        self.assertTrue(s.status()["needs_reindex"])
+
+        # единичная индексация НЕ снимает флаг и не сносит legacy (индекс всё ещё неполон)
+        self.assertTrue(s.index_item("new", "новая запись"))
+        self.assertTrue((Path(self.root) / "embeddings.npy").exists())
+        self.assertTrue(s.status()["needs_reindex"])
+
+        # полная перестройка снимает legacy и флаг
+        s._encode_batch = lambda model, texts: __import__("numpy").ones((len(texts), 4), dtype="float32")
+        result = s.index_all([{"id": "n1", "text": "один"}, {"id": "n2", "text": "два"}], force=True)
+        self.assertEqual(result["indexed"], 2)
+        self.assertFalse((Path(self.root) / "embeddings.npy").exists())
+        self.assertFalse((Path(self.root) / "embeddings_index.json").exists())
+        self.assertFalse(s.status()["needs_reindex"])
+
+    def test_index_all_does_not_count_unpersisted_snapshot(self) -> None:
+        s = _searcher(self.root)
+        s._encode_batch = lambda model, texts: __import__("numpy").ones((len(texts), 4), dtype="float32")
+        s._save_locked = lambda drop_legacy=False: False
+        result = s.index_all([{"id": "n1", "text": "один"}], force=True)
+        self.assertEqual(result["indexed"], 0)
+        self.assertEqual(result["errors"], 1)
+
+
 class _ConfirmedAudit:
     def log_event_strict(self, **kwargs):
         return "confirmed"
