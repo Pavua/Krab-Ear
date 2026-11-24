@@ -6,9 +6,30 @@ final class HistoryEncryptionOutcomesTests: XCTestCase {
 
     // MARK: Миграция
 
-    func test_migration_plaintext_zero_without_terminal_status_is_done() {
-        XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: nil), .done)
+    /// G3-P04-04: «0 незашифрованных» без подтверждённого итога — не «Готово»: backend отдаёт
+    /// терминальный статус всегда, а его отсутствие значит «миграция не наша/перезапуск», и
+    /// судьбу plaintext .bak подтвердить нечем.
+    func test_migration_plaintext_zero_without_terminal_status_is_pending_not_done() {
+        XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: nil), .pending)
+        XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: ""), .pending)
         XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: "done"), .done)
+    }
+
+    func test_migration_done_status_with_remaining_plaintext_is_partial() {
+        XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 3, terminalStatus: "done"), .partial(plaintext: 3))
+    }
+
+    func test_presenter_has_pending_branch_without_done_glyph() throws {
+        let url = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("Sources/KrabEarAgent/HistoryPanelController+SecuritySettings.swift")
+        let src = try String(contentsOf: url, encoding: .utf8)
+        let start = try XCTUnwrap(src.range(of: "case .pending:"))
+        let tail = String(src[start.upperBound...])
+        let end = tail.range(of: "case .failed")?.lowerBound ?? tail.endIndex
+        let branch = String(tail[..<end])
+        XCTAssertFalse(branch.contains("Готово"), "pending не должен показывать «Готово»")
+        XCTAssertTrue(branch.contains("не подтвержд"))
     }
 
     func test_migration_backup_cleanup_failed_is_not_done_even_when_plaintext_zero() {
@@ -157,7 +178,7 @@ final class SecuritySettingsWiringContractTests: XCTestCase {
     }
 
     func test_migration_encrypting_is_not_terminal() {
-        XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: "encrypting"), .done)
+        XCTAssertEqual(HistoryMigrationOutcome.resolve(plaintext: 0, terminalStatus: "encrypting"), .pending)
         XCTAssertEqual(
             HistoryMigrationOutcome.resolve(plaintext: 2, terminalStatus: "encrypting"),
             .partial(plaintext: 2))
