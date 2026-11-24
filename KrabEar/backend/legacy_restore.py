@@ -17,9 +17,14 @@
   filesystem → ``os.replace`` атомарен), затем durable маркер ``COMMITTING``
   (``kind: legacy_plaintext`` + size/sha256 каждого файла) ДО первой замены;
 * замены по одной, read-back всех файлов → маркер ``COMMITTED`` → уборка;
-* крах после маркера → ``roll_forward_legacy_locked`` докатывает ТЕ ЖЕ байты
-  из staging (sha256 сверяется с маркером). Ключ и политика ON не нужны —
+* крах после маркера → ``roll_forward_legacy_locked`` докатывает набор из
+  staging (sha256 сверяется с маркером). Ключ и политика ON не нужны —
   в отличие от encrypted-докатки, источник истины здесь сам staging.
+  Докатка может прийти не сразу (первая точка обслуживания после краха), а
+  процесс в это окно работает: ledger объединяется с ТЕКУЩИМ живым, записи,
+  сделанные в окне, переносятся (H1, как у encrypted-ветки);
+* жёсткий kill ДО маркера оставляет staging без маркера — следующий restore
+  под тем же lock'ом убирает его (``sweep_orphan_restore_staging_locked``).
 
 Решения владельца (24.11): tombstones ОБЪЕДИНЯЮТСЯ с живыми (удаление
 пользователя не отменяется restore'ом — как у ветки ON); история и статусы
@@ -43,6 +48,7 @@ from backend.encrypted_snapshot import (
     REASON_MANIFEST_INVALID,
     REASON_PREPARED_MISSING,
     REASON_READBACK_FAILED,
+    REASON_RECOVERY_PENDING,
     RESTORE_MARKER_VERSION,
     RESTORE_STATE_COMMITTED,
     RESTORE_STATE_COMMITTING,
@@ -58,7 +64,10 @@ from backend.encrypted_snapshot import (
     _sha256,
     _write_file_durable,
     _write_restore_marker,
+    restore_marker_dirs,
+    restore_staging_dirs,
 )
+from backend.purge_fs import rmtree_strict
 
 logger = logging.getLogger("KrabEar.Backend.LegacyRestore")
 
@@ -134,9 +143,21 @@ def prepare_legacy_restore_set(*, backup_dir: Path, data_dir: Path) -> tuple[dic
     Вызывается под store-lock (живой ledger читается в том же окне, что и
     замена). Возвращает ``(files, stats)``.
     """
-    backup_dir = Path(backup_dir)
+    files, stats, _blocked = _build_legacy_set(source_dir=backup_dir, data_dir=data_dir,
+                                               source_reason=REASON_LEGACY_UNREADABLE)
+    return files, stats
+
+
+def _build_legacy_set(*, source_dir: Path, data_dir: Path,
+                      source_reason: str) -> tuple[dict[str, bytes], dict[str, int], set[str]]:
+    """Источник (бэкап или staging докатки) ⊕ ТЕКУЩИЙ живой ledger.
+
+    Объединение идемпотентно: повторный проход по уже объединённому набору
+    даёт те же байты, поэтому докатка после повторного краха безопасна.
+    """
+    source_dir = Path(source_dir)
     data_dir = Path(data_dir)
-    backup = {name: _parse_plaintext_journal(backup_dir / name, reason=REASON_LEGACY_UNREADABLE)
+    backup = {name: _parse_plaintext_journal(source_dir / name, reason=source_reason)
               for name in LEGACY_JOURNALS}
     live_tombstones = _parse_plaintext_journal(data_dir / TOMBSTONES_NAME, reason=REASON_LIVE_LEDGER_UNREADABLE)
     live_purged = _parse_plaintext_journal(data_dir / PURGED_NAME, reason=REASON_LIVE_LEDGER_UNREADABLE)
@@ -167,7 +188,155 @@ def prepare_legacy_restore_set(*, backup_dir: Path, data_dir: Path) -> tuple[dic
     files[TOMBSTONES_NAME] = _body(tomb_lines)
     stats = {"history_lines": restored_lines, "filtered_out_lines": filtered,
              "tombstones": len(seen), "blocked_ids": len(blocked)}
-    return files, stats
+    return files, stats, blocked
+
+
+# ----------------------------------------------------------------------
+# Окно pending: записи, сделанные между крахом и докаткой (H1)
+# ----------------------------------------------------------------------
+
+
+def _known_lines(path: Path) -> tuple[set[str], set[str]]:
+    """Строки и id журнала без отказов (для сравнения, не для записи)."""
+    lines: set[str] = set()
+    ids: set[str] = set()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return lines, ids
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        lines.add(line)
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        raw_id = payload.get("id") if isinstance(payload, dict) else None
+        if isinstance(raw_id, str) and raw_id.strip():
+            ids.add(raw_id.strip())
+    return lines, ids
+
+
+def _collect_window_records(*, data_dir: Path, files: dict[str, bytes], staging: Path,
+                            prerestore_dir: Path | None,
+                            blocked: set[str]) -> tuple[dict[str, list[str]], dict[str, int], list[str]]:
+    """Строки живых history/status, которых нет ни в staging, ни в pre-restore копии.
+
+    Живой набор в момент докатки = «до restore» (его хранит pre-restore копия)
+    или частично заменённый staging, плюс то, что владелец записал после краха.
+    Только последнее переносится: прежнее restore сознательно отбрасывает, а
+    staging и так ляжет целиком. Удалённое (``blocked``) не переносится —
+    запрет resurrection сильнее сохранности. Неразбираемая строка не
+    выбрасывается молча: счётчик + warning.
+    """
+    data_dir = Path(data_dir)
+    carry: dict[str, list[str]] = {HISTORY_NAME: [], STATUS_NAME: []}
+    counters = {"carried": 0, "delta_carried": 0, "excluded_deleted": 0, "unparsable": 0}
+    warnings: list[str] = []
+    pre_ok = prerestore_dir is not None and prerestore_dir.is_dir() and not prerestore_dir.is_symlink()
+    if not pre_ok:
+        # Без страховки «прежнее» от «нового» не отличить: переносим всё, чего нет
+        # в staging (сохранность важнее точности), и говорим об этом.
+        warnings.append("prerestore_copy_unavailable")
+    for name in (HISTORY_NAME, STATUS_NAME):
+        live = data_dir / name
+        if live.is_symlink() or not live.is_file():
+            continue
+        known, known_ids = _known_lines_from_bytes(files.get(name, b""))
+        # Сырые строки staging тоже «известны»: при частичной замене живой журнал
+        # уже равен staging, и удалённая в окне запись оттуда — не запись окна.
+        staged_lines, staged_ids = _known_lines(staging / name)
+        known |= staged_lines
+        known_ids |= staged_ids
+        if pre_ok:
+            pre_lines, pre_ids = _known_lines(prerestore_dir / name)
+            known |= pre_lines
+            known_ids |= pre_ids
+        try:
+            text = live.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise SnapshotOperationRefused(REASON_LIVE_LEDGER_UNREADABLE, f"{name} не читается: {exc}") from exc
+        is_history = name == HISTORY_NAME
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            if not line.strip() or line in known:
+                continue
+            try:
+                payload = json.loads(line)
+            except ValueError:
+                payload = None
+            raw_id = payload.get("id") if isinstance(payload, dict) else None
+            if not isinstance(raw_id, str) or not raw_id.strip():
+                counters["unparsable"] += 1
+                warnings.append(f"window_record_unparsable: {name}:{lineno}")
+                continue
+            item_id = raw_id.strip()
+            if item_id in blocked:
+                counters["excluded_deleted"] += 1
+                continue
+            if is_history and item_id in known_ids:
+                continue  # дубль записи по id — две записи одного id в выходе = порча
+            carry[name].append(line)
+            known.add(line)
+            known_ids.add(item_id)
+            counters["carried" if is_history else "delta_carried"] += 1
+    if any(counters.values()):
+        logger.warning("legacy_restore: окно pending — перенесено записей %d, статусов %d, "
+                       "исключено удалённых %d, неразбираемых %d", counters["carried"],
+                       counters["delta_carried"], counters["excluded_deleted"], counters["unparsable"])
+    return carry, counters, warnings
+
+
+def _known_lines_from_bytes(blob: bytes) -> tuple[set[str], set[str]]:
+    lines: set[str] = set()
+    ids: set[str] = set()
+    for line in blob.decode("utf-8").splitlines():
+        if not line.strip():
+            continue
+        lines.add(line)
+        payload = json.loads(line)  # байты собраны нами из проверенных строк
+        raw_id = payload.get("id") if isinstance(payload, dict) else None
+        if isinstance(raw_id, str) and raw_id.strip():
+            ids.add(raw_id.strip())
+    return lines, ids
+
+
+# ----------------------------------------------------------------------
+# Сироты после жёсткого kill
+# ----------------------------------------------------------------------
+
+
+def sweep_orphan_restore_staging_locked(data_dir: Path) -> list[str]:
+    """Убирает restore-staging БЕЗ маркера и осиротевшие tmp-фрагменты.
+
+    Вызывать только под history-lock и только когда незавершённой транзакции
+    нет: тогда staging без маркера не принадлежит ни одному работающему
+    restore (encrypted-ветка держит тот же lock-файл) — это след kill до
+    маркера. Иначе он навсегда блокирует retention (``restore_staging_dirs``)
+    и держит в data_dir plaintext-копию журналов. Сбой уборки не мешает restore.
+    """
+    data_dir = Path(data_dir)
+    removed: list[str] = []
+    try:
+        with_marker = set(restore_marker_dirs(data_dir))
+        orphans = [p for p in restore_staging_dirs(data_dir) if p not in with_marker]
+    except SnapshotOperationRefused:
+        return removed
+    for orphan in orphans:
+        try:
+            rmtree_strict(orphan)
+        except OSError:
+            logger.warning("legacy_restore: staging-сирота %s не убран", orphan.name, exc_info=True)
+            continue
+        removed.append(str(orphan))
+    _cleanup_restore_tmp(data_dir, None)
+    if removed:
+        logger.warning("legacy_restore: убраны staging без маркера (kill до маркера): %s", removed)
+        try:
+            _fsync_dir(data_dir)
+        except SnapshotOperationRefused:
+            logger.warning("legacy_restore: fsync после уборки сирот не удался", exc_info=True)
+    return removed
 
 
 # ----------------------------------------------------------------------
@@ -225,13 +394,18 @@ def _ordered_names(files: dict[str, bytes]) -> list[str]:
     return names
 
 
-def _replace_and_readback(*, data_dir: Path, staging: Path, files_meta: list[dict],
-                          transaction_id: str) -> dict:
+def _files_meta(blobs: dict[str, bytes]) -> list[dict]:
+    return [{"name": name, "size": len(blobs[name]), "sha256": _sha256(blobs[name])}
+            for name in _ordered_names(blobs)]
+
+
+def _replace_and_readback(*, data_dir: Path, blobs: dict[str, bytes], transaction_id: str) -> dict:
+    files_meta = _files_meta(blobs)
     try:
         for entry in files_meta:
             name = str(entry["name"])
             tmp = data_dir / f"{name}{RESTORE_TMP_SUFFIX}{transaction_id}"
-            _write_file_durable(tmp, (staging / name).read_bytes())
+            _write_file_durable(tmp, blobs[name])
             _replace_live(tmp, data_dir / name)
     except Exception as exc:  # noqa: BLE001 — после COMMITTING только докатка
         _cleanup_restore_tmp(data_dir, transaction_id)
@@ -291,6 +465,9 @@ def apply_legacy_restore_locked(
     """
     data_dir = Path(data_dir)
     transaction_id = transaction_id or _new_transaction_id("legacy-restore")
+    if restore_marker_dirs(data_dir):
+        raise SnapshotOperationRefused(REASON_RECOVERY_PENDING, "незавершённый restore на диске")
+    sweep_orphan_restore_staging_locked(data_dir)
     staging = _restore_staging_dir(data_dir, transaction_id)
     if staging.exists():
         raise SnapshotOperationRefused(REASON_DESTINATION_EXISTS, f"staging {staging.name} уже существует")
@@ -321,8 +498,7 @@ def apply_legacy_restore_locked(
         _cancel_staging(staging)
         raise SnapshotOperationRefused(REASON_FSYNC_FAILED, f"подготовка restore не удалась: {exc}") from exc
 
-    readback = _replace_and_readback(data_dir=data_dir, staging=staging, files_meta=files_meta,
-                                     transaction_id=transaction_id)
+    readback = _replace_and_readback(data_dir=data_dir, blobs=files, transaction_id=transaction_id)
     _commit_marker(staging, marker, data_dir)
     logger.info("legacy_restore: %s COMMITTED из %s (%d файлов)", transaction_id, backup_dir, len(files_meta))
     return {"ok": True, "state": RESTORE_STATE_COMMITTED, "transaction_id": transaction_id,
@@ -335,6 +511,11 @@ def roll_forward_legacy_locked(*, data_dir: Path, staging: Path, marker: dict) -
     Источник — байты staging, сверенные с size/sha256 маркера: ключ и политика
     не нужны, повторная проверка бэкапа тоже (он мог быть удалён после краха).
     Несовпадение → fail-closed отказ, ничего не трогаем.
+
+    Между крахом и докаткой процесс работал (точка обслуживания — не старт):
+    staging объединяется с ТЕКУЩИМ живым ledger (удаления и purge окна не
+    отменяются), записи окна переносятся. Staging не переписывается: повторный
+    краш → следующий проход заново собирает тот же результат.
     """
     data_dir = Path(data_dir)
     transaction_id = str(marker.get("transaction_id") or "")
@@ -352,14 +533,36 @@ def roll_forward_legacy_locked(*, data_dir: Path, staging: Path, marker: dict) -
         blob = staged.read_bytes()
         if len(blob) != entry.get("size") or _sha256(blob) != entry.get("sha256"):
             raise SnapshotOperationRefused(REASON_PREPARED_MISSING, f"staging {name} не совпадает с маркером")
-    readback = _replace_and_readback(data_dir=data_dir, staging=staging, files_meta=files_meta,
-                                     transaction_id=transaction_id)
-    _commit_marker(staging, dict(marker), data_dir)
+    names = {entry["name"] for entry in files_meta}
+    if not set(LEGACY_JOURNALS) <= names:
+        raise SnapshotOperationRefused(REASON_MANIFEST_INVALID, "legacy-маркер без полного набора журналов")
+    blobs, _stats, blocked = _build_legacy_set(source_dir=staging, data_dir=data_dir,
+                                               source_reason=REASON_MANIFEST_INVALID)
+    pre = marker.get("pre_restore_snapshot")
+    carry, counters, warnings = _collect_window_records(
+        data_dir=data_dir, files=blobs, staging=staging, prerestore_dir=Path(pre) if pre else None,
+        blocked=blocked)
+    for name, lines in carry.items():
+        if lines:
+            blobs[name] = blobs[name] + _body(lines)
+    if SETTINGS_NAME in names:
+        blobs[SETTINGS_NAME] = (staging / SETTINGS_NAME).read_bytes()
+    readback = _replace_and_readback(data_dir=data_dir, blobs=blobs, transaction_id=transaction_id)
+    committed = dict(marker)
+    committed["files"] = _files_meta(blobs)
+    _commit_marker(staging, committed, data_dir)
     # Эмбеддинги прежней истории не должны подняться в новом процессе: докатка
     # может идти мимо HistoryService (auto_backup на старте), где RAM-сброса нет.
     from backend.semantic_search import invalidate_index_files
 
-    invalidate_index_files(data_dir)
+    index_reset = bool(invalidate_index_files(data_dir))
     logger.warning("legacy_restore: %s докатан (roll-forward)", transaction_id)
     return {"ok": True, "state": RESTORE_STATE_COMMITTED, "transaction_id": transaction_id,
-            "pre_restore_snapshot": marker.get("pre_restore_snapshot"), "readback": readback}
+            "pre_restore_snapshot": pre, "readback": readback,
+            "semantic_reindex_required": index_reset,
+            "records_carried": counters["carried"],
+            "delta_records_carried": counters["delta_carried"],
+            "records_excluded_deleted": counters["excluded_deleted"],
+            "records_unparsable": counters["unparsable"],
+            "records_at_risk": counters["excluded_deleted"] + counters["unparsable"],
+            "warnings": warnings}
