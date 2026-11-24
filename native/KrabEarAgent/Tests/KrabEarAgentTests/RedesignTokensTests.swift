@@ -143,8 +143,10 @@ final class RedesignTokensTests: XCTestCase {
 
     // MARK: - Гейт размера шрифта (храповик)
 
-    /// Допустимое число литералов `ofSize: N` с N < 12 по файлам на момент PR 0.
-    /// Список только СОКРАЩАЕТСЯ: новый мелкий шрифт вне темы роняет тест; исправил — уменьши число.
+    /// Точное число мелких шрифтов (< 12 pt) по файлам: литерал `ofSize: N`, `NSFont(name:…, size: N)`,
+    /// `NSFont.smallSystemFontSize` (11) и `NSFont.labelFontSize` (10). Строки-комментарии не считаются.
+    /// ХРАПОВИК: число должно совпадать ТОЧНО. Добавил мелкий шрифт — тест красный; убрал —
+    /// тест тоже красный, пока не уменьшишь число здесь (иначе можно снова вырасти до старого).
     private static let smallFontAllowlist: [String: Int] = [
         "CallAutomationController.swift": 1,
         "HistoryPanelController+AllSettings.swift": 1,
@@ -154,6 +156,7 @@ final class RedesignTokensTests: XCTestCase {
         "HistoryPanelController+ConfigPresets.swift": 2,
         "HistoryPanelController+DictationHeroCard.swift": 2,
         "HistoryPanelController+InlineTranslation.swift": 3,
+        "HistoryPanelController+QuickActions.swift": 2,
         "HistoryPanelController+RetentionSettings.swift": 1,
         "HistoryPanelController+STTModelMemory.swift": 1,
         "HistoryPanelController+STTVocabulary.swift": 3,
@@ -167,28 +170,76 @@ final class RedesignTokensTests: XCTestCase {
         "main.swift": 2,
     ]
 
-    func test_smallFontLiterals_doNotGrowOutsideTheme() throws {
+    /// Размер шрифта из переменной/выражения (`ofSize: x`), кроме токенов темы: тот же храповик,
+    /// отдельным счётчиком на весь каталог. TODO PR 5: `controlSize = .small/.mini` и `.caption2`.
+    private static let variableFontSizeAllowance = 1
+
+    private struct FontScan {
+        var small: [String: Int] = [:]
+        var variable: [String: Int] = [:]
+        var fileCount = 0
+    }
+
+    private func scanSources() throws -> FontScan {
         let sources = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .appendingPathComponent("Sources/KrabEarAgent")
-        let files = try FileManager.default.contentsOfDirectory(atPath: sources.path)
-            .filter { $0.hasSuffix(".swift") && $0 != "KrabEarTheme.swift" }
-        // Гард от пустого списка: пустота не должна читаться как «всё чисто».
-        XCTAssertGreaterThan(files.count, 100, "каталог исходников не найден: \(sources.path)")
-
-        let regex = try NSRegularExpression(pattern: #"ofSize:\s*([0-9]+(?:\.[0-9]+)?)"#)
-        var offenders: [String] = []
-        for file in files {
-            let text = try String(contentsOf: sources.appendingPathComponent(file), encoding: .utf8)
-            let range = NSRange(text.startIndex..., in: text)
-            var small = 0
-            regex.enumerateMatches(in: text, range: range) { m, _, _ in
-                guard let m, let r = Range(m.range(at: 1), in: text), let size = Double(text[r]) else { return }
-                if size < Double(KrabEarTheme.Typography.minimumPointSize) { small += 1 }
-            }
-            let allowed = Self.smallFontAllowlist[file] ?? 0
-            if small > allowed { offenders.append("\(file): \(small) > \(allowed)") }
+        let literal = try NSRegularExpression(pattern: #"(?:ofSize|size):\s*([0-9]+(?:\.[0-9]+)?)"#)
+        let named = try NSRegularExpression(pattern: #"NSFont\.(?:smallSystemFontSize|labelFontSize)"#)
+        let variable = try NSRegularExpression(pattern: #"ofSize:\s*([A-Za-z_][A-Za-z0-9_.]*)"#)
+        var scan = FontScan()
+        guard let walker = FileManager.default.enumerator(at: sources, includingPropertiesForKeys: nil) else {
+            return scan
         }
-        XCTAssertTrue(offenders.isEmpty, "новые шрифты < 12 pt вне темы: \(offenders)")
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            let file = url.lastPathComponent
+            guard file != "KrabEarTheme.swift" else { continue }
+            scan.fileCount += 1
+            let text = try String(contentsOf: url, encoding: .utf8)
+            var small = 0, vars = 0
+            for raw in text.components(separatedBy: .newlines) {
+                let line = raw.trimmingCharacters(in: .whitespaces)
+                if line.hasPrefix("//") || line.hasPrefix("*") || line.hasPrefix("/*") { continue }
+                let r = NSRange(line.startIndex..., in: line)
+                for m in literal.matches(in: line, range: r) {
+                    guard let rr = Range(m.range(at: 1), in: line), let size = Double(line[rr]) else { continue }
+                    // `size:` учитываем только у NSFont(name:…, size:) — у других API это не шрифт.
+                    let whole = line[Range(m.range, in: line)!]
+                    if whole.hasPrefix("size"), !line.contains("NSFont(name:") { continue }
+                    if size < Double(KrabEarTheme.Typography.minimumPointSize) { small += 1 }
+                }
+                small += named.numberOfMatches(in: line, range: r)
+                for m in variable.matches(in: line, range: r) {
+                    guard let rr = Range(m.range(at: 1), in: line) else { continue }
+                    let expr = line[rr]
+                    if expr.hasPrefix("KrabEarTheme.") || expr.hasPrefix("NSFont.smallSystemFontSize")
+                        || expr.hasPrefix("NSFont.labelFontSize") { continue }
+                    vars += 1
+                }
+            }
+            if small > 0 { scan.small[file] = small }
+            if vars > 0 { scan.variable[file] = vars }
+        }
+        return scan
+    }
+
+    func test_smallFonts_exactRatchetOutsideTheme() throws {
+        let scan = try scanSources()
+        // Гард от пустого обхода: пустота не должна читаться как «всё чисто».
+        XCTAssertGreaterThan(scan.fileCount, 100, "исходники не найдены")
+        var problems: [String] = []
+        for file in Set(scan.small.keys).union(Self.smallFontAllowlist.keys).sorted() {
+            let actual = scan.small[file] ?? 0, allowed = Self.smallFontAllowlist[file] ?? 0
+            if actual > allowed { problems.append("\(file): \(actual) > \(allowed) — новый шрифт < 12 pt, бери токен темы") }
+            if actual < allowed { problems.append("\(file): \(actual) < \(allowed) — исправлено, уменьши число в allowlist") }
+        }
+        XCTAssertTrue(problems.isEmpty, "храповик мелких шрифтов: \(problems); факт: \(scan.small)")
+    }
+
+    func test_variableFontSizes_exactRatchet() throws {
+        let scan = try scanSources()
+        let total = scan.variable.values.reduce(0, +)
+        XCTAssertEqual(total, Self.variableFontSizeAllowance,
+                       "ofSize: <выражение> вне токенов темы: \(scan.variable) — бери токены KrabEarTheme")
     }
 }
