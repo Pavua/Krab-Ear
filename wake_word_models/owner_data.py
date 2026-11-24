@@ -265,3 +265,64 @@ def prepare_owner_clips(clips: Iterable[OwnerClip], out_dir: Path, *, prefix: st
             n += 1
             counters["out"] += 1
     return counters
+
+
+# ----------------------------------------------------------------------------
+# Синтетические шумовые негативы
+# ----------------------------------------------------------------------------
+
+NOISE_KINDS: tuple[str, ...] = ("white", "brown", "pink", "hum")
+NOISE_RMS_LEVELS: tuple[float, ...] = (0.001, 0.003, 0.01, 0.03)
+
+
+def synth_noise(kind: str, *, n_samples: int, rms: float, seed: int) -> list[int]:
+    """Шум заданного вида и уровня (rms в долях полной шкалы), детерминированно по seed.
+
+    white — гауссов; brown — интеграл белого (низкочастотный гул комнаты); pink — белый через
+    однополюсный ФНЧ (между белым и коричневым); hum — сетевой гул 50/100 Гц плюс слабый белый.
+    Нужны как негативы ОТДЕЛЬНО от речи: модель, обученная только на речевых негативах, срабатывает
+    на тишине и шуме (живой замер 24.11: белый шум 3–4% кадров на любом уровне).
+    """
+    if kind not in NOISE_KINDS:
+        raise OwnerDataError(f"неизвестный вид шума: {kind}")
+    if n_samples <= 0 or rms <= 0:
+        raise OwnerDataError("n_samples и rms должны быть положительными")
+    rng = random.Random(f"{seed}:{kind}")
+    white = [rng.gauss(0.0, 1.0) for _ in range(n_samples)]
+    if kind == "white":
+        raw = white
+    elif kind == "brown":
+        acc, raw = 0.0, []
+        for w in white:
+            acc = 0.98 * acc + w
+            raw.append(acc)
+    elif kind == "pink":
+        acc, raw = 0.0, []
+        for w in white:
+            acc = 0.85 * acc + w
+            raw.append(acc)
+    else:  # hum
+        phase = rng.random() * 2 * math.pi
+        raw = [math.sin(2 * math.pi * 50 * i / SAMPLE_RATE + phase)
+               + 0.5 * math.sin(2 * math.pi * 100 * i / SAMPLE_RATE + phase) + 0.05 * w
+               for i, w in enumerate(white)]
+    mean = sum(raw) / len(raw)
+    centred = [x - mean for x in raw]
+    current = math.sqrt(sum(x * x for x in centred) / len(centred)) or 1.0
+    scale = rms * 32768.0 / current
+    return [max(-32768, min(32767, int(round(x * scale)))) for x in centred]
+
+
+def write_synthetic_noise_clips(out_dir: Path, *, count: int, seed: int, seconds: float = 2.0) -> int:
+    """``count`` клипов шума: виды и уровни чередуются, имена обезличены (``noise_NNNN.wav``)."""
+    if count <= 0:
+        return 0
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    n_samples = int(SAMPLE_RATE * seconds)
+    for i in range(count):
+        kind = NOISE_KINDS[i % len(NOISE_KINDS)]
+        rms = NOISE_RMS_LEVELS[(i // len(NOISE_KINDS)) % len(NOISE_RMS_LEVELS)]
+        write_wav_mono16(out_dir / f"noise_{i:04d}.wav",
+                         synth_noise(kind, n_samples=n_samples, rms=rms, seed=seed * 1000 + i))
+    return count

@@ -259,6 +259,57 @@ class ShortSegmentTests(unittest.TestCase):
             self.assertEqual(c["out"], c0["out"] + 5)
 
 
+class SyntheticNoiseTests(unittest.TestCase):
+    """Шумовые негативы: белый/коричневый/розовый/гул на разных уровнях (гейт меряет тишину и белый шум)."""
+
+    def _rms(self, samples: list[int]) -> float:
+        return math.sqrt(sum(s * s for s in samples) / len(samples)) / 32768.0
+
+    def test_kinds_have_length_and_target_rms(self) -> None:
+        for kind in od.NOISE_KINDS:
+            noise = od.synth_noise(kind, n_samples=32000, rms=0.01, seed=1)
+            self.assertEqual(len(noise), 32000, kind)
+            self.assertAlmostEqual(self._rms(noise), 0.01, delta=0.0025, msg=kind)
+            self.assertTrue(all(-32768 <= x <= 32767 for x in noise), kind)
+
+    def test_deterministic_and_kinds_differ(self) -> None:
+        a = od.synth_noise("white", n_samples=4000, rms=0.01, seed=5)
+        self.assertEqual(a, od.synth_noise("white", n_samples=4000, rms=0.01, seed=5))
+        self.assertNotEqual(a, od.synth_noise("white", n_samples=4000, rms=0.01, seed=6))
+        self.assertNotEqual(a, od.synth_noise("brown", n_samples=4000, rms=0.01, seed=5))
+
+    def test_unknown_kind_and_bad_args_rejected(self) -> None:
+        with self.assertRaises(od.OwnerDataError):
+            od.synth_noise("blue", n_samples=100, rms=0.01, seed=1)
+        with self.assertRaises(od.OwnerDataError):
+            od.synth_noise("white", n_samples=0, rms=0.01, seed=1)
+        with self.assertRaises(od.OwnerDataError):
+            od.synth_noise("white", n_samples=100, rms=0.0, seed=1)
+
+    def test_write_clips_cycles_kinds_and_levels_with_pseudonymous_names(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td)
+            n = od.write_synthetic_noise_clips(out, count=24, seed=3)
+            self.assertEqual(n, 24)
+            names = sorted(p.name for p in out.iterdir())
+            self.assertEqual(len(names), 24)
+            self.assertTrue(all(nm.startswith("noise_") and nm.endswith(".wav") for nm in names))
+            levels = {round(self._rms(od.read_wav_mono16(out / nm)), 3) for nm in names}
+            self.assertGreaterEqual(len(levels), 3, "уровни должны различаться")
+            self.assertEqual(od.write_synthetic_noise_clips(out / "none", count=0, seed=1), 0)
+
+    def test_repeat_copies_adds_numbered_copies(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            src = root / "src"
+            src.mkdir()
+            od.write_wav_mono16(src / "neg_room_silence_000.wav", _tone(2.0, amp=0.05))
+            clips = [od.OwnerClip(src / "neg_room_silence_000.wav", "neg", "neg_room_silence")]
+            c = od.prepare_owner_clips(clips, root / "out", prefix="neg_train_q1")
+            c2 = od.prepare_owner_clips(clips, root / "out", prefix="neg_train_q2")
+            self.assertEqual(len(list((root / "out").iterdir())), c["out"] + c2["out"])
+
+
 class ModuleHygieneTests(unittest.TestCase):
     def test_no_heavy_imports_and_no_path_logging(self) -> None:
         tree = ast.parse((Path(WAKE_MODELS_DIR) / "owner_data.py").read_text(encoding="utf-8"))

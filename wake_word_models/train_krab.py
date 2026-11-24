@@ -782,6 +782,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Раундов аугментации на клип-негатив владельца и golden (train)")
     owner_g.add_argument("--owner-short-negs", type=int, default=10,
                          help="Коротких отрезков речи на клип-негатив (train): негативы формы позитива")
+    owner_g.add_argument("--owner-noise-negs", type=int, default=96,
+                         help="Синтетических шумовых клипов-негативов (белый/коричневый/розовый/гул, 4 уровня)")
+    owner_g.add_argument("--owner-quiet-repeat", type=int, default=3,
+                         help="Во сколько раз усилить вес тихих блоков владельца (комната/клавиатура/тихая речь)")
     owner_g.add_argument("--owner-val-rounds", type=int, default=6,
                          help="Раундов аугментации на проверочный клип (чтобы проверка шла и по шуму)")
     owner_g.add_argument(
@@ -1454,6 +1458,17 @@ def stage_owner_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
             items, target, prefix=name,
             short_per_clip=args.owner_short_negs if name == "neg_train" else 0,
             short_block_prefixes=OWNER_SHORT_NEG_BLOCKS)
+    # Шумовые негативы: синтетический шум (белый/коричневый/розовый/гул) и повторные копии тихих блоков
+    # владельца (комната, клавиатура, тихая речь) — их аугментация даёт разные варианты каждый раз.
+    noise_written = od.write_synthetic_noise_clips(
+        clips_root / "neg_train", count=args.owner_noise_negs, seed=args.seed + 101)
+    quiet_items = [c for c in neg_train if c.block in OWNER_BACKGROUND_BLOCKS]
+    quiet_copies = 0
+    for repeat in range(1, max(1, args.owner_quiet_repeat)):
+        quiet_copies += od.prepare_owner_clips(
+            quiet_items, clips_root / "neg_train", prefix=f"neg_train_q{repeat}")["out"]
+    counters["neg_train"]["synthetic_noise"] = noise_written
+    counters["neg_train"]["quiet_copies"] = quiet_copies
     bg_dir = clips_root / "background"
     bg_items = [c for c in neg_train if c.block in OWNER_BACKGROUND_BLOCKS]
     bg_counters = od.prepare_owner_clips(bg_items, bg_dir, prefix="bg") if bg_items else {"in": 0, "out": 0}
