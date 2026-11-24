@@ -63,6 +63,27 @@ def test_wav_and_manifest_roundtrip(tmp_path):
     assert json.loads((tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()[0])["prompt"] == "Краб"
 
 
-def test_dataset_dir_is_gitignored():
-    ignore = (ROOT / "wake_word_models" / ".gitignore").read_text(encoding="utf-8")
-    assert "/owner_recordings/" in ignore
+def test_default_dataset_dir_is_outside_repo_and_worktree():
+    m = _load()
+    out = m.DEFAULT_OUT.resolve()
+    assert ROOT.resolve() not in out.parents and out != ROOT.resolve()
+
+
+def test_manifest_entry_removed_on_redo(tmp_path):
+    import json
+    m = _load()
+    m.append_manifest(tmp_path, {"file": "a.wav", "prompt": "1"})
+    m.append_manifest(tmp_path, {"file": "b.wav", "prompt": "2"})
+    m.remove_manifest_entry(tmp_path, "a.wav")
+    rows = [json.loads(x) for x in (tmp_path / "manifest.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [r["file"] for r in rows] == ["b.wav"]
+    m.remove_manifest_entry(tmp_path / "nope", "a.wav")  # нет файла — не падает
+
+
+def test_silent_positive_is_not_saved_but_silent_negative_is():
+    m = _load()
+    plan = {b.key: b for b in m.build_plan()}
+    silent = m.assess_clip([0] * 1000)
+    assert m.is_unusable_positive(plan["pos_normal"], silent) is True
+    assert m.is_unusable_positive(plan["neg_room_silence"], silent) is False
+    assert m.is_unusable_positive(plan["pos_normal"], m.assess_clip([4000, -4000] * 500)) is False

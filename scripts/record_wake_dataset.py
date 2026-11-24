@@ -12,8 +12,9 @@
 Управление: Enter — записать; r — переписать предыдущий; s — пропустить блок;
 q — выйти (прогресс сохранён).
 
-Приватность: записи остаются локально в `wake_word_models/owner_recordings/`
-(каталог в .gitignore), никуда не отправляются. Скрипт сам ничего не загружает.
+Приватность: записи остаются локально в `~/Documents/KrabEar_wake_dataset/` (вне репозитория
+и вне worktree: не пропадут при его удалении и не попадут в git), никуда не отправляются.
+ВНИМАНИЕ: privacy-purge Krab Ear этот каталог НЕ чистит — удалить его при необходимости нужно вручную.
 
 Запуск (из корня репозитория):
     .venv_krab_ear/bin/python scripts/record_wake_dataset.py
@@ -37,7 +38,7 @@ MIN_RMS = 0.004
 CLIP_PEAK = 0.98
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = ROOT / "wake_word_models" / "owner_recordings"
+DEFAULT_OUT = Path.home() / "Documents" / "KrabEar_wake_dataset"
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,7 @@ class Block:
 
 
 def build_plan() -> list[Block]:
-    """План записи: ~100 позитивов и ~90 негативов, примерно 12 минут."""
+    """План записи: ~88 позитивов и ~81 негатив, примерно 12 минут."""
     return [
         Block("pos_normal", "pos", "обычным голосом, как зовёте ассистента", tuple(["Краб"] * 10 + ["Эй, Краб"] * 10)),
         Block("pos_quiet", "pos", "ТИХО, вполголоса, как будто рядом спят", tuple(["Краб"] * 5 + ["Эй, Краб"] * 5)),
@@ -137,6 +138,28 @@ def append_manifest(out_dir: Path, record: dict) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def remove_manifest_entry(out_dir: Path, filename: str) -> None:
+    """Убирает из manifest.jsonl строки про `filename` (при перезаписи клипа не плодим дубли)."""
+    path = out_dir / "manifest.jsonl"
+    if not path.exists():
+        return
+    kept = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            if json.loads(line).get("file") == filename:
+                continue
+        except ValueError:
+            pass
+        kept.append(line)
+    path.write_text("".join(f"{ln}\n" for ln in kept), encoding="utf-8")
+
+
+def is_unusable_positive(block: Block, quality: dict) -> bool:
+    """Позитив с rms ниже порога не сохраняем: macOS при запрете микрофона (TCC) отдаёт нули, и такие
+    «позитивы» отравили бы датасет ровно тем отказом, из-за которого krab_ru срабатывает на тишине."""
+    return block.label == "pos" and quality["rms"] < MIN_RMS
+
+
 def record_clip(seconds: float):
     """Пишет `seconds` с микрофона по умолчанию. Импорт sounddevice — только тут, чтобы тесты
     и `--plan` не открывали микрофон."""
@@ -149,52 +172,102 @@ def record_clip(seconds: float):
     return np.asarray(data).reshape(-1)
 
 
+def _check_microphone_stack() -> str | None:
+    """Сообщение об ошибке, если запись невозможна (проверяем ДО первой фразы)."""
+    try:
+        import numpy  # noqa: F401
+        import sounddevice  # noqa: F401
+    except ImportError as exc:
+        return f"не хватает пакета ({exc.name}). Запускайте через .venv_krab_ear: .venv_krab_ear/bin/python scripts/record_wake_dataset.py"
+    return None
+
+
 def run(out_dir: Path) -> int:
+    problem = _check_microphone_stack()
+    if problem:
+        print(f"Ошибка: {problem}")
+        return 2
     out_dir.mkdir(parents=True, exist_ok=True)
     plan = build_plan()
     total = sum(len(b.prompts) for b in plan)
     done = total - sum(len(pending_indices(b, out_dir)) for b in plan)
-    print(f"Каталог записей: {out_dir}\nГотово {done} из {total}. Enter — записать, r — переписать, s — пропустить блок, q — выйти.\n")
+    print(f"Каталог записей: {out_dir}\nГотово {done} из {total}. Enter — записать, r — переписать предыдущий, s — пропустить блок, q — выйти.\n")
     last: tuple[Block, int] | None = None
-    for block in plan:
-        todo = pending_indices(block, out_dir)
-        if not todo:
-            continue
-        print(f"=== {block.key} ({block.label.upper()}) — {block.hint} ===")
-        queue = list(todo)
-        while queue:
-            idx = queue[0]
-            prompt = block.prompts[idx]
-            cmd = input(f"[{idx + 1}/{len(block.prompts)}] «{prompt}»  → Enter: запись {block.clip_sec:g} с > ").strip().lower()
-            if cmd == "q":
-                print("Прогресс сохранён. Запустите снова, чтобы продолжить.")
-                return 0
-            if cmd == "s":
-                break
-            if cmd == "r" and last is not None:
-                lb, li = last
-                (out_dir / clip_filename(lb, li)).unlink(missing_ok=True)
-                print(f"  переписываем предыдущий: «{lb.prompts[li]}»")
-                queue.insert(0, li) if lb is block else print("  (предыдущий из другого блока — перезапустите скрипт)")
+    skipped: set[str] = set()
+    first_clip = done == 0
+    while True:
+        progressed = False
+        for block in plan:
+            if block.key in skipped:
                 continue
-            time.sleep(0.25)
-            print("  ● запись…", end="", flush=True)
-            samples = record_clip(block.clip_sec)
-            print(" готово")
-            quality = assess_clip(samples.tolist())
-            for w in quality["warnings"]:
-                print(f"  ⚠ {w}")
-            path = out_dir / clip_filename(block, idx)
-            write_wav(path, samples.tobytes())
-            append_manifest(out_dir, {
-                "file": path.name, "label": block.label, "block": block.key, "prompt": prompt,
-                "sec": block.clip_sec, "rate": SAMPLE_RATE, "rms": quality["rms"], "peak": quality["peak"],
-                "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            })
-            last = (block, idx)
-            queue.pop(0)
-        print()
-    print("Все блоки записаны. Спасибо! Дальше — обучение (см. wake_word_models/README.md).")
+            announced = False
+            while True:
+                todo = pending_indices(block, out_dir)
+                if not todo:
+                    break
+                if not announced:
+                    print(f"=== {block.key} ({block.label.upper()}) — {block.hint} ===")
+                    announced = True
+                idx = todo[0]
+                prompt = block.prompts[idx]
+                try:
+                    cmd = input(f"[{idx + 1}/{len(block.prompts)}] «{prompt}»  → Enter: запись {block.clip_sec:g} с > ").strip().lower()
+                except EOFError:
+                    print("\nВвод закрыт. Прогресс сохранён.")
+                    return 0
+                if cmd == "q":
+                    print("Прогресс сохранён. Запустите снова, чтобы продолжить.")
+                    return 0
+                if cmd == "s":
+                    skipped.add(block.key)
+                    break
+                if cmd == "r":
+                    if last is None:
+                        print("  (нечего переписывать)")
+                        continue
+                    lb, li = last
+                    name = clip_filename(lb, li)
+                    (out_dir / name).unlink(missing_ok=True)
+                    remove_manifest_entry(out_dir, name)
+                    print(f"  удалён предыдущий клип: «{lb.prompts[li]}» — он будет записан заново")
+                    last = None
+                    progressed = True
+                    if lb is not block:
+                        break  # вернуться к блоку удалённого клипа на следующем проходе
+                    continue
+                time.sleep(0.25)
+                print("  ● запись…", end="", flush=True)
+                try:
+                    samples = record_clip(block.clip_sec)
+                except Exception as exc:  # PortAudioError и пр.: понятное сообщение вместо трассировки
+                    print(f"\nОшибка записи с микрофона: {exc}\nПроверьте устройство ввода и доступ к микрофону для Терминала.")
+                    return 3
+                print(" готово")
+                values = samples.tolist()
+                quality = assess_clip(values)
+                if first_clip and values and max(abs(v) for v in values) == 0:
+                    print("\n⚠ Микрофон отдал полную тишину (нули). Вероятно, у Терминала нет доступа к микрофону:\n"
+                          "  Системные настройки → Конфиденциальность → Микрофон → разрешить Терминалу, и запустите скрипт заново.")
+                    return 4
+                first_clip = False
+                for w in quality["warnings"]:
+                    print(f"  ⚠ {w}")
+                if is_unusable_positive(block, quality):
+                    print("  ✗ клип НЕ сохранён (слишком тихо для позитива) — повторите ближе к микрофону")
+                    continue
+                path = out_dir / clip_filename(block, idx)
+                write_wav(path, samples.tobytes())
+                append_manifest(out_dir, {
+                    "file": path.name, "label": block.label, "block": block.key, "prompt": prompt,
+                    "sec": block.clip_sec, "rate": SAMPLE_RATE, "rms": quality["rms"], "peak": quality["peak"],
+                    "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                })
+                last = (block, idx)
+                progressed = True
+            print()
+        if not any(pending_indices(b, out_dir) for b in plan if b.key not in skipped) or not progressed:
+            break
+    print("Записано. Дальше — обучение (см. wake_word_models/README.md §8a).")
     return 0
 
 
