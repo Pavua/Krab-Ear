@@ -89,39 +89,59 @@ class TestCRLFHeaderInjection(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestTempUploadLeak(unittest.TestCase):
-    """rest_server: partial temp-файл удаляется даже если file.save() падает."""
+    """rest_server: partial temp-файл удаляется даже если file.save() падает.
 
-    def test_temp_file_cleaned_on_save_error(self):
-        """Если FileStorage.save() поднимает OSError — temp-файл не остаётся."""
-        import uuid
+    G3-audio-06 (A06-03): прежний тест сам создавал файл и сам же удалял его в собственном
+    try/finally, ни разу не вызывая rest_server — он остался бы зелёным и при сломанной очистке
+    настоящего HTTP-upload. Теперь запрос идёт через реальное Flask-приложение.
+    """
+
+    def _client(self, tmp_dir):
+        from unittest.mock import patch
+
+        import backend.rest_server as rs
+        from test_rest_vg_contract_M1 import _deps_with
+
+        deps = _deps_with()
+        deps.store.call_privacy_mode.return_value = False
+        deps.store.is_idempotent.return_value = False
+        patches = [
+            patch.object(rs, "TEMP_DIR", tmp_dir),
+            patch.object(rs.settings, "REST_API_AUTH_ENABLED", False),
+            patch.object(rs.settings, "REST_API_KEY", ""),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        app = rs.create_app(deps)
+        app.config.update(TESTING=True, RATELIMIT_ENABLED=False)
+        return app.test_client()
+
+    def test_real_rest_upload_removes_partial_file_when_save_fails(self):
+        import io
         from pathlib import Path
+        from unittest.mock import patch
 
-        tmp_dir = Path(tempfile.mkdtemp())
-        safe_base = "test_upload.wav"
-        temp_path = tmp_dir / f"{uuid.uuid4().hex[:12]}_{safe_base}"
+        from werkzeug.datastructures import FileStorage
 
-        # Имитируем логику rest_server: file.save внутри try/finally
-        class _FakeFile:
-            def save(self, path):
-                # Создаём частичный файл, потом бросаем ошибку (ENOSPC)
-                Path(path).write_bytes(b"partial")
-                raise OSError(28, "No space left on device")
+        saved: list[Path] = []
 
-        fake_file = _FakeFile()
+        def failing_save(storage, dst, *args, **kwargs):
+            saved.append(Path(dst))
+            Path(dst).write_bytes(b"partial")  # частичная запись, затем ENOSPC
+            raise OSError(28, "No space left on device")
 
-        try:
-            fake_file.save(str(temp_path))
-        except OSError:
-            pass
-        finally:
-            if temp_path.exists():
-                try:
-                    temp_path.unlink()
-                except Exception:
-                    pass
-
-        self.assertFalse(temp_path.exists(),
-                         "Partial temp-файл не должен остаться после ошибки save()")
+        with tempfile.TemporaryDirectory() as td:
+            client = self._client(Path(td))
+            with patch.object(FileStorage, "save", failing_save):
+                response = client.post(
+                    "/v1/stt/transcribe",
+                    data={"file": (io.BytesIO(b"RIFF" + b"\x00" * 64), "audio.wav")},
+                )
+            self.assertNotEqual(response.status_code, 200)
+            self.assertTrue(saved, "реальный путь upload не дошёл до file.save()")
+            self.assertTrue(all(not p.exists() for p in saved), "partial temp-файл остался на диске")
+            self.assertEqual(list(Path(td).iterdir()), [])
 
 
 # ---------------------------------------------------------------------------

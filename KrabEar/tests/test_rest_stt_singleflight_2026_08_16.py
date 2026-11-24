@@ -51,26 +51,39 @@ class SttSingleflightLockTest(unittest.TestCase):
         max_in_flight = 0
         lock = threading.Lock()
         started = threading.Barrier(2)
+        # G3-audio-06 (A06-10): assertTrue внутри дочернего потока не проваливает тест —
+        # исключение гибнет в потоке. Результаты и ошибки собираются и проверяются в главном.
+        acquired: list[bool] = []
+        failures: list[BaseException] = []
 
         def _worker():
             nonlocal in_flight, max_in_flight
-            started.wait(timeout=2.0)
-            self.assertTrue(try_acquire_stt_singleflight(2.0))
             try:
-                with lock:
-                    in_flight += 1
-                    max_in_flight = max(max_in_flight, in_flight)
-                threading.Event().wait(0.2)
-                with lock:
-                    in_flight -= 1
-            finally:
-                release_stt_singleflight()
+                started.wait(timeout=2.0)
+                got = try_acquire_stt_singleflight(2.0)
+                acquired.append(bool(got))
+                if not got:
+                    return
+                try:
+                    with lock:
+                        in_flight += 1
+                        max_in_flight = max(max_in_flight, in_flight)
+                    threading.Event().wait(0.2)
+                    with lock:
+                        in_flight -= 1
+                finally:
+                    release_stt_singleflight()
+            except BaseException as exc:  # noqa: BLE001 — доставить в главный поток
+                failures.append(exc)
 
         threads = [threading.Thread(target=_worker) for _ in range(2)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=5.0)
+        self.assertFalse(any(t.is_alive() for t in threads), "поток singleflight не завершился")
+        self.assertEqual(failures, [])
+        self.assertEqual(acquired, [True, True], "оба потока обязаны по очереди получить lock")
         self.assertEqual(max_in_flight, 1)
 
 
