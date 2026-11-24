@@ -43,6 +43,12 @@ _FakeSemantic = base._FakeSemantic
 _ids = base._ids
 _line = base._line
 
+
+def _ids_nl(path: Path) -> list[str]:
+    """Как ``_ids``, но делит только по ``\\n`` — как writer/reader журналов."""
+    return [json.loads(x)["id"] for x in path.read_text(encoding="utf-8").split("\n") if x.strip()]
+
+
 LIVE = ("history.ndjson", "history_tombstones.ndjson", "history_status.ndjson")
 
 
@@ -173,6 +179,33 @@ class LegacyRestoreQualTest(unittest.TestCase):
         self.assertEqual(verdict["records_unparsable"], 0, verdict)
         self.assertEqual(_ids(history), ["n1"])
 
+    def test_unicode_line_separators_inside_records_survive_restore_and_window(self):
+        """Writer — ``json.dumps(ensure_ascii=False) + "\\n"``, reader — ``for line in fh``.
+
+        ``str.splitlines()`` рвал запись с U+2028/U+0085 в тексте: restore бэкапа
+        отказывал «не JSON», а запись окна pending терялась как неразбираемая.
+        """
+        weird = "строка\u2028вторая\x85третья\u2029конец"
+        rec = json.dumps({"id": "n1", "ts": "2026-01-01T00:00:00Z", "text": weird}, ensure_ascii=False)
+        backup = self._backup([rec])
+        self._pending_after_failure(backup)
+        fresh = self.store.add_history_item(text="окно " + weird)
+        verdict = self.svc._recover_pending_restore()
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(verdict["records_unparsable"], 0, verdict)
+        self.assertEqual(_ids_nl(self._live("history.ndjson")), ["n1", fresh.id])
+        self.assertIn(rec + "\n", self._live("history.ndjson").read_text(encoding="utf-8"))
+        # Запись с U+2028 из pre-restore набора — не запись окна (крах до первой замены).
+        p_os, p_sh = self._fail_on_live("history.ndjson")
+        with p_os, p_sh:
+            self.assertTrue(self._restore(self._backup([_line("m1")], name="backup_20260104_000000")).get("pending"))
+        verdict = self.svc._recover_pending_restore()
+        self.assertTrue(verdict["ok"], verdict)
+        self.assertEqual(_ids_nl(self._live("history.ndjson")), ["m1"], "pre-restore запись с U+2028 перенесена как окно")
+        res = self._restore(self._backup([rec], name="backup_20260103_000000"))
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(_ids_nl(self._live("history.ndjson")), ["n1"])
+
     def test_status_window_start_boundaries(self):
         start = legacy_restore._status_window_start
         self.assertEqual(start("a\nb\nc\n", bases=["a\n", "a\nb\n", None]), (2, True), "самая длинная база")
@@ -180,6 +213,7 @@ class LegacyRestoreQualTest(unittest.TestCase):
         self.assertEqual(start("ab\n", bases=["a"]), (0, False), "совпадение посреди строки — не база")
         self.assertEqual(start("x\n", bases=["a\n"]), (0, False))
         self.assertEqual(start("x\n", bases=[""]), (0, True))
+        self.assertEqual(start("a\u2028b\nc\n", bases=["a\u2028b\n"]), (1, True), "U+2028 — не граница строки")
 
     def test_dictation_in_pending_window_survives_delayed_roll_forward(self):
         backup = self._backup([_line("n1")])

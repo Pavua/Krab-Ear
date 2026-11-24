@@ -62,6 +62,7 @@ from backend.encrypted_snapshot import (
     _readback_live_journals,
     _restore_staging_dir,
     _sha256,
+    _split_ndjson_lines,
     _write_file_durable,
     _write_restore_marker,
     restore_marker_dirs,
@@ -104,6 +105,10 @@ def _replace_live(tmp_file: Path, target: Path) -> None:
 def _parse_plaintext_journal(path: Path, *, reason: str) -> list[tuple[str, str | None]]:
     """Строки plaintext-журнала как ``(line, id)``. Нет файла → пусто.
 
+    Деление ТОЛЬКО по ``\\n`` (``_split_ndjson_lines``), как у writer'а
+    (``ensure_ascii=False``) и reader'а: ``str.splitlines()`` рвал запись с
+    U+2028/U+0085 в тексте.
+
     Любая строка, которая не JSON-объект, или ENC1-строка (зашифрованный журнал
     в legacy-бэкапе / OFF-профиле) → отказ ``reason``: «наверное, не запись»
     не угадываем, иначе битые данные легли бы в живую историю.
@@ -117,7 +122,7 @@ def _parse_plaintext_journal(path: Path, *, reason: str) -> list[tuple[str, str 
     except (OSError, UnicodeDecodeError) as exc:
         raise SnapshotOperationRefused(reason, f"{path.name} не читается: {exc}") from exc
     out: list[tuple[str, str | None]] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
+    for lineno, line in enumerate(_split_ndjson_lines(text), start=1):
         if not line.strip():
             continue
         try:  # ENC1-строка («ENC1:<base64>») — не JSON, отсекается здесь же
@@ -204,7 +209,7 @@ def _known_lines(path: Path) -> tuple[set[str], set[str]]:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return lines, ids
-    for line in text.splitlines():
+    for line in _split_ndjson_lines(text):
         if not line.strip():
             continue
         lines.add(line)
@@ -218,7 +223,7 @@ def _known_lines(path: Path) -> tuple[set[str], set[str]]:
     return lines, ids
 
 
-def _collect_window_records(*, data_dir: Path, files: dict[str, bytes], staging: Path,
+def _collect_window_records(*, data_dir: Path, staging: Path,
                             prerestore_dir: Path | None,
                             blocked: set[str]) -> tuple[dict[str, list[str]], dict[str, int], list[str]]:
     """Строки живых history/status, которых нет ни в staging, ни в pre-restore копии.
@@ -243,12 +248,10 @@ def _collect_window_records(*, data_dir: Path, files: dict[str, bytes], staging:
         live = data_dir / name
         if live.is_symlink() or not live.is_file():
             continue
-        known, known_ids = _known_lines_from_bytes(files.get(name, b""))
-        # Сырые строки staging тоже «известны»: при частичной замене живой журнал
-        # уже равен staging, и удалённая в окне запись оттуда — не запись окна.
-        staged_lines, staged_ids = _known_lines(staging / name)
-        known |= staged_lines
-        known_ids |= staged_ids
+        # «Известно» = сырые строки staging (надмножество выходного набора:
+        # тот лишь отфильтрован по ledger) + pre-restore. При частичной замене живой
+        # журнал уже равен staging, и удалённая в окне запись оттуда — не запись окна.
+        known, known_ids = _known_lines(staging / name)
         if pre_ok:
             pre_lines, pre_ids = _known_lines(prerestore_dir / name)
             known |= pre_lines
@@ -270,7 +273,7 @@ def _collect_window_records(*, data_dir: Path, files: dict[str, bytes], staging:
                 + ([_read_optional(prerestore_dir / name)] if pre_ok else []))
             if not base_known:
                 warnings.append(f"status_window_base_unknown: {name}")
-        for lineno, line in enumerate(text.splitlines(), start=1):
+        for lineno, line in enumerate(_split_ndjson_lines(text), start=1):
             if not line.strip():
                 continue
             if is_history and line in known:
@@ -333,27 +336,7 @@ def _status_window_start(text: str, *, bases: list[str | None]) -> tuple[int, bo
             best = base
     if best is None:
         return 0, False
-    return len(best.splitlines()), True
-
-
-def _known_lines_from_bytes(blob: bytes) -> tuple[set[str], set[str]]:
-    """Строки и id выходного набора. Байты собраны нами из строк, прошедших
-    ``_parse_plaintext_journal``, но сравнение не должно падать на инварианте:
-    неразбираемая строка остаётся «известной» по тексту, id не даёт."""
-    lines: set[str] = set()
-    ids: set[str] = set()
-    for line in blob.decode("utf-8", errors="replace").splitlines():
-        if not line.strip():
-            continue
-        lines.add(line)
-        try:
-            payload = json.loads(line)
-        except ValueError:
-            continue
-        raw_id = payload.get("id") if isinstance(payload, dict) else None
-        if isinstance(raw_id, str) and raw_id.strip():
-            ids.add(raw_id.strip())
-    return lines, ids
+    return len(_split_ndjson_lines(best)), True
 
 
 # ----------------------------------------------------------------------
@@ -595,7 +578,7 @@ def roll_forward_legacy_locked(*, data_dir: Path, staging: Path, marker: dict) -
                                                source_reason=REASON_MANIFEST_INVALID)
     pre = marker.get("pre_restore_snapshot")
     carry, counters, warnings = _collect_window_records(
-        data_dir=data_dir, files=blobs, staging=staging, prerestore_dir=Path(pre) if pre else None,
+        data_dir=data_dir, staging=staging, prerestore_dir=Path(pre) if pre else None,
         blocked=blocked)
     for name, lines in carry.items():
         if lines:
