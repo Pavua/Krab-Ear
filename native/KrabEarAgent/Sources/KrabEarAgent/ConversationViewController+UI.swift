@@ -333,7 +333,7 @@ extension ConversationViewController {
     }
 
     private func hStack() -> NSStackView {
-        let s = NSStackView()
+        let s = AdaptiveRowStackView()  // ряд кнопок встаёт столбиком на узком окне
         s.orientation = .horizontal
         s.spacing     = KrabEarTheme.Metrics.standard
         s.alignment   = .centerY

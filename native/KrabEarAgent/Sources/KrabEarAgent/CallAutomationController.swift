@@ -579,7 +579,8 @@ final class CallAutomationController: NSViewController {
 
     private func makeRow(label: NSView, control: NSView) -> NSStackView {
         label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        let row = NSStackView(views: [label, control])
+        let row = AdaptiveRowStackView()  // строка встаёт столбиком на узком окне
+        row.setViews([label, control], in: .leading)
         row.orientation = .horizontal
         row.spacing = KrabEarTheme.Metrics.standard
         row.alignment = .centerY

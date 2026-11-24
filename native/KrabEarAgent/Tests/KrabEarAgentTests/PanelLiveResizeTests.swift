@@ -156,6 +156,16 @@ final class PanelLiveResizeTests: XCTestCase {
         return issues
     }
 
+    /// Раскрывает все CollapsibleSectionView во всех разделах (без анимации).
+    private func expandAllSections(in controller: HistoryPanelController) {
+        for item in controller.mainTabView.tabViewItems {
+            guard let root = item.view else { continue }
+            for case let section as CollapsibleSectionView in descendants(root) where !section.isExpanded {
+                section.setExpanded(true, animated: false)
+            }
+        }
+    }
+
     // MARK: - Тест
 
     private let widths: [CGFloat] = [640, 860, 1100, 1600, 1100, 860, 640]
@@ -172,9 +182,12 @@ final class PanelLiveResizeTests: XCTestCase {
             for tab in Tab.ordered {
                 conflictLog += captureStderr {
                     controller.selectPanelTab(tab)
+                    // Гейт Opus #2254: 72 из 85 секций по умолчанию свёрнуты, и их содержимое
+                    // (настройки) пропускалось как скрытое; состояние ещё и читается из
+                    // UserDefaults. Раскрываем ВСЁ — проверка не зависит от окружения.
+                    expandAllSections(in: controller)
                     for w in widths + [860] {
-                        let h: CGFloat = (w == 860 && tab == Tab.ordered.last) ? 820 : 820
-                        window.setContentSize(NSSize(width: w, height: h))
+                        window.setContentSize(NSSize(width: w, height: 820))
                         window.contentView?.layoutSubtreeIfNeeded()
                         window.contentView?.layoutSubtreeIfNeeded()
                         issues += inspect(tab: tab, controller: controller, width: w, theme: theme)
@@ -194,6 +207,29 @@ final class PanelLiveResizeTests: XCTestCase {
         }
         XCTAssertEqual(conflicts, 0, "конфликты констрейнтов при ресайзе: \(conflicts)")
         XCTAssertTrue(unique.isEmpty, "нарушения раскладки при ресайзе (\(unique.count)):\n" + unique.prefix(40).map(\.description).joined(separator: "\n"))
+    }
+
+    /// Перенесённая длинная подпись получает высоту нескольких строк (а не обрезается по высоте).
+    func test_wrapLongLabels_wrapsAndGrowsInHeight() {
+        let root = NSView(frame: NSRect(x: 0, y: 0, width: 320, height: 400))
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let label = NSTextField(labelWithString: String(repeating: "длинное пояснение настройки ", count: 12))
+        stack.addArrangedSubview(label)
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: root.topAnchor),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            stack.widthAnchor.constraint(equalToConstant: 320),
+        ])
+        KrabEarTheme.wrapLongLabels(in: root)
+        root.layoutSubtreeIfNeeded()
+        root.layoutSubtreeIfNeeded()
+        let oneLine = label.font!.boundingRectForFont.height
+        XCTAssertLessThanOrEqual(label.alignmentRect(forFrame: label.frame).width, 320.5, "подпись не шире стека")
+        XCTAssertGreaterThan(label.frame.height, oneLine * 2.5, "перенос по словам: высота \(label.frame.height)")
     }
 
     /// Поле ключа Voice Gateway обязано быть на экране (владелец не нашёл, где его вводить).
