@@ -38,15 +38,22 @@ final class ConversationErrorAnnouncer {
         case connectionLost = "connection_lost"
         /// conv.error / conv.fatal от сервера.
         case serverError = "server_error"
+        /// Рукопожатие WS отклонено 401/403: у Voice Gateway включена проверка ключа, а в
+        /// настройках Ear он пуст или неверен. Это ошибка конфигурации, а не сбой сети.
+        case gatewayAuthRequired = "gateway_auth_required"
     }
 
     static let debounceInterval: TimeInterval = 30
+    /// Ошибка конфигурации не лечится повтором: голосом напоминаем редко (раз в 10 минут),
+    /// иначе каждый вызов разговора превращается в повторяющуюся озвучку.
+    static let authDebounceInterval: TimeInterval = 600
 
     /// Фразы фиксированы спекой (§4.1). Без слова «Краб».
     static let phrases: [ErrorClass: String] = [
         .gatewayUnreachable: "Голосовой шлюз недоступен.",
         .connectionLost:     "Связь с голосовым шлюзом потеряна.",
         .serverError:        "Произошла ошибка. Попробуй ещё раз.",
+        .gatewayAuthRequired: "Нужен ключ голосового шлюза. Введи его в настройках.",
     ]
 
     /// Реальная озвучка фразы (синтез + воспроизведение). Инжектится из
@@ -62,8 +69,9 @@ final class ConversationErrorAnnouncer {
     /// Озвучить ошибку класса cls с дебаунсом. true = фраза ушла в speak.
     @discardableResult
     func announce(_ cls: ErrorClass) -> Bool {
+        let interval = cls == .gatewayAuthRequired ? Self.authDebounceInterval : Self.debounceInterval
         if let last = lastAnnounced[cls],
-           now().timeIntervalSince(last) < Self.debounceInterval {
+           now().timeIntervalSince(last) < interval {
             return false
         }
         lastAnnounced[cls] = now()
