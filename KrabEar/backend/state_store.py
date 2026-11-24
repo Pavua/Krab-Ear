@@ -1306,6 +1306,20 @@ class StateStore:
         )
         return self._commit_prepared_settings_unlocked(*prepared)
 
+    def _publish_committed_settings_unlocked(self, crypto_candidate: HistoryCrypto | None) -> None:
+        """In-memory часть commit настроек — после того, как байты УЖЕ на диске.
+
+        Отдельно от записи: M04-05 legacy-restore заменяет settings.json в одной
+        транзакции с журналами (staging + маркер), а RAM-состояние публикует
+        этим же кодом, чтобы не разойтись с обычным commit.
+        """
+        if crypto_candidate is not None:
+            self._history_crypto_initialized = True
+            self._history_crypto_instance = crypto_candidate
+        # После replace даже ошибка directory fsync не делает профиль новым.
+        self._fresh_settings_pending = False
+        self._startup_initialization_consumed = True
+
     def _commit_prepared_settings_unlocked(
         self, settings: dict[str, Any], serialized: str,
         crypto_candidate: HistoryCrypto | None,
@@ -1317,12 +1331,7 @@ class StateStore:
         # atomic_write_text завершается сразу после os.replace. Policy уже
         # видима: до directory fsync публикуем тот же свежий ключ, даже если
         # последующий fsync завершится ошибкой. None сохраняет прежний cache.
-        if crypto_candidate is not None:
-            self._history_crypto_initialized = True
-            self._history_crypto_instance = crypto_candidate
-        # После replace даже ошибка directory fsync не делает профиль новым.
-        self._fresh_settings_pending = False
-        self._startup_initialization_consumed = True
+        self._publish_committed_settings_unlocked(crypto_candidate)
         dir_fd = os.open(self.data_dir, os.O_RDONLY | os.O_CLOEXEC)
         try:
             os.fsync(dir_fd)

@@ -710,12 +710,27 @@ Returns: `{path, size_bytes, ts}`
 *(history_service.py)*  
 Восстанавливает историю из резервной копии (текущий файл заменяется).  
 Params: `{backup_path, restore_settings?}`  
-Returns (legacy, OFF-профиль): `{restored_entries, backup_date}` либо
-`{ok: false, reason, restored_entries: 0, backup_date: "unknown"}`.
+Returns (legacy, OFF-профиль): `{ok: true, restored_entries, backup_date, transaction_id,
+pre_restore_backup, filtered_out_lines, semantic_reindex_required}` либо
+`{ok: false, reason, restored_entries: 0, backup_date: "unknown", pending?, pre_restore_backup?}`.
 
 **Два пути, выбираются по текущей `history_encryption_enabled`.**
 
-**1) OFF-профиль — legacy `copy2`.** Принимает **только
+**1) OFF-профиль — legacy-бэкап, транзакционно (M04-05, 2026-11-24).** Вместо
+`copy2` поверх живых файлов — commit-протокол A5.2b2: проверка всех строк бэкапа
+и живого ledger до первой записи (битая/ENC1 строка → `reason:
+"legacy_backup_unreadable"`, живые файлы целы); журнал, которого нет в бэкапе, =
+пустой; tombstones = бэкап ∪ живые (удалённое после бэкапа не воскресает), строки
+истории/статусов с ID из ledger (tombstones ∪ purged) не пишутся; страховочная
+копия `backups/backup_prerestore_*` (видна в `list_backups`) → staging → durable
+маркер `COMMITTING` (`kind: legacy_plaintext`) → замены (settings последним) →
+read-back → `COMMITTED`. Сбой после маркера → `{ok:false, pending:true}`;
+следующая точка обслуживания докатывает те же байты из staging (sha256 сверяется
+с маркером; без settings в транзакции — только при доказанной policy OFF).
+Семантический индекс после restore очищается, `semantic_search_status.needs_reindex`
+= true до полной перестройки.
+
+Исторически (до M04-05) — legacy `copy2`. Принимает **только
 legacy-бэкапы** (`backup_*`, `auto_backup_*`). Каталоги encrypted snapshot'ов,
 dot-prefixed (в т.ч. `backups/.staging/`) и любые другие имена отклоняются с
 `reason: "unsupported_backup_format"` **до первой копии** — legacy `copy2` поверх
