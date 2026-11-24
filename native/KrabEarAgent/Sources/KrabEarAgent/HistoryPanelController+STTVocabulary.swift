@@ -637,7 +637,10 @@ extension HistoryPanelController {
                 let resp = try ipc.call(method: "add_stt_hotword", params: ["word": word])
                 let result = resp["result"] as? [String: Any]
                 // G3-MEM-07 (M07-12): требуем подтверждённого добавления в список.
-                if result?["ok"] as? Bool != true { throw NSError(domain: "KrabEar", code: -1) }
+                // Контракт бэкенда: {"hotwords": [...], "truncated": Bool} БЕЗ ok;
+                // подтверждение = запрошенное слово присутствует в возвращённом списке.
+                let confirmed = (result?["hotwords"] as? [String])?.contains(word) == true
+                if result?["ok"] as? Bool == false || !confirmed { throw NSError(domain: "KrabEar", code: -1) }
                 truncated = result?["truncated"] as? Bool ?? false
             } catch {
                 DispatchQueue.main.async {

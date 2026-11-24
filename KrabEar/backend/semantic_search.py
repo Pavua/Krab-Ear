@@ -566,7 +566,10 @@ class SemanticSearcher:
                             "semantic_search: загрузка с диска отменена — purge_all() после чтения"
                         )
                         return
-                    self._embeddings = vectors
+                    # Пустой снимок (удалён последний элемент) хранится как (0, 0) —
+                    # возвращаем в «неинициализированное» состояние, иначе следующий
+                    # index_item не сможет стекнуть D-мерный вектор на 0-колоночную матрицу.
+                    self._embeddings = vectors if len(ids) > 0 else None
                     self._index = ids
                 logger.info("semantic_search: загружено %d embeddings с диска", len(ids))
             else:

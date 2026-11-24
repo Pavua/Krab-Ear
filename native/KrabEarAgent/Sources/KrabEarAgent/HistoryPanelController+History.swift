@@ -380,7 +380,10 @@ extension HistoryPanelController {
                 ]
             )
             let resultDict = addResult?["result"] as? [String: Any]
-            let addedOk = resultDict?["ok"] as? Bool == true
+            // Контракт бэкенда: handle_add_history_item возвращает item.to_dict() —
+            // подтверждение сохранения = непустой id записи; явный ok==false — отказ.
+            let addedID = resultDict?["id"] as? String
+            let addedOk = resultDict?["ok"] as? Bool != false && addedID?.isEmpty == false
 
             DispatchQueue.main.async {
                 guard let self = self else { return }

@@ -4208,7 +4208,7 @@ class HistoryService:
         # collaborator — clear() не обязан сглаживать неудачную очистку, а
         # complete=True допускает «успех при оставленном артефакте».
         checks = (
-            ("embeddings.npy", "embeddings_index.json"),
+            ("embeddings.npy", "embeddings_index.json", "embeddings_snapshot.npz"),
             ("vocabulary.json",),
             ("webhooks.json",),
             ("translation_cache.json",),

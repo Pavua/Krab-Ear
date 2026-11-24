@@ -403,7 +403,9 @@ extension HistoryPanelController {
                     // message_id НЕ разрешает успех при ok=false.
                     let okFlag = result["ok"] as? Bool
                     let hasMessageId = result["message_id"] != nil
-                    let success = okFlag == true && hasMessageId
+                    // Контракт бэкенда: успех = {message_id, sent_at, chat_title} БЕЗ ok;
+                    // отказ = {"ok": false, ...}. ok==false перекрывает message_id.
+                    let success = okFlag != false && hasMessageId
 
                     DispatchQueue.main.async {
                         if success {

@@ -109,9 +109,10 @@ extension HistoryPanelController {
             do {
                 let response = try client.call(method: "generate_daily_digest", params: params)
                 let result = (response["result"] as? [String: Any]) ?? [:]
-                // M06-11: ok==true обязателен — отсутствие ok / ok==false или отказ —
-                // не выглядит как «Готово» с прежней или пустой сводкой.
-                if (result["ok"] as? Bool) != true {
+                // M06-11: отказ (ok==false) или ответ без сводки не выглядит как «Готово».
+                // Контракт бэкенда: успех = поля дайджеста (markdown, date, ...) БЕЗ ok,
+                // отказ = {"ok": false, "reason": ...}.
+                if (result["ok"] as? Bool) == false || !(result["markdown"] is String) {
                     let privacy = (result["reason"] as? String) == "privacy_mode_active"
                     let errorMsg = (result["error"] as? String) ?? (result["reason"] as? String) ?? ""
                     DispatchQueue.main.async {

@@ -227,9 +227,10 @@ extension HistoryPanelController {
                 let resp = try ipc.call(method: "start_chain", params: ["name": name])
                 let result = resp["result"] as? [String: Any] ?? [:]
 
-                // G3-MEM-07 (M07-06): цепочка создана только с подтверждённым ok + chain_id.
+                // G3-MEM-07 (M07-06): цепочка создана только с подтверждённым chain_id.
+                // Контракт бэкенда: успех = {"chain_id"} БЕЗ поля ok, отказ = {"ok": false, ...}.
                 let chainID = result["chain_id"] as? String
-                if result["ok"] as? Bool != true || chainID?.isEmpty != false {
+                if result["ok"] as? Bool == false || chainID?.isEmpty != false {
                     let reason = result["reason"] as? String
                     let message = self?.chainErrorMessage(result: result, reason: reason) ?? "Не удалось создать цепочку"
                     DispatchQueue.main.async {
