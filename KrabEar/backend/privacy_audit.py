@@ -41,6 +41,13 @@ _LOG_FILENAME = "privacy_audit.log"
 # импортов, config втянул бы цикл через backend.service.
 _ENV_DIR_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
 
+# Исходы строгой записи (G3-P02-02). Три состояния, а не bool: «не записано» и
+# «неизвестно» требуют разных действий владельца, а «неизвестно» нельзя выдавать
+# ни за успех, ни за доказанный отказ.
+AUDIT_CONFIRMED = "confirmed"      # запись дошла до fsync без исключения
+AUDIT_NOT_WRITTEN = "not_written"  # сбой ДО начала записи — на диске ничего не появилось
+AUDIT_UNKNOWN = "unknown"          # сбой во время/после записи — запись могла лечь
+
 
 def _default_log_path() -> Path:
     """Путь журнала: env-переменная, иначе боевой home-rooted дефолт.
@@ -276,11 +283,39 @@ class PrivacyAuditLogger:
     ) -> None:
         """Дописывает одну NDJSON-строку в лог с HMAC хеш-цепочкой.
 
+        Best-effort: ошибка записи логируется и НЕ пробрасывается (поведение
+        для всех существующих вызывающих не менялось). Кому нужен результат —
+        ``log_event_strict``.
+
         Args:
             category: категория события (sentry, translation, …).
             action:   действие (blocked, forced_offline, …).
             details:  дополнительные данные (опционально).
         """
+        self._write_event(category, action, details)
+
+    def log_event_strict(
+        self,
+        category: str,
+        action: str,
+        details: dict[str, Any] | None = None,
+    ) -> str:
+        """Как ``log_event``, но возвращает исход записи.
+
+        Возвращает одну из констант ``AUDIT_CONFIRMED`` / ``AUDIT_NOT_WRITTEN`` /
+        ``AUDIT_UNKNOWN``. Исключений не бросает. Для обязательных
+        комплаенс-записей (purge): «complete» вправе опираться только на
+        ``AUDIT_CONFIRMED``.
+        """
+        return self._write_event(category, action, details)
+
+    def _write_event(
+        self,
+        category: str,
+        action: str,
+        details: dict[str, Any] | None,
+    ) -> str:
+        """Общая запись события; возвращает исход (см. константы ``AUDIT_*``)."""
         # _log_lock сериализует цикл внутри процесса (W1027 F1 HIGH / W1029 fix),
         # flock — между процессами. Нужны ОБА: тредовый лок не виден соседнему
         # процессу, файловый — не виден соседнему треду того же процесса.
@@ -292,6 +327,11 @@ class PrivacyAuditLogger:
                 "action": action,
                 "details": details or {},
             }
+            # Фаза нужна, чтобы отличить «доказанно не записано» от «неизвестно»:
+            #   pre     — до первого байта записи (open/flock/чтение tip/хеш);
+            #   writing — write/flush/fsync начались, исход неопределён;
+            #   done    — fsync вернулся без ошибки, запись долговечна.
+            phase = "pre"
 
             try:
                 self._ensure_parent()
@@ -319,15 +359,18 @@ class PrivacyAuditLogger:
                         entry["entry_hash"] = entry_hash
 
                         line = json.dumps(entry, ensure_ascii=False) + "\n"
+                        phase = "writing"
                         fh.write(line.encode("utf-8"))
                         fh.flush()
                         os.fsync(fh.fileno())
+                        phase = "done"
                     finally:
                         fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
 
                 # Кэш обновляем только после успешной записи. Источник истины —
                 # файл; это значение остаётся лишь подсказкой для диагностики.
                 self._last_hash = entry_hash
+                return AUDIT_CONFIRMED
 
             except Exception:
                 logger.exception(
@@ -335,6 +378,13 @@ class PrivacyAuditLogger:
                     category,
                     action,
                 )
+                if phase == "done":
+                    # fsync прошёл — запись долговечна; упал только хвост
+                    # (unlock/close). Это не повод считать комплаенс-запись потерянной.
+                    return AUDIT_CONFIRMED
+                if phase == "pre":
+                    return AUDIT_NOT_WRITTEN
+                return AUDIT_UNKNOWN
 
     def verify_chain(self) -> dict[str, Any]:
         """Проверяет целостность HMAC хеш-цепочки лога.
