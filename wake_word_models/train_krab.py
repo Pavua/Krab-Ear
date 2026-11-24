@@ -741,6 +741,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                          help="Примеры на батч: positive,adversarial,general "
                               "(авто-расчёт генератора с 17GB-ACAV даёт 0.78%% "
                               "позитивов -- модель вырождается)")
+    train_g.add_argument("--general-from-fp-val", type=float, default=0.0,
+                         help="Если общий корпус ACAV100M не скачан: доля (0..1) fp-валидации (~10.7 ч реального "
+                              "аудио) в качестве общих негативов train; остаток остаётся для fp/час. 0 — выключено")
     train_g.add_argument("--max-negative-weight", type=int, default=1000)
     train_g.add_argument("--target-fp-per-hour", type=float, default=0.2,
                          help="Внутренняя адаптивная цель auto_train")
@@ -1596,6 +1599,41 @@ def _write_training_report(
     report_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def prepare_general_negatives_from_fp_val(
+    src_path: Path, out_dir: Path, fraction: float, *, window: int = 16, stride: int = 4,
+) -> tuple[Path, Path]:
+    """Делит fp-валидационный корпус (~10.7 ч реального аудио, кадры ``[N, 96]``) на две НЕПЕРЕСЕКАЮЩИЕСЯ
+    части: первые ``fraction`` кадров -> окна ``[M, window, 96]`` как общий негативный корпус для train,
+    остаток -> валидация fp/час. Нужен, пока 17 ГБ ACAV100M не скачан: без общего корпуса модель видела
+    только синтез и речь владельца и давала ~7000 ложных срабатываний/час на реальном аудио.
+
+    Возвращает ``(general_windows.npy, holdout_frames.npy)``. Файлы пишутся через ``.partial`` +
+    ``os.replace``: оборванный прогон не оставляет усечённый .npy, который следующий запуск принял бы за готовый.
+    Окна не пересекают границу раздела (иначе валидация «подглядывала» бы в train).
+    """
+    import numpy as np
+
+    if not 0.0 < fraction < 1.0:
+        raise ValueError("fraction должен быть в (0, 1)")
+    raw = np.load(src_path, mmap_mode="r")
+    if raw.ndim != 2:
+        raise ValueError(f"ожидались кадры [N, D], получено {raw.shape}")
+    cut = int(raw.shape[0] * fraction)
+    if cut < window * 2 or raw.shape[0] - cut < window * 2:
+        raise ValueError("корпус слишком мал для раздела")
+    starts = range(0, cut - window + 1, stride)
+    windows = np.stack([raw[i:i + window] for i in starts]).astype(np.float32)
+    holdout = np.asarray(raw[cut:], dtype=np.float32)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    general_path = out_dir / "general_from_fp_val_train.npy"
+    holdout_path = out_dir / "fp_val_holdout.npy"
+    for path, array in ((general_path, windows), (holdout_path, holdout)):
+        partial = path.with_name(path.name + ".partial.npy")
+        np.save(partial, array)
+        os.replace(partial, path)
+    return general_path, holdout_path
+
+
 def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
     """Обучает ``openwakeword.train.Model`` через ``auto_train`` и гейтует
     итог по ``max_fp_per_hour`` через ``_select_best_model`` (решение §3.5
@@ -1661,6 +1699,13 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
     if negatives_override.exists():
         feature_files["general_negative"] = str(negatives_override)
         logger.info("train: подключён общий негативный корпус %s", negatives_override)
+    elif args.general_from_fp_val > 0:
+        general_path, holdout_path = prepare_general_negatives_from_fp_val(
+            fp_val_path, paths.features, args.general_from_fp_val)
+        feature_files["general_negative"] = str(general_path)
+        fp_val_path = holdout_path  # fp/час меряем на неперекрывающемся остатке
+        logger.info("train: общий негативный корпус = %.0f%% fp-валидации (%s), fp/час на остатке (%s)",
+                    100 * args.general_from_fp_val, general_path, holdout_path)
     else:
         logger.warning(
             "train: общий негативный корпус (%s) не найден -- используются "

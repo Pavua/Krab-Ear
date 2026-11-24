@@ -152,3 +152,54 @@ class LinkSyntheticTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GeneralNegativesFromFpValTests(unittest.TestCase):
+    """Общий негативный корпус из fp-валидации (пока ACAV100M не скачан)."""
+
+    def _frames(self, n: int):
+        import numpy as np
+
+        # каждая строка — уникальный номер кадра: по значениям видно, откуда окно
+        return (np.arange(n, dtype=np.float32)[:, None] * np.ones((1, 96), dtype=np.float32))
+
+    def test_split_is_disjoint_and_windows_stay_inside_train_part(self) -> None:
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "val.npy")
+            np.save(src, self._frames(1000))
+            general, holdout = tk.prepare_general_negatives_from_fp_val(src, Path(tmp, "out"), 0.7)
+            windows = np.load(general)
+            rest = np.load(holdout)
+            self.assertEqual(windows.shape[1:], (16, 96))
+            self.assertEqual(rest.shape, (300, 96))
+            self.assertEqual(float(rest[0, 0]), 700.0)               # остаток начинается ровно с границы
+            self.assertLess(float(windows[:, :, 0].max()), 700.0)    # ни одно окно не заходит в остаток
+            self.assertGreater(windows.shape[0], 100)
+
+    def test_no_partial_files_left_and_bad_input_rejected(self) -> None:
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp, "val.npy")
+            np.save(src, self._frames(500))
+            out = Path(tmp, "out")
+            tk.prepare_general_negatives_from_fp_val(src, out, 0.5)
+            self.assertEqual(sorted(p.name for p in out.iterdir()),
+                             ["fp_val_holdout.npy", "general_from_fp_val_train.npy"])
+            for bad in (0.0, 1.0, 1.5):
+                with self.assertRaises(ValueError):
+                    tk.prepare_general_negatives_from_fp_val(src, out, bad)
+            tiny = Path(tmp, "tiny.npy")
+            np.save(tiny, self._frames(20))
+            with self.assertRaises(ValueError):
+                tk.prepare_general_negatives_from_fp_val(tiny, out, 0.5)
+
+    def test_flag_default_off_and_wired_into_stage_train(self) -> None:
+        args = tk.build_arg_parser().parse_args(["--stage", "train"])
+        self.assertEqual(args.general_from_fp_val, 0.0)
+        src = _func_source("stage_train")
+        self.assertIn("prepare_general_negatives_from_fp_val", src)
+        # остаток используется для fp/час: fp_val_path переназначается ДО чтения x_val_fp_raw
+        self.assertLess(src.index("fp_val_path = holdout_path"), src.index("x_val_fp_raw = np.load(fp_val_path)"))
