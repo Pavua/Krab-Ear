@@ -174,6 +174,35 @@ class TestReplayEventsTruncation(unittest.TestCase):
             mgr.close()
 
 
+class TestReplayTruncationBoundary(unittest.TestCase):
+    """G3-audio-03 (A03-10): truncated отражает ФАКТ усечения, а не равенство лимиту."""
+
+    def _handle(self, n_events: int) -> dict:
+        mgr = EventReplayManager(max_buffer=_MAX_REPLAY_EVENTS + 5)
+        self.addCleanup(mgr.close)
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        with mgr._lock:
+            for i in range(n_events):
+                mgr._buffer.append({"type": "flood", "ts": ts, "data": {}, "seq": i})
+        now = time.time()
+        return mgr.handle_replay_events({"from_ts": now - 3600, "to_ts": now + 3600})
+
+    def test_exactly_max_events_is_not_truncated(self):
+        result = self._handle(_MAX_REPLAY_EVENTS)
+        self.assertEqual(result["count"], _MAX_REPLAY_EVENTS)
+        self.assertIs(result["truncated"], False)
+
+    def test_one_over_max_is_truncated(self):
+        result = self._handle(_MAX_REPLAY_EVENTS + 1)
+        self.assertEqual(result["count"], _MAX_REPLAY_EVENTS)
+        self.assertIs(result["truncated"], True)
+
+    def test_below_max_is_not_truncated(self):
+        result = self._handle(3)
+        self.assertEqual(result["count"], 3)
+        self.assertIs(result["truncated"], False)
+
+
 class TestReplayEventsWindowConstants(unittest.TestCase):
     """Verify module-level constants have expected values."""
 

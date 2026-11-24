@@ -329,14 +329,37 @@ def _read_dispatch_source():
         return f.read()
 
 
+import ast as _ast
+
+
+def _extract_dispatch_table_source(src: str) -> str:
+    """Исходник ТОЛЬКО метода BackendService._build_dispatch_table (G3-audio-03 A03-01).
+
+    Раньше guard искал ключи по ВСЕМУ service.py: ключ, оставшийся лишь в постороннем
+    словаре, засчитывался как зарегистрированный IPC-обработчик, и удаление хендлера
+    из реальной таблицы не краснело.
+    """
+    tree = _ast.parse(src)
+    cls = next(n for n in tree.body if isinstance(n, _ast.ClassDef) and n.name == "BackendService")
+    method = next(
+        n for n in cls.body
+        if isinstance(n, _ast.FunctionDef) and n.name == "_build_dispatch_table"
+    )
+    segment = _ast.get_source_segment(src, method)
+    if not segment:
+        raise AssertionError("не удалось извлечь исходник _build_dispatch_table")
+    return segment
+
+
 def _dispatch_block(src):
-    """Return the full service.py text (it contains the inline dispatch dict).
+    """Return the source of BackendService._build_dispatch_table ONLY.
 
     W1769: dispatch table consolidated inline in service.py; ipc_dispatch.py removed.
     The live dict uses the ``self.`` prefix; _dispatch_rhs() normalizes it to the
-    historical ``svc.`` prefix used by _EXPECTED.
+    historical ``svc.`` prefix used by _EXPECTED. G3-audio-03 (A03-01): блок —
+    только метод таблицы, а не весь service.py.
     """
-    return src
+    return _extract_dispatch_table_source(src)
 
 
 def _all_dispatch_keys(block):

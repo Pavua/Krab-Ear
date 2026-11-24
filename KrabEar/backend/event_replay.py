@@ -299,6 +299,12 @@ class EventReplayManager:
         совпадающих событий, список усекается и в последний элемент добавляется
         маркер ``{"truncated": True}``.
         """
+        return self._collect_replay(from_ts, to_ts)[0]
+
+    def _collect_replay(self, from_ts: str, to_ts: str) -> tuple[list[dict[str, Any]], bool]:
+        """Возвращает (события, truncated). truncated=True ТОЛЬКО если совпавших событий было
+        БОЛЬШЕ лимита (G3-audio-03 A03-10: прежний признак ``len(events) == MAX`` помечал
+        усечённым и полный результат ровно из _MAX_REPLAY_EVENTS событий)."""
         from_dt = _parse_ts(from_ts)
         to_dt = _parse_ts(to_ts)
 
@@ -319,7 +325,8 @@ class EventReplayManager:
         results.sort(key=lambda e: e.get("seq", 0))
 
         # Защита от DoS: не возвращаем более _MAX_REPLAY_EVENTS событий.
-        if len(results) > _MAX_REPLAY_EVENTS:
+        truncated = len(results) > _MAX_REPLAY_EVENTS
+        if truncated:
             logger.warning(
                 "EventReplayManager.replay_events: результат обрезан до %d событий (было %d)",
                 _MAX_REPLAY_EVENTS,
@@ -327,7 +334,7 @@ class EventReplayManager:
             )
             results = results[:_MAX_REPLAY_EVENTS]
 
-        return results
+        return results, truncated
 
     def get_event_stats(self) -> dict[str, Any]:
         """Возвращает статистику: количество событий по типу, скорость за минуту.
@@ -472,8 +479,7 @@ class EventReplayManager:
         except (ValueError, OverflowError, OSError):
             return {"ok": False, "reason": "from_ts or to_ts out of valid date range"}
 
-        events = self.replay_events(from_iso, to_iso)
-        truncated = len(events) == _MAX_REPLAY_EVENTS
+        events, truncated = self._collect_replay(from_iso, to_iso)
         return {"events": events, "count": len(events), "truncated": truncated}
 
 
