@@ -83,7 +83,7 @@ class NoHeavyTopLevelImportsTest(unittest.TestCase):
             tk.STAGES,
             ("corpora", "positives", "negatives", "features", "train", "export", "install"),
         )
-        self.assertEqual(set(tk.STAGE_FUNCS.keys()), set(tk.STAGES))
+        self.assertEqual(set(tk.STAGE_FUNCS.keys()), set(tk.STAGES) | set(tk.OWNER_STAGES))
 
 
 # ---------------------------------------------------------------------------

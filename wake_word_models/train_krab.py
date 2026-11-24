@@ -83,6 +83,17 @@ STAGES: tuple[str, ...] = (
     "corpora", "positives", "negatives", "features", "train", "export", "install",
 )
 
+# Этапы данных владельца запускаются ТОЛЬКО явно (--stage owner_features) и не входят в --all:
+# им нужны личные записи, которых нет у чужого клона репозитория.
+OWNER_STAGES: tuple[str, ...] = ("owner_features",)
+
+# Блоки личного датасета, чьи клипы годятся как фоновый шум для AddBackgroundNoise
+# (комната, клавиатура, тихая «свободная речь»): берутся ТОЛЬКО из train-части.
+OWNER_BACKGROUND_BLOCKS: frozenset[str] = frozenset(
+    {"neg_room_silence", "neg_typing", "neg_self_talk"})
+OWNER_FEATURE_FILES: tuple[str, str] = (
+    "owner_positive_features_train.npy", "owner_negative_features_train.npy")
+
 # Официальные ресурсы openWakeWord -- сверены 2026-07-09 напрямую через
 # dscripka/openWakeWord (notebooks/automatic_model_training.ipynb) и HuggingFace
 # Hub API (репозитории публичные, не gated). См. README «Откуда взяты датасеты».
@@ -552,6 +563,38 @@ def _glob_wavs(directory: Path | str | None) -> list[str]:
 # Пути проекта
 # ============================================================================
 
+def is_path_inside(path: Path | str, root: Path | str) -> bool:
+    """True, если ``path`` (после resolve) лежит внутри ``root``."""
+    try:
+        Path(path).expanduser().resolve().relative_to(Path(root).expanduser().resolve())
+    except ValueError:
+        return False
+    return True
+
+
+def assert_private_work_dir(work_dir: Path | str, repo_root: Path | str) -> None:
+    """Рабочий каталог данных владельца обязан быть ВНЕ репозитория.
+
+    Там лежат нарезанные и аугментированные личные записи (биометрия) и признаки:
+    случайный ``git add`` внутри клона или синхронизация каталога не должны их задеть.
+    """
+    if is_path_inside(work_dir, repo_root):
+        raise RuntimeError(
+            "owner_features: --work-dir внутри репозитория; личные записи и признаки должны "
+            "лежать вне него (например ~/Library/Application Support/KrabEar/wake_training_owner)")
+
+
+def parse_owner_batch_composition(raw: str) -> tuple[int, int]:
+    """``"384,192"`` -> (owner_positive, owner_negative) на батч; обе доли должны быть > 0."""
+    try:
+        parts = [int(p) for p in str(raw).split(",")]
+    except ValueError as exc:
+        raise ValueError("--owner-batch-composition: ожидаются два целых через запятую") from exc
+    if len(parts) != 2 or min(parts) <= 0:
+        raise ValueError("--owner-batch-composition: ровно две положительные доли (позитивы,негативы)")
+    return parts[0], parts[1]
+
+
 @dataclass
 class ProjectPaths:
     """Рабочие директории тренировочного пайплайна (все, кроме ``root``,
@@ -600,7 +643,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
     stage_group = parser.add_mutually_exclusive_group()
     stage_group.add_argument(
-        "--stage", choices=STAGES, default=None, help="Запустить один этап",
+        "--stage", choices=STAGES + OWNER_STAGES, default=None, help="Запустить один этап",
     )
     stage_group.add_argument(
         "--all", action="store_true", help="Запустить все этапы по порядку",
@@ -717,6 +760,29 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "проверяется, при отсутствии train использует только RU-синтетику"
         ),
     )
+
+    owner_g = parser.add_argument_group("owner (данные владельца, только явный --stage owner_features)")
+    owner_g.add_argument(
+        "--owner-dir", default=str(Path.home() / "Library" / "Application Support" / "KrabEar" / "wake_dataset"),
+        help="Каталог записи scripts/record_wake_dataset.py (manifest.jsonl + WAV); только чтение")
+    owner_g.add_argument(
+        "--golden-dir", default=str(Path.home() / "Library" / "Application Support" / "KrabEar" / "golden"),
+        help="Golden R2 (ru_/es_/en_NNN.wav) как жёсткие негативы; только чтение, '' = не использовать")
+    owner_g.add_argument(
+        "--synthetic-work-dir", default=None,
+        help="Прежний work-dir с синтетическими признаками и corpora (positive/negative_features_train.npy, "
+             "validation_set_features.npy, rir/, маркер features) — подключаются как дополнение")
+    owner_g.add_argument("--owner-val-ratio", type=float, default=0.2,
+                         help="Доля клипов владельца в проверочной части (делится по клипам)")
+    owner_g.add_argument("--owner-pos-rounds", type=int, default=40,
+                         help="Раундов аугментации на клип-позитив владельца (train)")
+    owner_g.add_argument("--owner-neg-rounds", type=int, default=12,
+                         help="Раундов аугментации на клип-негатив владельца и golden (train)")
+    owner_g.add_argument("--owner-val-rounds", type=int, default=6,
+                         help="Раундов аугментации на проверочный клип (чтобы проверка шла и по шуму)")
+    owner_g.add_argument(
+        "--owner-batch-composition", default="384,192",
+        help="owner_positive,owner_negative на батч (в дополнение к --batch-composition)")
 
     install_g = parser.add_argument_group("install")
     install_g.add_argument(
@@ -1296,6 +1362,132 @@ def stage_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
 
 
 # ============================================================================
+# Этап: owner_features (личные записи владельца + golden R2)
+# ============================================================================
+
+def _link_synthetic_inputs(args: argparse.Namespace, paths: ProjectPaths) -> int:
+    """Подключает синтетические признаки и corpora прежнего work-dir симлинками (только чтение).
+
+    Возвращает ``total_length`` из маркера features прежнего прогона: признаки владельца
+    считаются с той же длиной окна, иначе массивы не складываются в один батч.
+    """
+    if not args.synthetic_work_dir:
+        raise RuntimeError("owner_features: укажите --synthetic-work-dir (прежний work-dir с признаками)")
+    src = ProjectPaths.from_work_dir(Path(args.synthetic_work_dir).expanduser().resolve())
+    meta = read_marker(src.features, "features")
+    if not meta or "total_length_samples" not in meta:
+        raise RuntimeError("owner_features: в --synthetic-work-dir нет маркера features (нужен готовый прогон)")
+    paths.features.mkdir(parents=True, exist_ok=True)
+    paths.corpora.mkdir(parents=True, exist_ok=True)
+    pairs = [
+        (src.features / "positive_features_train.npy", paths.features / "positive_features_train.npy"),
+        (src.features / "negative_features_train.npy", paths.features / "negative_features_train.npy"),
+        (src.corpora / args.fp_validation_file, paths.corpora / args.fp_validation_file),
+    ]
+    rir_src = src.corpora / "rir"
+    if rir_src.is_dir():
+        pairs.append((rir_src, paths.corpora / "rir"))
+    for source, link in pairs:
+        if not source.exists():
+            raise RuntimeError(f"owner_features: нет {source.name} в --synthetic-work-dir")
+        if link.is_symlink() or link.exists():
+            if link.is_symlink() and link.resolve() == source.resolve():
+                continue
+            raise RuntimeError(f"owner_features: {link} уже существует и указывает не туда")
+        link.symlink_to(source.resolve())
+    return int(meta["total_length_samples"])
+
+
+def stage_owner_features(args: argparse.Namespace, paths: ProjectPaths) -> None:
+    """Признаки из личного датасета владельца и golden R2.
+
+    * делит клипы владельца на train/val ПО КЛИПАМ (стратифицировано по блоку), golden — так же;
+    * позитивы режет по активному участку (``augment_clips`` дополняет слева нулями до окна);
+    * фоновый шум для аугментации берёт ТОЛЬКО из train-части (комната/клавиатура/тихая речь);
+    * проверочные признаки (``positive/negative_features_test.npy``) — клипы владельца, чтобы
+      recall и ложные срабатывания гейта мерились на его голосе;
+    * синтетические признаки прежнего прогона подключаются дополнением (симлинки, read-only).
+    Рабочий каталог обязан быть ВНЕ репозитория: там личные клипы и признаки.
+    """
+    if is_stage_done(paths.features, "owner_features") and not args.force:
+        logger.info("owner_features: уже выполнено, пропуск (--force для повтора)")
+        return
+    assert_private_work_dir(paths.root, SCRIPT_DIR.parent)
+    if str(SCRIPT_DIR) not in sys.path:
+        sys.path.insert(0, str(SCRIPT_DIR))
+    import owner_data as od
+
+    try:
+        from openwakeword.data import augment_clips
+        from openwakeword.utils import compute_features_from_generator
+    except ImportError as exc:
+        raise RuntimeError(f"openwakeword.data недоступен ({exc}); см. README «Пререквизиты»") from exc
+
+    total_length = _link_synthetic_inputs(args, paths)
+
+    owner = od.load_owner_manifest(Path(args.owner_dir).expanduser())
+    pos = [c for c in owner if c.label == "pos"]
+    neg = [c for c in owner if c.label == "neg"]
+    golden = [od.OwnerClip(path=p, label="neg", block=f"golden_{p.name[:2]}")
+              for p in od.list_golden_clips(Path(args.golden_dir).expanduser())] if args.golden_dir else []
+    if len(pos) < 20 or len(neg) < 20:
+        raise RuntimeError("owner_features: слишком мало клипов владельца (нужно >= 20 позитивов и негативов)")
+    pos_train, pos_val = od.split_clips(pos, val_ratio=args.owner_val_ratio, seed=args.seed)
+    neg_train, neg_val = od.split_clips(neg + golden, val_ratio=args.owner_val_ratio, seed=args.seed)
+
+    clips_root = paths.root / "owner_clips"
+    sets = {
+        "pos_train": (pos_train, args.owner_pos_rounds), "pos_val": (pos_val, args.owner_val_rounds),
+        "neg_train": (neg_train, args.owner_neg_rounds), "neg_val": (neg_val, args.owner_val_rounds),
+    }
+    counters: dict[str, dict[str, int]] = {}
+    for name, (items, _rounds) in sets.items():
+        target = clips_root / name
+        if target.exists() and args.force:
+            for stale in target.glob("*.wav"):
+                stale.unlink()
+        counters[name] = od.prepare_owner_clips(items, target, prefix=name)
+    bg_dir = clips_root / "background"
+    bg_items = [c for c in neg_train if c.block in OWNER_BACKGROUND_BLOCKS]
+    bg_counters = od.prepare_owner_clips(bg_items, bg_dir, prefix="bg") if bg_items else {"in": 0, "out": 0}
+    if counters["pos_train"]["out"] < 20 or counters["pos_val"]["out"] < 3:
+        raise RuntimeError("owner_features: после обрезки тишины осталось слишком мало позитивов")
+
+    rir_paths = [] if args.skip_rir else _glob_wavs(paths.corpora / "rir")
+    background_paths = _glob_wavs(bg_dir)
+    jobs = [
+        ("owner_positive_features_train.npy", "pos_train", args.owner_pos_rounds),
+        ("owner_negative_features_train.npy", "neg_train", args.owner_neg_rounds),
+        ("positive_features_test.npy", "pos_val", args.owner_val_rounds),
+        ("negative_features_test.npy", "neg_val", args.owner_val_rounds),
+    ]
+    for out_name, set_name, rounds in jobs:
+        out_path = paths.features / out_name
+        if out_path.exists() and not args.force:
+            logger.info("owner_features: %s уже существует, пропуск", out_name)
+            continue
+        clip_list = sorted(str(p) for p in (clips_root / set_name).glob("*.wav")) * max(1, rounds)
+        logger.info("owner_features: %s — %d окон (%d раундов)", out_name, len(clip_list), rounds)
+        gen = augment_clips(
+            clip_list, total_length=total_length, batch_size=args.augmentation_batch_size,
+            background_clip_paths=background_paths, RIR_paths=rir_paths,
+        )
+        compute_features_from_generator(
+            gen, n_total=len(clip_list), clip_duration=total_length,
+            output_file=str(out_path), device="cpu", ncpu=args.feature_ncpu,
+        )
+        _assert_features_sane(out_path)
+
+    # features-маркер нужен stage_train/export (длина окна); owner-маркер — только счётчики.
+    write_marker(paths.features, "features", {"total_length_samples": total_length, "source": "owner_features"})
+    write_marker(paths.features, "owner_features", {
+        "counters": counters, "background": bg_counters, "golden_clips": len(golden),
+        "rir_count": len(rir_paths), "total_length_samples": total_length,
+    })
+    logger.info("owner_features: готово (клипы: %s, фон: %s)", counters, bg_counters)
+
+
+# ============================================================================
 # Этап: train
 # ============================================================================
 
@@ -1448,9 +1640,17 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
             "качество гейта может быть ниже, отмечено в отчёте)", negatives_override,
         )
 
+    owner_files = [paths.features / name for name in OWNER_FEATURE_FILES]
+    owner_n: tuple[int, int] | None = None
+    if all(f.exists() for f in owner_files):
+        feature_files["owner_positive"] = str(owner_files[0])
+        feature_files["owner_negative"] = str(owner_files[1])
+        owner_n = parse_owner_batch_composition(args.owner_batch_composition)
+        logger.info("train: подключены признаки владельца (owner_positive/owner_negative)")
+
     data_transforms = {k: _reshape_transform for k in feature_files}
     label_transforms: dict[str, Callable[[Any], list[int]]] = {
-        k: (lambda x: [1 for _ in x]) if k == "positive" else (lambda x: [0 for _ in x])
+        k: (lambda x: [1 for _ in x]) if k in ("positive", "owner_positive") else (lambda x: [0 for _ in x])
         for k in feature_files
     }
 
@@ -1468,6 +1668,8 @@ def stage_train(args: argparse.Namespace, paths: ProjectPaths) -> None:
     else:
         # Без общего корпуса его долю отдаём adversarial-негативам.
         n_per_class["adversarial_negative"] += parts[2]
+    if owner_n is not None:
+        n_per_class["owner_positive"], n_per_class["owner_negative"] = owner_n
     logger.info("train: композиция батча n_per_class=%s", n_per_class)
     batch_gen = mmap_batch_generator(
         feature_files, n_per_class=n_per_class,
@@ -1715,6 +1917,7 @@ STAGE_FUNCS: dict[str, Callable[[argparse.Namespace, ProjectPaths], None]] = {
     "train": stage_train,
     "export": stage_export,
     "install": stage_install,
+    "owner_features": stage_owner_features,
 }
 
 
