@@ -1298,13 +1298,13 @@ Returns: `{suggestions: [{word, score, reason}, ...]}`
 *(stt_management_service.py)*  
 Добавляет термин в список STT hotwords (используются в initial_prompt Whisper).  
 Params: `{word}` (str)  
-Returns: `{ok, word, total}`
+Returns: `{hotwords: [...], truncated}` — список, который РЕАЛЬНО сохранил `set_settings` (после нормализации). Если слова в сохранённом списке нет — ошибка `stt_hotword не сохранён`, а не ложный успех.
 
 ### `remove_stt_hotword`
 *(stt_management_service.py)*  
 Удаляет термин из списка STT hotwords.  
 Params: `{word}` (str)  
-Returns: `{ok, removed}`
+Returns: `{hotwords: [...]}` — сохранённый список; если слово осталось — ошибка `stt_hotword не удалён`.
 
 ### `list_stt_hotwords`
 *(stt_management_service.py)*  

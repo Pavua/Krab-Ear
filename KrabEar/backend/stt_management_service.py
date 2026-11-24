@@ -42,6 +42,18 @@ class STTManagementService:
     # STT hotwords (initial_prompt boost)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _saved_hotwords(saved: Any, fallback: list[str]) -> list[str]:
+        """Список hotwords, который РЕАЛЬНО сохранил set_settings.
+
+        Реальный `handle_set_settings` возвращает словарь настроек с `stt_hotwords` после
+        нормализации/валидации. Если ключа нет (заглушка, старая реализация), сверять не с чем —
+        остаётся локально собранный список.
+        """
+        if isinstance(saved, dict) and isinstance(saved.get("stt_hotwords"), list):
+            return [w for w in saved["stt_hotwords"] if isinstance(w, str)]
+        return fallback
+
     def handle_add_stt_hotword(self, params: dict[str, Any]) -> dict[str, Any]:
         """Добавляет термин в список STT hotwords.
 
@@ -69,7 +81,11 @@ class STTManagementService:
                 )
                 current = current[excess:]
                 truncated = True
-            self._settings_svc.handle_set_settings({"stt_hotwords": current})
+            saved = self._settings_svc.handle_set_settings({"stt_hotwords": current})
+            current = self._saved_hotwords(saved, current)
+            if word not in current:
+                # Нормализация/валидация выбросила слово при сохранении: «добавлено» было бы ложью.
+                raise RuntimeError(f"stt_hotword не сохранён: {word!r}")
         add_breadcrumb(
             category="stt",
             message="add_stt_hotword",
@@ -93,7 +109,10 @@ class STTManagementService:
             current = []
         updated = [w for w in current if w != word]
         if len(updated) != len(current):
-            self._settings_svc.handle_set_settings({"stt_hotwords": updated})
+            saved = self._settings_svc.handle_set_settings({"stt_hotwords": updated})
+            updated = self._saved_hotwords(saved, updated)
+            if word in updated:
+                raise RuntimeError(f"stt_hotword не удалён: {word!r}")
         return {"hotwords": updated}
 
     def handle_list_stt_hotwords(self, params: dict[str, Any]) -> dict[str, Any]:
