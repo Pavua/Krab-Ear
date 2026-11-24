@@ -111,6 +111,9 @@ final class DiagnosticsTabViewController: NSViewController {
         // Root outer stack
         let outerStack = NSStackView()
         outerStack.orientation = .vertical
+        // Карточка таблицы сама не имеет ширины: без явного растяжения на всю ширину
+        // вертикальный стек центрирует её по intrinsic size (~170 pt) и колонки схлопываются.
+        outerStack.alignment = .leading
         outerStack.spacing = Layout.sectionGap
         outerStack.translatesAutoresizingMaskIntoConstraints = false
         outerStack.edgeInsets = NSEdgeInsets(
@@ -150,6 +153,12 @@ final class DiagnosticsTabViewController: NSViewController {
 
             root.widthAnchor.constraint(greaterThanOrEqualToConstant: Layout.minWidth),
             root.heightAnchor.constraint(greaterThanOrEqualToConstant: Layout.minHeight),
+
+            // Все секции — на всю ширину стека минус внешние поля.
+            filtersBar.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -2 * Layout.outerPadding),
+            tableContainer.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -2 * Layout.outerPadding),
+            memBar.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -2 * Layout.outerPadding),
+            footer.widthAnchor.constraint(equalTo: outerStack.widthAnchor, constant: -2 * Layout.outerPadding),
 
             filtersBar.heightAnchor.constraint(equalToConstant: Layout.headerHeight),
             memBar.heightAnchor.constraint(equalToConstant: 28),
