@@ -21,7 +21,7 @@ import AppKit
 /// Итог проверки шлюза: адрес (по /health) и ключ (по запросу, ТРЕБУЮЩЕМУ авторизацию).
 struct VoiceGatewayCheck: Equatable {
     enum Address: Equatable { case reachable, unreachable(String), badResponse(Int) }
-    enum Key: Equatable { case accepted, rejected, notRequired, required, unknown }
+    enum Key: Equatable { case accepted, rejected, notRequired, notVerified, required, unknown }
 
     let address: Address
     let key: Key
@@ -29,7 +29,10 @@ struct VoiceGatewayCheck: Equatable {
     /// - healthStatus: HTTP-код /health (nil — сетевой сбой, тогда healthError).
     /// - authStatus: HTTP-код GET /v1/settings/conversation (маршрут с _auth_required в VG).
     /// - keyProvided: отправляли ли Bearer.
-    static func evaluate(healthStatus: Int?, healthError: String?, authStatus: Int?, keyProvided: Bool) -> VoiceGatewayCheck {
+    /// - authStatusWithoutKey: контрольный запрос без ключа (только если с ключом пришло 200):
+    ///   тоже 200 → шлюз ключ не проверяет (auth выключен), «принят» было бы неправдой.
+    static func evaluate(healthStatus: Int?, healthError: String?, authStatus: Int?, keyProvided: Bool,
+                         authStatusWithoutKey: Int? = nil) -> VoiceGatewayCheck {
         let address: Address
         if let code = healthStatus {
             address = (200..<300).contains(code) ? .reachable : .badResponse(code)
@@ -41,7 +44,10 @@ struct VoiceGatewayCheck: Equatable {
         }
         let key: Key
         switch auth {
-        case 200..<300: key = keyProvided ? .accepted : .notRequired
+        case 200..<300:
+            if !keyProvided { key = .notRequired }
+            else if let open = authStatusWithoutKey, (200..<300).contains(open) { key = .notVerified }
+            else { key = .accepted }
         case 401, 403: key = keyProvided ? .rejected : .required
         default: key = .unknown
         }
@@ -61,6 +67,7 @@ struct VoiceGatewayCheck: Equatable {
         case .accepted: return "Ключ: принят"
         case .rejected: return "Ключ: отклонён шлюзом — проверьте ключ"
         case .notRequired: return "Ключ: шлюз не требует ключ"
+        case .notVerified: return "Ключ: шлюз не проверяет ключи (авторизация выключена)"
         case .required: return "Ключ: нужен — шлюз отвечает 401 без ключа"
         case .unknown: return "Ключ: не проверен"
         }
@@ -69,7 +76,7 @@ struct VoiceGatewayCheck: Equatable {
     /// Можно ли разговаривать с AI с текущими настройками.
     var isReady: Bool {
         guard case .reachable = address else { return false }
-        return key == .accepted || key == .notRequired
+        return key == .accepted || key == .notRequired || key == .notVerified
     }
 
     var summaryLine: String {
@@ -88,12 +95,15 @@ final class VoiceGatewayConnectionView: NSView, NSTextFieldDelegate {
     var onCommitKey: ((String) -> Void)?
     var onCheck: (() -> Void)?
     var onShowDetails: (() -> Void)?
+    /// Явное удаление ключа (пустое поле — это «не менять»).
+    var onDeleteKey: (() -> Void)?
 
     let urlField = NSTextField(frame: .zero)
     let keyField = NSSecureTextField(frame: .zero)
     let pasteButton = NSButton(title: "Вставить из буфера", target: nil, action: nil)
     let checkButton = NSButton(title: "Проверить подключение", target: nil, action: nil)
     let detailsButton = NSButton(title: "Подробности", target: nil, action: nil)
+    let deleteKeyButton = NSButton(title: "Удалить ключ", target: nil, action: nil)
     private let keyStatusLabel = NSTextField(labelWithString: "")
     private let resultLabel = NSTextField(wrappingLabelWithString: "")
     private let card = ThemeCardView()
@@ -120,16 +130,23 @@ final class VoiceGatewayConnectionView: NSView, NSTextFieldDelegate {
         keyField.action = #selector(onKeyEnter)
         keyField.setAccessibilityLabel("Ключ доступа Voice Gateway")
 
-        for b in [pasteButton, checkButton, detailsButton] {
+        for b in [pasteButton, checkButton, detailsButton, deleteKeyButton] {
             b.bezelStyle = .rounded
             b.controlSize = .large
-            b.target = self
         }
+        // target — явно у каждой кнопки (гард audit_orphan_panel_controls читает исходник статически).
+        pasteButton.target = self
+        checkButton.target = self
+        detailsButton.target = self
+        deleteKeyButton.target = self
         pasteButton.action = #selector(onPastePressed)
         pasteButton.setAccessibilityLabel("Вставить ключ из буфера обмена")
         checkButton.action = #selector(onCheckPressed)
         detailsButton.action = #selector(onDetailsPressed)
         detailsButton.isHidden = true
+        deleteKeyButton.action = #selector(onDeleteKeyPressed)
+        deleteKeyButton.setAccessibilityLabel("Удалить сохранённый ключ Voice Gateway")
+        deleteKeyButton.isHidden = true
 
         keyStatusLabel.font = Self.captionFont
         keyStatusLabel.textColor = KrabEarTheme.Colors.textSecondary
@@ -147,13 +164,18 @@ final class VoiceGatewayConnectionView: NSView, NSTextFieldDelegate {
         keyRow.orientation = .horizontal
         keyRow.spacing = KrabEarTheme.Metrics.standard
         keyRow.alignment = .centerY
-        let actionRow = NSStackView(views: [checkButton, detailsButton])
+        let actionRow = NSStackView(views: [checkButton, detailsButton, deleteKeyButton])
         actionRow.orientation = .horizontal
         actionRow.spacing = KrabEarTheme.Metrics.standard
         actionRow.alignment = .centerY
-        for v in [urlTitle, urlField, keyTitle, keyRow, keyStatusLabel, actionRow, resultLabel] as [NSView] {
-            stack.addArrangedSubview(v)
-        }
+        // Явными строками: гард audit_orphan_panel_controls проверяет включение в иерархию статически.
+        stack.addArrangedSubview(urlTitle)
+        stack.addArrangedSubview(urlField)
+        stack.addArrangedSubview(keyTitle)
+        stack.addArrangedSubview(keyRow)
+        stack.addArrangedSubview(keyStatusLabel)
+        stack.addArrangedSubview(actionRow)
+        stack.addArrangedSubview(resultLabel)
         // Явные ширины детей (урок #2240): иначе вертикальный стек центрирует по intrinsic size.
         var constraints: [NSLayoutConstraint] = [
             card.topAnchor.constraint(equalTo: topAnchor),
@@ -193,6 +215,7 @@ final class VoiceGatewayConnectionView: NSView, NSTextFieldDelegate {
 
     func apply(keyStatus status: KeyStatus) {
         keyStatus = status
+        deleteKeyButton.isHidden = status != .saved
         switch status {
         case .saved:
             keyStatusLabel.stringValue = "Ключ сохранён (скрыт). Чтобы заменить — вставьте новый."
@@ -270,6 +293,12 @@ final class VoiceGatewayConnectionView: NSView, NSTextFieldDelegate {
         commitKey()
     }
 
-    @objc private func onCheckPressed() { onCheck?() }
+    @objc private func onCheckPressed() {
+        // Проверяем то, что сохранено: недописанный адрес сначала сохраняется, иначе
+        // сохранённый ключ ушёл бы на новый, ещё не подтверждённый хост.
+        commitURL()
+        onCheck?()
+    }
+    @objc private func onDeleteKeyPressed() { onDeleteKey?() }
     @objc private func onDetailsPressed() { onShowDetails?() }
 }

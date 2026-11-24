@@ -22,41 +22,28 @@ extension HistoryPanelController {
         card.setURL(settingsProvider().voiceGatewayURL)
         card.onCommitURL = { [weak self] url in self?.commitVoiceGatewayURL(url) }
         card.onCommitKey = { [weak self] key in self?.commitVoiceGatewayKey(key) }
+        card.onDeleteKey = { [weak self] in self?.commitVoiceGatewayKey("") }
         card.onCheck = { [weak self] in self?.runVoiceGatewayCheck() }
         card.onShowDetails = { [weak self] in self?.showVoiceGatewayCheckDetails() }
         // Старая строка «Gateway URL / API key» на «Live перевод»: сохраняла ключ только по
         // Enter и сжималась на узком окне до нечитаемых подписей. TODO: удалить строку после
-        // мержа #2247 (он правит её placeholder) — здесь только скрываем, без конфликта строк.
+        // мержа #2247 (он правит её placeholder и текст 401) — здесь только скрываем.
         voiceGatewayRow.isHidden = true
         refreshVoiceGatewayKeyStatus()
     }
 
-    /// Сохраняет адрес и сразу применяет к разговору (WS-адрес + HTTP-база).
+    /// Сохраняет адрес и сразу применяет к разговору (общий путь #2251).
     func commitVoiceGatewayURL(_ raw: String) {
         applySettingsPatch(["voice_gateway_url": raw])
-        applyVoiceGatewayConfigToConversation(url: raw, key: nil)
+        refreshConversationGatewayConfig(gatewayURL: raw)
     }
 
-    /// Сохраняет ключ и сразу применяет к разговору. Пустую строку сюда не передают.
+    /// Сохраняет ключ и сразу применяет к разговору (общий путь #2251, защита от «REDACTED» — там же).
+    /// Пустая строка — только из явной кнопки «Удалить ключ».
     func commitVoiceGatewayKey(_ raw: String) {
         applySettingsPatch(["voice_gateway_api_key": raw])
-        applyVoiceGatewayConfigToConversation(url: nil, key: raw)
+        refreshConversationGatewayConfig(apiKey: raw)
         voiceGatewayConnectionView.apply(keyStatus: raw.isEmpty ? .missing : .saved)
-    }
-
-    /// Обновляет конфиг разговора. Начатый разговор продолжает со старым соединением;
-    /// новый ключ/адрес используются со следующего «Начать разговор».
-    func applyVoiceGatewayConfigToConversation(url: String?, key: String?) {
-        guard let vc = conversationVC else { return }
-        if let key { vc.config.apiKey = key }
-        if let url {
-            var settings = settingsProvider()
-            settings.voiceGatewayURL = url
-            vc.config.wsURLString = buildConversationWSURL(from: settings)
-            vc.config.httpBaseURLString = url
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        }
     }
 
     /// Есть ли сохранённый ключ — без раскрытия значения.
@@ -111,7 +98,8 @@ extension HistoryPanelController {
             return (VoiceGatewayCheck.evaluate(healthStatus: nil, healthError: "некорректный адрес",
                                                authStatus: nil, keyProvided: !apiKey.isEmpty), details)
         }
-        let session = URLSession(configuration: configuration)
+        // Без перехода по редиректу: иначе Bearer ушёл бы на другой хост вместе с заголовками.
+        let session = URLSession(configuration: configuration, delegate: VoiceGatewayNoRedirect(), delegateQueue: nil)
         var healthStatus: Int?
         var healthError: String?
         do {
@@ -124,19 +112,28 @@ extension HistoryPanelController {
             healthError = (error as NSError).localizedDescription
             details += "GET /health → ошибка: \(healthError ?? "")\n"
         }
-        var authStatus: Int?
-        if let code = healthStatus, (200..<300).contains(code) {
+        func authProbe(withKey: Bool) async -> Int? {
             var req = URLRequest(url: authURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 3)
             req.httpMethod = "GET"
-            if !apiKey.isEmpty { req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
-            if let (_, resp) = try? await session.data(for: req) {
-                authStatus = (resp as? HTTPURLResponse)?.statusCode
-            }
+            if withKey { req.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization") }
+            guard let (_, resp) = try? await session.data(for: req) else { return nil }
+            return (resp as? HTTPURLResponse)?.statusCode
+        }
+        var authStatus: Int?
+        var authWithoutKey: Int?
+        if let code = healthStatus, (200..<300).contains(code) {
+            authStatus = await authProbe(withKey: !apiKey.isEmpty)
             details += "GET /v1/settings/conversation (\(apiKey.isEmpty ? "без ключа" : "с ключом")) → HTTP \(authStatus.map(String.init) ?? "нет ответа")\n"
+            // Шлюз с выключенной авторизацией ответит 200 и с ключом — контрольный запрос без ключа.
+            if !apiKey.isEmpty, let a = authStatus, (200..<300).contains(a) {
+                authWithoutKey = await authProbe(withKey: false)
+                details += "Контроль без ключа → HTTP \(authWithoutKey.map(String.init) ?? "нет ответа")\n"
+            }
         }
         session.finishTasksAndInvalidate()
         let check = VoiceGatewayCheck.evaluate(healthStatus: healthStatus, healthError: healthError,
-                                               authStatus: authStatus, keyProvided: !apiKey.isEmpty)
+                                               authStatus: authStatus, keyProvided: !apiKey.isEmpty,
+                                               authStatusWithoutKey: authWithoutKey)
         return (check, details)
     }
 
@@ -147,5 +144,14 @@ extension HistoryPanelController {
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Закрыть")
         presentAlertSheet(alert, for: window) { _ in }
+    }
+}
+
+/// Запрет перехода по HTTP-редиректу при проверке шлюза: заголовок Authorization не должен
+/// уходить на хост, куда перенаправил ответ.
+final class VoiceGatewayNoRedirect: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
     }
 }

@@ -32,7 +32,7 @@ extension HistoryPanelController {
         let config = ConversationConfig(
             wsURLString:  buildConversationWSURL(from: settings),
             apiKey:       settings.voiceGatewayAPIKey,
-            languageHint: "auto",
+            languageHint: ConversationViewController.savedLanguageHint,
             engine:       "auto",
             brain:        "auto",
             brainMode:    ConversationViewController.savedBrainMode,
@@ -100,16 +100,62 @@ extension HistoryPanelController {
         _ = vc.view
     }
 
+    // MARK: - Обновление конфига после смены настроек шлюза
+
+    /// Передать в конфиг «Разговора с AI» новый адрес и/или ключ Voice Gateway, введённые в настройках.
+    ///
+    /// `setupConversationTab` читает их один раз при запуске, а обработчики полей «Gateway URL» и «API key»
+    /// только сохраняют настройку в бэкенде: без этого вызова разговор шлёт прежний ключ до перезапуска
+    /// агента (баг 24.11: верный ключ введён, шлюз отвечал 401). Значения берутся ПРЯМО из введённых полей,
+    /// а не из `settingsProvider()`/IPC: сразу после сохранения настройки могут быть ещё не применены, и
+    /// повторное чтение вернуло бы прежнее значение (замечание гейта Opus). Параметр `nil` = не менять.
+    func refreshConversationGatewayConfig(gatewayURL: String? = nil, apiKey: String? = nil) {
+        guard let vc = conversationVC else { return }
+        vc.config = Self.conversationGatewayConfig(current: vc.config, urlInput: gatewayURL, keyInput: apiKey)
+    }
+
+    /// Плейсхолдер, которым `get_settings` заменяет непустые секреты (wave-35). Enter в нетронутом поле
+    /// ключа присылает именно его: записывать как ключ нельзя, иначе разговор слал бы «REDACTED».
+    static let redactedSecretPlaceholder = "REDACTED"
+
+    /// Чистое правило обновления конфига разговора из введённых значений.
+    /// * `urlInput == nil` — адрес не менять; иначе WS-URL и HTTP-база пересобираются из введённого.
+    /// * `keyInput == nil` или плейсхолдер «REDACTED» — ключ не трогать (нетронутое поле);
+    ///   пустая строка — осознанная очистка; иначе новое значение.
+    /// Применяется к СЛЕДУЮЩЕМУ разговору: уже открытый WS остаётся со старым заголовком.
+    static func conversationGatewayConfig(current: ConversationConfig, urlInput: String?,
+                                          keyInput: String?) -> ConversationConfig {
+        var config = current
+        if let urlInput {
+            config = config.updatingGateway(
+                wsURLString: conversationWSURL(fromGatewayURL: urlInput),
+                httpBaseURLString: conversationHTTPBase(fromGatewayURL: urlInput))
+        }
+        if let keyInput, keyInput != redactedSecretPlaceholder {
+            config.apiKey = keyInput
+        }
+        return config
+    }
+
     // MARK: - URL builder
 
     /// Строит WS-URL для Voice Gateway из настроек.
     /// Контракт VG (verified live 2026-06-20): `WS /v1/sessions/{session_id}/conversation`.
     /// Пример: http://127.0.0.1:8090 → ws://127.0.0.1:8090/v1/sessions/vs_<uuid>/conversation
     /// session_id свободный (vs_-префикс); `?lang=` добавляется в startWebSocketSession; auth — Bearer apiKey.
-    func buildConversationWSURL(from settings: AgentSettings) -> String {
-        var base = settings.voiceGatewayURL
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+    private func buildConversationWSURL(from settings: AgentSettings) -> String {
+        Self.conversationWSURL(fromGatewayURL: settings.voiceGatewayURL)
+    }
+
+    /// HTTP-база шлюза без пробелов и завершающего «/».
+    static func conversationHTTPBase(fromGatewayURL raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    /// WS-URL из адреса шлюза: http→ws, https→wss, голый хост → ws://, плюс session-scoped путь.
+    static func conversationWSURL(fromGatewayURL raw: String) -> String {
+        var base = conversationHTTPBase(fromGatewayURL: raw)
 
         // Заменяем http(s) → ws(s) если нужно.
         if base.hasPrefix("http://") {

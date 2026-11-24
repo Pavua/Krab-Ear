@@ -18,7 +18,8 @@ import AppKit
 
 /// Заглушка сети: /health → 200, /v1/settings/conversation → 200 c верным ключом, иначе 401.
 final class VGStubProtocol: URLProtocol {
-    nonisolated(unsafe) static var seenAuthHeaders: [String: String?] = [:]
+    /// Журнал запросов: путь → заголовки Authorization по порядку.
+    nonisolated(unsafe) static var seenAuthHeaders: [String: [String?]] = [:]
     nonisolated(unsafe) static var acceptedKey = "test-key-ok"
     nonisolated(unsafe) static var healthStatus = 200
 
@@ -27,7 +28,7 @@ final class VGStubProtocol: URLProtocol {
     override func startLoading() {
         let path = request.url?.path ?? ""
         let auth = request.value(forHTTPHeaderField: "Authorization")
-        Self.seenAuthHeaders[path] = auth
+        Self.seenAuthHeaders[path, default: []].append(auth)
         let code: Int
         if path == "/health" { code = Self.healthStatus }
         else if path == "/v1/settings/conversation" { code = (auth == "Bearer \(Self.acceptedKey)") ? 200 : 401 }
@@ -58,6 +59,37 @@ final class VoiceGatewayConnectionTests: XCTestCase {
         XCTAssertFalse(down.isReady)
         XCTAssertTrue(C.evaluate(healthStatus: 200, healthError: nil, authStatus: 200, keyProvided: true).isReady)
         XCTAssertFalse(C.evaluate(healthStatus: 200, healthError: nil, authStatus: 401, keyProvided: false).isReady)
+    }
+
+    func test_check_authOffGateway_isNotVerified_notAccepted() {
+        // Гейт Opus: шлюз с выключенной авторизацией отвечает 200 и с ключом — это не «принят».
+        let c = VoiceGatewayCheck.evaluate(healthStatus: 200, healthError: nil, authStatus: 200,
+                                           keyProvided: true, authStatusWithoutKey: 200)
+        XCTAssertEqual(c.key, .notVerified)
+        XCTAssertTrue(c.isReady)
+        XCTAssertEqual(VoiceGatewayCheck.evaluate(healthStatus: 200, healthError: nil, authStatus: 200,
+                                                  keyProvided: true, authStatusWithoutKey: 401).key, .accepted)
+    }
+
+    func test_card_deleteKeyButton_onlyWhenSaved_andCallsHandler() {
+        let view = VoiceGatewayConnectionView()
+        var deleted = 0
+        view.onDeleteKey = { deleted += 1 }
+        view.apply(keyStatus: .missing)
+        XCTAssertTrue(view.deleteKeyButton.isHidden)
+        view.apply(keyStatus: .saved)
+        XCTAssertFalse(view.deleteKeyButton.isHidden)
+        view.deleteKeyButton.performClick(nil)
+        XCTAssertEqual(deleted, 1)
+    }
+
+    func test_controller_deleteKey_clearsConversationKey() {
+        let controller = makeController()
+        guard let vc = controller.conversationVC else { return XCTFail("нет разговора") }
+        controller.commitVoiceGatewayKey("test-key-ok")
+        controller.commitVoiceGatewayKey("")
+        XCTAssertEqual(vc.config.apiKey, "", "явное удаление очищает ключ разговора")
+        XCTAssertEqual(controller.voiceGatewayConnectionView.keyStatus, .missing)
     }
 
     func test_check_linesAreWords_notJSON() {
@@ -208,8 +240,9 @@ final class VoiceGatewayConnectionTests: XCTestCase {
         VGStubProtocol.healthStatus = 200
         let ok = await HistoryPanelController.probeVoiceGateway(base: "http://vg.test", apiKey: "test-key-ok", configuration: stubConfig())
         XCTAssertEqual(ok.check.key, .accepted)
-        XCTAssertEqual(VGStubProtocol.seenAuthHeaders["/health"] ?? nil, nil, "/health — без ключа")
-        XCTAssertEqual(VGStubProtocol.seenAuthHeaders["/v1/settings/conversation"] ?? nil, "Bearer test-key-ok")
+        XCTAssertEqual(VGStubProtocol.seenAuthHeaders["/health"] ?? [], [nil], "/health — без ключа")
+        // Первый — с ключом; второй контрольный (после 200) — без ключа.
+        XCTAssertEqual(VGStubProtocol.seenAuthHeaders["/v1/settings/conversation"] ?? [], ["Bearer test-key-ok", nil])
         XCTAssertFalse(ok.details.contains("test-key-ok"), "ключ не должен попадать в «Подробности»")
 
         let bad = await HistoryPanelController.probeVoiceGateway(base: "http://vg.test", apiKey: "test-key-wrong", configuration: stubConfig())
