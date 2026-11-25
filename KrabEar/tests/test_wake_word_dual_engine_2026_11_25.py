@@ -453,3 +453,16 @@ def test_spotter_unavailable_reason_is_cleared_by_a_successful_recognition():
             assert spotter.last_unavailable_reason() == "mlx_busy"
     assert spotter.last_unavailable_reason() is None   # распознавание удалось — причина не залипает
     spotter.close()
+
+
+def test_runtime_oww_load_is_not_started_after_stop_or_during_shutdown(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(threading.Thread, "start", lambda self: started.append(self.name))
+    adapter, _ = _adapter(tmp_path, {"wake_word_oww_mode": "live"})
+    adapter._oww_available = True
+    adapter._stop_event.set()                      # stop() случился между снимком состояния и вызовом
+    adapter._maybe_load_oww_async(adapter._generation, "hey_jarvis")
+    adapter._stop_event.clear()
+    adapter.mark_shutdown()                        # backend закрывается
+    adapter._maybe_load_oww_async(adapter._generation, "hey_jarvis")
+    assert "OwwRuntimeLoad" not in started

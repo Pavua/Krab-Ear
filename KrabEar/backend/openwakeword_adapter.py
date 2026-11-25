@@ -585,8 +585,9 @@ class OpenWakeWordAdapter:
         if model_name is None or not self._oww_available:
             return
         with self._lock:
-            if self._oww_loading or self._generation != generation or time.monotonic() < self._oww_load_retry_at:
-                return
+            if (self._oww_loading or self._generation != generation or time.monotonic() < self._oww_load_retry_at
+                    or self._stop_event.is_set() or self._shutting_down):
+                return  # остановка/закрытие между снимком и вызовом: поток загрузки не нужен (и опасен при close())
             self._oww_loading = True
 
         def _load() -> None:
