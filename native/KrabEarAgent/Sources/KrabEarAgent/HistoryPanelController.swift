@@ -1626,6 +1626,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         tableView.style = .plain
 
         scrollView.documentView = tableView
+        // lastColumnOnly прибавляет к столбцу только РАЗНИЦУ размеров видимой области, поэтому
+        // стартовый разрыв (560 pt против фактической ширины) оставался навсегда: на окне 640
+        // таблица вылезала за карточку на ~30 pt. Подгоняем последний столбец точно.
+        scrollView.contentView.postsFrameChangedNotifications = true
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(onHistoryClipFrameChanged(_:)),
+            name: NSView.frameDidChangeNotification, object: scrollView.contentView)
 
         bottomBar1.orientation = .horizontal
         bottomBar1.spacing = KrabEarTheme.Metrics.standard

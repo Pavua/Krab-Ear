@@ -1081,6 +1081,11 @@ public class CollapsibleSectionView: NSView {
             // Как в ThemeCardView: без явной ширины стек содержимого секции сжимался до
             // intrinsic size и тянул за собой карточки внутри (замер: 498 из 1392 pt).
             KrabEarTheme.fillWidth(contentStackView, of: containerStack),
+            // 🔴 Заголовок тоже на всю ширину: в стеке с alignment .leading ряд держался по
+            // ширине текста, только пока подпись не уступала сжатию. После правила подписей
+            // (#2255, сопротивление 240) ряд схлопывался до 25–45 pt и заголовки ВСЕХ секций
+            // исчезали (на экране — один шеврон). Заодно вся строка — цель клика, как задумано.
+            KrabEarTheme.fillWidth(headerStack, of: containerStack),
             containerStack.topAnchor.constraint(equalTo: topAnchor),
             containerStack.leadingAnchor.constraint(equalTo: leadingAnchor),
             containerStack.trailingAnchor.constraint(equalTo: trailingAnchor),
