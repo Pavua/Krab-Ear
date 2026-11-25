@@ -179,12 +179,14 @@ def test_start_stt_only_does_not_need_openwakeword_library(tmp_path, monkeypatch
 def test_stt_engine_needs_transcriber_and_standard_chunk(tmp_path, monkeypatch):
     # без транскрибера режим stt трактуется как недоступный; с нестандартным чанком споттер не создаётся
     a1, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"})
+    a1._oww_available = True  # на CI-раннере openwakeword не установлен
     monkeypatch.setattr(a1, "_load_model", lambda *a, **k: SimpleNamespace(predict=lambda c: {}))
     monkeypatch.setattr(a1, "_listen_loop", lambda **kw: None)
     a1.start("hey_jarvis", lambda n, s: None)
     assert a1._stt is None
     a1.stop()
     a2, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"}, stt_transcribe=lambda a: "")
+    a2._oww_available = True
     monkeypatch.setattr(a2, "_load_model", lambda *a, **k: SimpleNamespace(predict=lambda c: {}))
     monkeypatch.setattr(a2, "_listen_loop", lambda **kw: None)
     a2.start("hey_jarvis", lambda n, s: None, chunk_size=1024)
