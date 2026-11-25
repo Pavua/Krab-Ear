@@ -140,8 +140,9 @@ enum WakeEngineStatsFormatter {
     /// «Включается…» показываем только при работающем слушателе.
     static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?,
                      listening: Bool? = nil) -> String {
-        // Новый backend (#2263) прямо говорит «грузится» / «ошибка»: решаем по этим полям,
-        // эвристика по `active` нужна только старому backend (тот не отличал прогрев от сбоя).
+        // Новый backend (#2263) прямо сообщает ошибку загрузки через load_error — она главнее.
+        // `explicitState` — признак нового backend: у него сбой загрузки не выводим из
+        // устаревшей unavailable_reason.
         let explicitState = report.loading != nil
         if report.mode != .off, let error = report.loadError {
             return loadErrorText(engine: engine, code: error)
@@ -149,13 +150,13 @@ enum WakeEngineStatsFormatter {
         if engine == .stt, report.mode != .off, report.available == false {
             return "Недоступен (распознаватель не загружен)"
         }
-        if report.mode != .off {
-            if explicitState {
-                if report.loading == true { return turningOnText }
-            } else if listening == true, report.active == false {
-                // Старый backend: режим сменили на лету, модель грузится/прогревается (секунды).
-                return turningOnText
-            }
+        // «Включается…»: идёт загрузка ИЛИ слушатель работает, а объекта движка ещё нет.
+        // Второе — переход сразу после клика: движок создаётся только на следующем чанке
+        // микрофона, и первый статус приходит с active=false, loading=false (ревью Codex
+        // #2264). Устойчивых тупиков в этом состоянии нет — их backend #2263 отдаёт через
+        // load_error (обработан выше), а у старого backend это прежняя эвристика.
+        if report.mode != .off, report.loading == true || (listening == true && report.active == false) {
+            return turningOnText
         }
         var parts = [
             "Срабатываний вживую: \(report.firesLive)",

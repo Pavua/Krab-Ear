@@ -103,9 +103,20 @@ final class WakeEngineModesTests: XCTestCase {
         let loading = WakeEngineReport(engine: .oww, payload: ["mode": "live", "active": false, "loading": true])
         XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: loading, backendNow: nil, listening: true),
                        WakeEngineStatsFormatter.turningOnText)
-        // active=false без loading и без ошибки — не «включается» (эвристика старого backend выключена).
-        let idle = WakeEngineReport(engine: .oww, payload: ["mode": "live", "active": false, "loading": false])
-        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: idle, backendNow: nil, listening: true),
+        // Ревью Codex #2264: сразу после клика движок ещё не создан (создаётся на следующем чанке) —
+        // active=false, loading=false, ошибки нет. Это переход, а не «готово»: «Включается…»,
+        // чтобы сработал автоповтор и панель увидела прогрев или ошибку.
+        let pending = WakeEngineReport(engine: .stt, payload: [
+            "mode": "live", "active": false, "loading": false, "available": true,
+        ])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .stt, report: pending, backendNow: nil, listening: true),
+                       WakeEngineStatsFormatter.turningOnText)
+        // Без слушателя тот же ответ — не «включается».
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .stt, report: pending, backendNow: nil, listening: false),
+                       "Сейчас не слушает · Срабатываний вживую: 0 · в тени: 0")
+        // Движок работает — числа.
+        let running = WakeEngineReport(engine: .oww, payload: ["mode": "live", "active": true, "loading": false])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: running, backendNow: nil, listening: true),
                        "Срабатываний вживую: 0 · в тени: 0")
     }
 
