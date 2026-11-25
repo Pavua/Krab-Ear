@@ -405,6 +405,14 @@ class RateLimitRefundTests(unittest.TestCase):
         self.assertEqual(sum(1 for v in fired if v >= 0.5), 1)   # слово после 25 пустых реплик не потеряно
         model.close()
 
+    def test_loudness_bucket_uses_the_loudest_frame_not_the_diluted_average(self) -> None:
+        # кадр с речью rms ~495 (корзина 400–1000); в реплике ~половина тишины, среднее по ней ~324 (корзина 150–400)
+        model = sk.SttKeywordModel(lambda s: "", name="krab_stt", max_per_minute=100, cooldown_sec=0.0)
+        self._bursts(model, 1, amp=700)
+        stats = model.stats()
+        self.assertEqual((stats["rms_400_1000"], stats["rms_150_400"]), (1, 0))
+        model.close()
+
     def test_loudness_buckets_are_counters_only(self) -> None:
         model = sk.SttKeywordModel(lambda s: "", name="krab_stt", max_per_minute=100, cooldown_sec=0.0)
         self._bursts(model, 1, amp=3000)    # rms ~2100 → ge1000
