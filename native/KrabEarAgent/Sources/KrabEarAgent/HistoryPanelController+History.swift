@@ -883,10 +883,46 @@ extension HistoryPanelController {
         historyDensitySelector.selectItem(at: compact ? 1 : 0)
     }
 
+    /// Текст записи: обычная плотность — крупный (15 pt, редизайн «Истории»), компактная — 13 pt.
+    /// Тот же шрифт ставит ячейка и считает heightOfRow — иначе строка не совпадает с текстом.
     func historyBodyFont() -> NSFont {
         return settingsProvider().historyTextDensity == "compact"
-            ? .systemFont(ofSize: 12)
-            : .systemFont(ofSize: NSFont.systemFontSize)
+            ? KrabEarTheme.Typography.body
+            : KrabEarTheme.Typography.bodyLarge
+    }
+
+    /// Сколько строк текста записи видно в строке таблицы: обычная — 2, компактная — 1.
+    func historyVisibleLines() -> Int {
+        settingsProvider().historyTextDensity == "compact" ? 1 : 2
+    }
+
+    /// Высота строки таблицы по тому, что реально видно в HistoryItemCellView: отступы 4+4,
+    /// текст (не больше `maxLines` строк — ячейка обрезает многоточием), промежуток 2,
+    /// ряд меток, и перевод, если показан. Раньше считался полный текст без предела строк
+    /// и без ряда меток: у длинной записи внизу оставалась пустая полоса, а у короткой
+    /// текст сжимался до нуля (офлайн-рендер PR 4b).
+    nonisolated static func historyRowHeight(
+        textHeight: CGFloat, lineHeight: CGFloat, maxLines: Int,
+        metaHeight: CGFloat, translationHeight: CGFloat?
+    ) -> CGFloat {
+        let shown = maxLines > 0 ? min(textHeight, lineHeight * CGFloat(maxLines)) : textHeight
+        var height = 4 + ceil(max(shown, lineHeight)) + 2 + metaHeight + 4
+        if let translationHeight { height += 2 + ceil(translationHeight) }
+        return ceil(height)
+    }
+
+    /// Высота ряда меток: капсула-метка или кнопка перевода — что выше.
+    static var historyMetaRowHeight: CGFloat { max(HistoryBadgeView.height, 20) }
+
+    /// Статус вставки — словом по-русски (метка рядом со значком и цветом).
+    nonisolated static func pasteStatusTitle(_ status: String) -> String {
+        switch status {
+        case "ok": return "Вставлено"
+        case "failed": return "Не вставлено"
+        case "pending": return "Вставляется"
+        case "skipped": return "Заметка"
+        default: return status
+        }
     }
 
     func historyMinRowHeight() -> CGFloat {
@@ -1227,6 +1263,11 @@ extension HistoryPanelController {
         cell.identifier = cellIdentifier
 
         cell.transcriptLabel.stringValue = item.text
+        let bodyFont = historyBodyFont()
+        cell.transcriptLabel.font = bodyFont
+        cell.transcriptLabel.maximumNumberOfLines = historyVisibleLines()
+        cell.translationLabel.font = NSFont(
+            descriptor: bodyFont.fontDescriptor.withSymbolicTraits(.italic), size: bodyFont.pointSize - 1)
         
         let isLoading = inlineTranslationLoading.contains(item.id)
         let isVisible = inlineTranslationVisible.contains(item.id)
@@ -1271,7 +1312,8 @@ extension HistoryPanelController {
             statusColor = KrabEarTheme.Colors.textSecondary
             statusSymbol = "questionmark.circle"
         }
-        let statusBadge = HistoryBadgeView(text: item.pasteStatus, symbol: statusSymbol, color: statusColor)
+        let statusBadge = HistoryBadgeView(
+            text: Self.pasteStatusTitle(item.pasteStatus), symbol: statusSymbol, color: statusColor)
         cell.metaStack.addArrangedSubview(statusBadge)
 
         if let conf = item.confidence {
@@ -1288,8 +1330,14 @@ extension HistoryPanelController {
             translateBtn.bezelStyle = .inline
             translateBtn.tag = row
             translateBtn.toolTip = isVisible ? "Скрыть перевод" : "Показать перевод"
+            translateBtn.setAccessibilityLabel(translateBtn.toolTip)
             cell.metaStack.addArrangedSubview(translateBtn)
         }
+        // Распорка забирает свободную ширину: метки и кнопка остаются по своему размеру.
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        spacer.setAccessibilityElement(false)
+        cell.metaStack.addArrangedSubview(spacer)
 
         return cell
     }
@@ -1376,7 +1424,8 @@ extension HistoryPanelController {
         // Cache key учитывает item.id, columnWidth и состояние inline translation —
         // при изменении любого пересчитываем (KRAB-EAR-AGENT-5 fix).
         let translationVisible = inlineTranslationVisible.contains(item.id)
-        let cacheKey = "\(item.id):\(Int(columnWidth)):\(translationVisible ? 1 : 0)"
+        // Плотность меняет шрифт и число строк — тоже часть ключа.
+        let cacheKey = "\(item.id):\(Int(columnWidth)):\(translationVisible ? 1 : 0):\(historyVisibleLines())"
         if let cached = rowHeightCache[cacheKey] { return cached }
 
         let sampleText = item.text as NSString
@@ -1388,9 +1437,8 @@ extension HistoryPanelController {
             context: nil
         ).height
 
-        var totalHeight = ceil(textHeight) + 10
-
         // Если перевод виден — добавляем высоту второй строки.
+        var translationHeight: CGFloat?
         if translationVisible {
             let translationText: String
             if let cached = inlineTranslationCache.object(forKey: item.id as NSString) {
@@ -1400,16 +1448,20 @@ extension HistoryPanelController {
             }
             let italicDescriptor = bodyFont.fontDescriptor.withSymbolicTraits(.italic)
             let italicFont = NSFont(descriptor: italicDescriptor, size: bodyFont.pointSize - 1) ?? bodyFont
-            let translationHeight = (translationText as NSString).boundingRect(
+            translationHeight = (translationText as NSString).boundingRect(
                 with: NSSize(width: columnWidth, height: .greatestFiniteMagnitude),
                 options: [.usesLineFragmentOrigin, .usesFontLeading],
                 attributes: [.font: italicFont],
                 context: nil
             ).height
-            totalHeight += ceil(translationHeight) + 6
         }
 
-        let height = max(historyMinRowHeight(), totalHeight)
+        let height = Self.historyRowHeight(
+            textHeight: textHeight,
+            lineHeight: NSLayoutManager().defaultLineHeight(for: bodyFont),
+            maxLines: historyVisibleLines(),
+            metaHeight: Self.historyMetaRowHeight,
+            translationHeight: translationHeight)
         rowHeightCache[cacheKey] = height
         return height
     }
