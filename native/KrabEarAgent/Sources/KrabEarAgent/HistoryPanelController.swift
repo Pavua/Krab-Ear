@@ -283,6 +283,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let vaWakeWordStatusLabel = NSTextField(labelWithString: "openWakeWord: проверяю состояние")
     let vaWakeWordModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let vaWakeWordThresholdSlider = NSSlider(value: 0.5, minValue: 0.05, maxValue: 1.0, target: nil, action: nil)
+    // Автозавершение разговора по тишине (ConversationIdleEndSettings): тумблер + порог.
+    let vaIdleEndToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    let vaIdleEndSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     // Режимы двух движков голосовой активации (#2258): сегмент Выкл/В тени/Вживую
     // и строка чисел из wake_word_status.engines (см. HistoryPanelController+WakeEngines).
     lazy var wakeEngineModeControls: [WakeEngine: NSSegmentedControl] = Dictionary(
@@ -2104,6 +2107,10 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaWakeWordModelSelector.action = #selector(onVAWakeWordModelChanged)
         vaWakeWordThresholdSlider.target = self
         vaWakeWordThresholdSlider.action = #selector(onVAWakeWordThresholdChanged)
+        vaIdleEndToggle.target = self
+        vaIdleEndToggle.action = #selector(onVAIdleEndToggleChanged)
+        vaIdleEndSelector.target = self
+        vaIdleEndSelector.action = #selector(onVAIdleEndSecondsChanged)
         for control in wakeEngineModeControls.values {
             control.target = self
             control.action = #selector(onWakeEngineModeChanged(_:))

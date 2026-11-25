@@ -24,9 +24,14 @@ final class ConversationStatusOverlay: NSObject {
     private let statusLabel = NSTextField(labelWithString: "⚪ Готов")
     private let levelMeter = MicLevelMeterView(frame: NSRect(x: 0, y: 0, width: 120, height: 18))
     let interruptButton = ThemeSecondaryButton(title: "Прервать", target: nil, action: nil)
+    /// «Завершить» видна всё время, пока панель показана (= сессия активна): после «Прервать»
+    /// разговор раньше оставался открытым с микрофоном (живая проверка владельца 25.11).
+    let endButton = ThemeSecondaryButton(title: "Завершить", target: nil, action: nil)
 
     /// Колбэк кнопки «Прервать» — ConversationViewController подвязывает interruptAI().
     var onInterrupt: (() -> Void)?
+    /// Колбэк кнопки «Завершить» — ConversationViewController подвязывает stopConversation().
+    var onEnd: (() -> Void)?
 
     private(set) var isVisible = false
     private let positionKey = "KrabEar_ConversationStatusHUDPosition"
@@ -42,6 +47,8 @@ final class ConversationStatusOverlay: NSObject {
     var _testStatusText: String { statusLabel.stringValue }
     var _testPanelOrigin: NSPoint { panel.frame.origin }
     var _testUsesAppKitPanelOrdering: Bool { panelOrdering is AppKitPanelOrdering }
+    var _testEndButtonVisible: Bool { !endButton.isHidden }
+    func _testTapEnd() { onEndTapped() }
 
     // MARK: - Init
 
@@ -104,6 +111,10 @@ final class ConversationStatusOverlay: NSObject {
         interruptButton.target = self
         interruptButton.action = #selector(onInterruptTapped)
         interruptButton.isHidden = true
+        interruptButton.setAccessibilityLabel("Прервать ответ AI")
+        endButton.target = self
+        endButton.action = #selector(onEndTapped)
+        endButton.setAccessibilityLabel("Завершить разговор с AI")
 
         levelMeter.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -111,7 +122,7 @@ final class ConversationStatusOverlay: NSObject {
             levelMeter.heightAnchor.constraint(equalToConstant: 18),
         ])
 
-        let row = NSStackView(views: [statusLabel, levelMeter, interruptButton])
+        let row = NSStackView(views: [statusLabel, levelMeter, interruptButton, endButton])
         row.orientation = .horizontal
         row.spacing = KrabEarTheme.Metrics.comfortable
         row.alignment = .centerY
@@ -150,6 +161,10 @@ final class ConversationStatusOverlay: NSObject {
 
     @objc private func onInterruptTapped() {
         onInterrupt?()
+    }
+
+    @objc private func onEndTapped() {
+        onEnd?()
     }
 
     // MARK: - Position persistence (паттерн LiveSubtitlesOverlay + M2-guard RealtimeOverlayController)

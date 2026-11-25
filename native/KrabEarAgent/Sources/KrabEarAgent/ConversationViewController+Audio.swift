@@ -54,6 +54,9 @@ extension ConversationViewController {
 
     /// Сбрасывает состояние предыдущей сессии. До ready сборщик намеренно закрыт.
     func prepareAudioNegotiation() {
+        // Разговор от свежей детекции «Краб» забирает её pre-roll; горячая клавиша ящик сбрасывает.
+        audioHolder.expectsWakePreroll = WakePrerollMailbox.shared.claimIfArmed(
+            at: ProcessInfo.processInfo.systemUptime)
         audioHolder.negotiationReady = false
         audioHolder.sampleRate = ConversationAudioContract.fallbackSampleRate
         audioHolder.captureSampleRate = nil
@@ -96,6 +99,14 @@ extension ConversationViewController {
             startAudioCapture()
         }
 
+        // Pre-roll слова-пробуждения — первым куском (только для разговора, запущенного детекцией).
+        if audioHolder.expectsWakePreroll {
+            audioHolder.expectsWakePreroll = false
+            if let preroll = WakePrerollMailbox.shared.take(at: ProcessInfo.processInfo.systemUptime) {
+                audioHolder.prebuffer.prepend(preroll)
+                AgentLogger.shared.info("[Audio] pre-roll слова-пробуждения: \(preroll.count) сэмплов в начало")
+            }
+        }
         let dropped = audioHolder.prebuffer.droppedSampleCount
         let bufferedFrames = drainAudioPrebufferFrames()
         sendUplinkFrames(bufferedFrames)
@@ -433,6 +444,11 @@ extension ConversationViewController {
         // задержанное эхо, отправленное позже, обмануло бы VAD ровно так же.
         if !audioHolder.echoCancellationActive, isOwnPlaybackAudible() { return }
 
+        // Пользователь говорит — отсчёт тишины сбрасывается (после эхо-гейта: свой TTS не в счёт).
+        if idleEndPolicy != nil, localVoiceGate.isVoice(samples, now: idleEndClock()) {
+            noteConversationActivity()
+        }
+
         let frames = assembleUplinkFrames(samples, sourceSampleRate: sourceSampleRate)
         sendUplinkFrames(frames)
     }
@@ -443,6 +459,20 @@ extension ConversationViewController {
     /// времени и копятся в узле, поэтому окно считается от КОНЦА уже запланированного
     /// воспроизведения, а не от «сейчас». Хвост добавляется на реверберацию комнаты —
     /// звук слышен микрофону ещё некоторое время после последнего сэмпла.
+    /// Сигнал «AI говорит» (downlink-аудио, финальный текст ответа).
+    func noteAISpeechSignal() {
+        audioHolder.lastAISpeechAt = playbackClock()
+    }
+
+    /// Ответ доигран → «слушаю» (см. ConversationPlaybackSettle). Зовётся тиком автозавершения.
+    func settleFinishedPlayback() {
+        guard ConversationPlaybackSettle.isSettled(
+            state: conversationState, playbackQueueEndsAt: audioHolder.playbackQueueEndsAt,
+            echoTail: _echoGuardTailSeconds, lastAISpeechAt: audioHolder.lastAISpeechAt,
+            now: playbackClock()) else { return }
+        conversationState = .listening
+    }
+
     func isOwnPlaybackAudible() -> Bool {
         Date() < audioHolder.playbackQueueEndsAt.addingTimeInterval(_echoGuardTailSeconds)
     }
@@ -488,6 +518,7 @@ extension ConversationViewController {
             return
         }
 
+        noteAISpeechSignal()
         // Валидный бинарный фрейм означает, что ассистент действительно заговорил.
         if conversationState != .speaking {
             conversationState = .speaking
@@ -598,6 +629,11 @@ private final class AudioHolder: NSObject {
     var echoCancellationActive = false
     /// W1893: момент, когда доиграет уже запланированный downlink (модель очереди плеера).
     var playbackQueueEndsAt = Date.distantPast
+    /// Последний сигнал речи AI (downlink-аудио, replyFinal) — для возврата в «слушаю».
+    var lastAISpeechAt = Date.distantPast
+    /// Разговор запущен свежей детекцией слова-пробуждения: по ready в начало prebuffer
+    /// встанет её pre-roll (WakePrerollMailbox).
+    var expectsWakePreroll = false
     var prebuffer = ConversationAudioPrebuffer(
         maxSampleCount: ConversationAudioContract.prebufferMaxSampleCount
     )

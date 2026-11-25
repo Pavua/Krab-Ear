@@ -1323,9 +1323,66 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(engineRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(brainRow)
+        card.contentStackView.addArrangedSubview(makeSeparator())
+        for row in makeIdleEndRows() {
+            card.contentStackView.addArrangedSubview(row)
+        }
 
         section.contentStackView.addArrangedSubview(card)
         return section
+    }
+
+    /// Автозавершение по тишине: тумблер и порог (10 с – 5 мин).
+    @MainActor
+    func makeIdleEndRows() -> [NSView] {
+        configureIdleEndControls()
+        let toggleRow = makeSwitchRow(
+            label: "Завершать разговор после тишины",
+            description: "Если вы молчите и AI не говорит, разговор закрывается сам и микрофон освобождается. "
+                + "Так ассистент не «просыпается» от шума после «Прервать».",
+            button: vaIdleEndToggle
+        )
+        let secondsRow = makeSettingRow(
+            label: "Тишина до завершения",
+            description: "Отсчёт идёт, только пока ассистент слушает.",
+            control: vaIdleEndSelector
+        )
+        return [toggleRow, secondsRow]
+    }
+
+    @MainActor
+    func configureIdleEndControls() {
+        vaIdleEndToggle.title = ""
+        vaIdleEndToggle.setButtonType(.switch)
+        vaIdleEndToggle.setAccessibilityLabel("Завершать разговор с AI после тишины")
+        if vaIdleEndSelector.numberOfItems == 0 {
+            vaIdleEndSelector.addItems(withTitles: ConversationIdleEndSettings.choices.map(ConversationIdleEndSettings.choiceTitle))
+        }
+        vaIdleEndSelector.setAccessibilityLabel("Сколько секунд тишины до завершения разговора")
+        syncIdleEndControls()
+    }
+
+    func syncIdleEndControls() {
+        let defaults = UserDefaults.standard
+        let enabled = ConversationIdleEndSettings.isEnabled(in: defaults)
+        vaIdleEndToggle.state = enabled ? .on : .off
+        let seconds = ConversationIdleEndSettings.seconds(in: defaults)
+        let choices = ConversationIdleEndSettings.choices
+        let nearest = choices.indices.min { abs(choices[$0] - seconds) < abs(choices[$1] - seconds) } ?? 2
+        vaIdleEndSelector.selectItem(at: nearest)
+        vaIdleEndSelector.isEnabled = enabled
+    }
+
+    @objc func onVAIdleEndToggleChanged() {
+        UserDefaults.standard.set(vaIdleEndToggle.state == .on, forKey: ConversationIdleEndSettings.enabledKey)
+        vaIdleEndSelector.isEnabled = vaIdleEndToggle.state == .on
+    }
+
+    @objc func onVAIdleEndSecondsChanged() {
+        let choices = ConversationIdleEndSettings.choices
+        let idx = vaIdleEndSelector.indexOfSelectedItem
+        guard choices.indices.contains(idx) else { return }
+        UserDefaults.standard.set(choices[idx], forKey: ConversationIdleEndSettings.secondsKey)
     }
 
     // MARK: - VA Settings handlers
@@ -1436,6 +1493,7 @@ extension HistoryPanelController {
         // ключ означает ON, а явно сохранённый false обязан остаться OFF.
         vaHotkeyToggle.state = ConversationHotkeyPolicy.isEnabled(in: .standard) ? .on : .off
 
+        syncIdleEndControls()
         let wakeWordEnabled = UserDefaults.standard.bool(forKey: "KrabEar_WakeWordEnabled")
         vaWakeWordToggle.state = wakeWordEnabled ? .on : .off
         refreshWakeWordStatusRow()
@@ -1865,6 +1923,10 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(engineRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(brainRow)
+        configureIdleEndControls()
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        card.contentStackView.addArrangedSubview(cdMakeRow(label: "Завершать после тишины", control: vaIdleEndToggle))
+        card.contentStackView.addArrangedSubview(cdMakeRow(label: "Тишина до завершения", control: vaIdleEndSelector))
 
         section.contentStackView.addArrangedSubview(card)
         return section
