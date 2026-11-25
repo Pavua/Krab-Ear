@@ -150,6 +150,13 @@ class GigaAmMemoryTranscriber:
                 try:
                     return self._infer(model, tokenizer, audio)
                 finally:
+                    # Реплики разной длины каждый раз просят буферы нового размера, и MLX копит их в кэше (замер на проде
+                    # 25.11: footprint 2,35 ГБ вместо ~1,2 ГБ, в эксперименте 1,83 vs 1,2 ГБ за 300 реплик). Кэш чистим
+                    # здесь, ПОД mlx_lock; веса модели он не трогает (освобождаются только неиспользуемые буферы).
+                    try:
+                        self._release_cache()
+                    except Exception:  # noqa: BLE001 — сбой очистки кэша не должен ломать распознавание
+                        pass
                     lock.release()
         except TranscriberUnavailable:
             raise

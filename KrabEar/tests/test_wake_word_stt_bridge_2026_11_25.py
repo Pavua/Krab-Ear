@@ -191,7 +191,7 @@ def test_release_clears_mlx_cache_only_under_mlx_lock():
     tr(np.ones(100, dtype=np.int16))
     tr.release()
     assert not tr.is_loaded()
-    assert cleared == [1]                       # кэш сброшен, пока лок удерживался
+    assert cleared == [1, 1]                    # после инференса и при выгрузке: оба раза, пока лок удерживался
     assert lock.released == lock.acquired == 2  # инференс + выгрузка, лок отпущен
     assert inter.kwargs == {"timeout_sec": 0.25}
 
@@ -329,3 +329,31 @@ def test_failed_warmup_records_error_code_before_any_utterance_and_success_clear
     assert tr.last_error() == "model_load_failed" and not tr.is_loaded()
     tr.warmup()                       # второй прогрев удался
     assert tr.last_error() is None and tr.is_loaded()
+
+
+def test_mlx_cache_is_cleared_after_every_inference_under_the_lock_and_failure_is_harmless():
+    events = []
+    lock = _Lock()
+
+    class SpyLock(_Lock):
+        def release(self):
+            events.append("lock_release")
+            super().release()
+
+    spy = SpyLock()
+    tr = bridge.GigaAmMemoryTranscriber(
+        loader=lambda m: ("m", "t"), infer=lambda m, t, a: events.append("infer") or "x",
+        mlx_lock_fn=lambda: spy, inter_lock_fn=_Inter(), release_cache=lambda: events.append("clear"),
+    )
+    tr(np.ones(100, dtype=np.int16))
+    tr(np.ones(100, dtype=np.int16))
+    assert events == ["infer", "clear", "lock_release", "infer", "clear", "lock_release"]  # очистка до отпускания лока
+
+    def bad_clear():
+        raise RuntimeError("metal")
+
+    tr2 = bridge.GigaAmMemoryTranscriber(
+        loader=lambda m: ("m", "t"), infer=lambda m, t, a: "Краб", mlx_lock_fn=lambda: lock, inter_lock_fn=_Inter(),
+        release_cache=bad_clear,
+    )
+    assert tr2(np.ones(100, dtype=np.int16)) == "Краб" and lock.released == lock.acquired == 1
