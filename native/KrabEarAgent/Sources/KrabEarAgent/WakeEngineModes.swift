@@ -76,6 +76,9 @@ struct WakeEngineReport: Equatable {
     var unavailableReason: String?
     /// Только `stt`: сколько реплик пропущено из-за недоступности распознавателя.
     var spotterUnavailable: Int?
+    /// Существует ли объект движка в текущей сессии слушателя (backend #2261).
+    /// `nil` — старый backend поля не отдаёт: это «неизвестно», а не «выключен».
+    var active: Bool?
 
     init(engine: WakeEngine, payload: [String: Any]?) {
         let p = payload ?? [:]
@@ -88,6 +91,7 @@ struct WakeEngineReport: Equatable {
         unavailableReason = (reason?.isEmpty ?? true) ? nil : reason
         let spotter = p["spotter"] as? [String: Any]
         spotterUnavailable = spotter.map { Self.int($0["unavailable"]) }
+        active = p["active"] as? Bool
     }
 
     private static func int(_ value: Any?) -> Int {
@@ -104,6 +108,17 @@ struct WakeEngineReport: Equatable {
 }
 
 enum WakeEngineStatsFormatter {
+    /// Причины, при которых движок действительно не работает. Остальные (`mlx_busy` —
+    /// диктовка держит GPU, `run_failed`, `not_text`) — разовые пропуски реплик:
+    /// backend хранит ПОСЛЕДНЮЮ причину и не сбрасывает её после успешного
+    /// распознавания, поэтому по ней одной нельзя писать «недоступен» вместо чисел.
+    static let hardUnavailableReasons: Set<String> = ["model_load_failed"]
+
+    static let turningOnText = "Включается… (загружается модель)"
+    /// Автоповторы статуса кончились, а движок так и не поднялся: вечное «Включается…»
+    /// вводило бы в заблуждение (backend не отличает прогрев от упавшей загрузки).
+    static let turningOnSlowText = "Включается дольше обычного — нажмите «Обновить числа»"
+
     /// Строка чисел движка.
     ///
     /// `backendNow` — «сейчас» по часам backend: `last_chunk_ts` из того же ответа
@@ -111,15 +126,18 @@ enum WakeEngineStatsFormatter {
     /// — `time.monotonic()` процесса backend; сравнивать его с часами агента нельзя
     /// (разные процессы, на macOS разные часы ведут себя по-разному во сне), поэтому
     /// давность считаем только внутри часов backend, а без слушателя не показываем.
-    /// Причины, при которых движок действительно не работает. Остальные (`mlx_busy` —
-    /// диктовка держит GPU, `run_failed`, `not_text`) — разовые пропуски реплик:
-    /// backend хранит ПОСЛЕДНЮЮ причину и не сбрасывает её после успешного
-    /// распознавания, поэтому по ней одной нельзя писать «недоступен» вместо чисел.
-    static let hardUnavailableReasons: Set<String> = ["model_load_failed"]
-
-    static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?) -> String {
+    ///
+    /// `listening` — `running` из того же ответа: `nil` — неизвестно (старый backend).
+    /// Без слушателя backend отдаёт `active == false` у обоих движков, поэтому
+    /// «Включается…» показываем только при работающем слушателе.
+    static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?,
+                     listening: Bool? = nil) -> String {
         if engine == .stt, report.mode != .off, report.available == false {
             return "Недоступен (распознаватель не загружен)"
+        }
+        if report.mode != .off, listening == true, report.active == false {
+            // Режим сменили на лету: модель грузится/прогревается (секунды).
+            return turningOnText
         }
         var parts = [
             "Срабатываний вживую: \(report.firesLive)",
@@ -145,6 +163,9 @@ enum WakeEngineStatsFormatter {
         }
         if report.mode == .off {
             parts.insert("Выключен", at: 0)
+        } else if listening == false {
+            // Детектор выключен или прослушивание на паузе (запись, разговор, privacy mode).
+            parts.insert("Сейчас не слушает", at: 0)
         }
         return parts.joined(separator: " · ")
     }
