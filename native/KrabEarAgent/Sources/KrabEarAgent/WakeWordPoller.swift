@@ -3,7 +3,8 @@
 
  Архитектура (spec docs/superpowers/specs/2026-07-05-wake-word-openwakeword-design.md):
  - Микрофоном владеет Python-бэкенд (backend/openwakeword_adapter.py, openWakeWord).
- - Агент шлёт wake_word_start/stop по IPC и раз в 0.75с поллит wake_word_status.
+ - Агент шлёт wake_word_start/stop по IPC и раз в 0.25с поллит wake_word_status
+   (было 0.75 с: живая проверка 25.11 — первые слова после «Краб» терялись).
  - Рост last_detection.ts → триггер «Разговор с AI».
  - SSE НЕ используется: прод = два процесса (IPC-бэкенд и REST) с раздельными
    EventBus, событие из service.py до SSE на :5005 не доходит.
@@ -121,10 +122,11 @@ struct WedgedEscalationTracker {
     /// убивая in-flight работу backend'а.
     static let maxConsecutive = 3
     /// Сколько подряд тиков «running + last_chunk_ts» считаем устойчивым
-    /// здоровьем. ~6 с при интервале поллера 0.75 с. Живой инцидент 2026-08-17:
+    /// здоровьем. ~6 с при интервале поллера 0.25 с (было 8 при 0.75 с — окно
+    /// во времени сохранено). Живой инцидент 2026-08-17:
     /// 1–2 чанка сразу после kickstart обнуляли кап через noteHealthy() —
     /// цикл 20:17 / 20:47 / 21:17, give-up maxConsecutive=3 не срабатывал.
-    static let minHealthyPolls = 8
+    static let minHealthyPolls = 24
 
     private var lastEscalationAt: TimeInterval?
     private(set) var consecutiveEscalations = 0
@@ -196,7 +198,10 @@ struct WedgedEscalationTracker {
 
 @MainActor
 final class WakeWordPoller {
-    static let pollInterval: TimeInterval = 0.75
+    /// 0.25 с: детекция видна агенту до ¼ с после срабатывания (было 0.75 с — вместе со
+    /// стартом WS/захвата первые слова после «Краб» терялись). wake_word_status дешёвый,
+    /// inFlight не даёт запросам копиться.
+    static let pollInterval: TimeInterval = 0.25
     /// Мин. пауза между self-heal попытками wake_word_start (backend мог
     /// перезапуститься launchd'ом — сессия адаптера пропадает).
     static let restartMinGapSec: TimeInterval = 10.0
@@ -397,6 +402,9 @@ final class WakeWordPoller {
                     }
                     if !allowed { return }
                     AgentLogger.shared.info("[WakeWord] Детекция — запускаю разговор")
+                    // Pre-roll ДО onDetection: разговор ставит паузу wake word (wake_word_stop),
+                    // а серийная ipcQueue гарантирует, что take_preroll уйдёт раньше stop.
+                    self.requestPreroll(ipc: ipc)
                     self.onDetection()
                     return
                 }
@@ -505,6 +513,26 @@ final class WakeWordPoller {
                     AgentLogger.shared.warn(
                         "[WakeWord] wake_word_start не удался (\(self.failedStartAttempts)/\(Self.maxFailedStartAttempts)): \(why)")
                 }
+            }
+        }
+    }
+
+    /// Звук, накопленный backend'ом к срабатыванию «Краб», — в начало разговора
+    /// (контракт `wake_word_take_preroll`, одноразовый; что именно в нём — WakePreroll.swift).
+    /// Таймаут 1 с (минимум IPCClient): дольше держать wake_word_stop за спиной нельзя.
+    /// Разговор этот ответ не ждёт; нет метода/звука/privacy — молча без pre-roll.
+    private func requestPreroll(ipc: IPCClient) {
+        WakePrerollMailbox.shared.arm(at: ProcessInfo.processInfo.systemUptime)
+        Self.ipcQueue.async {
+            let resp = try? ipc.call(method: "wake_word_take_preroll", params: [:], timeoutSec: 1)
+            let samples = WakePrerollDecoder.decode(resp)
+            DispatchQueue.main.async {
+                guard let samples else {
+                    AgentLogger.shared.info("[WakeWord] pre-roll недоступен — разговор без него")
+                    return
+                }
+                WakePrerollMailbox.shared.deliver(samples, at: ProcessInfo.processInfo.systemUptime)
+                AgentLogger.shared.info("[WakeWord] pre-roll получен: \(samples.count) сэмплов")
             }
         }
     }

@@ -62,6 +62,18 @@ struct ConversationAudioPrebuffer {
         droppedSampleCount += samples.count - acceptedCount
     }
 
+    /// Pre-roll слова-пробуждения — В НАЧАЛО: звук, накопленный к срабатыванию «Краб»
+    /// (см. WakePreroll.swift), должен уйти в VG раньше живого захвата.
+    /// Предел тот же: при переполнении отбрасывается хвост (самые поздние сэмплы).
+    mutating func prepend(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+        var combined = Array(samples.prefix(maxSampleCount))
+        let room = maxSampleCount - combined.count
+        combined.append(contentsOf: bufferedSamples.prefix(room))
+        droppedSampleCount += samples.count + bufferedSamples.count - combined.count
+        bufferedSamples = combined
+    }
+
     /// Передаёт владение накопленным звуком flush-пути и переоткрывает буфер.
     mutating func drain() -> [Float] {
         let drained = bufferedSamples
