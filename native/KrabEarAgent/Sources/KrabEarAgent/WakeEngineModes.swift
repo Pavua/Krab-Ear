@@ -111,18 +111,15 @@ enum WakeEngineStatsFormatter {
     /// — `time.monotonic()` процесса backend; сравнивать его с часами агента нельзя
     /// (разные процессы, на macOS разные часы ведут себя по-разному во сне), поэтому
     /// давность считаем только внутри часов backend, а без слушателя не показываем.
+    /// Причины, при которых движок действительно не работает. Остальные (`mlx_busy` —
+    /// диктовка держит GPU, `run_failed`, `not_text`) — разовые пропуски реплик:
+    /// backend хранит ПОСЛЕДНЮЮ причину и не сбрасывает её после успешного
+    /// распознавания, поэтому по ней одной нельзя писать «недоступен» вместо чисел.
+    static let hardUnavailableReasons: Set<String> = ["model_load_failed"]
+
     static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?) -> String {
-        if engine == .stt, report.mode != .off {
-            if report.available == false {
-                return "Недоступен (распознаватель не загружен)"
-            }
-            if let reason = report.unavailableReason {
-                var line = "Недоступен (\(reason))"
-                if let skipped = report.spotterUnavailable, skipped > 0 {
-                    line += " · пропущено реплик: \(skipped)"
-                }
-                return line
-            }
+        if engine == .stt, report.mode != .off, report.available == false {
+            return "Недоступен (распознаватель не загружен)"
         }
         var parts = [
             "Срабатываний вживую: \(report.firesLive)",
@@ -133,6 +130,17 @@ enum WakeEngineStatsFormatter {
                 parts.append("последнее: \(ago(now - last))")
             } else {
                 parts.append("последнее: было")
+            }
+        }
+        if engine == .stt, report.mode != .off {
+            let skipped = report.spotterUnavailable ?? 0
+            if skipped > 0 || report.unavailableReason != nil {
+                var tail = "пропущено реплик: \(skipped)"
+                if let reason = report.unavailableReason { tail += " (последняя причина: \(reason))" }
+                parts.append(tail)
+            }
+            if let reason = report.unavailableReason, hardUnavailableReasons.contains(reason) {
+                parts.insert("Недоступен (\(reason))", at: 0)
             }
         }
         if report.mode == .off {

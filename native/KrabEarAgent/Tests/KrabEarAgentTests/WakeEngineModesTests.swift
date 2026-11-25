@@ -31,13 +31,36 @@ final class WakeEngineModesTests: XCTestCase {
         XCTAssertEqual(WakeEngineMode.parse("shadow", engine: .oww), .shadow)
     }
 
-    func test_stt_unavailableReason_isShownInsteadOfSilentZero() {
+    /// Гейт Opus #2260: backend хранит ПОСЛЕДНЮЮ причину пропуска и не сбрасывает её после
+    /// успешного распознавания. «mlx_busy» (диктовка держит GPU) — обычный пропуск: числа
+    /// остаются, причина — хвостом, без «Недоступен».
+    func test_stt_transientReason_keepsCounts_andAppendsReason() {
         let report = WakeEngineReport(engine: .stt, payload: [
-            "mode": "shadow", "fires_live": 0, "fires_shadow": 0, "available": true,
+            "mode": "live", "fires_live": 3, "fires_shadow": 0, "available": true,
             "unavailable_reason": "mlx_busy", "spotter": ["unavailable": 4, "utterances": 9],
         ])
         let text = WakeEngineStatsFormatter.text(engine: .stt, report: report, backendNow: nil)
-        XCTAssertEqual(text, "Недоступен (mlx_busy) · пропущено реплик: 4")
+        XCTAssertTrue(text.contains("Срабатываний вживую: 3"), text)
+        XCTAssertFalse(text.contains("Недоступен"), text)
+        XCTAssertEqual(text, "Срабатываний вживую: 3 · в тени: 0 · пропущено реплик: 4 (последняя причина: mlx_busy)")
+    }
+
+    func test_stt_modelLoadFailed_isUnavailable_butCountsStay() {
+        let report = WakeEngineReport(engine: .stt, payload: [
+            "mode": "shadow", "fires_live": 0, "fires_shadow": 2, "available": true,
+            "unavailable_reason": "model_load_failed", "spotter": ["unavailable": 1],
+        ])
+        let text = WakeEngineStatsFormatter.text(engine: .stt, report: report, backendNow: nil)
+        XCTAssertEqual(text, "Недоступен (model_load_failed) · Срабатываний вживую: 0 · в тени: 2"
+            + " · пропущено реплик: 1 (последняя причина: model_load_failed)")
+    }
+
+    func test_oww_ignoresSttOnlyFields() {
+        let report = WakeEngineReport(engine: .oww, payload: [
+            "mode": "live", "fires_live": 1, "unavailable_reason": "model_load_failed",
+        ])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: report, backendNow: nil),
+                       "Срабатываний вживую: 1 · в тени: 0")
     }
 
     func test_stt_withoutTranscriber_isUnavailable_whenNotOff() {
@@ -135,7 +158,10 @@ final class WakeEngineModesTests: XCTestCase {
         XCTAssertEqual(controller.wakeEngineStatsLabels[.oww]?.stringValue,
                        "Срабатываний вживую: 1 · в тени: 7 · последнее: 1 мин назад")
         XCTAssertEqual(controller.wakeEngineStatsLabels[.stt]?.stringValue,
-                       "Недоступен (model_load_failed) · пропущено реплик: 2")
+                       "Недоступен (model_load_failed) · Срабатываний вживую: 0 · в тени: 0"
+                       + " · пропущено реплик: 2 (последняя причина: model_load_failed)")
+        XCTAssertEqual(controller.wakeEngineStatsLabels[.stt]?.font, KrabEarTheme.Typography.sectionTitle,
+                       "настоящая недоступность выделена жирным, не только словом")
 
         controller.applyWakeEngineStatus(nil)
         XCTAssertEqual(controller.wakeEngineModeControls[.oww]?.selectedSegment, -1)
