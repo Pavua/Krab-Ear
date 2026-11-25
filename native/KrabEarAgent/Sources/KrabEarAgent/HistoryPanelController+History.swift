@@ -1419,8 +1419,10 @@ extension HistoryPanelController {
         let item = items[row]
 
         let textColumn = tableView.tableColumns.first { $0.identifier.rawValue == "text" }
-        // Оставляем 28pt под кнопку перевода справа.
-        let columnWidth = max(180, (textColumn?.width ?? 700) - 36)
+        // Ширина текста подписи = ширина ячейки − 2×Metrics.standard (отступы contentStack
+        // в HistoryItemCellView); кнопка перевода живёт в ряду меток, не справа от текста.
+        // Мерить уже реальной — значит переоценить число строк и оставить пустой хвост.
+        let columnWidth = max(180, (textColumn?.width ?? 700) - 2 * KrabEarTheme.Metrics.standard)
         // Cache key учитывает item.id, columnWidth и состояние inline translation —
         // при изменении любого пересчитываем (KRAB-EAR-AGENT-5 fix).
         let translationVisible = inlineTranslationVisible.contains(item.id)

@@ -152,9 +152,10 @@ final class HistoryRowsLayoutTests: XCTestCase {
                 let lineHeight = NSLayoutManager().defaultLineHeight(for: label.font ?? KrabEarTheme.Typography.body)
                 let shown = label.maximumNumberOfLines > 0 ? min(need, lineHeight * CGFloat(label.maximumNumberOfLines) + 2) : need
                 XCTAssertLessThanOrEqual(shown, text.height + 2, "текст строки \(row) не срезан по высоте (\(width)): нужно \(shown), есть \(text.height)")
-                // Пустой хвост: строка не выше содержимого больше чем на одну строку текста.
-                let content = text.height + meta.height + 24
-                XCTAssertLessThanOrEqual(rowHeight, content + 24, "строка \(row) без лишней пустоты (\(width)): \(rowHeight) vs \(content)")
+                // Пустой хвост: высота строки = содержимое ячейки (текст + метки + отступы 4+4 и 2)
+                // с точностью до пары пунктов — расчёт меряет текст по реальной ширине подписи.
+                let content = text.height + meta.height + 10
+                XCTAssertLessThanOrEqual(rowHeight, content + 3, "строка \(row) без лишней пустоты (\(width)): \(rowHeight) vs \(content)")
             }
         }
     }
