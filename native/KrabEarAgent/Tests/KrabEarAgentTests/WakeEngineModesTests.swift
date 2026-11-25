@@ -97,6 +97,59 @@ final class WakeEngineModesTests: XCTestCase {
                        "Выключен · Срабатываний вживую: 0 · в тени: 0")
     }
 
+    // MARK: - loading / load_error (backend #2263)
+
+    func test_explicitLoading_onlyLoadingTrueMeansTurningOn() {
+        let loading = WakeEngineReport(engine: .oww, payload: ["mode": "live", "active": false, "loading": true])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: loading, backendNow: nil, listening: true),
+                       WakeEngineStatsFormatter.turningOnText)
+        // active=false без loading и без ошибки — не «включается» (эвристика старого backend выключена).
+        let idle = WakeEngineReport(engine: .oww, payload: ["mode": "live", "active": false, "loading": false])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: idle, backendNow: nil, listening: true),
+                       "Срабатываний вживую: 0 · в тени: 0")
+    }
+
+    func test_loadError_codes_haveHonestText() {
+        let cases: [(WakeEngine, String, String)] = [
+            (.oww, "not_installed", "Недоступен (openWakeWord не установлен)"),
+            (.oww, "load_failed", "Недоступен (модель не загрузилась, повтор через минуту)"),
+            (.stt, "no_transcriber", "Недоступен (распознаватель не загружен)"),
+            (.stt, "chunk_size", "Недоступен (неподходящий размер аудиоблока)"),
+            (.stt, "load_failed", "Недоступен (модель распознавания не загрузилась)"),
+            (.stt, "future_code", "Недоступен (future_code)"),
+        ]
+        for (engine, code, expected) in cases {
+            let report = WakeEngineReport(engine: engine, payload: [
+                "mode": "shadow", "loading": false, "load_error": code, "available": true,
+            ])
+            XCTAssertEqual(WakeEngineStatsFormatter.text(engine: engine, report: report, backendNow: nil, listening: true),
+                           expected, "\(engine)/\(code)")
+        }
+    }
+
+    func test_loadError_ignoredWhenOff_andNullMeansNoError() {
+        let off = WakeEngineReport(engine: .oww, payload: ["mode": "off", "loading": false, "load_error": "not_installed"])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: off, backendNow: nil),
+                       "Выключен · Срабатываний вживую: 0 · в тени: 0")
+        let null = WakeEngineReport(engine: .stt, payload: [
+            "mode": "live", "loading": false, "load_error": NSNull(), "available": true, "fires_live": 4,
+        ])
+        XCTAssertNil(null.loadError)
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .stt, report: null, backendNow: nil, listening: true),
+                       "Срабатываний вживую: 4 · в тени: 0")
+    }
+
+    func test_explicitState_staleModelLoadFailedReason_isNotUnavailable() {
+        // Новый backend сообщает сбой через load_error; устаревшая unavailable_reason его не подменяет.
+        let report = WakeEngineReport(engine: .stt, payload: [
+            "mode": "live", "loading": false, "available": true, "unavailable_reason": "model_load_failed",
+            "spotter": ["unavailable": 1],
+        ])
+        let text = WakeEngineStatsFormatter.text(engine: .stt, report: report, backendNow: nil, listening: true)
+        XCTAssertFalse(text.hasPrefix("Недоступен"), text)
+        XCTAssertTrue(text.contains("пропущено реплик: 1 (последняя причина: model_load_failed)"), text)
+    }
+
     func test_oww_ignoresSttOnlyFields() {
         let report = WakeEngineReport(engine: .oww, payload: [
             "mode": "live", "fires_live": 1, "unavailable_reason": "model_load_failed",
