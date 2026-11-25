@@ -569,7 +569,15 @@ class OpenWakeWordAdapter:
     def _release_stt_model_async(self) -> None:
         """Выгрузка модели споттера в отдельном потоке: не под self._lock и не в потоке слушателя (release берёт
         mlx_lock с ожиданием до 0,25 с)."""
-        threading.Thread(target=self._release_stt_model, name="SttSpotterRelease", daemon=True).start()
+        # Нечего выгружать (модель не загружалась — режим stt никогда не включали) — поток не создаём: stop() входит в
+        # путь close() backend, где новые потоки нежелательны (граница rest_stageb_boundary), а выгрузка не нужна.
+        is_loaded = getattr(self._stt_transcribe, "is_loaded", None)
+        try:
+            if callable(is_loaded) and not is_loaded():
+                return
+            threading.Thread(target=self._release_stt_model, name="SttSpotterRelease", daemon=True).start()
+        except Exception:  # noqa: BLE001 — stop()/close() не имеют права падать из-за выгрузки модели споттера
+            logger.warning("OpenWakeWordAdapter: не удалось запустить выгрузку модели STT-споттера", exc_info=True)
 
     def _is_final_stop(self) -> bool:
         """Остановка «насовсем» (wake word выключен или включён privacy), а не пауза под запись: после паузы адаптер

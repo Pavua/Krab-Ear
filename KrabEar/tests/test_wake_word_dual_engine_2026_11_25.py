@@ -322,3 +322,29 @@ def test_pause_for_recording_keeps_the_model_but_final_stop_releases_it(tmp_path
     cfg["wake_word_enabled"] = False
     adapter.stop()                                  # wake word выключен — остановка «насовсем»
     assert released.wait(2.0)
+
+
+def test_stop_never_starts_a_thread_when_no_model_was_ever_loaded(tmp_path, monkeypatch):
+    # close() backend идёт через stop(); граница rest_stageb_boundary запрещает неучтённые потоки на этом пути
+    class Real(_Transcriber):
+        def is_loaded(self):
+            return False
+
+    started = []
+    monkeypatch.setattr(threading.Thread, "start", lambda self: started.append(self.name))
+    adapter, cfg = _adapter(tmp_path, {"wake_word_enabled": False}, stt_transcribe=Real())
+    assert adapter.stop() is True
+    assert not [name for name in started if name == "SttSpotterRelease"]
+
+
+def test_stop_survives_thread_start_failure(tmp_path, monkeypatch):
+    class Loaded(_Transcriber):
+        def is_loaded(self):
+            return True
+
+    def boom(self):
+        raise PermissionError("unreviewed thread start")
+
+    monkeypatch.setattr(threading.Thread, "start", boom)
+    adapter, _ = _adapter(tmp_path, {"wake_word_enabled": False}, stt_transcribe=Loaded())
+    assert adapter.stop() is True          # исключение выгрузки не должно ломать остановку/закрытие
