@@ -79,6 +79,11 @@ struct WakeEngineReport: Equatable {
     /// Существует ли объект движка в текущей сессии слушателя (backend #2261).
     /// `nil` — старый backend поля не отдаёт: это «неизвестно», а не «выключен».
     var active: Bool?
+    /// Идёт загрузка/прогрев модели (backend #2263). `nil` — старый backend.
+    var loading: Bool?
+    /// Код причины, по которой движок не работает при включённом режиме (#2263), без текста:
+    /// oww — `not_installed` | `load_failed`; stt — `no_transcriber` | `chunk_size` | `load_failed`.
+    var loadError: String?
 
     init(engine: WakeEngine, payload: [String: Any]?) {
         let p = payload ?? [:]
@@ -92,6 +97,9 @@ struct WakeEngineReport: Equatable {
         let spotter = p["spotter"] as? [String: Any]
         spotterUnavailable = spotter.map { Self.int($0["unavailable"]) }
         active = p["active"] as? Bool
+        loading = p["loading"] as? Bool
+        let error = (p["load_error"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        loadError = (error?.isEmpty ?? true) ? nil : error
     }
 
     private static func int(_ value: Any?) -> Int {
@@ -132,11 +140,22 @@ enum WakeEngineStatsFormatter {
     /// «Включается…» показываем только при работающем слушателе.
     static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?,
                      listening: Bool? = nil) -> String {
+        // Новый backend (#2263) прямо сообщает ошибку загрузки через load_error — она главнее.
+        // `explicitState` — признак нового backend: у него сбой загрузки не выводим из
+        // устаревшей unavailable_reason.
+        let explicitState = report.loading != nil
+        if report.mode != .off, let error = report.loadError {
+            return loadErrorText(engine: engine, code: error)
+        }
         if engine == .stt, report.mode != .off, report.available == false {
             return "Недоступен (распознаватель не загружен)"
         }
-        if report.mode != .off, listening == true, report.active == false {
-            // Режим сменили на лету: модель грузится/прогревается (секунды).
+        // «Включается…»: идёт загрузка ИЛИ слушатель работает, а объекта движка ещё нет.
+        // Второе — переход сразу после клика: движок создаётся только на следующем чанке
+        // микрофона, и первый статус приходит с active=false, loading=false (ревью Codex
+        // #2264). Устойчивых тупиков в этом состоянии нет — их backend #2263 отдаёт через
+        // load_error (обработан выше), а у старого backend это прежняя эвристика.
+        if report.mode != .off, report.loading == true || (listening == true && report.active == false) {
             return turningOnText
         }
         var parts = [
@@ -157,7 +176,8 @@ enum WakeEngineStatsFormatter {
                 if let reason = report.unavailableReason { tail += " (последняя причина: \(reason))" }
                 parts.append(tail)
             }
-            if let reason = report.unavailableReason, hardUnavailableReasons.contains(reason) {
+            // Новый backend сообщает сбой загрузки через load_error (обработан выше).
+            if !explicitState, let reason = report.unavailableReason, hardUnavailableReasons.contains(reason) {
                 parts.insert("Недоступен (\(reason))", at: 0)
             }
         }
@@ -168,6 +188,26 @@ enum WakeEngineStatsFormatter {
             parts.insert("Сейчас не слушает", at: 0)
         }
         return parts.joined(separator: " · ")
+    }
+
+    /// Понятная причина по коду `load_error`. Неизвестный код показываем как есть —
+    /// молчаливый ноль хуже непереведённого кода.
+    static func loadErrorText(engine: WakeEngine, code: String) -> String {
+        switch (engine, code) {
+        case (.oww, "not_installed"):
+            return "Недоступен (openWakeWord не установлен)"
+        case (.oww, "load_failed"):
+            // backend повторяет загрузку раз в 60 с — строка честно чередуется с «Включается…».
+            return "Недоступен (модель не загрузилась, повтор через минуту)"
+        case (.stt, "no_transcriber"):
+            return "Недоступен (распознаватель не загружен)"
+        case (.stt, "chunk_size"):
+            return "Недоступен (неподходящий размер аудиоблока)"
+        case (.stt, "load_failed"):
+            return "Недоступен (модель распознавания не загрузилась)"
+        default:
+            return "Недоступен (\(code))"
+        }
     }
 
     static func ago(_ seconds: Double) -> String {

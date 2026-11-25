@@ -1374,11 +1374,13 @@ extension HistoryPanelController {
 
     /// Off-main запрос wake_word_status + wake_word_list_models для статус-строки
     /// и актуального списка моделей (кастомные .onnx из wake_word_models/).
-    func refreshWakeWordStatusRow(failedEngine: WakeEngine? = nil) {
+    /// `includeModels == false` — только статус: автоповтор во время прогрева движка
+    /// (каждые 2 с) не трогает список моделей, пока пользователь, возможно, в нём.
+    func refreshWakeWordStatusRow(failedEngine: WakeEngine? = nil, includeModels: Bool = true) {
         let ipc = self.ipcClient
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let status = try? ipc.call(method: "wake_word_status", params: [:])
-            let models = try? ipc.call(method: "wake_word_list_models", params: [:])
+            let models = includeModels ? try? ipc.call(method: "wake_word_list_models", params: [:]) : nil
             DispatchQueue.main.async {
                 guard let self else { return }
                 let result = status?["result"] as? [String: Any]
@@ -1389,7 +1391,8 @@ extension HistoryPanelController {
                     : "openWakeWord: не установлен. Установка: pip install -r KrabEar/requirements-wakeword.txt"
                 if let list = (models?["result"] as? [String: Any])?["models"] as? [[String: Any]] {
                     let names = list.compactMap { $0["name"] as? String }
-                    if !names.isEmpty {
+                    // Тот же список — не пересобираем: пересборка закрыла бы открытое меню.
+                    if !names.isEmpty, names != self.vaWakeWordModelSelector.itemTitles {
                         let selected = self.vaWakeWordModelSelector.titleOfSelectedItem
                         self.vaWakeWordModelSelector.removeAllItems()
                         self.vaWakeWordModelSelector.addItems(withTitles: names)

@@ -168,6 +168,6 @@ extension HistoryPanelController {
         }
         guard wakeEngineStartupPollsLeft > 0 else { return }
         wakeEngineStartupPollsLeft -= 1
-        wakeEngineFollowUpScheduler { [weak self] in self?.refreshWakeWordStatusRow() }
+        wakeEngineFollowUpScheduler { [weak self] in self?.refreshWakeWordStatusRow(includeModels: false) }
     }
 }
