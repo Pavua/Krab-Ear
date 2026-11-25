@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -54,6 +55,9 @@ class _FakeStt:
 
     def busy_for(self):
         return 0.0
+
+    def last_unavailable_reason(self):
+        return None
 
 
 def _adapter(tmp_path, settings=None, stt_transcribe=None):
@@ -222,3 +226,61 @@ def test_stt_failure_in_predict_does_not_kill_the_oww_engine(tmp_path, monkeypat
     assert len(cb) == 3                                   # openWakeWord продолжает будить все 3 чанка
     assert adapter._consecutive_stream_failures == 0      # цикл не упал и микрофон не считается сломанным
     assert adapter.engine_report()[oa.ENGINE_STT]["predict_errors"] == 3
+
+
+def test_both_engines_live_in_one_chunk_wake_once_but_count_both(tmp_path, monkeypatch):
+    adapter, _ = _adapter(tmp_path, {"wake_word_oww_mode": "live", "wake_word_stt_mode": "live"})
+    cb = _arm(adapter, oww=_oww(), stt=_FakeStt(fire_on={1, 2}))
+    _run(adapter, monkeypatch, chunks=2)
+    assert len(cb) == 2                                   # по одному пробуждению на чанк, не по два
+    stats = adapter._engine_stats
+    assert stats[oa.ENGINE_OWW]["fires_live"] == 2 and stats[oa.ENGINE_STT]["fires_live"] == 2
+
+
+class _Transcriber:
+    def __init__(self):
+        self.warmed, self.released = threading.Event(), 0
+
+    def __call__(self, samples):
+        return ""
+
+    def warmup(self):
+        self.warmed.set()
+
+    def release(self):
+        self.released += 1
+
+
+def test_enabling_stt_warms_the_model_up_in_background_and_disabling_releases_it(tmp_path, monkeypatch):
+    tr = _Transcriber()
+    adapter, cfg = _adapter(tmp_path, {"wake_word_stt_mode": "live"}, stt_transcribe=tr)
+    adapter._oww_available = True
+    monkeypatch.setattr(adapter, "_load_model", lambda *a, **k: SimpleNamespace(predict=lambda c: {}))
+    monkeypatch.setattr(adapter, "_listen_loop", lambda **kw: None)
+    adapter.start("hey_jarvis", lambda n, s: None)
+    assert tr.warmed.wait(2.0) and tr.released == 0
+    adapter.stop()
+    cfg["wake_word_stt_mode"] = "off"
+    adapter.start("hey_jarvis", lambda n, s: None)
+    assert tr.released == 1 and adapter._stt is None      # режим off: модель выгружена, споттер не создан
+    adapter.stop()
+
+
+def test_status_shows_unavailable_reason_instead_of_a_silent_zero(tmp_path):
+    from backend.stt_keyword_spotter import SttKeywordModel, TranscriberUnavailable
+
+    def busy(_samples):
+        raise TranscriberUnavailable("mlx_busy")
+
+    spotter = SttKeywordModel(busy, name=oa.STT_MODEL_NAME, cooldown_sec=0.0)
+    adapter, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"})
+    adapter._stt = spotter
+    from backend.stt_keyword_spotter import FRAME_SAMPLES
+    burst = [0] * (FRAME_SAMPLES * 10) + [3000, -3000] * (FRAME_SAMPLES * 3) + [0] * (FRAME_SAMPLES * 8)
+    for i in range(0, len(burst) - FRAME_SAMPLES + 1, FRAME_SAMPLES):
+        spotter.predict(burst[i:i + FRAME_SAMPLES])
+        spotter.drain(2.0)
+    engines = adapter.handle_wake_word_status({})["engines"]
+    assert engines[oa.ENGINE_STT]["spotter"]["unavailable"] >= 1
+    assert engines[oa.ENGINE_STT]["unavailable_reason"] == "mlx_busy"
+    spotter.close()

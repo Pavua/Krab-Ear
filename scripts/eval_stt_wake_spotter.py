@@ -100,14 +100,15 @@ def main(argv: list[str] | None = None) -> int:
     import numpy as np
 
     from backend import stt_keyword_spotter as sk
-    from core.pipeline.stt_gigaam_mlx import GigaAMMLXAdapter
+    from backend.wake_word_stt_bridge import GigaAmMemoryTranscriber
 
-    adapter = GigaAMMLXAdapter(mode="v3_e2e_rnnt")
+    transcriber = GigaAmMemoryTranscriber()  # тот же код, что в проде: своя копия GigaAM, аудио в памяти
+    transcriber.warmup()
 
     def transcribe(audio):
         try:
-            return adapter.transcribe(audio.astype(np.float32) / 32768.0, sample_rate=16000)["text"]
-        except Exception:  # noqa: BLE001 — пустой ответ GigaAM на короткий клип = «не распознано»
+            return transcriber(audio)
+        except sk.TranscriberUnavailable:
             return ""
 
     model = sk.SttKeywordModel(transcribe, cooldown_sec=0.0, max_per_minute=100_000)

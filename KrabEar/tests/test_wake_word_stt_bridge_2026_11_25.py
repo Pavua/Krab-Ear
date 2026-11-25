@@ -1,8 +1,9 @@
-"""Мост STT-споттера к уже загруженному GigaAM-воркеру: без второй копии модели, без ожидания, с дедлайном."""
+"""Распознаватель STT-споттера: своя копия GigaAM в памяти, аудио без файлов, mlx_lock коротко и без ожидания."""
 
 from __future__ import annotations
 
 import ast
+import threading
 import time
 from pathlib import Path
 
@@ -16,98 +17,184 @@ from core.config import DEFAULT_SETTINGS
 SRC = Path(bridge.__file__).read_text(encoding="utf-8")
 
 
-class _Lease:
-    def __init__(self, result=None, exc=None):
-        self.result, self.exc, self.released, self.run_args = result, exc, 0, None
+class _Lock:
+    def __init__(self, acquirable=True):
+        self.acquirable, self.acquired, self.released, self.timeouts = acquirable, 0, 0, []
 
-    def run(self, audio, rate, deadline):
-        self.run_args = (audio, rate, deadline)
-        if self.exc:
-            raise self.exc
-        return self.result
+    def acquire(self, timeout=None):
+        self.timeouts.append(timeout)
+        if self.acquirable:
+            self.acquired += 1
+        return self.acquirable
 
     def release(self):
         self.released += 1
 
 
-class _Router:
-    def __init__(self, lease=None, status="ok", boom=False):
-        self.lease, self.status, self.boom, self.reserved = lease, status, boom, 0
+class _Inter:
+    def __init__(self, exc=None):
+        self.exc, self.kwargs = exc, None
 
-    def reserve_gigaam_call(self):
-        self.reserved += 1
-        if self.boom:
-            raise RuntimeError("router closing")
-        return self.lease, self.status
+    def __call__(self, **kwargs):
+        self.kwargs = kwargs
+        return self
 
+    def __enter__(self):
+        if self.exc:
+            raise self.exc
+        return self
 
-def _call(router, samples=None):
-    fn = bridge.make_router_transcriber(lambda: router)
-    return fn(np.ones(2000, dtype=np.int16) * 1000 if samples is None else samples)
-
-
-def test_ok_result_returns_text_and_releases_lease():
-    lease = _Lease({"status": "ok", "text": "Краб."})
-    assert _call(_Router(lease)) == "Краб."
-    assert lease.released == 1
-    audio, rate, deadline = lease.run_args
-    assert audio.dtype == np.float32 and audio.ndim == 1 and float(np.abs(audio).max()) <= 1.0
-    assert rate == 16000
-    # дедлайн ограничивает ожидание воркера: диктовка не ждёт дольше ~1.5 с
-    assert 0 < deadline - time.monotonic() <= bridge.DEFAULT_DEADLINE_SEC + 0.1
+    def __exit__(self, *a):
+        return False
 
 
-@pytest.mark.parametrize("status", ["busy", "not_ready", "closing"])
-def test_busy_or_not_loaded_worker_is_skipped_not_waited(status):
-    router = _Router(lease=None, status=status)
-    with pytest.raises(TranscriberUnavailable):
-        _call(router)
-    assert router.reserved == 1
+def _make(text="Краб.", lock=None, inter=None, loader=None, infer=None, **kw):
+    calls = {"load": 0, "infer": []}
+
+    def default_loader(mode):
+        calls["load"] += 1
+        return ("model", "tokenizer")
+
+    def default_infer(model, tokenizer, audio):
+        calls["infer"].append(audio)
+        return text
+
+    lock = lock or _Lock()
+    tr = bridge.GigaAmMemoryTranscriber(
+        loader=loader or default_loader, infer=infer or default_infer,
+        mlx_lock_fn=lambda: lock, inter_lock_fn=inter or _Inter(), release_cache=lambda: calls.setdefault("cleared", 0),
+        **kw,
+    )
+    return tr, calls, lock
 
 
-def test_missing_router_or_failing_reserve_is_unavailable():
-    with pytest.raises(TranscriberUnavailable):
-        _call(None)
-    with pytest.raises(TranscriberUnavailable):
-        _call(_Router(boom=True))
+def test_model_is_loaded_lazily_once_and_released_on_demand():
+    tr, calls, _ = _make()
+    assert calls["load"] == 0 and not tr.is_loaded()  # режим off: память не тратим
+    tr(np.ones(2000, dtype=np.int16))
+    tr(np.ones(2000, dtype=np.int16))
+    assert calls["load"] == 1 and tr.is_loaded()
+    tr.release()
+    assert not tr.is_loaded()
+    tr(np.ones(2000, dtype=np.int16))
+    assert calls["load"] == 2
 
 
-@pytest.mark.parametrize("result", [None, "text", {"status": "timeout", "text": ""}, {"status": "ok", "text": 5},
-                                    {"status": "error", "text": "краб"}])
-def test_non_ok_results_never_leak_text_and_lease_is_released(result):
-    lease = _Lease(result)
-    with pytest.raises(TranscriberUnavailable):
-        _call(_Router(lease))
-    assert lease.released == 1
+def test_audio_goes_to_the_model_as_float32_array_in_memory():
+    tr, calls, lock = _make()
+    assert tr(np.array([0, 16384, -32768, 32767], dtype=np.int16)) == "Краб."
+    audio = calls["infer"][0]
+    assert audio.dtype == np.float32 and audio.ndim == 1
+    assert audio[1] == 0.5 and audio[2] == -1.0  # ровно int16/32768, как load_audio gigaam_mlx
+    assert lock.acquired == 1 and lock.released == 1
 
 
-def test_run_exception_does_not_leak_its_message_and_releases_lease():
-    lease = _Lease(exc=RuntimeError("секретный фрагмент текста краб"))
+def test_mlx_lock_is_taken_briefly_and_busy_lock_skips_the_utterance():
+    tr, calls, lock = _make(lock=_Lock(acquirable=False), lock_wait_sec=0.25)
+    with pytest.raises(TranscriberUnavailable, match="mlx_busy"):
+        tr(np.ones(2000, dtype=np.int16))
+    assert lock.timeouts == [0.25] and calls["infer"] == [] and lock.released == 0
+
+
+def test_inter_process_lock_timeout_means_busy_not_error():
+    class MLXInterLockTimeout(Exception):
+        pass
+
+    tr, calls, _ = _make(inter=_Inter(exc=MLXInterLockTimeout("lock file busy")), lock_wait_sec=0.25)
+    with pytest.raises(TranscriberUnavailable, match="mlx_busy"):
+        tr(np.ones(2000, dtype=np.int16))
+    assert calls["infer"] == []
+
+
+def test_inter_process_lock_gets_the_same_short_timeout():
+    inter = _Inter()
+    tr, _, _ = _make(inter=inter, lock_wait_sec=0.25)
+    tr(np.ones(2000, dtype=np.int16))
+    assert inter.kwargs == {"timeout_sec": 0.25}
+
+
+def test_real_mlx_lock_held_by_dictation_does_not_block_the_spotter():
+    from core.mlx_lock import mlx_lock
+
+    held, done = threading.Event(), threading.Event()
+
+    def dictation():
+        with mlx_lock():
+            held.set()
+            done.wait(5.0)
+
+    t = threading.Thread(target=dictation, daemon=True)
+    t.start()
+    assert held.wait(2.0)
+    calls = {"infer": 0}
+    tr = bridge.GigaAmMemoryTranscriber(
+        loader=lambda mode: ("m", "t"), infer=lambda m, t_, a: calls.__setitem__("infer", 1) or "краб",
+        lock_wait_sec=0.1, release_cache=lambda: None,
+    )
+    start = time.monotonic()
+    with pytest.raises(TranscriberUnavailable, match="mlx_busy"):
+        tr(np.ones(2000, dtype=np.int16))
+    assert time.monotonic() - start < 1.0 and calls["infer"] == 0
+    done.set()
+    t.join(2.0)
+    assert tr(np.ones(2000, dtype=np.int16)) == "краб"  # лок свободен — работает
+
+
+def test_infer_exception_does_not_leak_text_and_lock_is_released():
+    def boom(model, tokenizer, audio):
+        raise RuntimeError("секретный фрагмент текста краб")
+
+    tr, _, lock = _make(infer=boom)
     with pytest.raises(TranscriberUnavailable) as info:
-        _call(_Router(lease))
-    assert lease.released == 1
+        tr(np.ones(2000, dtype=np.int16))
     assert "краб" not in str(info.value) and info.value.__cause__ is None
+    assert lock.released == 1
 
 
-def test_router_is_resolved_on_every_utterance():
-    holder = {"router": None}
-    fn = bridge.make_router_transcriber(lambda: holder["router"])
-    with pytest.raises(TranscriberUnavailable):
-        fn(np.ones(100, dtype=np.int16))
-    holder["router"] = _Router(_Lease({"status": "ok", "text": "краб"}))
-    assert fn(np.ones(100, dtype=np.int16)) == "краб"
+def test_model_load_failure_is_unavailable_and_retried_next_time():
+    state = {"n": 0}
+
+    def flaky(mode):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("no weights")
+        return ("m", "t")
+
+    tr, _, _ = _make(loader=flaky)
+    with pytest.raises(TranscriberUnavailable, match="model_load_failed"):
+        tr(np.ones(2000, dtype=np.int16))
+    assert tr(np.ones(2000, dtype=np.int16)) == "Краб."
 
 
-def test_bridge_never_creates_a_model_and_never_persists_or_logs_text():
+def test_non_text_result_is_rejected():
+    tr, _, _ = _make(infer=lambda m, t, a: 5)
+    with pytest.raises(TranscriberUnavailable, match="not_text"):
+        tr(np.ones(2000, dtype=np.int16))
+
+
+def test_warmup_loads_and_runs_on_silence_and_swallows_unavailability():
+    tr, calls, _ = _make()
+    tr.warmup()
+    assert calls["load"] == 1 and len(calls["infer"]) == 1 and not calls["infer"][0].any()
+    busy, _, _ = _make(lock=_Lock(acquirable=False))
+    busy.warmup()  # занят — молча пропускаем
+
+
+def test_bridge_never_writes_audio_to_disk_or_spawns_processes_or_logs_text():
     tree = ast.parse(SRC)
-    imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-    imported |= {(n.module or "").split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
-    assert not imported & {"gigaam_mlx", "mlx", "mlx_whisper", "socket", "wave", "sqlite3", "pathlib"}
-    names = {getattr(n.func, "attr", None) or getattr(n.func, "id", None) for n in ast.walk(tree) if isinstance(n, ast.Call)}
-    assert not names & {"open", "write_text", "write_bytes", "GigaAMMLXAdapter", "GigaAMAdapter"}
+    top_imports = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}
+    top_imports |= {(n.module or "").split(".")[0] for n in tree.body if isinstance(n, ast.ImportFrom)}
+    all_imports = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
+    all_imports |= {(n.module or "").split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
+    assert not all_imports & {"tempfile", "subprocess", "wave", "socket", "sqlite3", "pathlib", "shutil"}
+    assert "mlx" not in top_imports and "gigaam_mlx" not in top_imports  # импорт моделей только лениво
     for n in ast.walk(tree):
-        if isinstance(n, ast.Call) and getattr(n.func, "attr", "") in {"debug", "info", "warning", "error", "exception"}:
-            assert "text" not in ast.dump(n)
+        if isinstance(n, ast.Call):
+            name = getattr(n.func, "attr", None) or getattr(n.func, "id", None)
+            assert name not in {"open", "write_text", "write_bytes", "NamedTemporaryFile", "load_audio", "transcribe",
+                                "unlink", "mkdir"}
+            if name in {"debug", "info", "warning", "error", "exception"}:
+                assert "text" not in ast.dump(n)
 
 
 def test_settings_defaults_keep_old_behaviour_and_validator_rejects_garbage():

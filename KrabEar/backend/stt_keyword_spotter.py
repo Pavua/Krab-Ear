@@ -226,6 +226,7 @@ class SttKeywordModel:
         self._lock = threading.Lock()
         self._pending = 0
         self._busy_since: Optional[float] = None  # монотонное время начала текущего распознавания (health)
+        self._last_unavailable: Optional[str] = None  # код причины (без текста): «mlx_busy», «model_load_failed»…
         self._fired = False
         self._gen = 0  # reset() увеличивает: результат распознавания, запущенного до reset, устарел
         self._cooldown_until = 0.0
@@ -260,6 +261,12 @@ class SttKeywordModel:
 
     def is_alive(self) -> bool:
         return self._worker.is_alive()
+
+    def last_unavailable_reason(self) -> Optional[str]:
+        """Код последней причины пропуска реплики (не текст): панель/отчёт показывают «недоступен (причина)»,
+        а не молчаливый ноль."""
+        with self._lock:
+            return self._last_unavailable
 
     def busy_for(self) -> float:
         """Сколько секунд идёт текущее распознавание (0.0 — воркер свободен). Для health: зависший транскрибер
@@ -324,9 +331,10 @@ class SttKeywordModel:
                 kind = self._matcher.kind(text)
                 with self._lock:
                     self._stats["transcribed"] += 1
-            except TranscriberUnavailable:
+            except TranscriberUnavailable as exc:
                 with self._lock:
                     self._stats["unavailable"] += 1
+                    self._last_unavailable = str(exc)[:40] or "unavailable"
             except Exception as exc:  # noqa: BLE001 — сбой распознавания = «не совпало», воркер живёт
                 with self._lock:
                     self._stats["errors"] += 1

@@ -14,7 +14,7 @@ from backend.model_cache_manager import ModelCacheManager
 from backend.model_downloader import ModelDownloader
 from backend.hotword_detector import HotwordDetector
 from backend.openwakeword_adapter import OpenWakeWordAdapter
-from backend.wake_word_stt_bridge import make_router_transcriber as make_wake_word_stt_transcriber
+from backend.wake_word_stt_bridge import GigaAmMemoryTranscriber
 from backend.plugin_system import PluginManager
 from backend.feature_flags import FeatureFlags
 from backend.template_manager import TemplateManager
@@ -1558,11 +1558,10 @@ class BackendService:
             # жив после stop() (is_recording уже False). stop()/_listen_loop
             # продолжают голый is_recording — wedged под записью нельзя.
             is_start_blocked=self._reinit_is_recording_gate,
-            # STT-споттер слова «Краб» (wake_word_stt_mode): только уже загруженный GigaAM-воркер роутера,
-            # без второй копии модели и без ожидания (backend/wake_word_stt_bridge.py).
-            stt_transcribe=make_wake_word_stt_transcriber(
-                lambda: getattr(getattr(self.transcriber, "engine", None), "_router", None)
-            ),
+            # STT-споттер слова «Краб» (wake_word_stt_mode): СВОЯ копия GigaAM-MLX (решение владельца 25.11: в проде
+            # диктовка идёт через whisper, загруженного GigaAM нет), аудио только в памяти, модель не грузится,
+            # пока режим off (backend/wake_word_stt_bridge.py).
+            stt_transcribe=GigaAmMemoryTranscriber(),
         )
         # Wave 172: RecordingCoreService owns all recording lifecycle, preview worker,
         # transcription pipeline, and async job tracking.

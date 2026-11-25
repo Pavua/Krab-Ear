@@ -332,6 +332,9 @@ class OpenWakeWordAdapter:
             self._close_stt_locked()
             if stt_wanted:
                 self._stt = SttKeywordModel(self._stt_transcribe, name=STT_MODEL_NAME)  # type: ignore[arg-type]
+                self._start_stt_warmup()
+            else:
+                self._release_stt_model()
             self._thread = threading.Thread(
                 target=self._listen_loop,
                 kwargs={
@@ -548,6 +551,21 @@ class OpenWakeWordAdapter:
         self._last_any_chunk_ts = None
         self._wedged = False
 
+    def _start_stt_warmup(self) -> None:
+        """Загрузка и прогрев модели споттера в фоне (в первую реплику не копим 0,9 с компиляции ядер)."""
+        warmup = getattr(self._stt_transcribe, "warmup", None)
+        if callable(warmup):
+            threading.Thread(target=warmup, name="SttSpotterWarmup", daemon=True).start()
+
+    def _release_stt_model(self) -> None:
+        """Режим stt выключен — модель споттера выгружается из памяти (если она вообще была загружена)."""
+        release = getattr(self._stt_transcribe, "release", None)
+        if callable(release):
+            try:
+                release()
+            except Exception:
+                logger.warning("OpenWakeWordAdapter: выгрузка модели STT-споттера не удалась", exc_info=True)
+
     def _close_stt_locked(self) -> None:
         """Закрывает STT-споттер (воркер-поток). close() не трогает сегментатор и поэтому безопасен из другого потока;
         predict()/reset() споттера вызываются ТОЛЬКО из потока слушателя."""
@@ -596,6 +614,7 @@ class OpenWakeWordAdapter:
         if stt is not None:
             out[ENGINE_STT]["spotter"] = stt.stats()
             out[ENGINE_STT]["transcribing_for_sec"] = round(stt.busy_for(), 2)
+            out[ENGINE_STT]["unavailable_reason"] = stt.last_unavailable_reason()
         return out
 
     def _record_detection(
@@ -1147,14 +1166,16 @@ class OpenWakeWordAdapter:
                             stt_was_off = True
                     if privacy_changed():
                         break
+                    live_published = False  # оба движка в одном чанке: будим один раз, второй только считаем
                     for engine, mdl_name, score, mode in detections:
                         self._note_fire(engine, mode)
-                        if mode != "live":
+                        if mode != "live" or live_published:
                             continue
                         if not self._record_detection(
                             mdl_name, score, capture_revision=capture_revision,
                         ):
                             return
+                        live_published = True
                         if self._on_detected is not None:
                             if privacy_changed():
                                 return
