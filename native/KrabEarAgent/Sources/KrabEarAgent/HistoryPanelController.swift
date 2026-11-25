@@ -295,9 +295,13 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     var wakeEnginePendingWrites: [WakeEngine: Int] = [:]
     /// Запись режима в backend; completion — на main с признаком подтверждения.
     /// Подменяется в тестах (по умолчанию — set_settings off-main).
+    /// Записи идут через ОДНУ последовательную очередь: на глобальной параллельной два
+    /// быстрых клика («Вживую», затем «Выкл») могли дойти до backend в обратном порядке
+    /// и оставить движок включённым вопреки последнему выбору (ревью Codex #2260).
+    static let wakeEngineWriteQueue = DispatchQueue(label: "krab.wakeEngineModeWrites", qos: .userInitiated)
     lazy var wakeEngineModeWriter: (WakeEngine, WakeEngineMode, @escaping (Bool) -> Void) -> Void = {
         [ipcClient] engine, mode, completion in
-        DispatchQueue.global(qos: .userInitiated).async {
+        Self.wakeEngineWriteQueue.async {
             let response = try? ipcClient.call(method: "set_settings", params: [engine.settingKey: mode.rawValue])
             let ok = (response?["ok"] as? Bool) == true
             DispatchQueue.main.async { completion(ok) }
