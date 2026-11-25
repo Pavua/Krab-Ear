@@ -173,7 +173,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let historyFromDateField = NSTextField(frame: .zero)
     let historyToDateField = NSTextField(frame: .zero)
     let historyFocusModeButton: ThemeSecondaryButton = {
-        let b = ThemeSecondaryButton(title: "Фокус истории: ON", target: nil, action: nil)
+        let b = ThemeSecondaryButton(title: "Фокус истории: вкл", target: nil, action: nil)
         b.isTransparentStyle = true
         return b
     }()
@@ -335,9 +335,11 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         b.isTransparentStyle = true
         return b
     }()
-    let filterRow1 = AdaptiveRowStackView()
-    let filterRow2 = AdaptiveRowStackView()
-    let historyQuickPresetRow = AdaptiveRowStackView()
+    // Фильтры «Истории»: переносящиеся ряды (пара «подпись + список» не рвётся).
+    let historyFilterFlow = FlowRowView()
+    let historyQuickFilterFlow = FlowRowView()
+    /// Вид списка: «Встреча», записей на странице, плотность, фокус — переносящимся рядом.
+    let historyViewOptionsFlow = FlowRowView()
     let importRow = AdaptiveRowStackView()
     let toolsRow = AdaptiveRowStackView()
     private let controlRow = AdaptiveRowStackView()
@@ -828,20 +830,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         topActionsRow.alignment = .centerY
         topActionsRow.translatesAutoresizingMaskIntoConstraints = false
 
-        filterRow1.orientation = .horizontal
-        filterRow1.spacing = KrabEarTheme.Metrics.standard
-        filterRow1.alignment = .centerY
-        filterRow1.translatesAutoresizingMaskIntoConstraints = false
-
-        filterRow2.orientation = .horizontal
-        filterRow2.spacing = KrabEarTheme.Metrics.standard
-        filterRow2.alignment = .centerY
-        filterRow2.translatesAutoresizingMaskIntoConstraints = false
-
-        historyQuickPresetRow.orientation = .horizontal
-        historyQuickPresetRow.spacing = KrabEarTheme.Metrics.standard
-        historyQuickPresetRow.alignment = .centerY
-        historyQuickPresetRow.translatesAutoresizingMaskIntoConstraints = false
+        historyFilterFlow.translatesAutoresizingMaskIntoConstraints = false
+        historyFilterFlow.spacing = KrabEarTheme.Metrics.relaxed
+        historyQuickFilterFlow.translatesAutoresizingMaskIntoConstraints = false
 
         importRow.orientation = .horizontal
         importRow.spacing = KrabEarTheme.Metrics.standard
@@ -878,7 +869,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         topSearchRow.addArrangedSubview(searchField)
 
         let clearSearch: ThemeSecondaryButton = {
-            let b = ThemeSecondaryButton(title: "Сбросить", target: self, action: #selector(onClearSearch))
+            let b = ThemeSecondaryButton(title: "Очистить поиск", target: self, action: #selector(onClearSearch))
             b.isTransparentStyle = true
             return b
         }()
@@ -915,90 +906,96 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
 
         meetingPanelButton.target = self
         meetingPanelButton.action = #selector(onOpenMeetingPanel)
-        topActionsRow.addArrangedSubview(meetingPanelButton)
+        historyViewOptionsFlow.translatesAutoresizingMaskIntoConstraints = false
+        historyViewOptionsFlow.addItem(meetingPanelButton)
 
-        topActionsRow.addArrangedSubview(NSTextField(labelWithString: "Страница:"))
+        // Пары «подпись + список»: в столбике AdaptiveRow подпись больше не отрывается от списка.
         historyPageSizeSelector.addItems(withTitles: ["25", "50", "100", "200"])
         historyPageSizeSelector.controlSize = .small
         historyPageSizeSelector.target = self
         historyPageSizeSelector.action = #selector(onHistoryPageSizeChanged)
-        topActionsRow.addArrangedSubview(historyPageSizeSelector)
-        topActionsRow.addArrangedSubview(NSTextField(labelWithString: "Плотность:"))
-        historyDensitySelector.addItems(withTitles: ["Normal", "Compact"])
+        historyPageSizeSelector.setAccessibilityLabel("Записей на странице")
+        historyViewOptionsFlow.addItem(KrabEarTheme.labeledPair("На странице:", historyPageSizeSelector))
+        // Индекс 0 — normal, 1 — compact (onHistoryDensityChanged читает индекс).
+        historyDensitySelector.addItems(withTitles: ["Обычная", "Компактная"])
         historyDensitySelector.controlSize = .small
         historyDensitySelector.target = self
         historyDensitySelector.action = #selector(onHistoryDensityChanged)
-        topActionsRow.addArrangedSubview(historyDensitySelector)
+        historyDensitySelector.setAccessibilityLabel("Плотность строк истории")
+        historyViewOptionsFlow.addItem(KrabEarTheme.labeledPair("Плотность:", historyDensitySelector))
         historyFocusModeButton.target = self
         historyFocusModeButton.action = #selector(onToggleHistoryFocusMode)
         historyFocusModeButton.toolTip = "Сворачивает вторичные блоки и отдаёт максимум места таблице истории"
-        topActionsRow.addArrangedSubview(historyFocusModeButton)
+        historyViewOptionsFlow.addItem(historyFocusModeButton)
         topActionsRow.addArrangedSubview(NSView())
         topBar.addArrangedSubview(topSearchRow)
         topBar.addArrangedSubview(topActionsRow)
+        topBar.addArrangedSubview(historyViewOptionsFlow)
 
-        filterRow1.addArrangedSubview(NSTextField(labelWithString: "Вставка:"))
-        historyPasteStatusFilter.addItems(withTitles: ["Все", "ok", "failed"])
+        // Фильтры — пары «подпись + список» в переносящемся ряду: пара не разрывается
+        // (раньше AdaptiveRow на 860 pt ставил «Вставка:» и её список на разные строки).
+        // Значения читаются ПО ИНДЕКСУ (selectedHistory*Filter), поэтому подписи пунктов —
+        // по-русски; порядок пунктов менять нельзя.
+        historyPasteStatusFilter.addItems(withTitles: ["Все", "Вставлено", "Ошибка вставки"])
         historyPasteStatusFilter.target = self
         historyPasteStatusFilter.action = #selector(onHistoryFilterChanged)
-        filterRow1.addArrangedSubview(historyPasteStatusFilter)
+        historyFilterFlow.addItem(KrabEarTheme.labeledPair("Вставка:", historyPasteStatusFilter))
 
-        filterRow1.addArrangedSubview(NSTextField(labelWithString: "Перевод:"))
-        historyTranslationModeFilter.addItems(withTitles: ["Все", "off", "ru_to_es", "es_to_ru", "en_to_ru", "auto", "auto_to_ru", "bilingual_ru_es"])
+        historyTranslationModeFilter.addItems(withTitles: [
+            "Все", "Без перевода", "RU → ES", "ES → RU", "EN → RU", "Авто", "Авто → RU", "RU ↔ ES",
+        ])
         historyTranslationModeFilter.target = self
         historyTranslationModeFilter.action = #selector(onHistoryFilterChanged)
-        filterRow1.addArrangedSubview(historyTranslationModeFilter)
+        historyFilterFlow.addItem(KrabEarTheme.labeledPair("Перевод:", historyTranslationModeFilter))
 
-        filterRow1.addArrangedSubview(NSTextField(labelWithString: "Статус:"))
         historyTranslationStatusFilter.addItems(
             withTitles: [
                 "Все",
-                "ok",
-                "not_requested",
-                "model_unavailable_offline",
-                "model_unavailable_online",
-                "model_unavailable_cached",
-                "cannot_detect_language",
-                "already_target_language",
-                "translate_error",
+                "Переведено",
+                "Перевод не запрошен",
+                "Нет модели (офлайн)",
+                "Нет модели (онлайн)",
+                "Нет модели (кэш)",
+                "Язык не определён",
+                "Уже на нужном языке",
+                "Ошибка перевода",
             ]
         )
         historyTranslationStatusFilter.target = self
         historyTranslationStatusFilter.action = #selector(onHistoryFilterChanged)
-        filterRow1.addArrangedSubview(historyTranslationStatusFilter)
-        filterRow1.addArrangedSubview(NSView())
+        historyFilterFlow.addItem(KrabEarTheme.labeledPair("Статус перевода:", historyTranslationStatusFilter))
 
-        filterRow2.addArrangedSubview(NSTextField(labelWithString: "От:"))
-        historyFromDateField.placeholderString = "YYYY-MM-DD"
+        historyFromDateField.placeholderString = "ГГГГ-ММ-ДД"
         historyFromDateField.target = self
         historyFromDateField.action = #selector(onHistoryFilterChanged)
         historyFromDateField.controlSize = .small
         historyFromDateField.font = KrabEarTheme.Typography.caption
         historyFromDateField.widthAnchor.constraint(equalToConstant: 96).isActive = true
-        filterRow2.addArrangedSubview(historyFromDateField)
+        historyFilterFlow.addItem(KrabEarTheme.labeledPair("С даты:", historyFromDateField))
 
-        filterRow2.addArrangedSubview(NSTextField(labelWithString: "До:"))
-        historyToDateField.placeholderString = "YYYY-MM-DD"
+        historyToDateField.placeholderString = "ГГГГ-ММ-ДД"
         historyToDateField.target = self
         historyToDateField.action = #selector(onHistoryFilterChanged)
         historyToDateField.controlSize = .small
         historyToDateField.font = KrabEarTheme.Typography.caption
         historyToDateField.widthAnchor.constraint(equalToConstant: 96).isActive = true
-        filterRow2.addArrangedSubview(historyToDateField)
+        historyFilterFlow.addItem(KrabEarTheme.labeledPair("По дату:", historyToDateField))
 
         // Action items filter (PR feat/action-items-filter-ui, depends on #295 HistoryItem fields).
         // Применяется client-side через applyClientActionItemsFilter — backend
         // get_history_page не поддерживает has_action_items query.
-        filterRow2.addArrangedSubview(NSTextField(labelWithString: "Action items:"))
         historyActionItemsFilter.addItems(
-            withTitles: ["Все", "Только с action items", "Только без"]
+            withTitles: ["Все", "Только с задачами", "Только без задач"]
         )
         historyActionItemsFilter.target = self
         historyActionItemsFilter.action = #selector(onActionItemsFilterChanged)
-        filterRow2.addArrangedSubview(historyActionItemsFilter)
-        filterRow2.addArrangedSubview(NSView())
+        historyFilterFlow.addItem(KrabEarTheme.labeledPair("Задачи из записи:", historyActionItemsFilter))
 
-        historyQuickPresetRow.addArrangedSubview(NSTextField(labelWithString: "Быстрые фильтры:"))
+        // Быстрые фильтры — кнопки переносятся рядами, как слова (не по одной на строку).
+        let quickFiltersLabel = NSTextField(labelWithString: "Быстрые фильтры:")
+        quickFiltersLabel.font = KrabEarTheme.Typography.body
+        quickFiltersLabel.lineBreakMode = .byTruncatingTail
+        historyQuickFilterFlow.addItem(quickFiltersLabel)
         let historyTodayButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "Сегодня", target: self, action: #selector(onHistoryPresetToday))
             b.isTransparentStyle = true
@@ -1006,7 +1003,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         historyTodayButton.applyThemeSecondary()
         historyTodayButton.toolTip = "Показывает записи только за сегодня"
-        historyQuickPresetRow.addArrangedSubview(historyTodayButton)
+        historyQuickFilterFlow.addItem(historyTodayButton)
         let historyWeekButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "7 дней", target: self, action: #selector(onHistoryPresetLast7Days))
             b.isTransparentStyle = true
@@ -1014,7 +1011,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         historyWeekButton.applyThemeSecondary()
         historyWeekButton.toolTip = "Показывает записи за последние 7 дней"
-        historyQuickPresetRow.addArrangedSubview(historyWeekButton)
+        historyQuickFilterFlow.addItem(historyWeekButton)
         let historyErrorsButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "Ошибки перевода", target: self, action: #selector(onHistoryPresetTranslationErrors))
             b.isTransparentStyle = true
@@ -1022,7 +1019,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         historyErrorsButton.applyThemeSecondary()
         historyErrorsButton.toolTip = "Фильтр по translation_status=translate_error"
-        historyQuickPresetRow.addArrangedSubview(historyErrorsButton)
+        historyQuickFilterFlow.addItem(historyErrorsButton)
         let historyTranslatedButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "С переводом", target: self, action: #selector(onHistoryPresetTranslatedOnly))
             b.isTransparentStyle = true
@@ -1030,7 +1027,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         historyTranslatedButton.applyThemeSecondary()
         historyTranslatedButton.toolTip = "Показывает записи с успешным переводом (translation_status=ok)"
-        historyQuickPresetRow.addArrangedSubview(historyTranslatedButton)
+        historyQuickFilterFlow.addItem(historyTranslatedButton)
         let historyNoTranslationButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "Без перевода", target: self, action: #selector(onHistoryPresetNoTranslation))
             b.isTransparentStyle = true
@@ -1038,7 +1035,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         historyNoTranslationButton.applyThemeSecondary()
         historyNoTranslationButton.toolTip = "Показывает записи, где translation_mode=off"
-        historyQuickPresetRow.addArrangedSubview(historyNoTranslationButton)
+        historyQuickFilterFlow.addItem(historyNoTranslationButton)
         let historyPasteErrorsButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "Ошибки вставки", target: self, action: #selector(onHistoryPresetPasteFailed))
             b.isTransparentStyle = true
@@ -1046,7 +1043,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         historyPasteErrorsButton.applyThemeSecondary()
         historyPasteErrorsButton.toolTip = "Фильтр по paste_status=failed"
-        historyQuickPresetRow.addArrangedSubview(historyPasteErrorsButton)
+        historyQuickFilterFlow.addItem(historyPasteErrorsButton)
         let historyResetDatesButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "Сброс дат", target: self, action: #selector(onHistoryPresetResetDates))
             b.isTransparentStyle = true
@@ -1054,8 +1051,7 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }()
         historyResetDatesButton.applyThemeSecondary()
         historyResetDatesButton.toolTip = "Очищает поля дат и перезагружает историю"
-        historyQuickPresetRow.addArrangedSubview(historyResetDatesButton)
-        historyQuickPresetRow.addArrangedSubview(NSView())
+        historyQuickFilterFlow.addItem(historyResetDatesButton)
 
         let importAudioButton: ThemeSecondaryButton = {
             let b = ThemeSecondaryButton(title: "Импорт аудио", target: self, action: #selector(onImportAudio))
@@ -1722,15 +1718,15 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         }
 
         [
-            topBar, topSearchRow, topActionsRow, filterRow1, filterRow2, importRow, toolsRow, controlRow,
+            topBar, topSearchRow, topActionsRow, importRow, toolsRow, controlRow,
             settingsRow1, settingsRow2, settingsRow3, settingsRow4, settingsRow5, settingsRow6, settingsRow7,
             voiceGatewayRow,
             callAssistConfigRow, callAssistControlRow, callPhrasePresetRow, callPhraseActionRow, callTimelineRow,
-            historyQuickPresetRow, bottomBar1, bottomBar2,
+            bottomBar1, bottomBar2,
         ].forEach(relaxHorizontalCompression)
 
         // Критично: таблица истории должна забирать остаток высоты, а не схлопываться.
-        for fixedRow in [topBar, filterRow1, filterRow2, historyQuickPresetRow, importRow, bottomBar1, bottomBar2] {
+        for fixedRow in [topBar, historyFilterFlow, historyQuickFilterFlow, importRow, bottomBar1, bottomBar2] as [NSView] {
             fixedRow.setContentHuggingPriority(.required, for: .vertical)
             fixedRow.setContentCompressionResistancePriority(.required, for: .vertical)
         }
@@ -1877,9 +1873,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.setHuggingPriority(.required, for: .vertical)
         historyStack.setContentCompressionResistancePriority(.required, for: .vertical)
         historyStack.addArrangedSubview(topBar)
-        historyStack.addArrangedSubview(filterRow1)
-        historyStack.addArrangedSubview(filterRow2)
-        historyStack.addArrangedSubview(historyQuickPresetRow)
+        historyStack.addArrangedSubview(historyFilterFlow)
+        historyStack.addArrangedSubview(historyQuickFilterFlow)
         historyPreviewContainer.orientation = .vertical
         historyPreviewContainer.spacing = KrabEarTheme.Metrics.tight
         historyPreviewContainer.translatesAutoresizingMaskIntoConstraints = false
@@ -1908,9 +1903,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         historyStack.addArrangedSubview(bottomBar1)
         historyStack.addArrangedSubview(bottomBar2)
         historyFocusManagedRows = [
-            filterRow1,
-            filterRow2,
-            historyQuickPresetRow,
+            historyFilterFlow,
+            historyQuickFilterFlow,
             importRow,
             dropZoneView,
         ]
@@ -2715,8 +2709,9 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         if isVeryNarrow {
             loadMoreButton.title = "Ещё"
             jumpToLatestButton.title = "Свежее"
-            copyButton.title = "Copy"
-            deleteButton.title = "Del"
+            // Без английских сокращений («Copy», «Del»): ряд сам переносится, слово целиком понятнее.
+            copyButton.title = "Копировать"
+            deleteButton.title = "Удалить"
         } else {
             updateLoadMoreButtonCaption()
             jumpToLatestButton.title = "К последней"
