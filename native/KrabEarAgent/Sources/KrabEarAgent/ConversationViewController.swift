@@ -174,6 +174,8 @@ final class ConversationViewController: NSViewController {
     var idleEndClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// Локальный признак речи по микрофону (VG не шлёт VAD/частичных расшифровок).
     var localVoiceGate = LocalVoiceActivityGate()
+    /// Стеночные часы для модели очереди воспроизведения (тесты подменяют).
+    var playbackClock: () -> Date = { Date() }
     /// Интервал fallback (инжектируется в тестах; прод — 2с).
     var interruptFallbackInterval: TimeInterval = 2.0
 
@@ -404,7 +406,10 @@ final class ConversationViewController: NSViewController {
     /// Тик: N секунд тишины в «слушаю» → обычное завершение (.end, оверлей закрыт,
     /// пауза wake word снимается через .krabConversationStopped).
     func idleEndTick() {
-        guard isSessionActive, var policy = idleEndPolicy else { return }
+        guard isSessionActive, idleEndPolicy != nil else { return }
+        // Ответ доигран — назад в «слушаю», иначе отсчёт тишины удерживался бы вечно.
+        settleFinishedPlayback()
+        guard var policy = idleEndPolicy else { return }
         let shouldEnd = policy.shouldEnd(now: idleEndClock(), state: conversationState)
         idleEndPolicy = policy
         guard shouldEnd else { return }
@@ -518,6 +523,7 @@ final class ConversationViewController: NSViewController {
 
         case .replyFinal(let text):
             noteConversationActivity()
+            noteAISpeechSignal()
             appendTranscriptLine("AI: \(text)")
             conversationState = .speaking
 

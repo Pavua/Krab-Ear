@@ -65,6 +65,25 @@ struct ConversationIdleEndPolicy {
     }
 }
 
+/// Ответ AI доигран: пора вернуться из «говорю» в «слушаю».
+///
+/// Ревью Codex #2270: replyFinal и downlink ставят `.speaking`, а воспроизведение
+/// (`scheduleBuffer(..., completionHandler: nil)`) назад не переключает — после обычного
+/// ответа при молчащем пользователе состояние оставалось «говорю» навсегда, отсчёт тишины
+/// удерживался, микрофон оставался открытым. Доиграно = очередь воспроизведения кончилась
+/// (с хвостом эхо-защиты) И `settle` секунд не было новых сигналов речи AI — чтобы текст
+/// ответа, пришедший раньше звука, не дёргал метку «говорю → слушаю → говорю».
+enum ConversationPlaybackSettle {
+    static let settleSeconds: TimeInterval = 2.5
+
+    static func isSettled(state: ConversationState, playbackQueueEndsAt: Date, echoTail: TimeInterval,
+                          lastAISpeechAt: Date, now: Date) -> Bool {
+        state == .speaking
+            && now >= playbackQueueEndsAt.addingTimeInterval(echoTail)
+            && now.timeIntervalSince(lastAISpeechAt) >= settleSeconds
+    }
+}
+
 /// Локальный признак «пользователь говорит» по уровню микрофона разговора.
 ///
 /// Гейт Opus #2270: Voice Gateway не шлёт conv.vad_speech и частичных расшифровок —

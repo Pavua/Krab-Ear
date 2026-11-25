@@ -209,6 +209,43 @@ final class WakePrerollAndIdleEndTests: XCTestCase {
         XCTAssertFalse(WakePrerollMailbox.shared.claimIfArmed(at: now), "стоп сбросил недозабранный pre-roll")
     }
 
+    /// Ревью Codex #2270: после обычного ответа воспроизведение назад в «слушаю» не переключало.
+    func test_playbackSettle_onlyAfterQueueAndQuietPeriod() {
+        let t0 = Date(timeIntervalSince1970: 1_000)
+        func settled(_ state: ConversationState, queueEnds: Double, lastAI: Double, now: Double) -> Bool {
+            ConversationPlaybackSettle.isSettled(
+                state: state, playbackQueueEndsAt: t0.addingTimeInterval(queueEnds), echoTail: 0.35,
+                lastAISpeechAt: t0.addingTimeInterval(lastAI), now: t0.addingTimeInterval(now))
+        }
+        XCTAssertFalse(settled(.speaking, queueEnds: 10, lastAI: 5, now: 9), "очередь ещё играет")
+        XCTAssertFalse(settled(.speaking, queueEnds: 1, lastAI: 5, now: 6), "текст пришёл, звук может догнать")
+        XCTAssertTrue(settled(.speaking, queueEnds: 1, lastAI: 5, now: 7.6))
+        XCTAssertFalse(settled(.thinking, queueEnds: 0, lastAI: 0, now: 100), "только из «говорю»")
+    }
+
+    func test_vc_afterAiReplyAndSilence_returnsToListening_thenAutoEnds() {
+        let defaults = UserDefaults(suiteName: "idle-reply-\(UUID().uuidString)")!
+        defaults.set(10, forKey: ConversationIdleEndSettings.secondsKey)
+        let vc = makeVC(defaults: defaults)
+        var uptime: TimeInterval = 100
+        var wall = Date(timeIntervalSince1970: 50_000)
+        vc.idleEndClock = { uptime }
+        vc.playbackClock = { wall }
+        vc.startConversation()
+        vc.conversationState = .listening
+        vc.handleDownlinkEvent(.replyFinal(text: "Готово."))
+        XCTAssertEqual(vc.conversationState, .speaking)
+        func advance(_ seconds: TimeInterval) { uptime += seconds; wall = wall.addingTimeInterval(seconds); vc.idleEndTick() }
+        advance(1)
+        XCTAssertEqual(vc.conversationState, .speaking, "сразу после текста не переключаемся")
+        advance(2)
+        XCTAssertEqual(vc.conversationState, .listening, "ответ доигран — снова «слушаю»")
+        advance(9)
+        XCTAssertTrue(vc.isSessionActive)
+        advance(2)
+        XCTAssertFalse(vc.isSessionActive, "10 с тишины после ответа — разговор завершён")
+    }
+
     func test_vc_idleEndDisabled_noWatch() {
         let defaults = UserDefaults(suiteName: "idle-off-\(UUID().uuidString)")!
         defaults.set(false, forKey: ConversationIdleEndSettings.enabledKey)

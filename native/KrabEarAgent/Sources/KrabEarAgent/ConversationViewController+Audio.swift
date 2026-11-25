@@ -459,6 +459,20 @@ extension ConversationViewController {
     /// времени и копятся в узле, поэтому окно считается от КОНЦА уже запланированного
     /// воспроизведения, а не от «сейчас». Хвост добавляется на реверберацию комнаты —
     /// звук слышен микрофону ещё некоторое время после последнего сэмпла.
+    /// Сигнал «AI говорит» (downlink-аудио, финальный текст ответа).
+    func noteAISpeechSignal() {
+        audioHolder.lastAISpeechAt = playbackClock()
+    }
+
+    /// Ответ доигран → «слушаю» (см. ConversationPlaybackSettle). Зовётся тиком автозавершения.
+    func settleFinishedPlayback() {
+        guard ConversationPlaybackSettle.isSettled(
+            state: conversationState, playbackQueueEndsAt: audioHolder.playbackQueueEndsAt,
+            echoTail: _echoGuardTailSeconds, lastAISpeechAt: audioHolder.lastAISpeechAt,
+            now: playbackClock()) else { return }
+        conversationState = .listening
+    }
+
     func isOwnPlaybackAudible() -> Bool {
         Date() < audioHolder.playbackQueueEndsAt.addingTimeInterval(_echoGuardTailSeconds)
     }
@@ -504,6 +518,7 @@ extension ConversationViewController {
             return
         }
 
+        noteAISpeechSignal()
         // Валидный бинарный фрейм означает, что ассистент действительно заговорил.
         if conversationState != .speaking {
             conversationState = .speaking
@@ -614,6 +629,8 @@ private final class AudioHolder: NSObject {
     var echoCancellationActive = false
     /// W1893: момент, когда доиграет уже запланированный downlink (модель очереди плеера).
     var playbackQueueEndsAt = Date.distantPast
+    /// Последний сигнал речи AI (downlink-аудио, replyFinal) — для возврата в «слушаю».
+    var lastAISpeechAt = Date.distantPast
     /// Разговор запущен свежей детекцией слова-пробуждения: по ready в начало prebuffer
     /// встанет её pre-roll (WakePrerollMailbox).
     var expectsWakePreroll = false
