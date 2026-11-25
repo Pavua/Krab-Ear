@@ -153,6 +153,7 @@ class OpenWakeWordAdapter:
         # Pre-roll: ссылка на кольцо ТОЙ сессии, что сработала, якорь (абсолютная позиция), время и ревизия политики.
         self._preroll_lock = threading.Lock()
         self._preroll_fire: dict[str, Any] | None = None
+        self._preroll_ended = False  # вооружённое срабатывание пропало с выходом цикла (агент опоздал)
         # 2026-07-15 (спека wake-word-watchdog): heartbeat живого захвата.
         # last_chunk_ts штампуется ТОЛЬКО ненулевыми чанками (живой микрофон
         # никогда не отдаёт секунды идеальных int16-нулей; шторм нулей 12-07 и
@@ -575,6 +576,7 @@ class OpenWakeWordAdapter:
         self._last_any_chunk_ts = None
         self._wedged = False
         self._preroll_fire = None  # срабатывание прошлой сессии не переживает перезапуск прослушивания
+        self._preroll_ended = False
 
     def _create_stt_runtime(self, generation: int) -> SttKeywordModel | None:
         """Создаёт споттер ИЗ потока слушателя, когда режим stt переключили off→не-off уже после старта сессии
@@ -956,8 +958,9 @@ class OpenWakeWordAdapter:
         захвата. Звук не пишется на диск и не логируется."""
         with self._preroll_lock:
             fire, self._preroll_fire = self._preroll_fire, None
+            ended, self._preroll_ended = self._preroll_ended, False
         if fire is None:
-            return {"ok": True, "available": False, "reason": "no_detection"}
+            return {"ok": True, "available": False, "reason": "session_ended" if ended else "no_detection"}
         ring: PreRollBuffer = fire["ring"]
         reason: str | None = None
         if time.monotonic() - fire["ts"] > PREROLL_TTL_SEC:
@@ -986,6 +989,7 @@ class OpenWakeWordAdapter:
         with self._preroll_lock:
             if self._preroll_fire is not None and self._preroll_fire["ring"] is ring:
                 self._preroll_fire = None
+                self._preroll_ended = True
         ring.clear()
 
     def handle_wake_word_status(
@@ -1363,17 +1367,24 @@ class OpenWakeWordAdapter:
                         self._note_fire(engine, mode)
                         if mode != "live" or live_published:
                             continue
+                        # pre-roll вооружаем ДО публикации детекции: агент, увидев её в wake_word_status, сразу забирает
+                        # звук и не должен получить «no_detection» из-за не успевшего отработать потока (ревью Codex).
+                        # Отказ публикации (смена политики) → return → finally сбросит вооружённое срабатывание.
+                        back = backs.get(engine)
+                        with self._lock:
+                            if self._generation != generation:
+                                return  # зомби старого поколения не армирует чужую сессию
+                            with self._preroll_lock:
+                                self._preroll_ended = False
+                                self._preroll_fire = {
+                                    "ring": ring, "rate": sample_rate, "ts": time.monotonic(), "rev": capture_revision,
+                                    "anchor": max(0, ring_total - (back if back is not None else 0)),
+                                }
                         if not self._record_detection(
                             mdl_name, score, capture_revision=capture_revision,
                         ):
                             return
                         live_published = True
-                        back = backs.get(engine)
-                        with self._preroll_lock:
-                            self._preroll_fire = {
-                                "ring": ring, "rate": sample_rate, "ts": time.monotonic(), "rev": capture_revision,
-                                "anchor": max(0, ring_total - (back if back is not None else 0)),
-                            }
                         if self._on_detected is not None:
                             if privacy_changed():
                                 return

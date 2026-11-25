@@ -318,3 +318,50 @@ def test_dispatch_table_exposes_the_method():
                 if isinstance(k, ast.Constant) and k.value == "wake_word_take_preroll":
                     found = ast.unparse(v) == "self._oww_adapter.handle_wake_word_take_preroll"
     assert found
+
+
+# ----------------------------------------------------------------------------- ревью #2268 (Codex P2 + нит Opus)
+def test_preroll_is_armed_before_the_detection_becomes_visible_to_polling(tmp_path, monkeypatch):
+    """Codex P2: наблюдаемая через wake_word_status детекция всегда имеет заранее вооружённый pre-roll."""
+    adapter, _ = _adapter(tmp_path)
+    seen = {}
+    real = adapter._record_detection
+
+    def spy(*a, **kw):
+        seen["armed_at_publish"] = adapter._preroll_fire is not None
+        return real(*a, **kw)
+
+    adapter._record_detection = spy
+    _run(adapter, monkeypatch, chunks=4, stt=_FakeStt(fire_on={2}, back=CHUNK))
+    assert seen["armed_at_publish"] is True
+
+
+def test_rejected_detection_leaves_nothing_armed(tmp_path, monkeypatch):
+    adapter, _ = _adapter(tmp_path)
+    adapter._record_detection = lambda *a, **kw: False  # privacy сменилась между срабатыванием и публикацией
+    _run(adapter, monkeypatch, chunks=4, stt=_FakeStt(fire_on={2}, back=CHUNK))
+    assert adapter._preroll_fire is None and _take(adapter)["available"] is False
+
+
+def test_take_after_the_session_ended_says_so(tmp_path, monkeypatch):
+    adapter, _ = _adapter(tmp_path)
+    _run(adapter, monkeypatch, chunks=5, stt=_FakeStt(fire_on={2}, back=CHUNK))
+    first = _take(adapter)
+    assert first["available"] is False and first["reason"] == "session_ended"  # агент опоздал: цикл уже вышел
+    assert _take(adapter)["reason"] == "no_detection"  # повтор — уже просто нечего отдавать
+
+
+def test_stale_generation_thread_does_not_arm_a_new_sessions_preroll(tmp_path, monkeypatch):
+    adapter, _ = _adapter(tmp_path)
+    marker = {"ring": object(), "rate": RATE, "ts": 0.0, "rev": "rev1", "anchor": 0}
+
+    class _RacingStt(_FakeStt):
+        def predict(self, chunk):
+            out = super().predict(chunk)
+            if self.calls == 2:  # новая сессия стартует УЖЕ после проверки поколения в цикле, но до публикации детекции
+                adapter._generation += 1
+                adapter._preroll_fire = marker
+            return out
+
+    _run(adapter, monkeypatch, chunks=4, stt=_RacingStt(fire_on={2}, back=CHUNK))
+    assert adapter._preroll_fire is marker  # зомби старого поколения не армирует и не затирает срабатывание новой сессии

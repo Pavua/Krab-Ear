@@ -3361,7 +3361,7 @@ Returns: `{ok, running, active_model, engine_available, last_detection}`
 «Краб» и стартом записи агента (хвост VAD, распознавание, опрос, старт сессии). Агент вызывает метод сразу при детекции,
 ДО `wake_word_stop`: пока слушатель жив, кольцо не сброшено.  
 Нет params.  
-Returns: `{ok: true, available: bool, reason?: "no_detection"|"expired"|"privacy", sample_rate: 16000,
+Returns: `{ok: true, available: bool, reason?: "no_detection"|"session_ended"|"expired"|"privacy", sample_rate: 16000,
 format: "pcm_s16le_mono_b64", samples: int, pcm_b64: str, age_ms: int}` (при `available:false` аудио нет).  
 Одноразово (повтор → `no_detection`), не больше 6 с, TTL 15 с от срабатывания, при смене ревизии политики захвата —
 `privacy`. Для STT-движка якорь: одно слово «Краб» → звук с конца слова; реплика длиннее → с её начала; для openWakeWord —
