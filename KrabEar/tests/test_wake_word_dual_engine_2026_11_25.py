@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -466,3 +467,57 @@ def test_runtime_oww_load_is_not_started_after_stop_or_during_shutdown(tmp_path,
     adapter.mark_shutdown()                        # backend закрывается
     adapter._maybe_load_oww_async(adapter._generation, "hey_jarvis")
     assert "OwwRuntimeLoad" not in started
+
+
+def test_engine_report_tells_loading_from_errors_without_text(tmp_path):
+    # openWakeWord: библиотеки нет → not_installed; идёт загрузка → loading без ошибки; сбой → load_failed
+    adapter, _ = _adapter(tmp_path, {"wake_word_oww_mode": "live"})
+    adapter._oww_available = False
+    assert adapter.engine_report()[oa.ENGINE_OWW]["load_error"] == "not_installed"
+    adapter._oww_available = True
+    adapter._oww_loading = True
+    rep = adapter.engine_report()[oa.ENGINE_OWW]
+    assert rep["loading"] is True and rep["load_error"] is None
+    adapter._oww_loading = False
+    adapter._oww_load_retry_at = time.monotonic() + 60
+    assert adapter.engine_report()[oa.ENGINE_OWW]["load_error"] == "load_failed"
+    adapter._oww_load_retry_at = 0.0
+    adapter._oww = SimpleNamespace(predict=lambda c: {})
+    assert adapter.engine_report()[oa.ENGINE_OWW]["load_error"] is None   # модель на месте — ошибки нет
+    off, _ = _adapter(tmp_path, {"wake_word_oww_mode": "off"})
+    off._oww_available = False
+    assert off.engine_report()[oa.ENGINE_OWW]["load_error"] is None        # выключен — не ошибка
+
+    # STT: нет распознавателя, нестандартный чанк, сбой загрузки модели, нормальная загрузка
+    stt_adapter, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"})
+    assert stt_adapter.engine_report()[oa.ENGINE_STT]["load_error"] == "no_transcriber"
+    chunky, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"}, stt_transcribe=lambda a: "")
+    chunky._chunk_size = 1024
+    assert chunky.engine_report()[oa.ENGINE_STT]["load_error"] == "chunk_size"
+
+    class Tr(_Transcriber):
+        loaded = False
+
+        def is_loaded(self):
+            return self.loaded
+
+    tr = Tr()
+    live, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"}, stt_transcribe=tr)
+
+    class Spot(_FakeStt):
+        reason = None
+
+        def last_unavailable_reason(self):
+            return self.reason
+
+    spot = Spot()
+    live._stt = spot
+    rep = live.engine_report()[oa.ENGINE_STT]
+    assert rep["loading"] is True and rep["load_error"] is None            # модель ещё грузится — штатно
+    spot.reason = "model_load_failed"
+    rep = live.engine_report()[oa.ENGINE_STT]
+    assert rep["load_error"] == "load_failed" and rep["loading"] is False  # сбой — не «грузится вечно»
+    spot.reason = None
+    tr.loaded = True
+    rep = live.engine_report()[oa.ENGINE_STT]
+    assert rep["loading"] is False and rep["load_error"] is None
