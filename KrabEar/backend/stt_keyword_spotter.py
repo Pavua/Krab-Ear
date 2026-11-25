@@ -228,6 +228,9 @@ class SttKeywordModel:
         self._busy_since: Optional[float] = None  # монотонное время начала текущего распознавания (health)
         self._last_unavailable: Optional[str] = None  # код причины (без текста): «mlx_busy», «model_load_failed»…
         self._fired = False
+        self._frame_no = 0  # кадров принято predict() за всё время (только поток predict; воркер счётчик не читает)
+        self._fire_anchor: Optional[tuple[int, int, int]] = None  # (начало, конец реплики в сэмплах, слов) последнего совпадения
+        self._fire_back: Optional[int] = None  # сколько сэмплов назад от «сейчас» начинать pre-roll (одноразово)
         self._gen = 0  # reset() увеличивает: результат распознавания, запущенного до reset, устарел
         self._cooldown_until = 0.0
         self._starts: Deque[float] = deque()
@@ -242,12 +245,28 @@ class SttKeywordModel:
 
     # ------------------------------------------------------------------ контракт модели
     def predict(self, chunk: Any) -> dict[str, float]:
-        utterance = self._segmenter.push(chunk)
+        utterance = self._segmenter.push(chunk)  # ValueError на кадре неверной длины: счётчик ниже не трогаем
+        self._frame_no += 1
+        now_pos = self._frame_no * FRAME_SAMPLES
         if utterance is not None:
-            self._submit(utterance)
+            self._submit(utterance, now_pos)
         with self._lock:
             fired, self._fired = self._fired, False
+            anchor, self._fire_anchor = self._fire_anchor, None
+            if fired and anchor is not None:
+                start_pos, end_pos, words = anchor
+                # Одно слово «Краб»: команда начнётся ПОСЛЕ него — звук с конца слова (с запасом в два кадра тишины).
+                # Длиннее: команда уже внутри реплики — звук с её начала, чтобы ничего не потерять.
+                from_pos = max(start_pos, end_pos - 2 * FRAME_SAMPLES) if words <= 1 else start_pos
+                self._fire_back = max(0, now_pos - from_pos)
         return {self._name: 1.0 if fired else 0.0}
+
+    def fire_preroll_back(self) -> Optional[int]:
+        """Сколько сэмплов назад от конца только что принятого кадра начинать pre-roll после СРАБАТЫВАНИЯ; одноразово.
+        None — срабатывания не было (или уже забрано)."""
+        with self._lock:
+            back, self._fire_back = self._fire_back, None
+        return back
 
     def reset(self) -> None:
         self._segmenter.reset()
@@ -309,7 +328,7 @@ class SttKeywordModel:
             return "rms_150_400"
         return "rms_400_1000" if rms < 1000 else "rms_ge1000"
 
-    def _submit(self, utterance: list[int]) -> None:
+    def _submit(self, utterance: list[int], end_pos: int) -> None:
         now = self._clock()
         bucket = self._rms_bucket(utterance)
         with self._cond:
@@ -328,7 +347,7 @@ class SttKeywordModel:
             self._starts.append(now)
             self._pending += 1
             self._busy_since = time.monotonic()
-            self._queue.append((self._gen, utterance, now))
+            self._queue.append((self._gen, utterance, now, end_pos))
             self._cond.notify_all()
 
     def _run(self) -> None:
@@ -338,14 +357,16 @@ class SttKeywordModel:
                     self._cond.wait(0.2)
                 if self._closed:
                     return
-                gen, utterance, start_ts = self._queue.popleft()
+                gen, utterance, start_ts, end_pos = self._queue.popleft()
             kind = None
+            words = 0
             refund = False  # чистый шум и недоступный распознаватель не расходуют лимит (он от шторма СОВПАДЕНИЙ)
             try:
                 samples = self._as_audio(utterance)
                 text = self._transcribe(samples)
                 kind = self._matcher.kind(text)
-                refund = not (isinstance(text, str) and self._matcher.normalize(text))
+                words = len(self._matcher.normalize(text)) if isinstance(text, str) else 0
+                refund = words == 0
                 with self._lock:
                     self._stats["transcribed"] += 1
                     if refund:
@@ -372,6 +393,7 @@ class SttKeywordModel:
                             self._stats["matched"] += 1
                             self._stats["matched_word" if kind == "word" else "matched_fragment"] += 1
                             self._fired = True
+                            self._fire_anchor = (end_pos - len(utterance), end_pos, words)
                             self._cooldown_until = now + self._cooldown
                     if refund:
                         try:

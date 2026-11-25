@@ -16,6 +16,7 @@ GitHub: https://github.com/dscripka/openWakeWord
 
 from __future__ import annotations
 
+import base64
 import logging
 import sys
 import threading
@@ -24,6 +25,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from backend.wake_word_preroll import PreRollBuffer
 from backend.stt_keyword_spotter import (  # noqa: E402
     FRAME_SAMPLES as _STT_FRAME_SAMPLES,
     SttKeywordModel,
@@ -65,6 +67,11 @@ ENGINE_STT = "stt"
 _SETTING_KEYS = {ENGINE_OWW: "wake_word_oww_mode", ENGINE_STT: "wake_word_stt_mode"}
 _DEFAULT_MODES = {ENGINE_OWW: "live", ENGINE_STT: "off"}  # без настройки поведение прежнее: только openWakeWord
 STT_MODEL_NAME = "krab_stt"
+# Pre-roll после срабатывания (см. backend/wake_word_preroll.py): агент забирает звук «после слова» одним IPC-вызовом.
+PREROLL_RING_SEC = 8.0      # сколько последних секунд звука держит кольцо сессии прослушивания
+PREROLL_MAX_SEC = 6.0       # не больше этого отдаём агенту за раз
+PREROLL_TTL_SEC = 15.0      # срок годности срабатывания: позже звук уже не «сразу после слова»
+PREROLL_OWW_BACK_SEC = 0.5  # у openWakeWord точного конца слова нет: берём звук с небольшим запасом назад
 _SHADOW_TS_KEEP = 500  # сколько последних меток времени срабатываний «в тени» держим для отчёта (только числа)
 
 # Минимальный допустимый порог (F1 — covert mic tap guard)
@@ -143,6 +150,9 @@ class OpenWakeWordAdapter:
         # Последняя детекция для IPC-поллинга агента (wake_word_status).
         # Монотонный ts — агент дебаунсит по росту, wall-clock не нужен.
         self._last_detection: dict[str, Any] | None = None
+        # Pre-roll: ссылка на кольцо ТОЙ сессии, что сработала, якорь (абсолютная позиция), время и ревизия политики.
+        self._preroll_lock = threading.Lock()
+        self._preroll_fire: dict[str, Any] | None = None
         # 2026-07-15 (спека wake-word-watchdog): heartbeat живого захвата.
         # last_chunk_ts штампуется ТОЛЬКО ненулевыми чанками (живой микрофон
         # никогда не отдаёт секунды идеальных int16-нулей; шторм нулей 12-07 и
@@ -564,6 +574,7 @@ class OpenWakeWordAdapter:
         self._last_read_completed_ts = None
         self._last_any_chunk_ts = None
         self._wedged = False
+        self._preroll_fire = None  # срабатывание прошлой сессии не переживает перезапуск прослушивания
 
     def _create_stt_runtime(self, generation: int) -> SttKeywordModel | None:
         """Создаёт споттер ИЗ потока слушателя, когда режим stt переключили off→не-off уже после старта сессии
@@ -937,6 +948,46 @@ class OpenWakeWordAdapter:
         self.stop()
         return {"ok": True}
 
+    def handle_wake_word_take_preroll(self, params: dict[str, Any]) -> dict[str, Any]:
+        """IPC: ОДНОРАЗОВО отдать агенту звук «после слова» последнего живого срабатывания (pcm int16 mono, base64).
+
+        Агент вызывает сразу при детекции (до ``wake_word_stop``): пока слушатель жив, кольцо не сброшено. Недоступно
+        (``available: false`` + код причины, без аудио): нет свежего срабатывания, истёк TTL, сменилась ревизия политики
+        захвата. Звук не пишется на диск и не логируется."""
+        with self._preroll_lock:
+            fire, self._preroll_fire = self._preroll_fire, None
+        if fire is None:
+            return {"ok": True, "available": False, "reason": "no_detection"}
+        ring: PreRollBuffer = fire["ring"]
+        reason: str | None = None
+        if time.monotonic() - fire["ts"] > PREROLL_TTL_SEC:
+            reason = "expired"
+        else:
+            revision = self._privacy_revision()
+            if revision is None or revision != fire["rev"]:
+                reason = "privacy"
+        if reason is not None:
+            ring.clear()
+            return {"ok": True, "available": False, "reason": reason}
+        rate = int(fire["rate"])
+        pcm = ring.slice_from(fire["anchor"], int(PREROLL_MAX_SEC * rate))
+        return {
+            "ok": True,
+            "available": bool(pcm),
+            "sample_rate": rate,
+            "format": "pcm_s16le_mono_b64",
+            "samples": len(pcm) // 2,
+            "pcm_b64": base64.b64encode(pcm).decode("ascii"),
+            "age_ms": int((time.monotonic() - fire["ts"]) * 1000),
+        }
+
+    def _drop_preroll(self, ring: PreRollBuffer) -> None:
+        """Выход цикла: кольцо этой сессии и срабатывание, ссылающееся на него, забываются (ничего не висит в памяти)."""
+        with self._preroll_lock:
+            if self._preroll_fire is not None and self._preroll_fire["ring"] is ring:
+                self._preroll_fire = None
+        ring.clear()
+
     def handle_wake_word_status(
         self, params: dict[str, Any]
     ) -> dict[str, Any]:
@@ -1105,6 +1156,7 @@ class OpenWakeWordAdapter:
         """Фоновый поток: читает аудио с микрофона и передаёт в openWakeWord."""
         with self._lock:
             self._listen_started_ts = time.monotonic()
+        ring = PreRollBuffer(int(PREROLL_RING_SEC * sample_rate))  # pre-roll: звук только этой сессии, только в памяти
         try:
             import sounddevice as sd  # type: ignore[import]
         except ImportError:
@@ -1252,6 +1304,10 @@ class OpenWakeWordAdapter:
                         self._last_any_chunk_ts = time.monotonic()
                         if flat.any():
                             self._last_chunk_ts = self._last_any_chunk_ts
+                    try:
+                        ring_total = ring.append(flat)
+                    except Exception:  # noqa: BLE001 — pre-roll best-effort: сбой кольца не должен глушить wake word
+                        ring_total = ring.total
 
                     # Режим включили ПОСЛЕ старта сессии (off→shadow/live): объект движка создаём на лету.
                     if (stt is None and self._stt_transcribe is not None and chunk_size == _STT_FRAME_SAMPLES
@@ -1268,12 +1324,14 @@ class OpenWakeWordAdapter:
                     # Один тап микрофона, два движка. Режим читается на каждом чанке (off/shadow/live):
                     # shadow — только счётчики и метки времени, никого не будит и ничего не сохраняет.
                     detections: list[tuple[str, str, float, str]] = []  # (engine, имя, score, режим)
+                    backs: dict[str, int | None] = {}  # engine → сколько сэмплов назад начинать pre-roll
                     if oww is not None:
                         mode = self.engine_mode(ENGINE_OWW)
                         if mode != "off":
                             for mdl_name, score in oww.predict(flat).items():
                                 if score >= threshold:
                                     detections.append((ENGINE_OWW, mdl_name, float(score), mode))
+                                    backs[ENGINE_OWW] = int(PREROLL_OWW_BACK_SEC * sample_rate)
                     if stt is not None:
                         mode = self.engine_mode(ENGINE_STT)
                         if mode != "off":
@@ -1293,6 +1351,8 @@ class OpenWakeWordAdapter:
                             for mdl_name, score in stt_scores.items():
                                 if score >= 0.5:
                                     detections.append((ENGINE_STT, mdl_name, float(score), mode))
+                                    take_back = getattr(stt, "fire_preroll_back", None)
+                                    backs[ENGINE_STT] = take_back() if callable(take_back) else None
                         elif not stt_was_off:
                             stt_was_off = True
                             self._release_stt_model_async()  # выключили на лету: 1,1 ГБ не держим до рестарта
@@ -1308,6 +1368,12 @@ class OpenWakeWordAdapter:
                         ):
                             return
                         live_published = True
+                        back = backs.get(engine)
+                        with self._preroll_lock:
+                            self._preroll_fire = {
+                                "ring": ring, "rate": sample_rate, "ts": time.monotonic(), "rev": capture_revision,
+                                "anchor": max(0, ring_total - (back if back is not None else 0)),
+                            }
                         if self._on_detected is not None:
                             if privacy_changed():
                                 return
@@ -1328,6 +1394,7 @@ class OpenWakeWordAdapter:
                         _STREAM_FAILURE_COOLDOWN_SEC,
                     )
         finally:
+            self._drop_preroll(ring)  # pre-roll: кольцо и срабатывание, ссылающееся на него, исчезают с сессией
             # Любой выход цикла (exception, privacy-break, oww-None,
             # generation-break, штатный stop) — сессия либо чистится, либо
             # generation-гард защищает поля новой сессии.
