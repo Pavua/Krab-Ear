@@ -3318,6 +3318,7 @@ class BackendService:
             "wake_word_start": self._oww_adapter.handle_wake_word_start,  # запустить прослушивание
             "wake_word_stop": self._oww_adapter.handle_wake_word_stop,  # остановить прослушивание
             "wake_word_status": self._oww_adapter.handle_wake_word_status,  # статус адаптера
+            "wake_word_take_preroll": self._oww_adapter.handle_wake_word_take_preroll,  # одноразово: звук после слова «Краб»
             # --- Dual-mode TTS (Silero RU + Kokoro EN + macOS say fallback) ---
             "synthesize_speech": self._tts.handle_synthesize_speech,  # синтез речи: text, language (ru/en/auto), voice
             "analyze_word_timing": self._audio_analytics_svc.handle_analyze_word_timing,  # анализ ритма речи по пословным таймстемпам Whisper
