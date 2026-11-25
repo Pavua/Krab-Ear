@@ -331,6 +331,7 @@ class SttKeywordModel:
                 kind = self._matcher.kind(text)
                 with self._lock:
                     self._stats["transcribed"] += 1
+                    self._last_unavailable = None  # успешное распознавание снимает «залипшую» причину
             except TranscriberUnavailable as exc:
                 with self._lock:
                     self._stats["unavailable"] += 1

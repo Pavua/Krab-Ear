@@ -376,3 +376,80 @@ def test_service_close_marks_shutdown_before_stopping_the_adapter():
     assert calls[0].lineno < next(n.lineno for n in ast.walk(close) if isinstance(n, ast.Call)
                                   and getattr(n.func, "attr", None) == "stop"
                                   and getattr(getattr(n.func, "value", None), "id", None) == "wake_word_adapter")
+
+
+def test_stt_switched_on_after_session_start_creates_the_spotter_and_it_works(tmp_path, monkeypatch):
+    """Дыра #2258: при старте с stt=off объекта споттера нет, переключение на live ничего не делало до рестарта."""
+    adapter, cfg = _adapter(tmp_path, {"wake_word_stt_mode": "off"}, stt_transcribe=lambda a: "")
+    fake = _FakeStt(fire_on={3})
+    monkeypatch.setattr(oa, "SttKeywordModel", lambda transcribe, name=None: fake)
+    cb = _arm(adapter, oww=SimpleNamespace(predict=lambda c: {"krab_ru": 0.0}), stt=None)
+    seen_active = []
+
+    def on_read(n):
+        if n == 2:
+            cfg["wake_word_stt_mode"] = "live"  # владелец включил в панели: рестарта адаптера нет
+        seen_active.append(adapter.engine_report()[oa.ENGINE_STT]["active"])
+
+    _run(adapter, monkeypatch, chunks=6, on_read=on_read)
+    assert fake.calls >= 3 and [n for n, _ in cb] == [oa.STT_MODEL_NAME]
+    assert seen_active[0] is False and seen_active[-1] is True   # статус не врёт: активен только после создания
+
+
+def test_oww_switched_on_after_start_loads_model_in_background_without_blocking_mic(tmp_path, monkeypatch):
+    import time as _time
+
+    adapter, cfg = _adapter(tmp_path, {"wake_word_oww_mode": "off", "wake_word_stt_mode": "live"},
+                            stt_transcribe=lambda a: "")
+    adapter._oww_available = True
+    adapter._active_model = "hey_jarvis"
+    loaded = threading.Event()
+
+    def slow_load(name, path):
+        _time.sleep(0.3)
+        loaded.set()
+        return SimpleNamespace(predict=lambda c: {"krab_ru": 0.9})
+
+    monkeypatch.setattr(adapter, "_load_model", slow_load)
+    cb = _arm(adapter, oww=None, stt=_FakeStt())
+    reads = []
+
+    def on_read(n):
+        reads.append(_time.monotonic())
+        if n == 2:
+            cfg["wake_word_oww_mode"] = "live"
+        _time.sleep(0.05)
+
+    _run(adapter, monkeypatch, chunks=30, on_read=on_read)
+    assert loaded.is_set() and cb                      # модель загрузилась и начала будить
+    gaps = [b - a for a, b in zip(reads, reads[1:])]
+    assert max(gaps) < 0.25                            # чтение микрофона не вставало на время загрузки (0,3 с)
+
+
+def test_runtime_creation_ignores_stale_generation(tmp_path):
+    adapter, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"}, stt_transcribe=lambda a: "")
+    adapter._generation = 5
+    assert adapter._create_stt_runtime(generation=4) is None and adapter._stt is None
+
+
+def test_spotter_unavailable_reason_is_cleared_by_a_successful_recognition():
+    from backend.stt_keyword_spotter import FRAME_SAMPLES, SttKeywordModel, TranscriberUnavailable
+
+    state = {"n": 0}
+
+    def flaky(_samples):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise TranscriberUnavailable("mlx_busy")
+        return "привет"
+
+    spotter = SttKeywordModel(flaky, name="krab_stt", cooldown_sec=0.0)
+    burst = [0] * (FRAME_SAMPLES * 10) + [3000, -3000] * (FRAME_SAMPLES * 3) + [0] * (FRAME_SAMPLES * 8)
+    for _ in range(2):
+        for i in range(0, len(burst) - FRAME_SAMPLES + 1, FRAME_SAMPLES):
+            spotter.predict(burst[i:i + FRAME_SAMPLES])
+            spotter.drain(2.0)
+        if _ == 0:
+            assert spotter.last_unavailable_reason() == "mlx_busy"
+    assert spotter.last_unavailable_reason() is None   # распознавание удалось — причина не залипает
+    spotter.close()
