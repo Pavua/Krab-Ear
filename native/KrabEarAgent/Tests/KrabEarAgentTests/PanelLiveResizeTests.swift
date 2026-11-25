@@ -139,6 +139,19 @@ final class PanelLiveResizeTests: XCTestCase {
                 issues.append(Issue(tab: tab.title, width: width, theme: theme, kind: "сжато поле",
                                     detail: "\(name(field)) \(Int(field.bounds.width)) pt; путь: \(path(field, root))"))
             }
+            // 0в) Подпись с текстом сжата уже одной буквы: заголовки всех CollapsibleSectionView
+            //     были по 4 pt (на экране — один шеврон): перенос строк в ГОРИЗОНТАЛЬНОМ стеке
+            //     лишал подпись собственной ширины. Высота при этом оставалась в одну строку,
+            //     поэтому ни «столбиком», ни обрезка по высоте этого не видели.
+            //     Только обычный проход: в стрессе (все подписи по ~200 символов разом) две длинные
+            //     подписи одного ряда делят место, и одна остаётся без ширины — известный долг,
+            //     записан отдельной задачей; в реальных текстах такого соседства нет.
+            if theme != "стресс", let label = v as? NSTextField, !label.isEditable, !hScroll, f.height > 0,
+               !label.stringValue.trimmingCharacters(in: .whitespaces).isEmpty,
+               let font = label.font, label.bounds.width < font.pointSize {
+                issues.append(Issue(tab: tab.title, width: width, theme: theme, kind: "сжата подпись",
+                                    detail: "\(name(label)) \(Int(label.bounds.width)) pt; путь: \(path(label, root))"))
+            }
             if f.width <= 0 || f.height <= 0 { continue }
             // 1) Схлопнутые карточки и секции верхнего уровня.
             if (v is ThemeCardView || v is CollapsibleSectionView), !hScroll,
