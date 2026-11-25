@@ -1,0 +1,150 @@
+import Foundation
+
+/*
+ Режимы двух движков голосовой активации и разбор их чисел из IPC `wake_word_status`.
+
+ Backend (#2258) держит два движка на одном потоке микрофона: openWakeWord (`oww`)
+ и поиск «Краб» по распознаванию речи (`stt`). Режим каждого — настройка
+ `wake_word_oww_mode` / `wake_word_stt_mode` со значениями `off | shadow | live`;
+ backend читает её на каждом чанке, поэтому переключатель действует без рестарта.
+
+ Здесь только чистая логика (без AppKit), чтобы её можно было проверить тестом:
+ соответствие сегментов значениям настройки и текст строки чисел. В строке —
+ только числа и код причины, никакого распознанного текста и аудио.
+ */
+enum WakeEngine: String, CaseIterable {
+    case oww
+    case stt
+
+    /// Ключ настройки backend (allowlist в settings_validator.py `_ENUM_FIELDS`).
+    var settingKey: String {
+        switch self {
+        case .oww: return "wake_word_oww_mode"
+        case .stt: return "wake_word_stt_mode"
+        }
+    }
+
+    /// Режим по умолчанию — тот же, что `_DEFAULT_MODES` в openwakeword_adapter.py.
+    var defaultMode: WakeEngineMode {
+        switch self {
+        case .oww: return .live
+        case .stt: return .off
+        }
+    }
+
+    var titleRU: String {
+        switch self {
+        case .oww: return "openWakeWord"
+        case .stt: return "Поиск «Краб» по речи"
+        }
+    }
+}
+
+enum WakeEngineMode: String, CaseIterable {
+    case off
+    case shadow
+    case live
+
+    /// Подписи сегментов — в порядке `allCases` (индекс сегмента == индекс случая).
+    static let segmentTitlesRU = ["Выкл", "В тени", "Вживую"]
+
+    var segmentIndex: Int { Self.allCases.firstIndex(of: self) ?? 0 }
+
+    init?(segmentIndex: Int) {
+        guard Self.allCases.indices.contains(segmentIndex) else { return nil }
+        self = Self.allCases[segmentIndex]
+    }
+
+    /// Неизвестное значение = безопасный дефолт движка (как делает backend).
+    static func parse(_ raw: Any?, engine: WakeEngine) -> WakeEngineMode {
+        guard let text = raw as? String, let mode = WakeEngineMode(rawValue: text) else {
+            return engine.defaultMode
+        }
+        return mode
+    }
+}
+
+/// Числа одного движка из `wake_word_status.engines.<engine>`.
+struct WakeEngineReport: Equatable {
+    var mode: WakeEngineMode
+    var firesLive: Int
+    var firesShadow: Int
+    var lastFireTs: Double?
+    /// Только `stt`: есть ли у backend распознаватель (без него режим трактуется как off).
+    var available: Bool?
+    /// Только `stt`: код последней причины пропуска реплики («mlx_busy»…), не текст.
+    var unavailableReason: String?
+    /// Только `stt`: сколько реплик пропущено из-за недоступности распознавателя.
+    var spotterUnavailable: Int?
+
+    init(engine: WakeEngine, payload: [String: Any]?) {
+        let p = payload ?? [:]
+        mode = WakeEngineMode.parse(p["mode"], engine: engine)
+        firesLive = Self.int(p["fires_live"])
+        firesShadow = Self.int(p["fires_shadow"])
+        lastFireTs = Self.double(p["last_fire_ts"])
+        available = p["available"] as? Bool
+        let reason = (p["unavailable_reason"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        unavailableReason = (reason?.isEmpty ?? true) ? nil : reason
+        let spotter = p["spotter"] as? [String: Any]
+        spotterUnavailable = spotter.map { Self.int($0["unavailable"]) }
+    }
+
+    private static func int(_ value: Any?) -> Int {
+        if let n = value as? Int { return n }
+        if let d = value as? Double, d.isFinite { return Int(d) }
+        return 0
+    }
+
+    private static func double(_ value: Any?) -> Double? {
+        if let d = value as? Double, d.isFinite { return d }
+        if let n = value as? Int { return Double(n) }
+        return nil
+    }
+}
+
+enum WakeEngineStatsFormatter {
+    /// Строка чисел движка.
+    ///
+    /// `backendNow` — «сейчас» по часам backend: `last_chunk_ts` из того же ответа
+    /// (штампуется на каждом ненулевом чанке, пока слушатель работает). `last_fire_ts`
+    /// — `time.monotonic()` процесса backend; сравнивать его с часами агента нельзя
+    /// (разные процессы, на macOS разные часы ведут себя по-разному во сне), поэтому
+    /// давность считаем только внутри часов backend, а без слушателя не показываем.
+    static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?) -> String {
+        if engine == .stt, report.mode != .off {
+            if report.available == false {
+                return "Недоступен (распознаватель не загружен)"
+            }
+            if let reason = report.unavailableReason {
+                var line = "Недоступен (\(reason))"
+                if let skipped = report.spotterUnavailable, skipped > 0 {
+                    line += " · пропущено реплик: \(skipped)"
+                }
+                return line
+            }
+        }
+        var parts = [
+            "Срабатываний вживую: \(report.firesLive)",
+            "в тени: \(report.firesShadow)",
+        ]
+        if let last = report.lastFireTs {
+            if let now = backendNow, now >= last {
+                parts.append("последнее: \(ago(now - last))")
+            } else {
+                parts.append("последнее: было")
+            }
+        }
+        if report.mode == .off {
+            parts.insert("Выключен", at: 0)
+        }
+        return parts.joined(separator: " · ")
+    }
+
+    static func ago(_ seconds: Double) -> String {
+        if seconds < 60 { return "меньше минуты назад" }
+        let minutes = Int(seconds / 60)
+        if minutes < 60 { return "\(minutes) мин назад" }
+        return "\(minutes / 60) ч назад"
+    }
+}

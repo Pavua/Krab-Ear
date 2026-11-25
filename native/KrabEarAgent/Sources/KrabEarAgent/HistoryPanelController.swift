@@ -283,6 +283,26 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     let vaWakeWordStatusLabel = NSTextField(labelWithString: "openWakeWord: проверяю состояние")
     let vaWakeWordModelSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     let vaWakeWordThresholdSlider = NSSlider(value: 0.5, minValue: 0.05, maxValue: 1.0, target: nil, action: nil)
+    // Режимы двух движков голосовой активации (#2258): сегмент Выкл/В тени/Вживую
+    // и строка чисел из wake_word_status.engines (см. HistoryPanelController+WakeEngines).
+    lazy var wakeEngineModeControls: [WakeEngine: NSSegmentedControl] = Dictionary(
+        uniqueKeysWithValues: WakeEngine.allCases.map { ($0, Self.makeWakeEngineSegment(for: $0)) })
+    lazy var wakeEngineStatsLabels: [WakeEngine: NSTextField] = Dictionary(
+        uniqueKeysWithValues: WakeEngine.allCases.map { ($0, Self.makeWakeEngineStatsLabel(for: $0)) })
+    let wakeEngineRefreshButton = NSButton(title: "Обновить числа", target: nil, action: nil)
+    /// Сколько записей режима ещё в пути по каждому движку: пока > 0, ответ статуса
+    /// не перетирает сегмент (иначе выбор «прыгал» бы назад до подтверждения).
+    var wakeEnginePendingWrites: [WakeEngine: Int] = [:]
+    /// Запись режима в backend; completion — на main с признаком подтверждения.
+    /// Подменяется в тестах (по умолчанию — set_settings off-main).
+    lazy var wakeEngineModeWriter: (WakeEngine, WakeEngineMode, @escaping (Bool) -> Void) -> Void = {
+        [ipcClient] engine, mode, completion in
+        DispatchQueue.global(qos: .userInitiated).async {
+            let response = try? ipcClient.call(method: "set_settings", params: [engine.settingKey: mode.rawValue])
+            let ok = (response?["ok"] as? Bool) == true
+            DispatchQueue.main.async { completion(ok) }
+        }
+    }
 
     private let topBar = NSStackView()
     let topSearchRow = AdaptiveRowStackView()
@@ -2071,6 +2091,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaWakeWordModelSelector.action = #selector(onVAWakeWordModelChanged)
         vaWakeWordThresholdSlider.target = self
         vaWakeWordThresholdSlider.action = #selector(onVAWakeWordThresholdChanged)
+        for control in wakeEngineModeControls.values {
+            control.target = self
+            control.action = #selector(onWakeEngineModeChanged(_:))
+        }
+        wakeEngineRefreshButton.target = self
+        wakeEngineRefreshButton.action = #selector(onWakeEngineRefreshClicked)
         vaEngineSelector.target = self
         vaEngineSelector.action = #selector(onVAEngineSelectorChanged)
         vaBrainModeSelector.target = self

@@ -1316,6 +1316,10 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(wakeModelRow)
         card.contentStackView.addArrangedSubview(wakeThresholdRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
+        for row in makeWakeEngineRows() {
+            card.contentStackView.addArrangedSubview(row)
+        }
+        card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(engineRow)
         card.contentStackView.addArrangedSubview(makeSeparator())
         card.contentStackView.addArrangedSubview(brainRow)
@@ -1370,7 +1374,7 @@ extension HistoryPanelController {
 
     /// Off-main запрос wake_word_status + wake_word_list_models для статус-строки
     /// и актуального списка моделей (кастомные .onnx из wake_word_models/).
-    func refreshWakeWordStatusRow() {
+    func refreshWakeWordStatusRow(failedEngine: WakeEngine? = nil) {
         let ipc = self.ipcClient
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let status = try? ipc.call(method: "wake_word_status", params: [:])
@@ -1378,6 +1382,7 @@ extension HistoryPanelController {
             DispatchQueue.main.async {
                 guard let self else { return }
                 let result = status?["result"] as? [String: Any]
+                self.applyWakeEngineStatus(result, failedEngine: failedEngine)
                 let available = result?["engine_available"] as? Bool ?? false
                 self.vaWakeWordStatusLabel.stringValue = available
                     ? "openWakeWord: установлен"
@@ -1849,6 +1854,10 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(modelRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(threshRow)
+        card.contentStackView.addArrangedSubview(cdMakeSeparator())
+        for row in cdMakeWakeEngineRows() {
+            card.contentStackView.addArrangedSubview(row)
+        }
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(engineRow)
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
