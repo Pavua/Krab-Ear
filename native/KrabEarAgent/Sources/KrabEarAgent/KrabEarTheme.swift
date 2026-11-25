@@ -420,7 +420,7 @@ public final class CardFillingStackView: NSStackView {
             c.isActive = true
             return
         }
-        guard view is ThemeCardView || view is CollapsibleSectionView else { return }
+        guard view is ThemeCardView || view is CollapsibleSectionView || view is FlowRowView else { return }
         // 999, а не required: если место построения уже задало свою ширину, конфликта нет.
         // Снимается при removeFromSuperview (removeArrangedSubview его НЕ снимает — все места
         // удаления зовут оба). Ограничения: setViews(_:in:) и NSStackView(views:) обходят этот
@@ -428,6 +428,101 @@ public final class CardFillingStackView: NSStackView {
         let c = view.widthAnchor.constraint(equalTo: widthAnchor, constant: -(edgeInsets.left + edgeInsets.right))
         c.priority = NSLayoutConstraint.Priority(999)
         c.isActive = true
+    }
+}
+
+/// Ряд, который переносит элементы на следующую строку, как слова в тексте.
+///
+/// `AdaptiveRowStackView` на нехватке ширины встаёт столбиком ПО ОДНОМУ элементу: в фильтрах
+/// «Истории» подпись «Вставка:» отрывалась от своего списка, а семь кнопок быстрых фильтров
+/// занимали семь строк (офлайн-рендер, 860 pt). Здесь элементы идут слева направо и переносятся
+/// целиком; пару «подпись + контрол» собирайте через `KrabEarTheme.labeledPair`, чтобы она
+/// не рвалась. Собственной ширины нет (её задаёт родитель — `CardFillingStackView` растягивает),
+/// высота — по раскладке на текущей ширине. Скрытые элементы не занимают места.
+@MainActor
+public final class FlowRowView: NSView {
+    public var spacing: CGFloat = KrabEarTheme.Metrics.standard { didSet { relayout() } }
+    public var lineSpacing: CGFloat = KrabEarTheme.Metrics.tight { didSet { relayout() } }
+    public private(set) var items: [NSView] = []
+    private var laidOutWidth: CGFloat = -1
+
+    public override var isFlipped: Bool { true }
+
+    public func addItem(_ view: NSView) {
+        view.removeFromSuperview()
+        view.translatesAutoresizingMaskIntoConstraints = true
+        items.append(view)
+        addSubview(view)
+        relayout()
+    }
+
+    private func relayout() {
+        invalidateIntrinsicContentSize()
+        needsLayout = true
+    }
+
+    /// Рамки элементов и общая высота при заданной ширине (чистая функция раскладки).
+    func arrangement(for width: CGFloat) -> (frames: [NSRect], height: CGFloat) {
+        var frames: [NSRect] = []
+        var lines: [[Int]] = [[]]
+        var x: CGFloat = 0
+        let sizes = items.map { $0.isHidden ? .zero : $0.fittingSize }
+        for (i, size) in sizes.enumerated() where !items[i].isHidden {
+            let w = min(size.width, max(width, 0))
+            if x > 0, x + w > width {
+                lines.append([])
+                x = 0
+            }
+            lines[lines.count - 1].append(i)
+            x += w + spacing
+        }
+        frames = Array(repeating: .zero, count: items.count)
+        var y: CGFloat = 0
+        for line in lines where !line.isEmpty {
+            let lineHeight = line.map { sizes[$0].height }.max() ?? 0
+            var lx: CGFloat = 0
+            for i in line {
+                let w = min(sizes[i].width, max(width, 0))
+                frames[i] = NSRect(x: lx, y: y + (lineHeight - sizes[i].height) / 2, width: w, height: sizes[i].height)
+                lx += w + spacing
+            }
+            y += lineHeight + lineSpacing
+        }
+        return (frames, max(0, y - lineSpacing))
+    }
+
+    public override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: arrangement(for: bounds.width).height)
+    }
+
+    public override func layout() {
+        super.layout()
+        let result = arrangement(for: bounds.width)
+        for (view, frame) in zip(items, result.frames) where !view.isHidden {
+            view.frame = frame
+        }
+        // Высота зависит от ширины: на новой ширине пересчитываем intrinsic (одна итерация).
+        if bounds.width != laidOutWidth {
+            laidOutWidth = bounds.width
+            invalidateIntrinsicContentSize()
+        }
+    }
+}
+
+public extension KrabEarTheme {
+    /// Пара «подпись + контрол», которая не разрывается при переносе. Подпись — одной строкой
+    /// с многоточием: перенос строк в горизонтальном ряду лишил бы её ширины (регресс #2267).
+    @MainActor
+    static func labeledPair(_ text: String, _ control: NSView) -> NSStackView {
+        let label = NSTextField(labelWithString: text)
+        label.font = Typography.body
+        label.textColor = Colors.textPrimary
+        label.lineBreakMode = .byTruncatingTail
+        let pair = NSStackView(views: [label, control])
+        pair.orientation = .horizontal
+        pair.alignment = .centerY
+        pair.spacing = Metrics.tight
+        return pair
     }
 }
 
