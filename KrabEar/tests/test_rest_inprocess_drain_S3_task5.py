@@ -56,8 +56,8 @@ class DrainHooksWhiteBoxTest(unittest.TestCase):
         self.assertEqual(resp.status_code, 503)
         self.assertEqual(resp.get_json(), {"error": "shutting_down"})
 
-    def test_streaming_paths_are_not_counted_in_active_registry(self):
-        """Реестр НЕ считает долгоживущие стримы (их три, не два)."""
+    def test_event_subscriptions_are_excluded_but_stt_stream_is_counted(self):
+        """Подписки на события исключены; STT WebSocket учитывается."""
         app = Flask(__name__)
         counts: dict[str, int] = {}
 
@@ -91,7 +91,7 @@ class DrainHooksWhiteBoxTest(unittest.TestCase):
         client.get("/x")
 
         self.assertEqual(counts["events"], 0, "SSE /v1/events не должен считаться")
-        self.assertEqual(counts["stream"], 0, "WS /v1/stream не должен считаться")
+        self.assertEqual(counts["stream"], 1, "WS /v1/stream должен считаться")
         self.assertEqual(counts["ws_events"], 0, "WS /ws/events не должен считаться")
         self.assertEqual(counts["x"], 1, "обычный путь обязан считаться во время обработки")
         self.assertEqual(srv._active_requests, 0, "реестр обязан опустеть после всех teardown")
