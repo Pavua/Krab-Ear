@@ -54,6 +54,9 @@ extension ConversationViewController {
 
     /// Сбрасывает состояние предыдущей сессии. До ready сборщик намеренно закрыт.
     func prepareAudioNegotiation() {
+        // Разговор от свежей детекции «Краб» забирает её pre-roll; горячая клавиша ящик сбрасывает.
+        audioHolder.expectsWakePreroll = WakePrerollMailbox.shared.claimIfArmed(
+            at: ProcessInfo.processInfo.systemUptime)
         audioHolder.negotiationReady = false
         audioHolder.sampleRate = ConversationAudioContract.fallbackSampleRate
         audioHolder.captureSampleRate = nil
@@ -96,6 +99,14 @@ extension ConversationViewController {
             startAudioCapture()
         }
 
+        // Звук до «Краб» — первым куском (только для разговора, запущенного детекцией).
+        if audioHolder.expectsWakePreroll {
+            audioHolder.expectsWakePreroll = false
+            if let preroll = WakePrerollMailbox.shared.take(at: ProcessInfo.processInfo.systemUptime) {
+                audioHolder.prebuffer.prepend(preroll)
+                AgentLogger.shared.info("[Audio] pre-roll слова-пробуждения: \(preroll.count) сэмплов в начало")
+            }
+        }
         let dropped = audioHolder.prebuffer.droppedSampleCount
         let bufferedFrames = drainAudioPrebufferFrames()
         sendUplinkFrames(bufferedFrames)
@@ -598,6 +609,9 @@ private final class AudioHolder: NSObject {
     var echoCancellationActive = false
     /// W1893: момент, когда доиграет уже запланированный downlink (модель очереди плеера).
     var playbackQueueEndsAt = Date.distantPast
+    /// Разговор запущен свежей детекцией слова-пробуждения: по ready в начало prebuffer
+    /// встанет её pre-roll (WakePrerollMailbox).
+    var expectsWakePreroll = false
     var prebuffer = ConversationAudioPrebuffer(
         maxSampleCount: ConversationAudioContract.prebufferMaxSampleCount
     )

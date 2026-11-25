@@ -167,6 +167,11 @@ final class ConversationViewController: NSViewController {
     /// Fallback-таймер ручного прерывания: если сервер не подтвердил conv.interrupted
     /// за interruptFallbackInterval — применяем прерывание локально.
     var interruptFallbackTimer: Timer?
+    /// Автозавершение по тишине (ConversationIdleEndPolicy): решение и тик раз в секунду.
+    var idleEndPolicy: ConversationIdleEndPolicy?
+    var idleEndTimer: Timer?
+    /// Часы автозавершения; тесты подменяют, чтобы не ждать реальные секунды.
+    var idleEndClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
     /// Интервал fallback (инжектируется в тестах; прод — 2с).
     var interruptFallbackInterval: TimeInterval = 2.0
 
@@ -270,6 +275,7 @@ final class ConversationViewController: NSViewController {
         // Невалидный URL выставляет error синхронно; микрофон в таком случае не нужен.
         if case .error = conversationState { return }
         startAudioPrebufferCapture()
+        startIdleEndWatch()
     }
 
     /// Остановить сессию. Вызывается из hotkey-toggle или кнопки «Прервать».
@@ -278,6 +284,7 @@ final class ConversationViewController: NSViewController {
         isSessionActive = false
         interruptFallbackTimer?.invalidate()
         interruptFallbackTimer = nil
+        stopIdleEndWatch()
         sendControlMessage(.end)
         closeWebSocket()
         stopAudioCapture()
@@ -360,6 +367,49 @@ final class ConversationViewController: NSViewController {
         return fallback
     }
 
+    // MARK: - Автозавершение по тишине
+
+    /// Старт отсчёта на новую сессию (настройка «Завершать после тишины», 10–300 с).
+    func startIdleEndWatch() {
+        idleEndTimer?.invalidate()
+        idleEndTimer = nil
+        guard ConversationIdleEndSettings.isEnabled(in: userDefaults) else {
+            idleEndPolicy = nil
+            return
+        }
+        idleEndPolicy = ConversationIdleEndPolicy(
+            timeout: ConversationIdleEndSettings.seconds(in: userDefaults), startedAt: idleEndClock())
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.idleEndTick() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        idleEndTimer = timer
+    }
+
+    func stopIdleEndWatch() {
+        idleEndTimer?.invalidate()
+        idleEndTimer = nil
+        idleEndPolicy = nil
+    }
+
+    /// Речь пользователя / реплика AI / смена состояния сбрасывают отсчёт.
+    func noteConversationActivity() {
+        idleEndPolicy?.noteActivity(at: idleEndClock())
+    }
+
+    /// Тик: N секунд тишины в «слушаю» → обычное завершение (.end, оверлей закрыт,
+    /// пауза wake word снимается через .krabConversationStopped).
+    func idleEndTick() {
+        guard isSessionActive, var policy = idleEndPolicy else { return }
+        let shouldEnd = policy.shouldEnd(now: idleEndClock(), state: conversationState)
+        idleEndPolicy = policy
+        guard shouldEnd else { return }
+        let after = ConversationIdleEndSettings.choiceTitle(policy.timeout)
+        AgentLogger.shared.info("[ConversationVC] Тишина \(after) — разговор завершён автоматически")
+        appendTranscriptLine("— Разговор завершён: тишина \(after)")
+        stopConversation()
+    }
+
     // MARK: - Status overlay (Волна 3c)
 
     /// Правило видимости HUD: сессия активна И окно не в фокусе.
@@ -375,6 +425,7 @@ final class ConversationViewController: NSViewController {
             panelOrdering: runtimeOptions.statusPanelOrdering
         )
         overlay.onInterrupt = { [weak self] in self?.interruptAI() }
+        overlay.onEnd = { [weak self] in self?.stopConversation() }
         statusOverlay = overlay
     }
 
@@ -392,6 +443,9 @@ final class ConversationViewController: NSViewController {
     // MARK: - State application
 
     private func applyState(_ state: ConversationState) {
+        // Любая смена состояния (ответ AI начался/кончился, движок готов) — активность:
+        // отсчёт тишины начинается заново с момента, когда снова «слушаю».
+        noteConversationActivity()
         statusLabel.stringValue = state.localizedLabel
         statusOverlay?.update(state: state)
 
@@ -433,6 +487,7 @@ final class ConversationViewController: NSViewController {
     func handleDownlinkEvent(_ event: ConversationEvent) {
         switch event {
         case .sttPartial(let text, _, let isFinal):
+            noteConversationActivity()  // пользователь говорит — тишины нет
             if isFinal {
                 appendTranscriptLine("Вы: \(text)")
                 conversationState = .thinking
@@ -458,6 +513,7 @@ final class ConversationViewController: NSViewController {
             conversationState = .listening
 
         case .replyFinal(let text):
+            noteConversationActivity()
             appendTranscriptLine("AI: \(text)")
             conversationState = .speaking
 
@@ -492,6 +548,8 @@ final class ConversationViewController: NSViewController {
             handleInterrupted(reason: reason)
 
         case .unknown(let type, _):
+            // VAD шлюза «пользователь говорит» — активность для автозавершения по тишине.
+            if type == "conv.vad_speech" { noteConversationActivity() }
             // Неизвестный тип события (conv.vad_*, conv.audio_chunk) — логируем, не падаем.
             AgentLogger.shared.info("[ConversationVC] Неизвестное событие: \(type)")
         }
