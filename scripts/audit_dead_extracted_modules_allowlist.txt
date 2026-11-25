@@ -49,9 +49,3 @@ module:KrabEar/backend/call_silence_probe.py
 #     владельцев, sidecar-lock source-контракт, nowait-read). Production-
 #     подключение (IPC-процесс публикует свои резиденты, REST — свои) — задача
 #     последующей волны того же плана (T2+), намеренно НЕ в этой задаче.
-
-# --- Wake word по распознаванию речи, PR 1/2 (2026-11-25): stt_keyword_spotter — чистая логика (сегментатор,
-#     matcher, модель-обёртка с контрактом openWakeWord) + оценка на датасете владельца. Подключение к
-#     OpenWakeWordAdapter (выбор движка, транскрибер из BackendService, настройка + переключатель) — PR 2/2 той же
-#     задачи, намеренно отдельно: сначала гейт логики, потом интеграция и живой shadow. Запись УДАЛИТЬ в PR 2.
-module:KrabEar/backend/stt_keyword_spotter.py

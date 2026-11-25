@@ -273,7 +273,9 @@
 | `voxtral_reasoning_enabled` | `bool` | **Рассуждения в Voxtral** | Языковые модели и LLM | `False` | Включить генерацию рассуждений и цепочки мыслей Voxtral |
 | `wake_word_enabled` | `bool` | **Голосовая активация (Wake Word)** | Wake Word и ассистент | `False` | Включение фонового прослушивания ключевой фразы активации |
 | `wake_word_engine` | `str` | **Движок голосовой активации** | Wake Word и ассистент | `disabled` | Используемая библиотека детекции wake word (openwakeword, porcupine) |
+| `wake_word_oww_mode` | `str` | **openWakeWord: режим** | Wake Word и ассистент | `live` | off — выключен, shadow — только считает срабатывания (никого не будит), live — будит |
 | `wake_word_stale_sec` | `float` | **Таймаут зависания Wake Word** | Wake Word и ассистент | `30.0` | Время отсутствия heartbeat до перезапуска детектора (секунды) |
+| `wake_word_stt_mode` | `str` | **Поиск «Краб» по речи: режим** | Wake Word и ассистент | `off` | off — выключен, shadow — только считает срабатывания, live — будит; использует уже загруженный GigaAM, длинную речь не распознаёт |
 | `wake_word_watchdog_enabled` | `bool` | **Сторожевой таймер Wake Word** | Wake Word и ассистент | `True` | Мониторинг зависания потока распознавания ключевого слова |
 | `whisper_idle_unload_sec` | `float` | **Выгрузка Whisper при простое** | Распознавание речи (STT) | `900.0` | Таймаут выгрузки моделей Whisper из памяти MLX/GPU |
 

@@ -997,6 +997,11 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "wake_word_enabled": False,
     # Движок: "openwakeword" | "porcupine" | "disabled"
     "wake_word_engine": "disabled",
+    # Режимы движков слова-пробуждения на одном потоке микрофона (2026-11-25): "off" | "shadow" (только счётчики,
+    # никого не будит, ничего не сохраняет) | "live" (будит). openWakeWord по умолчанию live (как раньше),
+    # STT-споттер «Краб» (через уже загруженный GigaAM) по умолчанию off — включается владельцем в панели.
+    "wake_word_oww_mode": "live",
+    "wake_word_stt_mode": "off",
     # Движок разговора: "auto" | "moshi" | "seamless"
     "conversation_engine": "auto",
     # LLM мозг: "auto" | "qwen3-30b" | "qwen3-4b"

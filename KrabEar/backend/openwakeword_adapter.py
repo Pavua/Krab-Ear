@@ -20,9 +20,14 @@ import logging
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from backend.stt_keyword_spotter import (  # noqa: E402
+    FRAME_SAMPLES as _STT_FRAME_SAMPLES,
+    SttKeywordModel,
+)
 from core.audio_stream_guard import (  # noqa: E402
     DEFAULT_POLL_SEC,
     DEFAULT_STARVE_SEC,
@@ -51,6 +56,16 @@ _BUILTIN_MODELS: list[str] = [
 
 # Имя директории для пользовательских .onnx / .tflite моделей
 _CUSTOM_MODELS_DIR = "wake_word_models"
+
+# Режимы движков wake word (PR 2a, 2026-11-25): off — не работает, shadow — только счётчики (никого не будит,
+# ни аудио, ни текст не сохраняются), live — будит. Ключи settings: wake_word_oww_mode / wake_word_stt_mode.
+ENGINE_MODES = ("off", "shadow", "live")
+ENGINE_OWW = "oww"
+ENGINE_STT = "stt"
+_SETTING_KEYS = {ENGINE_OWW: "wake_word_oww_mode", ENGINE_STT: "wake_word_stt_mode"}
+_DEFAULT_MODES = {ENGINE_OWW: "live", ENGINE_STT: "off"}  # без настройки поведение прежнее: только openWakeWord
+STT_MODEL_NAME = "krab_stt"
+_SHADOW_TS_KEEP = 500  # сколько последних меток времени срабатываний «в тени» держим для отчёта (только числа)
 
 # Минимальный допустимый порог (F1 — covert mic tap guard)
 _THRESHOLD_MIN: float = 0.05
@@ -91,8 +106,17 @@ class OpenWakeWordAdapter:
         is_recording: Optional[Callable[[], bool]] = None,
         is_start_blocked: Optional[Callable[[], bool]] = None,
         read_privacy_revision: Optional[Callable[[], str | None]] = None,
+        stt_transcribe: Optional[Callable[[Any], str]] = None,
     ) -> None:
         self._data_dir = Path(data_dir)
+        # Распознаватель для STT-споттера (backend передаёт ТОЛЬКО уже загруженный в процессе GigaAM — второй
+        # копии модели адаптер не создаёт). None — STT-движок недоступен, режим stt трактуется как off.
+        self._stt_transcribe = stt_transcribe
+        self._stt: SttKeywordModel | None = None
+        self._engine_stats: dict[str, dict[str, Any]] = {
+            e: {"fires_live": 0, "fires_shadow": 0, "shadow_ts": deque(maxlen=_SHADOW_TS_KEEP), "last_fire_ts": None}
+            for e in (ENGINE_OWW, ENGINE_STT)
+        }
         # 2026-08-01 (F6): активная диктовка запрещает открывать второй тап.
         # stop()/_listen_loop читают голый is_recording (wedged под записью
         # нельзя — 2026-08-03). handle_wake_word_start дополнительно смотрит
@@ -274,7 +298,13 @@ class OpenWakeWordAdapter:
                 )
                 return
 
-            if not self._oww_available:
+            oww_mode = self.engine_mode(ENGINE_OWW)
+            stt_wanted = (
+                self._stt_transcribe is not None
+                and self.engine_mode(ENGINE_STT) != "off"
+                and chunk_size == _STT_FRAME_SAMPLES
+            )
+            if oww_mode != "off" and not self._oww_available and not stt_wanted:
                 logger.warning(
                     "OpenWakeWordAdapter: openwakeword не установлен. "
                     "Установите: pip install openwakeword. "
@@ -284,8 +314,12 @@ class OpenWakeWordAdapter:
                     "openwakeword не установлен. "
                     "Выполните: pip install openwakeword"
                 )
+            if oww_mode == "off" and not stt_wanted:
+                logger.info("OpenWakeWordAdapter.start: все движки wake word выключены (режим off)")
+                raise RuntimeError("все движки wake word выключены в настройках")
+            use_oww = oww_mode != "off" and self._oww_available
 
-            model_path = self._resolve_model_path(model_name)
+            model_path = self._resolve_model_path(model_name) if use_oww else None
             self._on_detected = on_detected
             self._active_model = model_name
             self._active_threshold = threshold
@@ -294,7 +328,13 @@ class OpenWakeWordAdapter:
             self._reset_session_state()
             self._generation += 1
 
-            self._oww = self._load_model(model_name, model_path)
+            self._oww = self._load_model(model_name, model_path) if use_oww else None
+            self._close_stt_locked()
+            if stt_wanted:
+                self._stt = SttKeywordModel(self._stt_transcribe, name=STT_MODEL_NAME)  # type: ignore[arg-type]
+                self._start_stt_warmup()
+            else:
+                self._release_stt_model()
             self._thread = threading.Thread(
                 target=self._listen_loop,
                 kwargs={
@@ -314,6 +354,15 @@ class OpenWakeWordAdapter:
             )
 
     def stop(self, timeout: float = 3.0) -> bool:
+        """Останавливает поток прослушивания; при остановке «насовсем» (wake word выключен/privacy) выгружает
+        модель STT-споттера. Пауза под запись модель не выгружает."""
+        final = self._is_final_stop()
+        exited = self._stop_impl(timeout)
+        if final:
+            self._release_stt_model_async()
+        return exited
+
+    def _stop_impl(self, timeout: float = 3.0) -> bool:
         """Останавливает поток прослушивания.
 
         Returns:
@@ -350,6 +399,7 @@ class OpenWakeWordAdapter:
             # dead_session (упавший restore) не затронут — там stop() после
             # провала никто не зовёт.
             self._oww = None
+            self._close_stt_locked()
             self._active_model = None
             self._active_threshold = None
             if thread is None or not thread.is_alive():
@@ -509,6 +559,95 @@ class OpenWakeWordAdapter:
         self._last_read_completed_ts = None
         self._last_any_chunk_ts = None
         self._wedged = False
+
+    def _start_stt_warmup(self) -> None:
+        """Загрузка и прогрев модели споттера в фоне (в первую реплику не копим 0,9 с компиляции ядер)."""
+        warmup = getattr(self._stt_transcribe, "warmup", None)
+        if callable(warmup):
+            threading.Thread(target=warmup, name="SttSpotterWarmup", daemon=True).start()
+
+    def _release_stt_model_async(self) -> None:
+        """Выгрузка модели споттера в отдельном потоке: не под self._lock и не в потоке слушателя (release берёт
+        mlx_lock с ожиданием до 0,25 с)."""
+        # Нечего выгружать (модель не загружалась — режим stt никогда не включали) — поток не создаём: stop() входит в
+        # путь close() backend, где новые потоки нежелательны (граница rest_stageb_boundary), а выгрузка не нужна.
+        is_loaded = getattr(self._stt_transcribe, "is_loaded", None)
+        try:
+            if callable(is_loaded) and not is_loaded():
+                return
+            threading.Thread(target=self._release_stt_model, name="SttSpotterRelease", daemon=True).start()
+        except Exception:  # noqa: BLE001 — stop()/close() не имеют права падать из-за выгрузки модели споттера
+            logger.warning("OpenWakeWordAdapter: не удалось запустить выгрузку модели STT-споттера", exc_info=True)
+
+    def _is_final_stop(self) -> bool:
+        """Остановка «насовсем» (wake word выключен или включён privacy), а не пауза под запись: после паузы адаптер
+        стартует снова, и выгрузка заставила бы грузить 1,1 ГБ после КАЖДОЙ диктовки."""
+        try:
+            if self._settings_get("wake_word_enabled", True) is False:
+                return True
+        except Exception:
+            return False
+        return self._privacy_blocked()
+
+    def _release_stt_model(self) -> None:
+        """Режим stt выключен — модель споттера выгружается из памяти (если она вообще была загружена)."""
+        release = getattr(self._stt_transcribe, "release", None)
+        if callable(release):
+            try:
+                release()
+            except Exception:
+                logger.warning("OpenWakeWordAdapter: выгрузка модели STT-споттера не удалась", exc_info=True)
+
+    def _close_stt_locked(self) -> None:
+        """Закрывает STT-споттер (воркер-поток). close() не трогает сегментатор и поэтому безопасен из другого потока;
+        predict()/reset() споттера вызываются ТОЛЬКО из потока слушателя."""
+        stt, self._stt = self._stt, None
+        if stt is not None:
+            try:
+                stt.close(timeout=0.5)
+            except Exception:
+                logger.warning("OpenWakeWordAdapter: закрытие STT-споттера не удалось", exc_info=True)
+
+    def engine_mode(self, engine: str) -> str:
+        """Текущий режим движка из настроек (читается на КАЖДОМ чанке: переключатель в панели действует без рестарта).
+        Мусор и сбой чтения настроек = безопасный дефолт (oww live как раньше, stt off)."""
+        try:
+            value = self._settings_get(_SETTING_KEYS[engine], _DEFAULT_MODES[engine])
+        except Exception:
+            return _DEFAULT_MODES[engine]
+        return value if value in ENGINE_MODES else _DEFAULT_MODES[engine]
+
+    def _note_fire(self, engine: str, mode: str) -> None:
+        with self._lock:
+            stats = self._engine_stats[engine]
+            now = time.monotonic()
+            stats["last_fire_ts"] = now
+            if mode == "live":
+                stats["fires_live"] += 1
+            else:
+                stats["fires_shadow"] += 1
+                stats["shadow_ts"].append(now)
+
+    def engine_report(self) -> dict[str, Any]:
+        """Числа по движкам для сравнения (без аудио и текста): режимы, срабатывания, health STT-распознавания."""
+        with self._lock:
+            stt = self._stt
+            out: dict[str, Any] = {}
+            for engine, stats in self._engine_stats.items():
+                out[engine] = {
+                    "fires_live": stats["fires_live"],
+                    "fires_shadow": stats["fires_shadow"],
+                    "last_fire_ts": stats["last_fire_ts"],
+                    "predict_errors": stats.get("predict_errors", 0),
+                }
+        for engine in (ENGINE_OWW, ENGINE_STT):
+            out[engine]["mode"] = self.engine_mode(engine)
+        out[ENGINE_STT]["available"] = self._stt_transcribe is not None
+        if stt is not None:
+            out[ENGINE_STT]["spotter"] = stt.stats()
+            out[ENGINE_STT]["transcribing_for_sec"] = round(stt.busy_for(), 2)
+            out[ENGINE_STT]["unavailable_reason"] = stt.last_unavailable_reason()
+        return out
 
     def _record_detection(
         self, model_name: str, score: float, *, capture_revision: str | None = None,
@@ -733,6 +872,7 @@ class OpenWakeWordAdapter:
         if last is not None and last.pop("_privacy_revision") != self._privacy_revision():
             last = None
         status["last_detection"] = last
+        status["engines"] = self.engine_report()
         return status
 
     # ------------------------------------------------------------------
@@ -856,6 +996,7 @@ class OpenWakeWordAdapter:
             if self._generation != generation:
                 return
             self._oww = None
+            self._close_stt_locked()
             self._active_model = None
             self._active_threshold = None
             self._last_detection = None
@@ -933,6 +1074,7 @@ class OpenWakeWordAdapter:
         if capture_revision is None:
             self._cleanup_session_after_loop_exit(generation)
             return
+        stt_was_off = False
 
         # Смена ревизии завершает сессию целиком: ring buffer и модель могли
         # накопить PCM за время краткого ON→OFF. Повторный start создаёт оба заново.
@@ -1017,26 +1159,61 @@ class OpenWakeWordAdapter:
                             )
                             break
                         oww = self._oww
+                        stt = self._stt
                         self._last_any_chunk_ts = time.monotonic()
                         if flat.any():
                             self._last_chunk_ts = self._last_any_chunk_ts
 
-                    if oww is None or privacy_changed():
+                    if (oww is None and stt is None) or privacy_changed():
                         break
 
-                    prediction = oww.predict(flat)
+                    # Один тап микрофона, два движка. Режим читается на каждом чанке (off/shadow/live):
+                    # shadow — только счётчики и метки времени, никого не будит и ничего не сохраняет.
+                    detections: list[tuple[str, str, float, str]] = []  # (engine, имя, score, режим)
+                    if oww is not None:
+                        mode = self.engine_mode(ENGINE_OWW)
+                        if mode != "off":
+                            for mdl_name, score in oww.predict(flat).items():
+                                if score >= threshold:
+                                    detections.append((ENGINE_OWW, mdl_name, float(score), mode))
+                    if stt is not None:
+                        mode = self.engine_mode(ENGINE_STT)
+                        if mode != "off":
+                            if stt_was_off:
+                                stt.reset()  # включили на лету: сегментатор не должен помнить старый поток
+                                self._start_stt_warmup()  # модель могла быть выгружена при выключении
+                                stt_was_off = False
+                            try:
+                                stt_scores = stt.predict(flat)
+                            except Exception as exc:  # noqa: BLE001 — сбой споттера не должен глушить openWakeWord
+                                stt_scores = {}
+                                with self._lock:
+                                    self._engine_stats[ENGINE_STT]["predict_errors"] = (
+                                        self._engine_stats[ENGINE_STT].get("predict_errors", 0) + 1
+                                    )
+                                logger.warning("OpenWakeWordAdapter: STT-споттер predict() упал (%s)", type(exc).__name__)
+                            for mdl_name, score in stt_scores.items():
+                                if score >= 0.5:
+                                    detections.append((ENGINE_STT, mdl_name, float(score), mode))
+                        elif not stt_was_off:
+                            stt_was_off = True
+                            self._release_stt_model_async()  # выключили на лету: 1,1 ГБ не держим до рестарта
                     if privacy_changed():
                         break
-                    for mdl_name, score in prediction.items():
-                        if score >= threshold:
-                            if not self._record_detection(
-                                mdl_name, float(score), capture_revision=capture_revision,
-                            ):
+                    live_published = False  # оба движка в одном чанке: будим один раз, второй только считаем
+                    for engine, mdl_name, score, mode in detections:
+                        self._note_fire(engine, mode)
+                        if mode != "live" or live_published:
+                            continue
+                        if not self._record_detection(
+                            mdl_name, score, capture_revision=capture_revision,
+                        ):
+                            return
+                        live_published = True
+                        if self._on_detected is not None:
+                            if privacy_changed():
                                 return
-                            if self._on_detected is not None:
-                                if privacy_changed():
-                                    return
-                                self._on_detected(mdl_name, float(score))
+                            self._on_detected(mdl_name, score)
 
         except Exception:
             logger.exception("OpenWakeWordAdapter._listen_loop: ошибка")

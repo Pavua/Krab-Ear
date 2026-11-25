@@ -74,6 +74,10 @@ def _rms(samples: Sequence[int]) -> float:
     return math.sqrt(sum(v * v for v in samples) / len(samples))
 
 
+class TranscriberUnavailable(Exception):
+    """Распознаватель сейчас недоступен (занят звонком/диктовкой или не прогрет): реплика пропускается, это не ошибка."""
+
+
 class KeywordMatcher:
     """Сопоставление транскрипта со словом-пробуждением.
 
@@ -221,11 +225,13 @@ class SttKeywordModel:
         self._segmenter = UtteranceSegmenter()
         self._lock = threading.Lock()
         self._pending = 0
+        self._busy_since: Optional[float] = None  # монотонное время начала текущего распознавания (health)
+        self._last_unavailable: Optional[str] = None  # код причины (без текста): «mlx_busy», «model_load_failed»…
         self._fired = False
         self._gen = 0  # reset() увеличивает: результат распознавания, запущенного до reset, устарел
         self._cooldown_until = 0.0
         self._starts: Deque[float] = deque()
-        self._stats = {"utterances": 0, "transcribed": 0, "matched": 0, "matched_word": 0, "matched_fragment": 0, "errors": 0,
+        self._stats = {"utterances": 0, "transcribed": 0, "matched": 0, "matched_word": 0, "matched_fragment": 0, "errors": 0, "unavailable": 0,
                        "dropped_busy": 0, "dropped_rate": 0, "suppressed_cooldown": 0, "stale_discarded": 0}
         self._cond = threading.Condition(self._lock)
         self._queue: Deque[Any] = deque()
@@ -255,6 +261,19 @@ class SttKeywordModel:
 
     def is_alive(self) -> bool:
         return self._worker.is_alive()
+
+    def last_unavailable_reason(self) -> Optional[str]:
+        """Код последней причины пропуска реплики (не текст): панель/отчёт показывают «недоступен (причина)»,
+        а не молчаливый ноль."""
+        with self._lock:
+            return self._last_unavailable
+
+    def busy_for(self) -> float:
+        """Сколько секунд идёт текущее распознавание (0.0 — воркер свободен). Для health: зависший транскрибер
+        держит ``_pending`` и молча оглушает споттер, ``is_alive()`` при этом True."""
+        with self._lock:
+            started = self._busy_since
+        return 0.0 if started is None else max(0.0, time.monotonic() - started)
 
     def drain(self, timeout: float = 5.0) -> bool:
         """Ждёт, пока воркер закончит текущее распознавание (для тестов и остановки)."""
@@ -293,6 +312,7 @@ class SttKeywordModel:
                 return
             self._starts.append(now)
             self._pending += 1
+            self._busy_since = time.monotonic()
             self._queue.append((self._gen, utterance))
             self._cond.notify_all()
 
@@ -311,6 +331,10 @@ class SttKeywordModel:
                 kind = self._matcher.kind(text)
                 with self._lock:
                     self._stats["transcribed"] += 1
+            except TranscriberUnavailable as exc:
+                with self._lock:
+                    self._stats["unavailable"] += 1
+                    self._last_unavailable = str(exc)[:40] or "unavailable"
             except Exception as exc:  # noqa: BLE001 — сбой распознавания = «не совпало», воркер живёт
                 with self._lock:
                     self._stats["errors"] += 1
@@ -329,6 +353,7 @@ class SttKeywordModel:
                             self._fired = True
                             self._cooldown_until = now + self._cooldown
                     self._pending -= 1
+                    self._busy_since = None
                     self._cond.notify_all()
 
     @staticmethod

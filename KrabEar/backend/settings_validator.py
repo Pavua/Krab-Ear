@@ -56,6 +56,9 @@ _ENUM_FIELDS: dict[str, tuple[str, ...]] = {
     "capture_source_mode": ("mic", "system_audio", "mic_plus_system"),
     # Голос исходящего звонка (Voice Gateway `PromptCallRequest.voice_mode`): мусор дал бы 422 и сорвал звонок.
     "call_voice_mode": ("clone", "system", "gemini"),
+    # Режимы движков слова-пробуждения: мусор → первое значение (oww безопасно live как раньше, stt — off).
+    "wake_word_oww_mode": ("live", "shadow", "off"),
+    "wake_word_stt_mode": ("off", "shadow", "live"),
     # Must mirror every PanelTab rawValue the Swift agent can persist
     # (native/KrabEarAgent/Sources/KrabEarAgent/HistoryPanelController.swift
     # enum PanelTab, written back in HistoryPanelController+LiveTranslation.swift

@@ -5,10 +5,10 @@
 (секунда тишины до и после), считается, сработала ли модель. В отчёт попадают ТОЛЬКО числа по блокам: ни имён
 файлов, ни транскриптов (записи — биометрия владельца, см. память reference-wake-dataset-owner-voice).
 
-Приёмка (решение владельца 24.11): recall >= 85% на позитивах и 0 ложных на негативах. Исключение — НЕ целым блоком,
-а по клипу: негативный клип, в подсказке (`prompt` manifest) которого есть слово на «краб» («Краб-салат», «Крабы»),
-считается отдельной строкой `<блок>:содержит_слово`; остальные клипы того же блока («Грабли», «Крап», «Карп»)
-остаются обычными негативами и обязаны не срабатывать.
+Приёмка (решение владельца 24.11): recall >= 85% на позитивах и 0 ложных на негативах. Исключения — НЕ целым блоком,
+а по клипу, по подсказке (`prompt` manifest), и отдельными строками отчёта: слово на «краб» («Краб-салат», «Крабы») —
+`<блок>:содержит_слово`; омофон «крап» (в русском оглушение конечной согласной: оба [крап]) — `<блок>:омофон`.
+Остальные созвучия («Драп», «Кроп», «Карп», «Кран», «Грабли») остаются обычными негативами и обязаны не срабатывать.
 
 Запуск (из корня репозитория, нужны mlx и gigaam-mlx из .venv_krab_ear; микрофон не используется):
     PYTHONPATH=KrabEar .venv_krab_ear/bin/python scripts/eval_stt_wake_spotter.py [--dataset DIR] [--seed 5]
@@ -30,20 +30,32 @@ DEFAULT_DATASET = Path.home() / "Library" / "Application Support" / "KrabEar" / 
 MIN_RECALL = 0.85
 # Суффикс блока для негативных клипов, где по подсказке звучит слово «краб» — срабатывание там не ложное.
 CONTAINS_WORD_SUFFIX = ":содержит_слово"
+# Омофоны «краб»: в русском оглушаются конечные согласные, «краб» и «крап» звучат одинаково ([крап]); разделить их не
+# может ни одна акустика и ни один распознаватель. Список ТОЧНЫЙ (не «похожие слова»): «Драп», «Кроп», «Карп», «Кран»
+# и прочие созвучия остаются обычными негативами, срабатывание на них валит приёмку. Подбор — по подсказке manifest.
+HOMOPHONE_WORDS = frozenset({"крап"})
+HOMOPHONE_SUFFIX = ":омофон"
 
 
 def block_label(block: str, prompt: str) -> str:
-    """Блок результата: клип с подсказкой, содержащей слово на «краб», выделяется в отдельную строку."""
-    words = re.sub(r"[^\w\s]", " ", prompt.lower().replace("ё", "е")).split()
-    return block + CONTAINS_WORD_SUFFIX if any(w.startswith("краб") for w in words) else block
+    """Блок результата: клип с подсказкой «краб*» — отдельная строка «содержит слово», с омофоном «крап» — «омофон»."""
+    words = re.sub(r"[^\w\s]", " ", (prompt or "").lower().replace("ё", "е")).split()
+    if any(w.startswith("краб") for w in words):
+        return block + CONTAINS_WORD_SUFFIX
+    if any(w in HOMOPHONE_WORDS for w in words):
+        return block + HOMOPHONE_SUFFIX
+    return block
 
 
 def summarize(results: Mapping[tuple[str, str], tuple[int, int]]) -> dict[str, float]:
     """``{(label, block): (всего, сработало)}`` → итоговые числа. Чистая функция (тесты без аудио)."""
     pos_total = sum(t for (label, _), (t, _) in results.items() if label == "pos")
     pos_hit = sum(h for (label, _), (_, h) in results.items() if label == "pos")
-    neg_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and not b.endswith(CONTAINS_WORD_SUFFIX))
-    neg_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and not b.endswith(CONTAINS_WORD_SUFFIX))
+    special = (CONTAINS_WORD_SUFFIX, HOMOPHONE_SUFFIX)
+    neg_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and not b.endswith(special))
+    neg_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and not b.endswith(special))
+    homo_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and b.endswith(HOMOPHONE_SUFFIX))
+    homo_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and b.endswith(HOMOPHONE_SUFFIX))
     word_total = sum(t for (label, b), (t, _) in results.items() if label == "neg" and b.endswith(CONTAINS_WORD_SUFFIX))
     word_fire = sum(h for (label, b), (_, h) in results.items() if label == "neg" and b.endswith(CONTAINS_WORD_SUFFIX))
     return {
@@ -51,6 +63,7 @@ def summarize(results: Mapping[tuple[str, str], tuple[int, int]]) -> dict[str, f
         "recall": (pos_hit / pos_total) if pos_total else 0.0,
         "neg_total": neg_total, "neg_fire": neg_fire,
         "word_clips": word_total, "word_clip_fires": word_fire,
+        "homophone_clips": homo_total, "homophone_fires": homo_fire,
     }
 
 
@@ -65,7 +78,8 @@ def format_report(results: Mapping[tuple[str, str], tuple[int, int]], summary: M
         lines.append(f"| {label} {block} | {hit} / {total} |")
     lines += ["", f"Recall: {int(summary['pos_hit'])} из {int(summary['pos_total'])} = {100 * summary['recall']:.1f}% (порог {100 * MIN_RECALL:.0f}%)",
               f"Ложные на негативах без слова «краб»: {int(summary['neg_fire'])} из {int(summary['neg_total'])} (порог 0)",
-              f"Клипы, где слово «краб» звучит само: сработало {int(summary['word_clip_fires'])} из {int(summary['word_clips'])} (не ложные)", ""]
+              f"Клипы, где слово «краб» звучит само: сработало {int(summary['word_clip_fires'])} из {int(summary['word_clips'])} (не ложные)",
+              f"Омофон «крап» (звучит как «краб»): сработало {int(summary['homophone_fires'])} из {int(summary['homophone_clips'])} (не ложные)", ""]
     return "\n".join(lines)
 
 
@@ -86,14 +100,15 @@ def main(argv: list[str] | None = None) -> int:
     import numpy as np
 
     from backend import stt_keyword_spotter as sk
-    from core.pipeline.stt_gigaam_mlx import GigaAMMLXAdapter
+    from backend.wake_word_stt_bridge import GigaAmMemoryTranscriber
 
-    adapter = GigaAMMLXAdapter(mode="v3_e2e_rnnt")
+    transcriber = GigaAmMemoryTranscriber()  # тот же код, что в проде: своя копия GigaAM, аудио в памяти
+    transcriber.warmup()
 
     def transcribe(audio):
         try:
-            return adapter.transcribe(audio.astype(np.float32) / 32768.0, sample_rate=16000)["text"]
-        except Exception:  # noqa: BLE001 — пустой ответ GigaAM на короткий клип = «не распознано»
+            return transcriber(audio)
+        except sk.TranscriberUnavailable:
             return ""
 
     model = sk.SttKeywordModel(transcribe, cooldown_sec=0.0, max_per_minute=100_000)
@@ -113,7 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 model.drain(10)
         model.drain(10)
         fired |= model.predict(np.zeros(frame, np.int16))[sk.DEFAULT_NAME] >= 0.5
-        block = block_label(row["block"], row.get("prompt", "")) if row["label"] == "neg" else row["block"]
+        block = block_label(row["block"], row.get("prompt") or "") if row["label"] == "neg" else row["block"]
         entry = stats[(row["label"], block)]
         entry[0] += 1
         entry[1] += int(fired)
