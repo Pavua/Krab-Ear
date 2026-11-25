@@ -3322,6 +3322,7 @@ Returns: `{count, cleared: [{model_id, age_sec}, ...]}`
 | `wake_word_start` | Запустить прослушивание |
 | `wake_word_stop` | Остановить прослушивание |
 | `wake_word_status` | Статус адаптера |
+| `wake_word_take_preroll` | Одноразово забрать звук «после слова» последнего срабатывания |
 
 ### `wake_word_list_models`
 *(openwakeword_adapter.py)*  
@@ -3353,6 +3354,18 @@ Returns: `{ok, running, active_model, engine_available, last_detection}`
 дебаунсит по росту (nil re-arm'ит baseline). Сбрасывается в null при
 `wake_word_start`/`wake_word_stop`. Поле добавлено 2026-07-05; до этого
 описание в доке дрейфовало (несуществующие `active`/`detections_today`).
+
+### `wake_word_take_preroll`
+*(openwakeword_adapter.py, wake_word_preroll.py)*  
+Звук «после слова» последнего ЖИВОГО срабатывания — чтобы первые слова команды не терялись за 1,3–1,7 с между словом
+«Краб» и стартом записи агента (хвост VAD, распознавание, опрос, старт сессии). Агент вызывает метод сразу при детекции,
+ДО `wake_word_stop`: пока слушатель жив, кольцо не сброшено.  
+Нет params.  
+Returns: `{ok: true, available: bool, reason?: "no_detection"|"session_ended"|"expired"|"privacy", sample_rate: 16000,
+format: "pcm_s16le_mono_b64", samples: int, pcm_b64: str, age_ms: int}` (при `available:false` аудио нет).  
+Одноразово (повтор → `no_detection`), не больше 6 с, TTL 15 с от срабатывания, при смене ревизии политики захвата —
+`privacy`. Для STT-движка якорь: одно слово «Краб» → звук с конца слова; реплика длиннее → с её начала; для openWakeWord —
+0,5 с назад. Кольцо (8 с) живёт только в памяти сессии прослушивания и исчезает с ней; на диск и в лог звук не попадает.
 
 ---
 

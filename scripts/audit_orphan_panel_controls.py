@@ -179,6 +179,8 @@ _HIERARCHY_CALLEES = (
     "cdMakeSliderRow",
     "makeSwitchRow",
     "makeSettingRow",
+    # FlowRowView.addItem — переносящийся ряд редизайна «Истории».
+    "addItem",
 )
 
 
@@ -615,6 +617,10 @@ def _has_hierarchy(decl: ControlDecl, body: str) -> bool:
             return True
     if re.search(rf"\baddView\(\s*{boundary}\s*,\s*in\s*:", flat):
         return True
+    # KrabEarTheme.labeledPair("Подпись:", control) — пара «подпись + контрол», контрол
+    # вторым позиционным аргументом (пара затем идёт в ряд через addItem/addArrangedSubview).
+    if re.search(rf"\blabeledPair\(\s*\"[^\"]*\"\s*,\s*{boundary}", flat):
+        return True
     return False
 
 
@@ -799,6 +805,34 @@ _GOOD_SAMPLES: dict[str, tuple[dict[str, str], str]] = {
             )
         },
         "helpButton",
+    ),
+    "labeledPair в переносящемся ряду": (
+        {
+            "A.swift": (
+                "class Panel {\n"
+                "    let modeFilter = NSPopUpButton(frame: .zero, pullsDown: false)\n"
+                "    func setup() {\n"
+                "        modeFilter.target = self\n"
+                "        modeFilter.action = #selector(onMode)\n"
+                "        flow.addItem(KrabEarTheme.labeledPair(\"Режим:\", modeFilter))\n"
+                "    }\n"
+                "}\n"
+            )
+        },
+        "modeFilter",
+    ),
+    "addItem переносящегося ряда": (
+        {
+            "A.swift": (
+                "class Panel {\n"
+                "    let todayButton = NSButton(title: \"Today\", target: self, action: #selector(onToday))\n"
+                "    func setup() {\n"
+                "        quickFlow.addItem(todayButton)\n"
+                "    }\n"
+                "}\n"
+            )
+        },
+        "todayButton",
     ),
     "конструктор с target/action и addSubview": (
         {

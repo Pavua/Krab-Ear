@@ -5,7 +5,7 @@
  Continuing PR #327 / #328 incremental split pattern.
 
  Tab включает:
- - Filters section (filterRow1/2 + historyQuickPresetRow)
+ - Filters section (historyFilterFlow + historyQuickFilterFlow)
  - Primary actions row (load more, jump, copy, paste, delete, status labels)
  - Advanced actions section (toolbar row, secondary actions, second overflow row, history enhancements)
  - Import section (importRow + dropZoneView)
@@ -35,12 +35,10 @@ extension HistoryPanelController {
         // Отцепляем rows из предыдущего parent'а (applyVisualTheme может
         // быть вызван повторно — rows как class properties могут висеть в
         // старой filtersCard).
-        filterRow1.removeFromSuperview()
-        filterRow2.removeFromSuperview()
-        historyQuickPresetRow.removeFromSuperview()
-        filtersCard.contentStackView.addArrangedSubview(filterRow1)
-        filtersCard.contentStackView.addArrangedSubview(filterRow2)
-        filtersCard.contentStackView.addArrangedSubview(historyQuickPresetRow)
+        historyFilterFlow.removeFromSuperview()
+        historyQuickFilterFlow.removeFromSuperview()
+        filtersCard.contentStackView.addArrangedSubview(historyFilterFlow)
+        filtersCard.contentStackView.addArrangedSubview(historyQuickFilterFlow)
         filtersSection.contentStackView.addArrangedSubview(filtersCard)
         self.historyFiltersSection = filtersSection
 
@@ -162,7 +160,9 @@ extension HistoryPanelController {
         // Search/actions + table cards.
         let searchActionsCard = ThemeCardView()
         searchActionsCard.contentStackView.addArrangedSubview(topSearchRow)
-        searchActionsCard.contentStackView.addArrangedSubview(topActionsRow)
+        // topActionsRow к этому моменту пуст («Справка» и Live-пресет переехали в «Расширенные
+        // действия» выше), вид списка — переносящимся рядом.
+        searchActionsCard.contentStackView.addArrangedSubview(historyViewOptionsFlow)
 
         // Empty state setup
         historyEmptyStateContainer.orientation = .vertical

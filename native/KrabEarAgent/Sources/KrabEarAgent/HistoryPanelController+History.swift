@@ -874,7 +874,7 @@ extension HistoryPanelController {
         historyImportSection?.disclosureButton.isEnabled = !enabled
 
         historyScrollMinHeightConstraint?.constant = enabled ? 240 : 180
-        historyFocusModeButton.title = enabled ? "Фокус истории: ON" : "Фокус истории: OFF"
+        historyFocusModeButton.title = enabled ? "Фокус истории: вкл" : "Фокус истории: выкл"
     }
 
     func applyHistoryTextDensity(_ density: String) {

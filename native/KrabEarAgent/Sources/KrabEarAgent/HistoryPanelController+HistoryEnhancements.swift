@@ -114,6 +114,14 @@ extension HistoryPanelController {
         }
     }
 
+    // MARK: - Ширина столбца «Текст»
+
+    /// Видимая область таблицы истории сменила размер: последний столбец — ровно по ней
+    /// (см. подписку в setupUI: lastColumnOnly переносил стартовый разрыв навсегда).
+    @objc func onHistoryClipFrameChanged(_ note: Notification) {
+        tableView.sizeLastColumnToFit()
+    }
+
     // MARK: - get_history_item (double-click detail)
 
     @objc func onTableViewDoubleClick() {

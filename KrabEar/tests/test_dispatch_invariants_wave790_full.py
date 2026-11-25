@@ -290,6 +290,7 @@ _EXPECTED = {
     "wake_word_start": "svc._oww_adapter.handle_wake_word_start",
     "wake_word_status": "svc._oww_adapter.handle_wake_word_status",
     "wake_word_stop": "svc._oww_adapter.handle_wake_word_stop",
+    "wake_word_take_preroll": "svc._oww_adapter.handle_wake_word_take_preroll",
     "warmup_rewriter": "svc._text_scoring_svc.handle_warmup_rewriter",
     "warmup_stt": "svc._stt_mgmt_svc.handle_warmup_stt",
     "word_frequency_analysis": "svc._history.handle_word_frequency_analysis",
