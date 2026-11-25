@@ -732,7 +732,8 @@ class OpenWakeWordAdapter:
             return "no_transcriber"
         if stt is None:
             return "chunk_size" if self._chunk_size != _STT_FRAME_SAMPLES else None
-        if stt.last_unavailable_reason() == "model_load_failed":
+        last_error = getattr(self._stt_transcribe, "last_error", None)
+        if stt.last_unavailable_reason() == "model_load_failed" or (callable(last_error) and last_error() == "model_load_failed"):
             return "load_failed"
         return None
 

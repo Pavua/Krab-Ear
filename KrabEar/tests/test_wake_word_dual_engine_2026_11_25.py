@@ -521,3 +521,23 @@ def test_engine_report_tells_loading_from_errors_without_text(tmp_path):
     tr.loaded = True
     rep = live.engine_report()[oa.ENGINE_STT]
     assert rep["loading"] is False and rep["load_error"] is None
+
+
+def test_stt_load_error_comes_from_transcriber_even_before_first_utterance(tmp_path):
+    class Tr(_Transcriber):
+        err = None
+
+        def is_loaded(self):
+            return False
+
+        def last_error(self):
+            return self.err
+
+    tr = Tr()
+    adapter, _ = _adapter(tmp_path, {"wake_word_stt_mode": "live"}, stt_transcribe=tr)
+    adapter._stt = _FakeStt()
+    rep = adapter.engine_report()[oa.ENGINE_STT]
+    assert rep["loading"] is True and rep["load_error"] is None
+    tr.err = "model_load_failed"      # прогрев упал, реплик ещё не было
+    rep = adapter.engine_report()[oa.ENGINE_STT]
+    assert rep["load_error"] == "load_failed" and rep["loading"] is False

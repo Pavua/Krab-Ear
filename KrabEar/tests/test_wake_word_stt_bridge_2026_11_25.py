@@ -312,3 +312,20 @@ def test_utterance_in_flight_when_release_happens_does_not_reload_the_model():
     gate.set()
     worker.join(3.0)
     assert result == {"reason": "released"} and not tr.is_loaded() and calls["infer"] == []
+
+
+def test_failed_warmup_records_error_code_before_any_utterance_and_success_clears_it():
+    state = {"n": 0}
+
+    def flaky(mode):
+        state["n"] += 1
+        if state["n"] == 1:
+            raise OSError("no weights")
+        return ("m", "t")
+
+    tr, _, _ = _make(loader=flaky)
+    assert tr.last_error() is None
+    tr.warmup()                       # прогрев глотает сбой, но код причины остаётся для статуса
+    assert tr.last_error() == "model_load_failed" and not tr.is_loaded()
+    tr.warmup()                       # второй прогрев удался
+    assert tr.last_error() is None and tr.is_loaded()
