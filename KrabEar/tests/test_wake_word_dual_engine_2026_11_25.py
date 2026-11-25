@@ -348,3 +348,31 @@ def test_stop_survives_thread_start_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(threading.Thread, "start", boom)
     adapter, _ = _adapter(tmp_path, {"wake_word_enabled": False}, stt_transcribe=Loaded())
     assert adapter.stop() is True          # исключение выгрузки не должно ломать остановку/закрытие
+
+
+def test_shutdown_never_releases_the_model_even_on_final_stop(tmp_path, monkeypatch):
+    class Loaded(_Transcriber):
+        def is_loaded(self):
+            return True
+
+    started = []
+    monkeypatch.setattr(threading.Thread, "start", lambda self: started.append(self.name))
+    adapter, _ = _adapter(tmp_path, {"wake_word_enabled": False}, stt_transcribe=Loaded())
+    adapter.mark_shutdown()
+    assert adapter.stop() is True
+    assert "SttSpotterRelease" not in started
+
+
+def test_service_close_marks_shutdown_before_stopping_the_adapter():
+    import ast
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1].joinpath("backend", "service.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    close = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "close"
+                 and "wake_word_adapter" in (ast.get_source_segment(src, n) or ""))
+    calls = [n for n in ast.walk(close) if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "mark_shutdown"]
+    assert calls, "close() обязан ВЫЗВАТЬ mark_shutdown (а не только прочитать атрибут)"
+    assert calls[0].lineno < next(n.lineno for n in ast.walk(close) if isinstance(n, ast.Call)
+                                  and getattr(n.func, "attr", None) == "stop"
+                                  and getattr(getattr(n.func, "value", None), "id", None) == "wake_word_adapter")

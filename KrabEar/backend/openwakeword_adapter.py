@@ -113,6 +113,7 @@ class OpenWakeWordAdapter:
         # копии модели адаптер не создаёт). None — STT-движок недоступен, режим stt трактуется как off.
         self._stt_transcribe = stt_transcribe
         self._stt: SttKeywordModel | None = None
+        self._shutting_down = False  # backend закрывается: модель споттера не выгружаем (процесс всё равно завершится)
         self._engine_stats: dict[str, dict[str, Any]] = {
             e: {"fires_live": 0, "fires_shadow": 0, "shadow_ts": deque(maxlen=_SHADOW_TS_KEEP), "last_fire_ts": None}
             for e in (ENGINE_OWW, ENGINE_STT)
@@ -356,7 +357,7 @@ class OpenWakeWordAdapter:
     def stop(self, timeout: float = 3.0) -> bool:
         """Останавливает поток прослушивания; при остановке «насовсем» (wake word выключен/privacy) выгружает
         модель STT-споттера. Пауза под запись модель не выгружает."""
-        final = self._is_final_stop()
+        final = self._is_final_stop() and not self._shutting_down
         exited = self._stop_impl(timeout)
         if final:
             self._release_stt_model_async()
@@ -578,6 +579,12 @@ class OpenWakeWordAdapter:
             threading.Thread(target=self._release_stt_model, name="SttSpotterRelease", daemon=True).start()
         except Exception:  # noqa: BLE001 — stop()/close() не имеют права падать из-за выгрузки модели споттера
             logger.warning("OpenWakeWordAdapter: не удалось запустить выгрузку модели STT-споттера", exc_info=True)
+
+    def mark_shutdown(self) -> None:
+        """Вызывается ``BackendService.close()`` ПЕРЕД ``stop()``: на закрытии процесса выгрузка модели не нужна (память
+        освободит выход), а daemon-поток с mlx_lock/mx.clear_cache во время finalize интерпретатора — тот же класс
+        фатала stderr-lock, что описан в CLAUDE.md (daemon-потоки BackendService)."""
+        self._shutting_down = True
 
     def _is_final_stop(self) -> bool:
         """Остановка «насовсем» (wake word выключен или включён privacy), а не пауза под запись: после паузы адаптер

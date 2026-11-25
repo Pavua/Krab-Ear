@@ -2779,6 +2779,10 @@ class BackendService:
         wake_word_adapter = getattr(self, "_oww_adapter", None)
         if wake_word_adapter is not None:
             try:
+                # закрытие процесса: модель STT-споттера не выгружаем (daemon-поток при finalize интерпретатора)
+                mark_shutdown = getattr(wake_word_adapter, "mark_shutdown", None)
+                if callable(mark_shutdown):
+                    mark_shutdown()
                 if not wake_word_adapter.stop():
                     wake_word_stopped = False
                     logger.error(

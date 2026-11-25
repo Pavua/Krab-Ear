@@ -175,7 +175,13 @@ class GigaAmMemoryTranscriber:
     def __call__(self, samples: Any) -> str:
         import numpy as np
 
+        gen = self._gen
         model, tokenizer = self._ensure_model()
+        if self._gen != gen:  # release() случился, пока грузились: реплика перед выключением не возвращает 1,1 ГБ
+            with self._load_lock:
+                if self._gen != gen:
+                    self._model = self._tokenizer = None
+            raise TranscriberUnavailable("released")
         audio = np.asarray(samples, dtype=np.int16).astype(np.float32) / 32768.0
         text = self._run_locked(model, tokenizer, audio)
         if not isinstance(text, str):

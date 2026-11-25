@@ -286,3 +286,29 @@ def test_settings_defaults_keep_old_behaviour_and_validator_rejects_garbage():
     assert fixed["wake_word_oww_mode"] == "live" and fixed["wake_word_stt_mode"] == "off"
     ok = SettingsValidator().validate({"wake_word_oww_mode": "shadow", "wake_word_stt_mode": "live"}).fixed
     assert ok["wake_word_oww_mode"] == "shadow" and ok["wake_word_stt_mode"] == "live"
+
+
+def test_utterance_in_flight_when_release_happens_does_not_reload_the_model():
+    gate, entered = threading.Event(), threading.Event()
+
+    def slow_loader(mode):
+        entered.set()
+        gate.wait(5.0)
+        return ("m", "t")
+
+    tr, calls, _ = _make(loader=slow_loader)
+    result = {}
+
+    def call():
+        try:
+            tr(np.ones(2000, dtype=np.int16))
+        except TranscriberUnavailable as exc:
+            result["reason"] = str(exc)
+
+    worker = threading.Thread(target=call, daemon=True)
+    worker.start()
+    assert entered.wait(2.0)
+    tr.release()          # владелец выключил режим, пока реплика ждала загрузку модели
+    gate.set()
+    worker.join(3.0)
+    assert result == {"reason": "released"} and not tr.is_loaded() and calls["infer"] == []
