@@ -172,6 +172,8 @@ final class ConversationViewController: NSViewController {
     var idleEndTimer: Timer?
     /// Часы автозавершения; тесты подменяют, чтобы не ждать реальные секунды.
     var idleEndClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    /// Локальный признак речи по микрофону (VG не шлёт VAD/частичных расшифровок).
+    var localVoiceGate = LocalVoiceActivityGate()
     /// Интервал fallback (инжектируется в тестах; прод — 2с).
     var interruptFallbackInterval: TimeInterval = 2.0
 
@@ -285,6 +287,8 @@ final class ConversationViewController: NSViewController {
         interruptFallbackTimer?.invalidate()
         interruptFallbackTimer = nil
         stopIdleEndWatch()
+        // Недозабранный pre-roll (ошибка/ранний стоп до ready) — до 6 с звука комнаты в памяти.
+        WakePrerollMailbox.shared.reset()
         sendControlMessage(.end)
         closeWebSocket()
         stopAudioCapture()

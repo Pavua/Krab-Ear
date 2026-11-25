@@ -110,6 +110,32 @@ final class WakePrerollAndIdleEndTests: XCTestCase {
         XCTAssertTrue(policy.shouldEnd(now: 110, state: .listening))
     }
 
+    /// Гейт Opus #2270: VG не шлёт VAD/частичных расшифровок — речь видна только локально.
+    /// Пауза на подумать 20 с + монолог: голос каждые 5 с в «слушаю» не даёт завершить на 40 с.
+    func test_idlePolicy_localVoiceEvery5s_keepsConversation_silenceEnds() {
+        var policy = ConversationIdleEndPolicy(timeout: 30, startedAt: 0)
+        var gate = LocalVoiceActivityGate()
+        let voice = [Float](repeating: 0.1, count: 1280)
+        for t in stride(from: 20.0, through: 40.0, by: 5.0) {
+            if gate.isVoice(voice, now: t) { policy.noteActivity(at: t) }
+            XCTAssertFalse(policy.shouldEnd(now: t, state: .listening), "говорит — не завершать (\(t) с)")
+        }
+        XCTAssertFalse(policy.shouldEnd(now: 40, state: .listening))
+        XCTAssertFalse(policy.shouldEnd(now: 69, state: .listening))
+        XCTAssertTrue(policy.shouldEnd(now: 70, state: .listening), "30 с тишины после последней речи")
+    }
+
+    func test_localVoiceGate_thresholdAndThrottle() {
+        var gate = LocalVoiceActivityGate()
+        let quiet = [Float](repeating: 0.005, count: 1280)  // шум комнаты
+        let loud = [Float](repeating: 0.05, count: 1280)
+        XCTAssertFalse(gate.isVoice(quiet, now: 0))
+        XCTAssertTrue(gate.isVoice(loud, now: 0))
+        XCTAssertFalse(gate.isVoice(loud, now: 0.3), "не чаще раза в 0,5 с")
+        XCTAssertTrue(gate.isVoice(loud, now: 0.5))
+        XCTAssertFalse(gate.isVoice([], now: 10))
+    }
+
     func test_idleSettings_defaultsAndBounds() {
         let defaults = UserDefaults(suiteName: "idle-\(UUID().uuidString)")!
         XCTAssertTrue(ConversationIdleEndSettings.isEnabled(in: defaults), "по умолчанию включено")
@@ -158,6 +184,29 @@ final class WakePrerollAndIdleEndTests: XCTestCase {
         // Завершение идёт штатным stopConversation(): .end, закрытие WS и микрофона, оверлей скрыт.
         XCTAssertEqual(vc.conversationState, .idle)
         XCTAssertNil(vc.idleEndTimer)
+    }
+
+    func test_vc_micVoice_resetsSilence_andStopResetsPrerollMailbox() {
+        let defaults = UserDefaults(suiteName: "idle-mic-\(UUID().uuidString)")!
+        defaults.set(10, forKey: ConversationIdleEndSettings.secondsKey)
+        let vc = makeVC(defaults: defaults)
+        var now: TimeInterval = 500
+        vc.idleEndClock = { now }
+        vc.startConversation()
+        vc.conversationState = .listening
+        let voice = [Float](repeating: 0.1, count: 1280)
+        for _ in 0..<5 {  // 15 с монолога: голос каждые 3 с
+            now += 3
+            vc.processAudioSamples(voice, sourceSampleRate: 16_000)
+            vc.idleEndTick()
+        }
+        XCTAssertTrue(vc.isSessionActive, "речь в микрофон держит разговор без событий VG")
+        WakePrerollMailbox.shared.arm(at: now)
+        WakePrerollMailbox.shared.deliver([0.2], at: now)
+        now += 10
+        vc.idleEndTick()
+        XCTAssertFalse(vc.isSessionActive, "10 с тишины — завершён")
+        XCTAssertFalse(WakePrerollMailbox.shared.claimIfArmed(at: now), "стоп сбросил недозабранный pre-roll")
     }
 
     func test_vc_idleEndDisabled_noWatch() {

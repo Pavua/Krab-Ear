@@ -517,7 +517,8 @@ final class WakeWordPoller {
         }
     }
 
-    /// Звук до «Краб» для начала разговора (контракт `wake_word_take_preroll`, одноразовый).
+    /// Звук, накопленный backend'ом к срабатыванию «Краб», — в начало разговора
+    /// (контракт `wake_word_take_preroll`, одноразовый; что именно в нём — WakePreroll.swift).
     /// Таймаут 1 с (минимум IPCClient): дольше держать wake_word_stop за спиной нельзя.
     /// Разговор этот ответ не ждёт; нет метода/звука/privacy — молча без pre-roll.
     private func requestPreroll(ipc: IPCClient) {

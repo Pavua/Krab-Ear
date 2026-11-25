@@ -99,7 +99,7 @@ extension ConversationViewController {
             startAudioCapture()
         }
 
-        // Звук до «Краб» — первым куском (только для разговора, запущенного детекцией).
+        // Pre-roll слова-пробуждения — первым куском (только для разговора, запущенного детекцией).
         if audioHolder.expectsWakePreroll {
             audioHolder.expectsWakePreroll = false
             if let preroll = WakePrerollMailbox.shared.take(at: ProcessInfo.processInfo.systemUptime) {
@@ -443,6 +443,11 @@ extension ConversationViewController {
         // в VG как «речь пользователя» (петля самоэха). Здесь именно DROP, а не буфер:
         // задержанное эхо, отправленное позже, обмануло бы VAD ровно так же.
         if !audioHolder.echoCancellationActive, isOwnPlaybackAudible() { return }
+
+        // Пользователь говорит — отсчёт тишины сбрасывается (после эхо-гейта: свой TTS не в счёт).
+        if idleEndPolicy != nil, localVoiceGate.isVoice(samples, now: idleEndClock()) {
+            noteConversationActivity()
+        }
 
         let frames = assembleUplinkFrames(samples, sourceSampleRate: sourceSampleRate)
         sendUplinkFrames(frames)

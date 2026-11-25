@@ -64,3 +64,27 @@ struct ConversationIdleEndPolicy {
         return now - lastActivity >= timeout
     }
 }
+
+/// Локальный признак «пользователь говорит» по уровню микрофона разговора.
+///
+/// Гейт Opus #2270: Voice Gateway не шлёт conv.vad_speech и частичных расшифровок —
+/// только финальную после реплики. Без локального признака разговор при паузе на подумать
+/// и монологе дольше порога обрывался бы посреди фразы. Порог по RMS + не чаще раза в
+/// `minInterval`, чтобы не дёргать главный актор на каждом чанке. Эхо собственного TTS
+/// опасности не несёт: оно лишь откладывает завершение, а пока AI говорит, отсчёт и так стоит.
+struct LocalVoiceActivityGate {
+    /// ≈ −34 dBFS: голос у микрофона заметно громче фонового шума комнаты.
+    static let rmsThreshold: Float = 0.02
+    static let minInterval: TimeInterval = 0.5
+    private var lastVoiceAt: TimeInterval = -.infinity
+
+    /// true — в этом чанке голос (и с прошлого признака прошло ≥ minInterval).
+    mutating func isVoice(_ samples: [Float], now: TimeInterval) -> Bool {
+        guard !samples.isEmpty, now - lastVoiceAt >= Self.minInterval else { return false }
+        var sumSq: Float = 0
+        for s in samples { sumSq += s * s }
+        guard (sumSq / Float(samples.count)).squareRoot() >= Self.rmsThreshold else { return false }
+        lastVoiceAt = now
+        return true
+    }
+}

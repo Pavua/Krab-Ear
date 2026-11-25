@@ -62,7 +62,8 @@ struct ConversationAudioPrebuffer {
         droppedSampleCount += samples.count - acceptedCount
     }
 
-    /// Pre-roll слова-пробуждения — В НАЧАЛО: звук до «Краб» должен уйти в VG первым.
+    /// Pre-roll слова-пробуждения — В НАЧАЛО: звук, накопленный к срабатыванию «Краб»
+    /// (см. WakePreroll.swift), должен уйти в VG раньше живого захвата.
     /// Предел тот же: при переполнении отбрасывается хвост (самые поздние сэмплы).
     mutating func prepend(_ samples: [Float]) {
         guard !samples.isEmpty else { return }
