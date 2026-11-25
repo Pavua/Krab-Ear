@@ -93,6 +93,7 @@ extension HistoryPanelController {
         guard let engine = wakeEngineModeControls.first(where: { $0.value === sender })?.key,
               let mode = WakeEngineMode(segmentIndex: sender.selectedSegment) else { return }
         wakeEnginePendingWrites[engine, default: 0] += 1
+        wakeEngineStartupPollsLeft = Self.wakeEngineStartupPollLimit
         wakeEngineModeWriter(engine, mode) { [weak self] ok in
             guard let self else { return }
             self.wakeEnginePendingWrites[engine] = max(0, (self.wakeEnginePendingWrites[engine] ?? 1) - 1)
@@ -101,6 +102,7 @@ extension HistoryPanelController {
     }
 
     @objc func onWakeEngineRefreshClicked() {
+        wakeEngineStartupPollsLeft = Self.wakeEngineStartupPollLimit
         refreshWakeWordStatusRow()
     }
 
@@ -111,6 +113,7 @@ extension HistoryPanelController {
         let engines = result?["engines"] as? [String: Any]
         let listening = result?["running"] as? Bool
         let backendNow: Double? = listening == true ? result?["last_chunk_ts"] as? Double : nil
+        var starting = false
         for engine in WakeEngine.allCases {
             guard let control = wakeEngineModeControls[engine],
                   let label = wakeEngineStatsLabels[engine] else { continue }
@@ -128,6 +131,13 @@ extension HistoryPanelController {
                 line = WakeEngineStatsFormatter.text(
                     engine: engine, report: report, backendNow: backendNow, listening: listening)
                 warn = line.hasPrefix("Недоступен")
+                if line == WakeEngineStatsFormatter.turningOnText {
+                    starting = true
+                    if wakeEngineStartupPollsLeft == 0 {
+                        line = WakeEngineStatsFormatter.turningOnSlowText
+                        warn = true
+                    }
+                }
             } else {
                 line = "Backend не сообщает о движках — нужен свежий backend"
                 warn = true
@@ -144,5 +154,20 @@ extension HistoryPanelController {
             label.font = warn ? KrabEarTheme.Typography.sectionTitle : KrabEarTheme.Typography.body
             label.setAccessibilityLabel("\(engine.titleRU): \(line)")
         }
+        scheduleWakeEngineStartupFollowUp(starting: starting)
+    }
+
+    /// Пока движок «включается», статус сам перезапрашивается (ревью Codex #2262):
+    /// модель грузится в фоне, а других событий о готовности панель не получает.
+    /// Бюджет ограничен — даже несколько параллельных цепочек вместе не превысят его.
+    @MainActor
+    private func scheduleWakeEngineStartupFollowUp(starting: Bool) {
+        guard starting else {
+            wakeEngineStartupPollsLeft = Self.wakeEngineStartupPollLimit
+            return
+        }
+        guard wakeEngineStartupPollsLeft > 0 else { return }
+        wakeEngineStartupPollsLeft -= 1
+        wakeEngineFollowUpScheduler { [weak self] in self?.refreshWakeWordStatusRow() }
     }
 }

@@ -293,6 +293,14 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     /// Сколько записей режима ещё в пути по каждому движку: пока > 0, ответ статуса
     /// не перетирает сегмент (иначе выбор «прыгал» бы назад до подтверждения).
     var wakeEnginePendingWrites: [WakeEngine: Int] = [:]
+    /// Сколько ещё автоповторов статуса осталось, пока движок «включается» (модель
+    /// грузится в фоне). Сбрасывается действием пользователя и статусом без прогрева.
+    static let wakeEngineStartupPollLimit = 15
+    var wakeEngineStartupPollsLeft = HistoryPanelController.wakeEngineStartupPollLimit
+    /// Планировщик автоповтора (подменяется в тестах); по умолчанию — через 2 с на main.
+    var wakeEngineFollowUpScheduler: (@escaping () -> Void) -> Void = { work in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+    }
     /// Запись режима в backend; completion — на main с признаком подтверждения.
     /// Подменяется в тестах (по умолчанию — set_settings off-main).
     /// Записи идут через ОДНУ последовательную очередь: на глобальной параллельной два

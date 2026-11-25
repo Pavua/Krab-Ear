@@ -248,6 +248,37 @@ final class WakeEngineModesTests: XCTestCase {
         }
     }
 
+    /// Ревью Codex #2262: «Включается…» не должно висеть до следующего клика — статус
+    /// перезапрашивается сам, но в пределах бюджета; потом честное «дольше обычного».
+    @MainActor
+    func test_turningOn_schedulesBoundedFollowUps_thenSaysSlow() {
+        let controller = makeController()
+        _ = controller.window
+        var scheduled = 0
+        controller.wakeEngineFollowUpScheduler = { _ in scheduled += 1 }
+        let starting: [String: Any] = ["running": true, "engines": [
+            "oww": ["mode": "live", "active": false], "stt": ["mode": "off", "active": false],
+        ]]
+        let limit = HistoryPanelController.wakeEngineStartupPollLimit
+        for _ in 0..<(limit + 5) { controller.applyWakeEngineStatus(starting) }
+        XCTAssertEqual(scheduled, limit, "автоповторов не больше бюджета")
+        XCTAssertEqual(controller.wakeEngineStatsLabels[.oww]?.stringValue, WakeEngineStatsFormatter.turningOnSlowText)
+        XCTAssertEqual(controller.wakeEngineStatsLabels[.stt]?.stringValue, "Выключен · Срабатываний вживую: 0 · в тени: 0")
+
+        // Движок поднялся — бюджет восстановлен, автоповторов больше нет.
+        controller.applyWakeEngineStatus(["running": true, "engines": [
+            "oww": ["mode": "live", "active": true], "stt": ["mode": "off"],
+        ]])
+        XCTAssertEqual(scheduled, limit)
+        XCTAssertEqual(controller.wakeEngineStartupPollsLeft, limit)
+        XCTAssertEqual(controller.wakeEngineStatsLabels[.oww]?.stringValue, "Срабатываний вживую: 0 · в тени: 0")
+
+        // Новый прогрев снова получает автоповтор.
+        controller.applyWakeEngineStatus(starting)
+        XCTAssertEqual(scheduled, limit + 1)
+        XCTAssertEqual(controller.wakeEngineStatsLabels[.oww]?.stringValue, WakeEngineStatsFormatter.turningOnText)
+    }
+
     @MainActor
     func test_segmentClick_writesOnlyThatKey_andPendingWriteIsNotOverwritten() {
         let controller = makeController()
