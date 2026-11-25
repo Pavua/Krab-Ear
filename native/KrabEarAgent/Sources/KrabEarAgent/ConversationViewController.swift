@@ -375,16 +375,16 @@ final class ConversationViewController: NSViewController {
 
     // MARK: - Автозавершение по тишине
 
-    /// Старт отсчёта на новую сессию (настройка «Завершать после тишины», 10–300 с).
+    /// Старт секундного тика на новую сессию. Тик идёт всегда (возврат «говорю» → «слушаю»
+    /// по концу ответа нужен и метке), а решение о завершении — только при включённой
+    /// настройке «Завершать после тишины» (10–300 с), иначе `idleEndPolicy == nil`.
     func startIdleEndWatch() {
         idleEndTimer?.invalidate()
         idleEndTimer = nil
-        guard ConversationIdleEndSettings.isEnabled(in: userDefaults) else {
-            idleEndPolicy = nil
-            return
-        }
-        idleEndPolicy = ConversationIdleEndPolicy(
-            timeout: ConversationIdleEndSettings.seconds(in: userDefaults), startedAt: idleEndClock())
+        idleEndPolicy = ConversationIdleEndSettings.isEnabled(in: userDefaults)
+            ? ConversationIdleEndPolicy(
+                timeout: ConversationIdleEndSettings.seconds(in: userDefaults), startedAt: idleEndClock())
+            : nil
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in self?.idleEndTick() }
         }
@@ -406,8 +406,8 @@ final class ConversationViewController: NSViewController {
     /// Тик: N секунд тишины в «слушаю» → обычное завершение (.end, оверлей закрыт,
     /// пауза wake word снимается через .krabConversationStopped).
     func idleEndTick() {
-        guard isSessionActive, idleEndPolicy != nil else { return }
-        // Ответ доигран — назад в «слушаю», иначе отсчёт тишины удерживался бы вечно.
+        guard isSessionActive else { return }
+        // Ответ доигран — назад в «слушаю» (метка и отсчёт тишины), независимо от настройки.
         settleFinishedPlayback()
         guard var policy = idleEndPolicy else { return }
         let shouldEnd = policy.shouldEnd(now: idleEndClock(), state: conversationState)
