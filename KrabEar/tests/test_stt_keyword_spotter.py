@@ -352,6 +352,69 @@ class ReviewFixesTests(unittest.TestCase):
             model.close()
 
 
+class RateLimitRefundTests(unittest.TestCase):
+    """Лимит 20/мин защищает от шторма СОВПАДЕНИЙ, а не от шума: пустые реплики лимит не едят (иначе шум комнаты
+    оглушает споттер и настоящий «Краб» попадает в dropped_rate)."""
+
+    def _bursts(self, model, n, amp=3000):
+        for _ in range(n):
+            burst = _silence(10) + _tone(6, amp=amp) + _silence(12)
+            for i in range(0, len(burst) - FRAME + 1, FRAME):
+                model.predict(burst[i:i + FRAME])
+                model.drain(timeout=2.0)
+
+    def test_empty_transcripts_do_not_consume_the_rate_limit(self) -> None:
+        calls = []
+        model = sk.SttKeywordModel(lambda s: calls.append(1) or "", name="krab_stt", max_per_minute=2, cooldown_sec=0.0)
+        self._bursts(model, 6)
+        stats = model.stats()
+        self.assertEqual(len(calls), 6)
+        self.assertEqual((stats["dropped_rate"], stats["empty"]), (0, 6))
+        model.close()
+
+    def test_unavailable_recognizer_does_not_consume_the_rate_limit(self) -> None:
+        calls = []
+
+        def busy(_s):
+            calls.append(1)
+            raise sk.TranscriberUnavailable("mlx_busy")
+
+        model = sk.SttKeywordModel(busy, name="krab_stt", max_per_minute=2, cooldown_sec=0.0)
+        self._bursts(model, 5)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(model.stats()["dropped_rate"], 0)
+        model.close()
+
+    def test_real_words_still_consume_the_limit(self) -> None:
+        calls = []
+        model = sk.SttKeywordModel(lambda s: calls.append(1) or "привет", name="krab_stt", max_per_minute=2, cooldown_sec=0.0)
+        self._bursts(model, 5)
+        self.assertEqual(len(calls), 2)
+        self.assertGreaterEqual(model.stats()["dropped_rate"], 1)
+        model.close()
+
+    def test_real_wake_word_is_recognized_after_a_noise_storm(self) -> None:
+        texts = iter([""] * 25 + ["Краб"])
+        model = sk.SttKeywordModel(lambda s: next(texts), name="krab_stt", max_per_minute=20, cooldown_sec=0.0)
+        fired = []
+        for _ in range(26):
+            burst = _silence(10) + _tone(6) + _silence(12)
+            for i in range(0, len(burst) - FRAME + 1, FRAME):
+                fired.append(model.predict(burst[i:i + FRAME])["krab_stt"])
+                model.drain(timeout=2.0)
+        self.assertEqual(sum(1 for v in fired if v >= 0.5), 1)   # слово после 25 пустых реплик не потеряно
+        model.close()
+
+    def test_loudness_buckets_are_counters_only(self) -> None:
+        model = sk.SttKeywordModel(lambda s: "", name="krab_stt", max_per_minute=100, cooldown_sec=0.0)
+        self._bursts(model, 1, amp=3000)    # rms ~2100 → ge1000
+        self._bursts(model, 1, amp=120)     # rms ~85 → lt150
+        stats = model.stats()
+        self.assertEqual((stats["rms_ge1000"], stats["rms_lt150"]), (1, 1))
+        self.assertEqual(stats["rms_150_400"] + stats["rms_400_1000"], 0)
+        model.close()
+
+
 class PrivacyContractTests(unittest.TestCase):
     """Аудио и тексты реплик живут только в памяти: модуль не пишет на диск и не логирует транскрипт."""
 
