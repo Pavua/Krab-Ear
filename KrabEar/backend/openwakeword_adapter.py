@@ -115,6 +115,7 @@ class OpenWakeWordAdapter:
         self._stt: SttKeywordModel | None = None
         self._oww_loading = False
         self._oww_load_retry_at = 0.0
+        self._chunk_size = _STT_FRAME_SAMPLES  # размер чанка активной сессии (STT-споттер требует ровно 1280)
         self._shutting_down = False  # backend закрывается: модель споттера не выгружаем (процесс всё равно завершится)
         self._engine_stats: dict[str, dict[str, Any]] = {
             e: {"fires_live": 0, "fires_shadow": 0, "shadow_ts": deque(maxlen=_SHADOW_TS_KEEP), "last_fire_ts": None}
@@ -332,6 +333,7 @@ class OpenWakeWordAdapter:
             self._generation += 1
 
             self._oww = self._load_model(model_name, model_path) if use_oww else None
+            self._chunk_size = chunk_size
             self._close_stt_locked()
             if stt_wanted:
                 self._stt = SttKeywordModel(self._stt_transcribe, name=STT_MODEL_NAME)  # type: ignore[arg-type]
@@ -698,11 +700,42 @@ class OpenWakeWordAdapter:
         out[ENGINE_STT]["available"] = self._stt_transcribe is not None
         out[ENGINE_STT]["active"] = stt is not None
         out[ENGINE_OWW]["active"] = oww_obj is not None
+        out[ENGINE_OWW]["loading"] = bool(self._oww_loading)
+        out[ENGINE_OWW]["load_error"] = self._oww_load_error(out[ENGINE_OWW]["mode"], oww_obj)
+        out[ENGINE_STT]["load_error"] = self._stt_load_error(out[ENGINE_STT]["mode"], stt)
+        is_loaded = getattr(self._stt_transcribe, "is_loaded", None)
+        out[ENGINE_STT]["loading"] = bool(
+            stt is not None and callable(is_loaded) and not is_loaded() and out[ENGINE_STT]["load_error"] is None
+        )
         if stt is not None:
             out[ENGINE_STT]["spotter"] = stt.stats()
             out[ENGINE_STT]["transcribing_for_sec"] = round(stt.busy_for(), 2)
             out[ENGINE_STT]["unavailable_reason"] = stt.last_unavailable_reason()
         return out
+
+    def _oww_load_error(self, mode: str, oww_obj: Any) -> str | None:
+        """Код причины, по которой openWakeWord не активен при включённом режиме (без текста): панель отличает
+        «грузится» (штатно, до 30 с) от «библиотеки нет» и «сбой загрузки, повтор через минуту»."""
+        if mode == "off" or oww_obj is not None:
+            return None
+        if not self._oww_available:
+            return "not_installed"
+        if not self._oww_loading and time.monotonic() < self._oww_load_retry_at:
+            return "load_failed"
+        return None
+
+    def _stt_load_error(self, mode: str, stt: Any) -> str | None:
+        """Код причины, по которой STT-споттер не работает при включённом режиме (без текста)."""
+        if mode == "off":
+            return None
+        if self._stt_transcribe is None:
+            return "no_transcriber"
+        if stt is None:
+            return "chunk_size" if self._chunk_size != _STT_FRAME_SAMPLES else None
+        last_error = getattr(self._stt_transcribe, "last_error", None)
+        if stt.last_unavailable_reason() == "model_load_failed" or (callable(last_error) and last_error() == "model_load_failed"):
+            return "load_failed"
+        return None
 
     def _record_detection(
         self, model_name: str, score: float, *, capture_revision: str | None = None,
