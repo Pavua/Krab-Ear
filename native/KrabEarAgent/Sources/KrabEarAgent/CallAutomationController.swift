@@ -511,7 +511,14 @@ final class CallAutomationController: NSViewController {
 
         let colGoal = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("goal"))
         colGoal.title = "Цель"
-        colGoal.width = 160
+        // Было 160: сумма колонок 535 + поля стиля .inset 32 = 567 > скролла окна 640 (536) —
+        // после отрисовки таблица выходила за край и резала «Цель» (офлайн-рендер ресайза).
+        // Автоподгонка последней колонки работает по ИЗМЕНЕНИЮ ширины клипа, не при первой
+        // раскладке, — поэтому стартовая сумма обязана помещаться в 536: 375 + 120 + 32 = 527.
+        colGoal.width = 120
+        colGoal.minWidth = 60
+        colGoal.resizingMask = .autoresizingMask
+        historyTableView.columnAutoresizingStyle = .lastColumnOnlyAutoresizingStyle
 
         for col in [colDate, colPhone, colDuration, colCost, colStatus, colGoal] {
             historyTableView.addTableColumn(col)

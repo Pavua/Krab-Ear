@@ -834,6 +834,12 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         searchField.action = #selector(onSearch)
         searchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
         searchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // У NSSearchField нет собственной ширины: ряд считал, что всё помещается, и на 640 поле
+        // сжималось до значка лупы под кнопкой «Сбросить» (офлайн-рендер). Минимум 220 с
+        // приоритетом 490: fittingSize его учитывает (ряд встаёт столбиком), окно не растёт.
+        let searchMin = searchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 220)
+        searchMin.priority = NSLayoutConstraint.Priority(490)
+        searchMin.isActive = true
         // Автодополнение: недавние запросы из backend (см. +SearchSuggestions).
         setupSearchSuggestionsMenu()
         refreshSearchSuggestions()

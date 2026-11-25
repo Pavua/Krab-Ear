@@ -89,6 +89,7 @@ final class PanelLiveResizeTests: XCTestCase {
         var s = String(describing: type(of: v))
         if let t = (v as? ThemeCardView)?.title, !t.isEmpty { s += "«\(t)»" }
         if let f = v as? NSTextField, !f.stringValue.isEmpty { s += "«\(f.stringValue.prefix(40))»" }
+        if let f = v as? NSTextField, f.stringValue.isEmpty, let ph = f.placeholderString, !ph.isEmpty { s += "‹\(ph.prefix(30))›" }
         if let b = v as? NSButton, !b.title.isEmpty { s += "«\(b.title.prefix(30))»" }
         if let id = v.identifier?.rawValue { s += "#\(id)" }
         return s
@@ -131,8 +132,14 @@ final class PanelLiveResizeTests: XCTestCase {
         }
         for v in descendants(root) where isEffectivelyVisible(v, under: root) {
             let f = v.convert(v.bounds, to: root)
-            if f.width <= 0 || f.height <= 0 { continue }
             let hScroll = insideHorizontalScroll(v, under: root)
+            // 0б) Поле ввода сжато до нечитаемого — до пропуска нулевых рамок: поиск «Истории»
+            //     на 640 получал ширину 0 (на экране — один значок лупы под «Сбросить»).
+            if let field = v as? NSTextField, field.isEditable, !hScroll, f.height > 0, field.bounds.width < 40 {
+                issues.append(Issue(tab: tab.title, width: width, theme: theme, kind: "сжато поле",
+                                    detail: "\(name(field)) \(Int(field.bounds.width)) pt; путь: \(path(field, root))"))
+            }
+            if f.width <= 0 || f.height <= 0 { continue }
             // 1) Схлопнутые карточки и секции верхнего уровня.
             if (v is ThemeCardView || v is CollapsibleSectionView), !hScroll,
                !(v.superview is NSStackView && (v.superview as? NSStackView)?.orientation == .horizontal),
@@ -144,6 +151,17 @@ final class PanelLiveResizeTests: XCTestCase {
             if !hScroll, f.maxX > rootW + 1, !(v is NSScroller) {
                 issues.append(Issue(tab: tab.title, width: width, theme: theme, kind: "за границей",
                                     detail: "\(name(v)) maxX \(Int(f.maxX)) > \(Int(rootW)); путь: \(path(v, root))"))
+            }
+            // 2б) Подпись в ручном горизонтальном ряду сложилась «столбиком слов» (нит гейта
+            //     #2255: «Источник звонка:» 28×96 pt) — такой ряд должен быть AdaptiveRowStackView.
+            if let label = v as? NSTextField, !label.isEditable, !hScroll, label.cell?.wraps == true,
+               let row = label.superview as? NSStackView, row.orientation == .horizontal,
+               let font = label.font {
+                let line = NSLayoutManager().defaultLineHeight(for: font)
+                if label.bounds.height > line * 2.5, label.bounds.width < 160 {
+                    issues.append(Issue(tab: tab.title, width: width, theme: theme, kind: "подпись столбиком",
+                                        detail: "\(name(label)) \(Int(label.bounds.width))×\(Int(label.bounds.height)); путь: \(path(label, root))"))
+                }
             }
             // 3) Однострочная подпись обрезана без многоточия.
             if let label = v as? NSTextField, !label.isEditable, !hScroll,
@@ -173,6 +191,25 @@ final class PanelLiveResizeTests: XCTestCase {
 
     private let widths: [CGFloat] = [640, 860, 1100, 1600, 1100, 860, 640]
 
+    /// XCTest сообщает о программной активации конфликтующих констрейнтов отдельным issue
+    /// («Conflicting constraints detected»), а не строкой в stderr — перехват stderr его не видел
+    /// (нит гейта #2255: конфликт setRail прошёл незамеченным). Собираем и проверяем явно.
+    private var conflictIssues: [String] = []
+
+    override func record(_ issue: XCTIssue) {
+        if issue.compactDescription.contains("Conflicting constraints") {
+            conflictIssues.append(issue.compactDescription)
+        }
+        super.record(issue)
+    }
+
+    override func tearDown() {
+        let found = conflictIssues
+        conflictIssues = []
+        XCTAssertTrue(found.isEmpty, "конфликты констрейнтов (issue XCTest): \(found.prefix(3))")
+        super.tearDown()
+    }
+
     func test_liveResize_allTabs_bothThemes() {
         let controller = makeController()
         guard let window = controller.window else { return XCTFail("нет окна") }
@@ -194,6 +231,24 @@ final class PanelLiveResizeTests: XCTestCase {
                         window.contentView?.layoutSubtreeIfNeeded()
                         window.contentView?.layoutSubtreeIfNeeded()
                         issues += inspect(tab: tab, controller: controller, width: w, theme: theme)
+                    }
+                    // Отрисовка — обязательная часть проверки: таблицы раскладывают колонки
+                    // только при показе (таблица «Автозвонков» выходила за край на 640 лишь
+                    // после отрисовки). PNG пишутся при KRAB_RENDER_DIR (светлая тема).
+                    if let content = window.contentView {
+                        for w: CGFloat in [860, 640] {
+                            window.setContentSize(NSSize(width: w, height: 820))
+                            content.layoutSubtreeIfNeeded()
+                            content.layoutSubtreeIfNeeded()
+                            guard let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else { continue }
+                            content.cacheDisplay(in: content.bounds, to: rep)
+                            content.layoutSubtreeIfNeeded()
+                            issues += inspect(tab: tab, controller: controller, width: w, theme: theme + ", после отрисовки")
+                            if theme == "светлая", let dir = ProcessInfo.processInfo.environment["KRAB_RENDER_DIR"] {
+                                try? rep.representation(using: .png, properties: [:])?
+                                    .write(to: URL(fileURLWithPath: dir).appendingPathComponent("panel_\(tab.rawValue)_\(Int(w)).png"))
+                            }
+                        }
                     }
                 }
             }
@@ -314,6 +369,7 @@ final class PanelLiveResizeTests: XCTestCase {
             var found: [String] = []
             for tab in Tab.ordered {
                 controller.selectPanelTab(tab)
+                expandAllSections(in: controller)
                 window.contentView?.layoutSubtreeIfNeeded()
                 window.contentView?.layoutSubtreeIfNeeded()
                 guard let root = controller.mainTabView.selectedTabViewItem?.view else { continue }
@@ -326,6 +382,9 @@ final class PanelLiveResizeTests: XCTestCase {
                     let link = descendants(root).compactMap { $0 as? NSButton }
                         .first { $0.title.contains("Разговор с AI") && $0.action == #selector(HistoryPanelController.selectVoiceGatewayCardTab) }
                     XCTAssertNotNil(link, "нет ссылки на карточку ключа на «Live перевод»")
+                    // Свёрнутая секция (состояние из UserDefaults) не должна молча пропускать
+                    // проверку (нит гейта): секции раскрыты, ссылка обязана быть видна.
+                    if let link { XCTAssertTrue(isEffectivelyVisible(link, under: root), "ссылка скрыта на \(Int(w))") }
                     if let link, isEffectivelyVisible(link, under: root) {
                         let f = link.convert(link.bounds, to: root)
                         XCTAssertLessThanOrEqual(f.maxX, root.bounds.width + 1, "ссылка за границей на \(Int(w)): \(f.maxX)")

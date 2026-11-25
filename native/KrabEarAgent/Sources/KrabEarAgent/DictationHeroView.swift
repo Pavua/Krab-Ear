@@ -441,6 +441,9 @@ final class DictationHeroView: NSView {
             }
         }
         if !row.isEmpty { summaryGrid.addRow(with: row) }
+        // Вью, не попавшие в текущие пары (ключ убран из списка), не висят в сетке.
+        let live = Set(pairs.flatMap { [titleLabels[$0.key], valueLabels[$0.key]] }.compactMap { $0.map(ObjectIdentifier.init) })
+        for v in summaryGrid.subviews where !live.contains(ObjectIdentifier(v)) { v.removeFromSuperview() }
         for col in 0..<summaryGrid.numberOfColumns {
             summaryGrid.column(at: col).xPlacement = .leading
             // Между парами «ярлык/значение» — заметный зазор, чтобы пары не слипались.
