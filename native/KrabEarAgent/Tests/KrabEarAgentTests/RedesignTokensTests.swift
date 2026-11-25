@@ -172,7 +172,8 @@ final class RedesignTokensTests: XCTestCase {
 
     /// Размер шрифта из переменной/выражения (`ofSize: x`), кроме токенов темы: тот же храповик,
     /// отдельным счётчиком на весь каталог. TODO PR 5: `controlSize = .small/.mini` и `.caption2`.
-    private static let variableFontSizeAllowance = 1
+    /// 0 с PR 4b: последний случай (`historyBodyFont` — `ofSize: NSFont.systemFontSize`) переведён на токены.
+    private static let variableFontSizeAllowance = 0
 
     private struct FontScan {
         var small: [String: Int] = [:]

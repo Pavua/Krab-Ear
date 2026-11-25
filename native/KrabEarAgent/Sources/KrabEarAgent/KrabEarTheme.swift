@@ -1352,6 +1352,9 @@ public class HistoryBadgeView: NSView {
         wantsLayer = true
         layer?.addSublayer(backgroundLayer)
 
+        // 🔴 Текст метки раньше не присваивался вовсе: в строках «Истории» дата, статус вставки
+        // и уверенность были пустыми капсулами со значком (офлайн-рендер PR 4b).
+        label.stringValue = text
         label.font = KrabEarTheme.Typography.captionMedium.tabular()
         label.textColor = color
         label.maximumNumberOfLines = 1
@@ -1388,6 +1391,16 @@ public class HistoryBadgeView: NSView {
 
         backgroundLayer.backgroundColor = color.withAlphaComponent(0.1).cgColor
         backgroundLayer.cornerRadius = 4 // Капсула
+        // Метка по своему содержимому: в ряду строки она не растягивается на всю ширину.
+        setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(text)
+    }
+
+    /// Высота метки (капсула 2 + подпись + 2) — для расчёта высоты строки таблицы.
+    public static var height: CGFloat {
+        ceil(NSLayoutManager().defaultLineHeight(for: KrabEarTheme.Typography.captionMedium)) + 4
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
@@ -1416,7 +1429,10 @@ public class HistoryItemCellView: NSTableCellView {
         transcriptLabel.font = KrabEarTheme.Typography.body
         transcriptLabel.textColor = KrabEarTheme.Colors.textPrimary
         transcriptLabel.maximumNumberOfLines = 2
-        transcriptLabel.lineBreakMode = .byTruncatingTail
+        // Две строки с многоточием в конце второй: перенос по словам + обрезка последней
+        // видимой строки. .byTruncatingTail делал переносимую подпись однострочной.
+        transcriptLabel.lineBreakMode = .byWordWrapping
+        transcriptLabel.cell?.truncatesLastVisibleLine = true
         transcriptLabel.drawsBackground = false
         transcriptLabel.isBordered = false
         transcriptLabel.isEditable = false
@@ -1455,7 +1471,11 @@ public class HistoryItemCellView: NSTableCellView {
             contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: KrabEarTheme.Metrics.standard),
             contentStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -KrabEarTheme.Metrics.standard),
             contentStack.topAnchor.constraint(equalTo: topAnchor, constant: KrabEarTheme.Metrics.tight),
-            contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -KrabEarTheme.Metrics.tight)
+            contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -KrabEarTheme.Metrics.tight),
+            // Переносимым подписям — ширина ячейки: иначе стек с alignment .leading отдаёт им
+            // ширину одной строки, и перенос не случается.
+            transcriptLabel.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
+            translationLabel.widthAnchor.constraint(equalTo: contentStack.widthAnchor),
         ])
     }
 
