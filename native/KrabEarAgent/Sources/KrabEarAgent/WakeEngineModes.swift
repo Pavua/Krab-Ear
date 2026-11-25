@@ -76,6 +76,9 @@ struct WakeEngineReport: Equatable {
     var unavailableReason: String?
     /// Только `stt`: сколько реплик пропущено из-за недоступности распознавателя.
     var spotterUnavailable: Int?
+    /// Существует ли объект движка в текущей сессии слушателя (backend #2261).
+    /// `nil` — старый backend поля не отдаёт: это «неизвестно», а не «выключен».
+    var active: Bool?
 
     init(engine: WakeEngine, payload: [String: Any]?) {
         let p = payload ?? [:]
@@ -88,6 +91,7 @@ struct WakeEngineReport: Equatable {
         unavailableReason = (reason?.isEmpty ?? true) ? nil : reason
         let spotter = p["spotter"] as? [String: Any]
         spotterUnavailable = spotter.map { Self.int($0["unavailable"]) }
+        active = p["active"] as? Bool
     }
 
     private static func int(_ value: Any?) -> Int {
@@ -117,9 +121,17 @@ enum WakeEngineStatsFormatter {
     /// распознавания, поэтому по ней одной нельзя писать «недоступен» вместо чисел.
     static let hardUnavailableReasons: Set<String> = ["model_load_failed"]
 
-    static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?) -> String {
+    /// `listening` — `running` из того же ответа: `nil` — неизвестно (старый backend).
+    /// Без слушателя backend отдаёт `active == false` у обоих движков, поэтому
+    /// «Включается…» показываем только при работающем слушателе.
+    static func text(engine: WakeEngine, report: WakeEngineReport, backendNow: Double?,
+                     listening: Bool? = nil) -> String {
         if engine == .stt, report.mode != .off, report.available == false {
             return "Недоступен (распознаватель не загружен)"
+        }
+        if report.mode != .off, listening == true, report.active == false {
+            // Режим сменили на лету: модель грузится/прогревается (секунды).
+            return "Включается… (загружается модель)"
         }
         var parts = [
             "Срабатываний вживую: \(report.firesLive)",
@@ -145,6 +157,9 @@ enum WakeEngineStatsFormatter {
         }
         if report.mode == .off {
             parts.insert("Выключен", at: 0)
+        } else if listening == false {
+            // Детектор выключен или прослушивание на паузе (запись, разговор, privacy mode).
+            parts.insert("Сейчас не слушает", at: 0)
         }
         return parts.joined(separator: " · ")
     }

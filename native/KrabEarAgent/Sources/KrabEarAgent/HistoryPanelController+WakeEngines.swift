@@ -109,7 +109,8 @@ extension HistoryPanelController {
     @MainActor
     func applyWakeEngineStatus(_ result: [String: Any]?, failedEngine: WakeEngine? = nil) {
         let engines = result?["engines"] as? [String: Any]
-        let backendNow: Double? = (result?["running"] as? Bool) == true ? result?["last_chunk_ts"] as? Double : nil
+        let listening = result?["running"] as? Bool
+        let backendNow: Double? = listening == true ? result?["last_chunk_ts"] as? Double : nil
         for engine in WakeEngine.allCases {
             guard let control = wakeEngineModeControls[engine],
                   let label = wakeEngineStatsLabels[engine] else { continue }
@@ -124,7 +125,8 @@ extension HistoryPanelController {
                 if (wakeEnginePendingWrites[engine] ?? 0) == 0 {
                     control.selectedSegment = report.mode.segmentIndex
                 }
-                line = WakeEngineStatsFormatter.text(engine: engine, report: report, backendNow: backendNow)
+                line = WakeEngineStatsFormatter.text(
+                    engine: engine, report: report, backendNow: backendNow, listening: listening)
                 warn = line.hasPrefix("Недоступен")
             } else {
                 line = "Backend не сообщает о движках — нужен свежий backend"

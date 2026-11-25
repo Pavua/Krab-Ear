@@ -55,6 +55,48 @@ final class WakeEngineModesTests: XCTestCase {
             + " · пропущено реплик: 1 (последняя причина: model_load_failed)")
     }
 
+    // MARK: - active (backend #2261)
+
+    func test_active_parsed_absentIsUnknown() {
+        XCTAssertNil(WakeEngineReport(engine: .oww, payload: ["mode": "live"]).active)
+        XCTAssertEqual(WakeEngineReport(engine: .oww, payload: ["active": false]).active, false)
+        XCTAssertEqual(WakeEngineReport(engine: .stt, payload: ["active": true]).active, true)
+    }
+
+    func test_switchedOnTheFly_whileListening_showsTurningOn() {
+        for engine in WakeEngine.allCases {
+            let report = WakeEngineReport(engine: engine, payload: [
+                "mode": "live", "active": false, "available": true, "unavailable_reason": "model_load_failed",
+            ])
+            XCTAssertEqual(WakeEngineStatsFormatter.text(engine: engine, report: report, backendNow: nil, listening: true),
+                           "Включается… (загружается модель)", "\(engine): прогрев важнее старой причины")
+        }
+    }
+
+    func test_activeFalse_withoutListener_isNotTurningOn() {
+        // Без слушателя backend отдаёт active=false у обоих движков — это не «включается».
+        let report = WakeEngineReport(engine: .oww, payload: ["mode": "live", "active": false, "fires_live": 2])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: report, backendNow: nil, listening: false),
+                       "Сейчас не слушает · Срабатываний вживую: 2 · в тени: 0")
+    }
+
+    func test_unknownActiveOrListening_keepsPreviousBehaviour() {
+        let report = WakeEngineReport(engine: .stt, payload: [
+            "mode": "shadow", "available": true, "unavailable_reason": "model_load_failed",
+        ])
+        XCTAssertTrue(WakeEngineStatsFormatter.text(engine: .stt, report: report, backendNow: nil, listening: true)
+            .hasPrefix("Недоступен (model_load_failed)"))
+        let unknownListener = WakeEngineReport(engine: .oww, payload: ["mode": "live", "active": false])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .oww, report: unknownListener, backendNow: nil),
+                       "Срабатываний вживую: 0 · в тени: 0")
+    }
+
+    func test_offMode_ignoresActiveAndListening() {
+        let report = WakeEngineReport(engine: .stt, payload: ["mode": "off", "active": false])
+        XCTAssertEqual(WakeEngineStatsFormatter.text(engine: .stt, report: report, backendNow: nil, listening: false),
+                       "Выключен · Срабатываний вживую: 0 · в тени: 0")
+    }
+
     func test_oww_ignoresSttOnlyFields() {
         let report = WakeEngineReport(engine: .oww, payload: [
             "mode": "live", "fires_live": 1, "unavailable_reason": "model_load_failed",
