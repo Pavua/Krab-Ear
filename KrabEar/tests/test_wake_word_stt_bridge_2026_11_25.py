@@ -180,6 +180,86 @@ def test_warmup_loads_and_runs_on_silence_and_swallows_unavailability():
     busy.warmup()  # занят — молча пропускаем
 
 
+def test_release_clears_mlx_cache_only_under_mlx_lock():
+    cleared = []
+    lock = _Lock()
+    inter = _Inter()
+    tr = bridge.GigaAmMemoryTranscriber(
+        loader=lambda m: ("m", "t"), infer=lambda m, t, a: "x", mlx_lock_fn=lambda: lock, inter_lock_fn=inter,
+        release_cache=lambda: cleared.append(lock.acquired - lock.released), lock_wait_sec=0.25,
+    )
+    tr(np.ones(100, dtype=np.int16))
+    tr.release()
+    assert not tr.is_loaded()
+    assert cleared == [1]                       # кэш сброшен, пока лок удерживался
+    assert lock.released == lock.acquired == 2  # инференс + выгрузка, лок отпущен
+    assert inter.kwargs == {"timeout_sec": 0.25}
+
+
+def test_release_with_busy_lock_drops_references_but_skips_cache_clear_and_does_not_wait():
+    cleared = []
+    tr = bridge.GigaAmMemoryTranscriber(
+        loader=lambda m: ("m", "t"), infer=lambda m, t, a: "x", mlx_lock_fn=lambda: _Lock(acquirable=False),
+        inter_lock_fn=_Inter(), release_cache=lambda: cleared.append(1), lock_wait_sec=0.05,
+    )
+    tr._model, tr._tokenizer = "m", "t"
+    tr.release()
+    assert not tr.is_loaded() and cleared == []
+
+
+def test_release_never_clears_cache_while_dictation_holds_the_real_mlx_lock():
+    from core.mlx_lock import mlx_lock
+
+    cleared = []
+    held, done = threading.Event(), threading.Event()
+
+    def dictation():
+        with mlx_lock():
+            held.set()
+            done.wait(5.0)
+
+    t = threading.Thread(target=dictation, daemon=True)
+    t.start()
+    assert held.wait(2.0)
+    tr = bridge.GigaAmMemoryTranscriber(
+        loader=lambda m: ("m", "t"), infer=lambda m, t_, a: "x", lock_wait_sec=0.1, release_cache=lambda: cleared.append(1),
+    )
+    tr._model = "m"
+    start = time.monotonic()
+    tr.release()
+    assert time.monotonic() - start < 1.0 and cleared == [] and not tr.is_loaded()
+    done.set()
+    t.join(2.0)
+
+
+def test_warmup_started_before_release_does_not_bring_the_model_back():
+    gate, entered = threading.Event(), threading.Event()
+
+    def slow_loader(mode):
+        entered.set()
+        gate.wait(5.0)
+        return ("m", "t")
+
+    tr, calls, _ = _make(loader=slow_loader)
+    worker = threading.Thread(target=tr.warmup, daemon=True)
+    worker.start()
+    assert entered.wait(2.0)
+    tr.release()          # владелец выключил режим, пока модель ещё грузилась
+    gate.set()
+    worker.join(3.0)
+    assert not tr.is_loaded() and calls["infer"] == []
+
+
+def test_warm_model_is_not_warmed_again_after_adapter_restart():
+    tr, calls, _ = _make()
+    tr.warmup()
+    tr.warmup()           # адаптер перезапускается после каждой диктовки
+    assert len(calls["infer"]) == 1 and calls["load"] == 1
+    tr.release()
+    tr.warmup()           # после выгрузки прогрев нужен снова
+    assert len(calls["infer"]) == 2 and calls["load"] == 2
+
+
 def test_bridge_never_writes_audio_to_disk_or_spawns_processes_or_logs_text():
     tree = ast.parse(SRC)
     top_imports = {a.name.split(".")[0] for n in tree.body if isinstance(n, ast.Import) for a in n.names}

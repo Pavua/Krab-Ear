@@ -354,6 +354,15 @@ class OpenWakeWordAdapter:
             )
 
     def stop(self, timeout: float = 3.0) -> bool:
+        """Останавливает поток прослушивания; при остановке «насовсем» (wake word выключен/privacy) выгружает
+        модель STT-споттера. Пауза под запись модель не выгружает."""
+        final = self._is_final_stop()
+        exited = self._stop_impl(timeout)
+        if final:
+            self._release_stt_model_async()
+        return exited
+
+    def _stop_impl(self, timeout: float = 3.0) -> bool:
         """Останавливает поток прослушивания.
 
         Returns:
@@ -556,6 +565,21 @@ class OpenWakeWordAdapter:
         warmup = getattr(self._stt_transcribe, "warmup", None)
         if callable(warmup):
             threading.Thread(target=warmup, name="SttSpotterWarmup", daemon=True).start()
+
+    def _release_stt_model_async(self) -> None:
+        """Выгрузка модели споттера в отдельном потоке: не под self._lock и не в потоке слушателя (release берёт
+        mlx_lock с ожиданием до 0,25 с)."""
+        threading.Thread(target=self._release_stt_model, name="SttSpotterRelease", daemon=True).start()
+
+    def _is_final_stop(self) -> bool:
+        """Остановка «насовсем» (wake word выключен или включён privacy), а не пауза под запись: после паузы адаптер
+        стартует снова, и выгрузка заставила бы грузить 1,1 ГБ после КАЖДОЙ диктовки."""
+        try:
+            if self._settings_get("wake_word_enabled", True) is False:
+                return True
+        except Exception:
+            return False
+        return self._privacy_blocked()
 
     def _release_stt_model(self) -> None:
         """Режим stt выключен — модель споттера выгружается из памяти (если она вообще была загружена)."""
@@ -1149,6 +1173,7 @@ class OpenWakeWordAdapter:
                         if mode != "off":
                             if stt_was_off:
                                 stt.reset()  # включили на лету: сегментатор не должен помнить старый поток
+                                self._start_stt_warmup()  # модель могла быть выгружена при выключении
                                 stt_was_off = False
                             try:
                                 stt_scores = stt.predict(flat)
@@ -1162,8 +1187,9 @@ class OpenWakeWordAdapter:
                             for mdl_name, score in stt_scores.items():
                                 if score >= 0.5:
                                     detections.append((ENGINE_STT, mdl_name, float(score), mode))
-                        else:
+                        elif not stt_was_off:
                             stt_was_off = True
+                            self._release_stt_model_async()  # выключили на лету: 1,1 ГБ не держим до рестарта
                     if privacy_changed():
                         break
                     live_published = False  # оба движка в одном чанке: будим один раз, второй только считаем

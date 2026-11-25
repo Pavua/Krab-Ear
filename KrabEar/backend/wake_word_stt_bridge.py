@@ -48,7 +48,7 @@ def _default_infer(model: Any, tokenizer: Any, audio: Any) -> str:
     return tokenizer.decode(model.decode(encoded, seq_len))
 
 
-def _default_release() -> None:
+def _clear_mlx_cache() -> None:
     try:
         import mlx.core as mx
 
@@ -71,16 +71,20 @@ class GigaAmMemoryTranscriber:
         inter_lock_fn: Optional[Callable[..., Any]] = None,
         release_cache: Optional[Callable[[], None]] = None,
     ) -> None:
+        # release_cache вызывается ТОЛЬКО под mlx_lock (инвариант проекта: любое обращение к MLX-кэшу — под локом).
         self._mode = mode
         self._lock_wait = float(lock_wait_sec)
         self._loader = loader or _default_loader
         self._infer = infer or _default_infer
         self._mlx_lock_fn = mlx_lock_fn
         self._inter_lock_fn = inter_lock_fn
-        self._release_cache = release_cache or _default_release
+        self._release_cache = release_cache or _clear_mlx_cache
         self._load_lock = threading.Lock()
         self._model: Any = None
         self._tokenizer: Any = None
+        self._warmed = False
+        self._gen = 0  # release() увеличивает: прогрев, начатый до выгрузки, не должен вернуть модель в память
+        self._gen_lock = threading.Lock()  # отдельный лёгкий лок: release() не ждёт конца идущей загрузки, чтобы объявить отмену
 
     # ------------------------------------------------------------------ модель
     def is_loaded(self) -> bool:
@@ -98,10 +102,25 @@ class GigaAmMemoryTranscriber:
         return self._model, self._tokenizer
 
     def release(self) -> None:
-        """Выгружает модель (владелец выключил режим): память возвращается, кэш MLX сбрасывается."""
+        """Выгружает модель (владелец выключил режим): ссылки сбрасываются сразу, кэш MLX — под mlx_lock с коротким
+        ожиданием; занято диктовкой — кэш не трогаем (Metal вернёт память сам), одновременного MLX нет."""
+        with self._gen_lock:
+            self._gen += 1  # отмена объявлена ДО ожидания _load_lock: идущий прогрев увидит её и не станет гонять инференс
         with self._load_lock:
             self._model = self._tokenizer = None
-        self._release_cache()
+            self._warmed = False
+        try:
+            mlx_lock_fn, inter_fn = self._locks()
+            with inter_fn(timeout_sec=self._lock_wait):
+                lock = mlx_lock_fn()
+                if not lock.acquire(timeout=self._lock_wait):
+                    return
+                try:
+                    self._release_cache()
+                finally:
+                    lock.release()
+        except Exception:  # noqa: BLE001 — занято/сбой: память вернётся без явного сброса кэша
+            return
 
     # ------------------------------------------------------------------ инференс
     def _locks(self) -> tuple[Callable[[], Any], Callable[..., Any]]:
@@ -138,8 +157,18 @@ class GigaAmMemoryTranscriber:
         try:
             import numpy as np
 
+            if self._model is not None and self._warmed:
+                return  # адаптер перезапускается после каждой диктовки: прогретую модель не гоняем зря
+            gen = self._gen
             model, tokenizer = self._ensure_model()
+            if self._gen != gen:  # release() случился, пока грузились: модель не должна остаться в памяти
+                with self._load_lock:
+                    if self._gen != gen:
+                        self._model = self._tokenizer = None
+                return
             self._run_locked(model, tokenizer, np.zeros(SAMPLE_RATE, dtype=np.float32))
+            if self._gen == gen:
+                self._warmed = True
         except TranscriberUnavailable:
             pass
 
@@ -151,4 +180,5 @@ class GigaAmMemoryTranscriber:
         text = self._run_locked(model, tokenizer, audio)
         if not isinstance(text, str):
             raise TranscriberUnavailable("not_text")
+        self._warmed = True
         return text

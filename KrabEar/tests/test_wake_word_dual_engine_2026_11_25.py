@@ -284,3 +284,41 @@ def test_status_shows_unavailable_reason_instead_of_a_silent_zero(tmp_path):
     assert engines[oa.ENGINE_STT]["spotter"]["unavailable"] >= 1
     assert engines[oa.ENGINE_STT]["unavailable_reason"] == "mlx_busy"
     spotter.close()
+
+
+def test_switching_stt_off_at_runtime_releases_model_in_background_and_on_warms_up_again(tmp_path, monkeypatch):
+    tr = _Transcriber()
+    released = threading.Event()
+    tr.release = lambda: released.set()
+    adapter, cfg = _adapter(tmp_path, {"wake_word_stt_mode": "live"}, stt_transcribe=tr)
+    adapter._oww = SimpleNamespace(predict=lambda c: {"krab_ru": 0.0})
+    adapter._stt = _FakeStt()
+
+    def on_read(n):
+        if n == 2:
+            cfg["wake_word_stt_mode"] = "off"
+        if n == 4:
+            cfg["wake_word_stt_mode"] = "live"
+
+    adapter._on_detected = lambda n, s: None
+    _run(adapter, monkeypatch, chunks=6, on_read=on_read)
+    assert released.wait(2.0)      # выключили на лету — модель выгружена без рестарта адаптера
+    assert tr.warmed.wait(2.0)     # включили обратно — прогрев запущен снова
+
+
+def test_pause_for_recording_keeps_the_model_but_final_stop_releases_it(tmp_path):
+    tr = _Transcriber()
+    released = threading.Event()
+    tr.release = lambda: released.set()
+    recording = {"on": True}
+    cfg = {"wake_word_stt_mode": "live", "audio_guarded_read_enabled": False}
+    adapter = OpenWakeWordAdapter(tmp_path, settings_get=lambda k, d: cfg.get(k, d), stt_transcribe=tr,
+                                  is_recording=lambda: recording["on"])
+    adapter.stop()                                  # пауза под диктовку
+    assert not released.wait(0.3)
+    recording["on"] = False
+    adapter.stop()                                  # обычная остановка при включённом wake word
+    assert not released.wait(0.3)
+    cfg["wake_word_enabled"] = False
+    adapter.stop()                                  # wake word выключен — остановка «насовсем»
+    assert released.wait(2.0)
