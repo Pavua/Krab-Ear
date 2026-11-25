@@ -231,7 +231,8 @@ class SttKeywordModel:
         self._gen = 0  # reset() увеличивает: результат распознавания, запущенного до reset, устарел
         self._cooldown_until = 0.0
         self._starts: Deque[float] = deque()
-        self._stats = {"utterances": 0, "transcribed": 0, "matched": 0, "matched_word": 0, "matched_fragment": 0, "errors": 0, "unavailable": 0,
+        self._stats = {"utterances": 0, "transcribed": 0, "matched": 0, "matched_word": 0, "matched_fragment": 0, "errors": 0, "unavailable": 0, "empty": 0,
+                       "rms_lt150": 0, "rms_150_400": 0, "rms_400_1000": 0, "rms_ge1000": 0,
                        "dropped_busy": 0, "dropped_rate": 0, "suppressed_cooldown": 0, "stale_discarded": 0}
         self._cond = threading.Condition(self._lock)
         self._queue: Deque[Any] = deque()
@@ -296,10 +297,24 @@ class SttKeywordModel:
         self._worker.join(timeout)
 
     # ------------------------------------------------------------------ внутреннее
+    @staticmethod
+    def _rms_bucket(utterance: list[int]) -> str:
+        """Корзина громкости реплики (только счётчик, без аудио): для живой настройки порога VAD под комнату.
+        Берётся МАКСИМУМ rms по кадрам, а не rms всей реплики: в ней ~0,64 с тишины по краям (пре-ролл и хвост), и среднее
+        занижало бы громкость короткого «Краб» ~в 1,4 раза, а порог VAD — кадровый."""
+        rms = max((_rms(utterance[i:i + FRAME_SAMPLES]) for i in range(0, len(utterance), FRAME_SAMPLES)), default=0.0)
+        if rms < 150:
+            return "rms_lt150"
+        if rms < 400:
+            return "rms_150_400"
+        return "rms_400_1000" if rms < 1000 else "rms_ge1000"
+
     def _submit(self, utterance: list[int]) -> None:
         now = self._clock()
+        bucket = self._rms_bucket(utterance)
         with self._cond:
             self._stats["utterances"] += 1
+            self._stats[bucket] += 1
             if self._closed:
                 return
             if self._pending > 0:
@@ -313,7 +328,7 @@ class SttKeywordModel:
             self._starts.append(now)
             self._pending += 1
             self._busy_since = time.monotonic()
-            self._queue.append((self._gen, utterance))
+            self._queue.append((self._gen, utterance, now))
             self._cond.notify_all()
 
     def _run(self) -> None:
@@ -323,16 +338,21 @@ class SttKeywordModel:
                     self._cond.wait(0.2)
                 if self._closed:
                     return
-                gen, utterance = self._queue.popleft()
+                gen, utterance, start_ts = self._queue.popleft()
             kind = None
+            refund = False  # чистый шум и недоступный распознаватель не расходуют лимит (он от шторма СОВПАДЕНИЙ)
             try:
                 samples = self._as_audio(utterance)
                 text = self._transcribe(samples)
                 kind = self._matcher.kind(text)
+                refund = not (isinstance(text, str) and self._matcher.normalize(text))
                 with self._lock:
                     self._stats["transcribed"] += 1
+                    if refund:
+                        self._stats["empty"] += 1
                     self._last_unavailable = None  # успешное распознавание снимает «залипшую» причину
             except TranscriberUnavailable as exc:
+                refund = True
                 with self._lock:
                     self._stats["unavailable"] += 1
                     self._last_unavailable = str(exc)[:40] or "unavailable"
@@ -353,6 +373,11 @@ class SttKeywordModel:
                             self._stats["matched_word" if kind == "word" else "matched_fragment"] += 1
                             self._fired = True
                             self._cooldown_until = now + self._cooldown
+                    if refund:
+                        try:
+                            self._starts.remove(start_ts)
+                        except ValueError:  # уже вытеснено окном в 60 с
+                            pass
                     self._pending -= 1
                     self._busy_since = None
                     self._cond.notify_all()
