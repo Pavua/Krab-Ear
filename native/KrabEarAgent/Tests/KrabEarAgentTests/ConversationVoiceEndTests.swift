@@ -59,12 +59,17 @@ final class ConversationVoiceEndTests: XCTestCase {
     /// Проект RU/ES/EN: прощание и просьба закончить на испанском и английском; вопросы, цитаты и отрицания — нет.
     func test_phrases_spanishAndEnglish() {
         for text in ["adiós", "Hasta luego", "ok, hasta luego", "Desconéctate", "termina la conversación", "goodbye",
-                     "Bye", "bye bye", "end the conversation", "disconnect", "ok goodbye", "Eso es todo"] {
+                     "Bye", "bye bye", "end the conversation", "disconnect", "ok goodbye", "Eso es todo",
+                     "Desconéctate, por favor", "termina la conversación por favor", "see you", "see you later",
+                     "ok, disconnect", "please stop listening", "end the call"] {
             XCTAssertTrue(ConversationVoiceEndPhrases.isEndRequest(text), text)
         }
         for text in ["cómo se dice adiós en inglés", "qué significa hasta luego", "how do I say goodbye in Spanish",
-                     "what does goodbye mean", "no te desconectes", "don't disconnect", "do not disconnect",
-                     "never say goodbye", "translate goodbye to russian", "hablemos del adiós de ayer por la tarde ahora"] {
+                     "what does goodbye mean", "no desconéctate", "nunca desconéctate", "don't disconnect", "do not disconnect",
+                     "never say goodbye", "translate goodbye to russian", "no me gusta el adiós de ayer",
+                     // Нит/блоки Opus-пары (#2281): приветствие и переходные глаголы — не конец разговора.
+                     "nice to see you", "good to see you", "disconnect my headphones", "disconnect the bluetooth speaker",
+                     "stop listening to that song", "remind me to end the call at five"] {
             XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest(text), text)
         }
     }

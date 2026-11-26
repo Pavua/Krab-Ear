@@ -27,29 +27,34 @@ enum ConversationVoiceEndPhrases {
         // Испанский и английский (проект RU/ES/EN): те же просьбы закончить.
         "desconectate", "desconéctate", "termina la conversacion", "termina la conversación",
         "cierra la conversacion", "cierra la conversación", "fin de la conversacion", "fin de la conversación",
-        "end the conversation", "end conversation", "end the call", "disconnect", "stop listening"
+        "end the conversation", "end conversation"
     ]
+
+    /// Переходные глаголы («disconnect my headphones», «stop listening to that song», «end the call at five»): закрывают
+    /// разговор, только если стоят в самом конце короткой реплики (не больше `maxLeadingWords` слов перед ними).
+    private static let tailAnchoredPhrases: [String] = ["disconnect", "stop listening", "end the call"]
+    private static let maxLeadingWords = 2
 
     /// Прощание закрывает разговор, только если стоит на краю реплики («ну всё, до свидания»). Слова вопроса и
     /// перевода/цитаты в реплике отключают разбор целиком: «как по-испански до свидания», «переведи до свидания на английский» — это просьба, а не конец.
     private static let edgeAnchoredPhrases: [String] = [
-        "до свидания", "adios", "adiós", "hasta luego", "hasta pronto", "goodbye", "good bye", "bye bye", "see you"
+        "до свидания", "adios", "adiós", "hasta luego", "hasta pronto", "goodbye", "good bye", "bye bye"
     ]
     private static let quotingWords: Set<String> = [
         "как", "переведи", "перевести", "перевод", "переводится", "скажи", "означает", "значит", "по", "слово", "фраза",
         "что", "почему", "зачем", "можно", "ли", "нужно", "надо",
         // ES/EN: вопрос, перевод, цитата.
-        "como", "cómo", "que", "qué", "traduce", "traducir", "significa", "di", "decir", "por", "cuando", "cuándo",
+        "como", "cómo", "que", "qué", "traduce", "traducir", "significa", "di", "decir", "cuando", "cuándo",
         "how", "translate", "say", "means", "mean", "what", "why", "does", "can", "when", "word", "phrase"
     ]
 
     /// Слово перед фразой переворачивает смысл: «не отключайся», «нельзя выключаться», «ни в коем случае не…».
-    private static let negations: Set<String> = ["не", "нельзя", "ни", "нет", "no", "not", "never", "dont", "don", "t"]  // «t» — хвост «don't» после снятия апострофа
+    private static let negations: Set<String> = ["не", "нельзя", "ни", "нет", "no", "not", "never", "nunca", "dont", "don", "t"]  // «t» — хвост «don't» после снятия апострофа
 
     /// Реплика целиком — одно из этих слов («пока» внутри фразы не считается).
     private static let exactPhrases: Set<String> = [
         "пока", "пока пока", "хватит", "все хватит", "на этом все", "на сегодня все", "все пока", "ну пока",
-        "bye", "hasta la vista", "chao", "chau", "that s all", "that is all", "eso es todo", "nada mas", "nada más"
+        "bye", "see you", "see you later", "see you soon", "hasta la vista", "chao", "chau", "that s all", "that is all", "eso es todo", "nada mas", "nada más"
     ]
 
     /// Строчные буквы без «ё» и знаков препинания, одиночные пробелы.
@@ -70,7 +75,17 @@ enum ConversationVoiceEndPhrases {
         // Вопрос или цитата («как завершить разговор с банком», «что значит отключись») — обсуждение, а не команда.
         guard quotingWords.isDisjoint(with: words) else { return false }
         if containedPhrases.contains(where: { containsPhrase($0, in: words, anchored: false) }) { return true }
+        if tailAnchoredPhrases.contains(where: { containsTail($0, in: words) }) { return true }
         return edgeAnchoredPhrases.contains { containsPhrase($0, in: words, anchored: true) }
+    }
+
+    /// Фраза в самом конце реплики, перед ней не больше `maxLeadingWords` слов и нет отрицания.
+    private static func containsTail(_ phrase: String, in words: [String]) -> Bool {
+        let target = phrase.split(separator: " ").map(String.init)
+        guard !target.isEmpty, words.count >= target.count else { return false }
+        let start = words.count - target.count
+        guard Array(words[start...]) == target, start <= maxLeadingWords else { return false }
+        return start == 0 || !negations.contains(words[start - 1])
     }
 
     /// Фраза целыми словами; не засчитывается, если перед ней отрицание. `anchored` — только в начале или в конце реплики.
