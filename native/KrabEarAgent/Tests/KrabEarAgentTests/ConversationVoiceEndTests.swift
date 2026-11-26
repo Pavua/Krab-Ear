@@ -49,6 +49,26 @@ final class ConversationVoiceEndTests: XCTestCase {
         XCTAssertTrue(ConversationVoiceEndPhrases.isEndRequest("Заверши разговор"))
     }
 
+    /// Нит Opus-пары 26.11: «заканчивай разговор» теперь фраза, значит «не заканчивай разговор» проверяет отрицание.
+    func test_phrases_negatedFinishingIsReallyChecked() {
+        XCTAssertTrue(ConversationVoiceEndPhrases.isEndRequest("заканчивай разговор"))
+        XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest("не заканчивай разговор"))
+        XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest("нет, не заканчивай разговор"))
+    }
+
+    /// Проект RU/ES/EN: прощание и просьба закончить на испанском и английском; вопросы, цитаты и отрицания — нет.
+    func test_phrases_spanishAndEnglish() {
+        for text in ["adiós", "Hasta luego", "ok, hasta luego", "Desconéctate", "termina la conversación", "goodbye",
+                     "Bye", "bye bye", "end the conversation", "disconnect", "ok goodbye", "Eso es todo"] {
+            XCTAssertTrue(ConversationVoiceEndPhrases.isEndRequest(text), text)
+        }
+        for text in ["cómo se dice adiós en inglés", "qué significa hasta luego", "how do I say goodbye in Spanish",
+                     "what does goodbye mean", "no te desconectes", "don't disconnect", "do not disconnect",
+                     "never say goodbye", "translate goodbye to russian", "hablemos del adiós de ayer por la tarde ahora"] {
+            XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest(text), text)
+        }
+    }
+
     func test_settings_defaultOn_explicitOff() {
         let defaults = UserDefaults(suiteName: "vend-\(UUID().uuidString)")!
         XCTAssertTrue(ConversationVoiceEndSettings.isEnabled(in: defaults))

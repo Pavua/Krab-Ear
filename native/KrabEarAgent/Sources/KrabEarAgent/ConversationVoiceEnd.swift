@@ -20,26 +20,36 @@ enum ConversationVoiceEndPhrases {
     private static let containedPhrases: [String] = [
         "отключись", "отключайся", "выключись", "выключайся",
         "заверши разговор", "завершай разговор", "завершим разговор",
-        "закончи разговор", "закончим разговор",
+        "закончи разговор", "закончим разговор", "заканчивай разговор",
         "закрой разговор", "прекрати разговор", "останови разговор",
         "заверши диалог", "закончи диалог", "закрой диалог",
-        "конец связи", "хватит разговаривать"
+        "конец связи", "хватит разговаривать",
+        // Испанский и английский (проект RU/ES/EN): те же просьбы закончить.
+        "desconectate", "desconéctate", "termina la conversacion", "termina la conversación",
+        "cierra la conversacion", "cierra la conversación", "fin de la conversacion", "fin de la conversación",
+        "end the conversation", "end conversation", "end the call", "disconnect", "stop listening"
     ]
 
     /// Прощание закрывает разговор, только если стоит на краю реплики («ну всё, до свидания»). Слова вопроса и
     /// перевода/цитаты в реплике отключают разбор целиком: «как по-испански до свидания», «переведи до свидания на английский» — это просьба, а не конец.
-    private static let edgeAnchoredPhrases: [String] = ["до свидания"]
+    private static let edgeAnchoredPhrases: [String] = [
+        "до свидания", "adios", "adiós", "hasta luego", "hasta pronto", "goodbye", "good bye", "bye bye", "see you"
+    ]
     private static let quotingWords: Set<String> = [
         "как", "переведи", "перевести", "перевод", "переводится", "скажи", "означает", "значит", "по", "слово", "фраза",
-        "что", "почему", "зачем", "можно", "ли", "нужно", "надо"
+        "что", "почему", "зачем", "можно", "ли", "нужно", "надо",
+        // ES/EN: вопрос, перевод, цитата.
+        "como", "cómo", "que", "qué", "traduce", "traducir", "significa", "di", "decir", "por", "cuando", "cuándo",
+        "how", "translate", "say", "means", "mean", "what", "why", "does", "can", "when", "word", "phrase"
     ]
 
     /// Слово перед фразой переворачивает смысл: «не отключайся», «нельзя выключаться», «ни в коем случае не…».
-    private static let negations: Set<String> = ["не", "нельзя", "ни", "нет"]
+    private static let negations: Set<String> = ["не", "нельзя", "ни", "нет", "no", "not", "never", "dont", "don", "t"]  // «t» — хвост «don't» после снятия апострофа
 
     /// Реплика целиком — одно из этих слов («пока» внутри фразы не считается).
     private static let exactPhrases: Set<String> = [
-        "пока", "пока пока", "хватит", "все хватит", "на этом все", "на сегодня все", "все пока", "ну пока"
+        "пока", "пока пока", "хватит", "все хватит", "на этом все", "на сегодня все", "все пока", "ну пока",
+        "bye", "hasta la vista", "chao", "chau", "that s all", "that is all", "eso es todo", "nada mas", "nada más"
     ]
 
     /// Строчные буквы без «ё» и знаков препинания, одиночные пробелы.
