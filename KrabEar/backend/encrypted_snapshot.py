@@ -43,6 +43,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -2404,14 +2405,30 @@ def _readback_live_journals(*, data_dir: Path, files_meta: list[dict]) -> dict:
     for entry in files_meta:
         name = str(entry.get("name"))
         journal_file = Path(data_dir) / name
-        if not journal_file.is_file():
+        try:
+            # O_NOFOLLOW: журнал-симлинк на файл с тем же содержимым не должен
+            # проходить как «живой журнал»; O_NONBLOCK — чтобы FIFO не повесил
+            # read-back. Тип проверяем по fstat уже открытого дескриптора (без
+            # окна между проверкой и чтением).
+            fd = os.open(str(journal_file), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except FileNotFoundError:
             mismatches.append(f"{name}: отсутствует")
             continue
+        except OSError as exc:
+            # ELOOP = симлинк. Без путей в тексте: только тип и errno.
+            mismatches.append(f"{name}: не читается ({type(exc).__name__} errno={exc.errno})")
+            continue
         try:
-            blob = journal_file.read_bytes()
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                mismatches.append(f"{name}: не обычный файл")
+                continue
+            with os.fdopen(fd, "rb", closefd=False) as fh:
+                blob = fh.read()
         except OSError as exc:
             mismatches.append(f"{name}: не читается ({type(exc).__name__} errno={exc.errno})")
             continue
+        finally:
+            os.close(fd)
         if len(blob) != entry.get("size"):
             mismatches.append(f"{name}: size {len(blob)} != {entry.get('size')}")
             continue
