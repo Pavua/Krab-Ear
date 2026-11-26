@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -109,14 +110,16 @@ class TestMismatchDoesNotLeakPath:
     def test_unreadable_journal_reports_errno_not_path(self, tmp_path, monkeypatch):
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
         target = data_dir / HISTORY_JOURNAL_FILENAMES[0]
-        real = Path.read_bytes
+        real_open = os.open
 
-        def deny(self):
-            if self == target:
-                raise PermissionError(13, "denied", str(self))
-            return real(self)
+        # Read-back открывает журнал через os.open(O_NOFOLLOW): отказываем только
+        # для целевого файла, чтобы остальные открытия (журналы, каталоги) шли как есть.
+        def deny(path, *args, **kwargs):
+            if Path(path) == target:
+                raise PermissionError(13, "denied", str(path))
+            return real_open(path, *args, **kwargs)
 
-        monkeypatch.setattr(Path, "read_bytes", deny)
+        monkeypatch.setattr(os, "open", deny)
         out = es._readback_live_journals(data_dir=data_dir, files_meta=files)
 
         assert out["ok"] is False
