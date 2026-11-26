@@ -25,6 +25,7 @@ import tempfile
 import time
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
@@ -51,6 +52,10 @@ def _make_auth(tmp_dir: str) -> RestAuth:
 # ---------------------------------------------------------------------------
 
 _REST_AVAILABLE = False
+# Ошибка импорта rest_server НЕ из-за отсутствующей зависимости (stub разошёлся
+# с модулем) — не повод для skip: TestRestStubImportHealthy падает громко.
+_REST_IMPORT_ERROR = None
+_STUB_DATA_DIR = Path(tempfile.gettempdir()) / "krab_ear_rest_stub_unused"
 _rest_mod = None
 
 
@@ -88,6 +93,10 @@ def _ensure_stubs():
         "backend.state_store": {
             "StateStore": type("_FSS", (), {
                 "__init__": lambda self, *a, **k: None,
+                # rest_server на импорте строит PhoneticVocabService(data_dir=store.data_dir)
+                # (W4, 2026-09-17): без атрибута импорт падал и все REST-тесты файла
+                # молча уходили в skip. Путь не создаётся — Path.mkdir пропатчен.
+                "data_dir": _STUB_DATA_DIR,
                 "is_idempotent": lambda self, *a, **k: False,
                 "load_vocabulary": lambda self: [],
                 "save_vocabulary": lambda self, *a, **k: None,
@@ -150,8 +159,12 @@ try:
     with patch("pathlib.Path.mkdir"):
         import backend.rest_server as _rest_mod
     _REST_AVAILABLE = True
-except Exception:
+except ModuleNotFoundError:
+    # Нет модуля flask/тяжёлой зависимости — честный skip. «cannot import name»
+    # (дрейф stub) — обычный ImportError и уходит в громкую ветку ниже.
     pass
+except Exception as _import_exc:
+    _REST_IMPORT_ERROR = repr(_import_exc)
 finally:
     # Снимаем ВСТАВЛЕННЫЕ НАМИ фейки из sys.modules: rest_server уже связал
     # свои top-level ссылки на них (module-level `from backend.state_store
@@ -447,6 +460,13 @@ class TestStubbedRestServerNotCached(unittest.TestCase):
         if not _REST_AVAILABLE or _REST_PRELOADED or not _inserted_stub_modules:
             self.skipTest("rest_server импортирован без фейков")
         self.assertIsNot(sys.modules.get("backend.rest_server"), _rest_mod)
+
+
+class TestRestStubImportHealthy(unittest.TestCase):
+    """Stub-импорт rest_server обязан проходить, иначе тесты файла — вечный skip."""
+
+    def test_rest_server_imports_with_stubs(self):
+        self.assertIsNone(_REST_IMPORT_ERROR, f"rest_server не импортируется со stub: {_REST_IMPORT_ERROR}")
 
 
 if __name__ == "__main__":
