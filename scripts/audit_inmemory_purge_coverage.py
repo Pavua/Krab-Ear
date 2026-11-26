@@ -53,7 +53,8 @@ Exit 1 → ``--fail-on-found`` and at least one registry entry is NOT cleared.
 
 Wired into CI (``krabear-ci.yml``, wave-30) and ``make audit-all``. Only REACHABLE
 clear-calls count (G3-P04-11): nested defs, lambdas, code after return/raise and
-constant-false branches are ignored.
+constant-false branches are ignored. It is a syntactic reachability check, not
+full control-flow analysis (see ``_reachable_calls`` for what it does not catch).
 """
 
 from __future__ import annotations
@@ -224,8 +225,18 @@ def _reachable_calls(node: ast.AST):
     Не заходит в тела вложенных ``def``/``async def``/``class`` и в ``lambda``
     (объявление не есть вызов), пропускает ветку ``if``/``while`` с константным
     условием, которое её отключает, и всё, что стоит после безусловного
-    ``return``/``raise`` в том же списке операторов. Это консервативно в нужную
-    сторону: сомнительный clear() не засчитывается и виден как дыра.
+    ``return``/``raise``/``break``/``continue`` в том же списке операторов. Это
+    консервативно в нужную сторону: сомнительный clear() не засчитывается и виден
+    как дыра.
+
+    ЧЕГО ГАРД НЕ ЛОВИТ (нужен полноценный анализ потока управления, не делаем):
+    тупик после ``if``/``try``, где ВСЕ ветки завершаются ``return``; ``while True``
+    без выхода; константные ``IfExp``/``BoolOp`` (``x() if False else y``);
+    неисполненные генераторные выражения. Такие clear() всё ещё засчитываются —
+    «only reachable» здесь означает «синтаксически недостижимо», не «доказано
+    исполняется». Обратная сторона строгости: ``lambda``, переданная в helper
+    (``self._step(lambda: self.x.clear())``), НЕ засчитывается — гард покажет
+    ложную дыру (падает громко, это безопасное направление).
     """
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
         return
@@ -250,7 +261,7 @@ def _reachable_list(items: list) -> Iterator[ast.Call]:
     for item in items:
         if isinstance(item, ast.AST):
             yield from _reachable_calls(item)
-        if isinstance(item, (ast.Return, ast.Raise)):
+        if isinstance(item, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
             break  # дальше в этом списке операторов исполнение не идёт
 
 

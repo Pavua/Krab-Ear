@@ -76,6 +76,9 @@ def test_reachable_clear_is_counted(body: str) -> None:
         "if True:\n    pass\nelse:\n    self._w.clear()",
         "while False:\n    self._w.clear()",
         "class _K:\n    def m(self):\n        self._w.clear()",
+        "for _ in range(2):\n    break\n    self._w.clear()",
+        "for _ in range(2):\n    continue\n    self._w.clear()",
+        "while self._flag:\n    if self._x:\n        break\n        self._w.clear()",
     ],
 )
 def test_unreachable_clear_is_not_counted(body: str) -> None:
