@@ -16,9 +16,12 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 import threading
+import unicodedata
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +51,145 @@ _ENV_DIR_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
 AUDIT_CONFIRMED = "confirmed"      # запись дошла до fsync без исключения
 AUDIT_NOT_WRITTEN = "not_written"  # сбой ДО начала записи — на диске ничего не появилось
 AUDIT_UNKNOWN = "unknown"          # сбой во время/после записи — запись могла лечь
+
+
+# G3-P04-08: централизованная санитизация details ДО расчёта HMAC. Журнал —
+# комплаенс-след, а не лог отладки: в нём лежат счётчики, флаги и короткие метки,
+# но не секреты и не содержимое пользовательских данных.
+#
+# Модель — ALLOWLIST, а не denylist: строка проходит только под явно разрешённым
+# ключом И только если она похожа на короткую метку (без пробелов). Всё остальное
+# заменяется на REDACTED. Denylist по именам ключей обходился переименованием
+# ключа, camelCase/дефисом, zero-width символом, вложенным списком и т.п.
+REDACTED = "[redacted]"
+_MAX_STR_LEN = 200
+_MAX_KEY_LEN = 64
+_MAX_LIST_ITEMS = 20
+_MAX_DEPTH = 2
+# Ключи (в нормализованном виде), под которыми допустима строка-метка. Список
+# собран по реальным производителям details (purge_all_data, cloud_*, translation,
+# sentry, key_quarantined); новый строковый ключ добавляется сюда осознанно.
+_SAFE_STRING_KEYS = frozenset(
+    {
+        "provider",
+        "language",
+        "method",
+        "reason",
+        "engine",
+        "original_mode",
+        "mode",
+        "result",
+        "status",
+        "ledger_entry",
+        "quarantined_as",
+        "secondary_errors",
+        "content_type",
+    }
+)
+# Метка: короткий токен без пробелов (буквы любого алфавита, цифры, _ . : / -).
+_LABEL_RE = re.compile(r"^[\w.:/\-]{1,64}$")
+# Ключи идентификаторов/хешей: значение проходит, только если оно строго UUID или hex.
+_ID_KEY_RE = re.compile(r"(^|_)(id|ids|hash|sha|sha1|sha256)$")
+_ID_VALUE_RE = re.compile(
+    r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|[0-9a-fA-F]{8,128})$"
+)
+_CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+_KEY_SHAPE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+# Секрет в КЛЮЧЕ словаря: после casefold он всё ещё подходит под a-z0-9_, поэтому
+# дополнительно отсекаем ключи с длинным сегментом или сегментом из >=8 цифр.
+_MAX_KEY_SEGMENT = 20
+_DIGIT_RUN_RE = re.compile(r"[0-9]{8,}")
+
+
+def _key_looks_safe(norm: str) -> bool:
+    if not _KEY_SHAPE_RE.match(norm):
+        return False
+    if _DIGIT_RUN_RE.search(norm):
+        return False
+    return all(len(seg) <= _MAX_KEY_SEGMENT for seg in norm.split("_"))
+
+
+def _normalize_key(raw_key: Any) -> str:
+    """Каноническая форма ключа: NFKC, без невидимых символов, snake_case, casefold."""
+    text = unicodedata.normalize("NFKC", str(raw_key))
+    text = "".join(ch for ch in text if unicodedata.category(ch) not in ("Cf", "Cc"))
+    text = _CAMEL_RE.sub("_", text)
+    text = re.sub(r"[\s\-]+", "_", text).casefold().strip("_")
+    return text[:_MAX_KEY_LEN * 4]
+
+
+def _string_allowed(norm_key: str, value: str) -> bool:
+    if norm_key in _SAFE_STRING_KEYS:
+        return bool(_LABEL_RE.match(value))
+    if _ID_KEY_RE.search(norm_key):
+        return bool(_ID_VALUE_RE.match(value))
+    return False
+
+
+def _sanitize_value(norm_key: str, value: Any, depth: int) -> Any:
+    """Санитизирует одно значение details (см. ``sanitize_audit_details``)."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        return value[:_MAX_STR_LEN] if _string_allowed(norm_key, value) else REDACTED
+    if isinstance(value, dict):
+        if depth >= _MAX_DEPTH:
+            return REDACTED
+        return _sanitize_mapping(value, depth + 1)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        if depth >= _MAX_DEPTH:
+            return REDACTED
+        items = list(value)[:_MAX_LIST_ITEMS]
+        return [_sanitize_value(norm_key, v, depth + 1) for v in items]
+    # bytes и произвольные объекты: только имя типа, содержимое не сериализуем.
+    return type(value).__name__
+
+
+def _sanitize_mapping(mapping: dict[Any, Any], depth: int) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    unsafe_n = 0
+    for raw_key, value in mapping.items():
+        norm = _normalize_key(raw_key)
+        if _key_looks_safe(norm):
+            key = norm
+        else:
+            # Ключ сам может нести содержимое (текст, токен): в журнал идёт
+            # обезличенное имя, а строковое значение под ним редактируется.
+            unsafe_n += 1
+            key = f"_key_{unsafe_n}"
+            norm = key
+        # Коллизия нормализованных ключей не должна терять значение.
+        base, n = key, 1
+        while key in out:
+            n += 1
+            key = f"{base[:_MAX_KEY_LEN - 4]}_{n}"
+        out[key] = _sanitize_value(norm, value, depth)
+    return out
+
+
+def sanitize_audit_details(details: Any) -> dict[str, Any]:
+    """Возвращает безопасную копию ``details`` для записи в журнал.
+
+    Allowlist: числа/bool/None проходят как есть (NaN/Inf -> None); строка
+    проходит только под разрешённым ключом (``_SAFE_STRING_KEYS``) и если это
+    короткая метка без пробелов, либо под ``*_id/_ids/_hash/_sha`` и строго
+    UUID/hex; любая другая строка -> ``REDACTED``. Ключи нормализуются (NFKC,
+    camelCase/дефис -> snake_case, без zero-width); ключ неподходящей формы
+    заменяется на ``_key_N``. Вложенность не глубже ``_MAX_DEPTH``, списки не
+    длиннее ``_MAX_LIST_ITEMS``; bytes и объекты -> имя типа. Не-словарь -> ``{}``.
+    Исключений не бросает.
+    """
+    if not isinstance(details, dict):
+        return {}
+    try:
+        return _sanitize_mapping(details, 0)
+    except Exception:  # noqa: BLE001 — аудит не должен падать на странном details
+        return {"details_error": "unserializable"}
 
 
 def _default_log_path() -> Path:
@@ -451,7 +593,7 @@ class PrivacyAuditLogger:
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "category": category,
                 "action": action,
-                "details": details or {},
+                "details": sanitize_audit_details(details),
             }
             # Фаза нужна, чтобы отличить «доказанно не записано» от «неизвестно»:
             #   pre     — до первого байта записи (open/flock/чтение tip/хеш);
