@@ -42,7 +42,25 @@ def _make_voice(duration_sec: float, sr: int = SR, amplitude: float = 0.3) -> np
     return (amplitude * envelope * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
 
 
-def _make_engine(vad_enabled: bool = True, trim_threshold: float = 2.0) -> "AudioEngine":  # noqa: F821
+def _patch_vad_settings(case: unittest.TestCase, vad_enabled: bool, trim_threshold: float) -> None:
+    """Патчит VAD-настройки только на время теста (G3-audio-03 A03-12).
+
+    Прежде тест присваивал значения глобальному settings без восстановления —
+    следующие audio-тесты наследовали чужой STT_VAD_PREFILTER_ENABLED.
+    """
+    from core import config as cfg_module
+
+    for name, value in (
+        ("STT_VAD_PREFILTER_ENABLED", vad_enabled),
+        ("STT_VAD_SILENCE_TRIM_THRESHOLD_SEC", trim_threshold),
+    ):
+        patcher = patch.object(cfg_module.settings, name, value)
+        patcher.start()
+        case.addCleanup(patcher.stop)
+
+
+def _make_engine(case: unittest.TestCase, vad_enabled: bool = True,
+                 trim_threshold: float = 2.0) -> "AudioEngine":  # noqa: F821
     """Создаёт AudioEngine с патченными тяжёлыми зависимостями."""
     from core.engine import AudioEngine
 
@@ -52,10 +70,7 @@ def _make_engine(vad_enabled: bool = True, trim_threshold: float = 2.0) -> "Audi
     engine._llm_rewriter = MagicMock()
     engine.current_model = "test_model"
 
-    # Патчим settings для этого теста
-    from core import config as cfg_module
-    cfg_module.settings.STT_VAD_PREFILTER_ENABLED = vad_enabled
-    cfg_module.settings.STT_VAD_SILENCE_TRIM_THRESHOLD_SEC = trim_threshold
+    _patch_vad_settings(case, vad_enabled, trim_threshold)
 
     return engine
 
@@ -65,14 +80,14 @@ class TestVADPrefilterEmptyAudio(unittest.TestCase):
 
     def test_all_zeros_returns_none(self) -> None:
         """Массив нулей (нет речи) → None."""
-        engine = _make_engine()
+        engine = _make_engine(self)
         audio = _make_silence(3.0)
         result = engine._apply_vad_prefilter(audio, sample_rate=SR)
         self.assertIsNone(result)
 
     def test_very_short_voice_below_min_threshold(self) -> None:
         """Меньше 0.3s речи → None (misfire-защита)."""
-        engine = _make_engine()
+        engine = _make_engine(self)
         # 0.1s голоса + 5s тишины = итого 5.1s, но речи мало
         audio = np.concatenate([_make_voice(0.1), _make_silence(5.0)])
         result = engine._apply_vad_prefilter(audio, sample_rate=SR)
@@ -80,7 +95,7 @@ class TestVADPrefilterEmptyAudio(unittest.TestCase):
 
     def test_empty_array_returns_none(self) -> None:
         """Пустой массив → None."""
-        engine = _make_engine()
+        engine = _make_engine(self)
         audio = np.array([], dtype=np.float32)
         result = engine._apply_vad_prefilter(audio, sample_rate=SR)
         self.assertIsNone(result)
@@ -91,7 +106,7 @@ class TestVADPrefilterLeadingSilence(unittest.TestCase):
 
     def test_leading_silence_trimmed(self) -> None:
         """5s тишины + 1s речи → выход заметно короче 6s."""
-        engine = _make_engine(trim_threshold=2.0)
+        engine = _make_engine(self, trim_threshold=2.0)
         audio = np.concatenate([_make_silence(5.0), _make_voice(1.0)])
         result = engine._apply_vad_prefilter(audio, sample_rate=SR)
         self.assertIsNotNone(result)
@@ -100,7 +115,7 @@ class TestVADPrefilterLeadingSilence(unittest.TestCase):
 
     def test_leading_silence_result_contains_voice(self) -> None:
         """После обрезки ведущей тишины результат содержит ненулевые сэмплы."""
-        engine = _make_engine(trim_threshold=2.0)
+        engine = _make_engine(self, trim_threshold=2.0)
         audio = np.concatenate([_make_silence(4.0), _make_voice(0.8)])
         result = engine._apply_vad_prefilter(audio, sample_rate=SR)
         self.assertIsNotNone(result)
@@ -112,7 +127,7 @@ class TestVADPrefilterMidSilence(unittest.TestCase):
 
     def test_mid_silence_longer_than_threshold_trimmed(self) -> None:
         """0.5s речь + 3s тишина + 0.5s речь → выход должен быть короче."""
-        engine = _make_engine(trim_threshold=2.0)
+        engine = _make_engine(self, trim_threshold=2.0)
         audio = np.concatenate([
             _make_voice(0.5),
             _make_silence(3.0),
@@ -125,7 +140,7 @@ class TestVADPrefilterMidSilence(unittest.TestCase):
 
     def test_mid_silence_shorter_than_threshold_kept(self) -> None:
         """0.5s речь + 1s тишина (< 2.0s порог) + 0.5s речь → выход не меньше речи."""
-        engine = _make_engine(trim_threshold=2.0)
+        engine = _make_engine(self, trim_threshold=2.0)
         audio = np.concatenate([
             _make_voice(0.5),
             _make_silence(1.0),
@@ -142,14 +157,14 @@ class TestVADPrefilterAllVoice(unittest.TestCase):
 
     def test_all_voice_not_none(self) -> None:
         """1s голоса → результат не None."""
-        engine = _make_engine()
+        engine = _make_engine(self)
         audio = _make_voice(1.0)
         result = engine._apply_vad_prefilter(audio, sample_rate=SR)
         self.assertIsNotNone(result)
 
     def test_all_voice_length_preserved(self) -> None:
         """2s голоса → выход близок по длине к входу (не более чем в 1.5× короче)."""
-        engine = _make_engine()
+        engine = _make_engine(self)
         audio = _make_voice(2.0)
         result = engine._apply_vad_prefilter(audio, sample_rate=SR)
         self.assertIsNotNone(result)
@@ -176,9 +191,7 @@ class TestVADPrefilterIntegrationWithTranscribe(unittest.TestCase):
         engine._model_loaded = False
         engine._unavailable_models = {}
 
-        from core import config as cfg_module
-        cfg_module.settings.STT_VAD_PREFILTER_ENABLED = True
-        cfg_module.settings.STT_VAD_SILENCE_TRIM_THRESHOLD_SEC = 2.0
+        _patch_vad_settings(self, True, 2.0)
 
         audio = _make_silence(3.0)
 
@@ -193,3 +206,18 @@ class TestVADPrefilterIntegrationWithTranscribe(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestVADSettingsRestored(unittest.TestCase):
+    """A03-12: после теста глобальные VAD-настройки возвращаются к исходным."""
+
+    def test_settings_restored_after_test(self):
+        from core import config as cfg_module
+        before = (cfg_module.settings.STT_VAD_PREFILTER_ENABLED,
+                  cfg_module.settings.STT_VAD_SILENCE_TRIM_THRESHOLD_SEC)
+        case = unittest.TestCase()
+        _make_engine(case, vad_enabled=not before[0], trim_threshold=before[1] + 7.0)
+        self.assertNotEqual(cfg_module.settings.STT_VAD_SILENCE_TRIM_THRESHOLD_SEC, before[1])
+        case.doCleanups()
+        self.assertEqual((cfg_module.settings.STT_VAD_PREFILTER_ENABLED,
+                          cfg_module.settings.STT_VAD_SILENCE_TRIM_THRESHOLD_SEC), before)

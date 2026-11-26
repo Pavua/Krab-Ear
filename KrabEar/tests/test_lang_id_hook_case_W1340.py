@@ -66,7 +66,11 @@ def _register_stub_modules() -> None:
         sys.modules["mlx.core"] = MagicMock()
 
 
-_register_stub_modules()
+
+# G3-audio-03 A03-02: заглушки НЕ ставятся при импорте файла — иначе MagicMock
+# в sys.modules["mlx"] живёт всю фазу pytest collection (tearDownModule бежит
+# много позже) и ломает find_spec("mlx") в соседних файлах. Их ставит
+# _fresh_audio_lang_id() внутри теста; conftest чистит после каждого теста.
 
 
 def tearDownModule() -> None:
@@ -391,6 +395,22 @@ class TestServicePySourceAssertions(unittest.TestCase):
             idx,
             "_get_model_balanced helper must be defined before _on_settings_saved_lang_id",
         )
+
+
+class TestNoModuleLevelStubInstall(unittest.TestCase):
+    """A03-02: верхний уровень файла не вызывает _register_stub_modules()."""
+
+    def test_no_module_level_stub_installation(self):
+        import ast as _ast_guard
+        tree = _ast_guard.parse(Path(__file__).read_text(encoding="utf-8"))
+        offenders = [
+            node for node in tree.body
+            if isinstance(node, _ast_guard.Expr)
+            and isinstance(node.value, _ast_guard.Call)
+            and isinstance(node.value.func, _ast_guard.Name)
+            and node.value.func.id == "_register_stub_modules"
+        ]
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":

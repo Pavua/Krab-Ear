@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import inspect
 import json
+import shutil
 import socket
 import sys
 import tempfile
@@ -40,13 +41,15 @@ from backend.ipc_server import (  # noqa: E402
 )
 
 
-def _make_service_ipc_server() -> ServiceIPCServer:
+def _make_service_ipc_server(case: unittest.TestCase) -> ServiceIPCServer:
     """IPCServer (через путь backend.service) с fake-сервисом — как в main().
 
     Конструктор вызывается ровно теми kwargs, что и в ``main()``:
     ``IPCServer(socket_path=..., service=...)``.
     """
     data_dir = Path(tempfile.mkdtemp())
+    # A03-14: temp-каталог удаляется после теста, а не копится в /tmp.
+    case.addCleanup(shutil.rmtree, data_dir, True)
     fake_service = MagicMock()
     fake_service.handle_request.return_value = {"id": "x", "ok": True, "result": {}}
     # Совпадение сигнатуры с main(): socket_path= + service=.
@@ -96,7 +99,7 @@ class ProductionUsesHardenedClassTestCase(unittest.TestCase):
 
     def test_hardened_instance_has_slow_loris_guard(self):
         """Инстанс, созданный как в main(), имеет BoundedSemaphore slow-loris guard."""
-        ipc = _make_service_ipc_server()
+        ipc = _make_service_ipc_server(self)
         self.assertTrue(
             hasattr(ipc, "_conn_semaphore"),
             "Отсутствует _conn_semaphore — slow-loris guard потерян",
@@ -111,7 +114,7 @@ class ProductionUsesHardenedClassTestCase(unittest.TestCase):
 
     def test_hardened_instance_has_recv_until_newline(self):
         """Инстанс имеет метод _recv_until_newline (reassembly loop W1767 #4)."""
-        ipc = _make_service_ipc_server()
+        ipc = _make_service_ipc_server(self)
         self.assertTrue(
             hasattr(ipc, "_recv_until_newline") and callable(ipc._recv_until_newline),
             "Отсутствует _recv_until_newline — reassembly loop потерян",
@@ -123,7 +126,7 @@ class ProductionUsesHardenedClassTestCase(unittest.TestCase):
         Это ключ slow-loris guard: без таймаута молчащий peer паркует поток
         навсегда. Проверяем, что settimeout() вызывается значением > 0.
         """
-        ipc = _make_service_ipc_server()
+        ipc = _make_service_ipc_server(self)
 
         mock_conn = MagicMock()
         mock_conn.__enter__ = MagicMock(return_value=mock_conn)
@@ -186,7 +189,7 @@ class FragmentedMessageViaServicePathTestCase(unittest.TestCase):
             def __exit__(self_, *_):
                 pass
 
-        ipc = _make_service_ipc_server()
+        ipc = _make_service_ipc_server(self)
         ipc._conn_semaphore.acquire(blocking=False)
         ipc._handle_connection(_SplitSocket())
 
@@ -213,7 +216,7 @@ class FragmentedMessageViaServicePathTestCase(unittest.TestCase):
                 self_._pos += 1
                 return chunk
 
-        ipc = _make_service_ipc_server()
+        ipc = _make_service_ipc_server(self)
         result = ipc._recv_until_newline(_OneByteSocket())
         parsed = json.loads(result.decode("utf-8"))
         self.assertEqual(parsed["method"], "ping")
@@ -221,7 +224,7 @@ class FragmentedMessageViaServicePathTestCase(unittest.TestCase):
 
     def test_silent_conn_closes_and_frees_semaphore_via_service_path(self):
         """slow-loris: молчащий коннект (socket.timeout) завершается + освобождает слот."""
-        ipc = _make_service_ipc_server()
+        ipc = _make_service_ipc_server(self)
 
         # Опустошаем семафор, оставляя ровно один слот для обработчика.
         drained = 0

@@ -141,6 +141,9 @@ def _ensure_stubs():
 
 
 _inserted_stub_modules: list = []
+# A06-02: если rest_server ещё не загружен, наша копия свяжется с фейками —
+# её нельзя оставлять в sys.modules для соседних тест-файлов чанка.
+_REST_PRELOADED = "backend.rest_server" in sys.modules
 try:
     import flask  # noqa: F401
     _inserted_stub_modules = _ensure_stubs()
@@ -160,6 +163,8 @@ finally:
     # вместо реальных StateStore/BackendService).
     for _name in _inserted_stub_modules:
         sys.modules.pop(_name, None)
+    if not _REST_PRELOADED and _inserted_stub_modules:
+        sys.modules.pop("backend.rest_server", None)
 
 
 def _make_client():
@@ -436,3 +441,12 @@ from datetime import datetime, timezone  # noqa: E402  (used in test above)
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStubbedRestServerNotCached(unittest.TestCase):
+    """A06-02: rest_server, связанный с фейками, не остаётся в sys.modules."""
+
+    def test_stub_bound_rest_server_not_left_in_sys_modules(self):
+        if not _REST_AVAILABLE or _REST_PRELOADED or not _inserted_stub_modules:
+            self.skipTest("rest_server импортирован без фейков")
+        self.assertIsNot(sys.modules.get("backend.rest_server"), _rest_mod)

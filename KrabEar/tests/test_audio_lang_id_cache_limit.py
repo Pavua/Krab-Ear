@@ -5,51 +5,28 @@ Tests use mocked mlx_whisper.load_models — no GPU/model required.
 """
 import sys
 import os
-import types
 import importlib
 import unittest
-from unittest.mock import MagicMock
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 
-def _install_mlx_whisper_stub():
-    """Register stub mlx_whisper modules so audio_lang_id can be imported."""
-    stub_whisper = types.ModuleType("mlx_whisper")
-    stub_load = types.ModuleType("mlx_whisper.load_models")
-    stub_load.load_model = MagicMock(side_effect=lambda p: {"model": p})
-    stub_whisper.load_models = stub_load
-    sys.modules.setdefault("mlx_whisper", stub_whisper)
-    sys.modules.setdefault("mlx_whisper.load_models", stub_load)
-    return stub_load
-
-
 class TestAudioLanguageIDCacheLimit(unittest.TestCase):
     """AudioLanguageID._model_cache must never hold more than 1 entry."""
 
     def setUp(self):
-        _install_mlx_whisper_stub()
-        # Capture current module (may be None if not yet imported) so tearDown
-        # can restore it and prevent contamination of W1466 tests that import
-        # AudioLanguageID at module-level and patch the original object.
-        self._original_module = sys.modules.get("core.audio_lang_id")
-        # Fresh import each test to avoid cross-test state
-        if "core.audio_lang_id" in sys.modules:
-            del sys.modules["core.audio_lang_id"]
+        # G3-audio-01 A02: без переимпорта core.audio_lang_id и без постоянной
+        # заглушки mlx_whisper (импорт в модуле ленивый) — только чистый кэш.
         self.mod = importlib.import_module("core.audio_lang_id")
         self.AudioLanguageID = self.mod.AudioLanguageID
+        self._saved_cache = dict(self.AudioLanguageID._model_cache)
         self.AudioLanguageID._model_cache.clear()
 
     def tearDown(self):
-        # Restore the original module so that other test files which imported
-        # AudioLanguageID at module-level (e.g. W1466 tests) continue to patch
-        # the correct object in sys.modules["core.audio_lang_id"].
-        if self._original_module is not None:
-            sys.modules["core.audio_lang_id"] = self._original_module
-        else:
-            sys.modules.pop("core.audio_lang_id", None)
+        self.AudioLanguageID._model_cache.clear()
+        self.AudioLanguageID._model_cache.update(self._saved_cache)
 
     def _insert(self, path: str):
         """Simulate bounded cache insertion (mirrors audio_lang_id.py logic)."""
@@ -93,30 +70,16 @@ class TestAudioLanguageIDCacheLimit(unittest.TestCase):
 class TestSysModulesRestoredAfterTeardown(unittest.TestCase):
     """Verify that TestAudioLanguageIDCacheLimit.tearDown restores sys.modules."""
 
-    def test_sys_modules_restored_after_teardown(self):
-        """After setUp+tearDown cycle, sys.modules['core.audio_lang_id'] is restored."""
-        _install_mlx_whisper_stub()
-        # Ensure module is loaded before we run the test class cycle
-        import importlib as _il
-        _il.import_module("core.audio_lang_id")
-        original = sys.modules.get("core.audio_lang_id")
-        self.assertIsNotNone(original, "core.audio_lang_id must be importable")
-
-        # Simulate a full setUp/tearDown cycle of TestAudioLanguageIDCacheLimit
+    def test_setup_teardown_keep_module_and_mlx_untouched(self):
+        """Цикл setUp/tearDown не меняет sys.modules (A02)."""
+        original = importlib.import_module("core.audio_lang_id")
+        before_mlx = sys.modules.get("mlx_whisper")
         instance = TestAudioLanguageIDCacheLimit("test_single_model_stored")
         instance.setUp()
-        # After setUp, sys.modules has a NEW module object
-        mid_module = sys.modules.get("core.audio_lang_id")
-        # It might be a fresh module or same if originally None — that's fine
+        self.assertIs(sys.modules.get("core.audio_lang_id"), original)
         instance.tearDown()
-
-        # After tearDown, sys.modules must be restored to original
-        restored = sys.modules.get("core.audio_lang_id")
-        self.assertIs(
-            restored,
-            original,
-            "tearDown must restore the original module object in sys.modules",
-        )
+        self.assertIs(sys.modules.get("core.audio_lang_id"), original)
+        self.assertIs(sys.modules.get("mlx_whisper"), before_mlx)
 
 
 if __name__ == "__main__":
