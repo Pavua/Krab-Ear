@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
@@ -139,6 +140,19 @@ class RecordingChainManager:
             logger.exception("Не удалось сохранить %s", self._chains_path)
             raise
 
+    def _save_or_rollback(self, snapshot: dict[str, Any]) -> None:
+        """Сохраняет; при сбое возвращает self._data к снимку до мутации.
+
+        G3 audio-05 A05-08: иначе отклонённая (ok=False) операция оставалась в
+        памяти и молча уходила на диск со следующей удачной записью.
+        Вызывать под self._lock; snapshot = copy.deepcopy(self._data) до мутации.
+        """
+        try:
+            self._save()
+        except Exception:
+            self._data = snapshot
+            raise
+
     # ------------------------------------------------------------------
     # Публичный API
     # ------------------------------------------------------------------
@@ -154,6 +168,7 @@ class RecordingChainManager:
             )
         chain_id = str(uuid.uuid4())
         with self._lock:
+            snapshot = copy.deepcopy(self._data)
             if len(self._data["chains"]) >= MAX_CHAINS:
                 raise RuntimeError(
                     f"Достигнут лимит цепочек ({MAX_CHAINS})"
@@ -165,7 +180,7 @@ class RecordingChainManager:
                 "ended_at": None,
                 "item_ids": [],
             }
-            self._save()
+            self._save_or_rollback(snapshot)
         return chain_id
 
     def add_to_chain(self, chain_id: str, item_id: str) -> None:
@@ -196,8 +211,9 @@ class RecordingChainManager:
                 raise ChainLimitError(
                     f"Цепочка достигла лимита элементов ({MAX_ITEMS_PER_CHAIN})"
                 )
+            snapshot = copy.deepcopy(self._data)
             chain["item_ids"].append(item_id)
-            self._save()
+            self._save_or_rollback(snapshot)
 
     def unlink_recording_from_chain(self, chain_id: str, item_id: str) -> bool:
         """Удаляет запись из цепочки.
@@ -215,8 +231,9 @@ class RecordingChainManager:
                 raise KeyError(f"Цепочка не найдена: {chain_id}")
             item_id = str(item_id).strip()
             if item_id in chain["item_ids"]:
+                snapshot = copy.deepcopy(self._data)
                 chain["item_ids"].remove(item_id)
-                self._save()
+                self._save_or_rollback(snapshot)
                 return True
             return False
 
@@ -227,8 +244,9 @@ class RecordingChainManager:
             if chain is None:
                 raise KeyError(f"Цепочка не найдена: {chain_id}")
             if chain.get("ended_at") is None:
+                snapshot = copy.deepcopy(self._data)
                 chain["ended_at"] = datetime.now(timezone.utc).isoformat()
-                self._save()
+                self._save_or_rollback(snapshot)
 
     def get_chain(self, chain_id: str) -> dict[str, Any]:
         """Возвращает цепочку: элементы по порядку, суммарные duration и word_count.
@@ -507,8 +525,9 @@ class RecordingChainManager:
                 else:
                     new_list.append(iid)
             if changed:
+                snapshot = copy.deepcopy(self._data)
                 chain["item_ids"] = new_list
-                self._save()
+                self._save_or_rollback(snapshot)
         return changed
 
     # ------------------------------------------------------------------
