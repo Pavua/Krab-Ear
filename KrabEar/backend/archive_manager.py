@@ -505,7 +505,8 @@ class ArchiveManager:
             store: StateStore (по умолчанию используется self._store).
 
         Returns:
-            Словарь с ключами unarchived_count, not_found.
+            Словарь с ключами unarchived_count, not_found, restored_ids, failed_ids, complete
+            (+ reason="restore_failed" при сбое восстановления отдельных записей).
             При обнаружении конкурентного purge возвращает ok=False, reason=purge_in_progress.
             При превышении ``_MAX_UNARCHIVE_BATCH`` — ok=False, reason=too_many_ids
             (проверка ДО захвата store-flock).
@@ -533,13 +534,15 @@ class ArchiveManager:
         if isinstance(validated, dict):
             return validated
         if not validated:
-            return {"unarchived_count": 0, "not_found": []}
+            return {"unarchived_count": 0, "not_found": [], "restored_ids": [], "failed_ids": [], "complete": True}
         ids_set = set(validated)
 
         # wave-33 (B2): снимок purge-epoch ДО захвата self._lock.
         epoch_before = self._current_epoch()
 
         unarchived_count = 0
+        restored_ids: list[str] = []  # id записей АРХИВА, реально восстановленных (карта ревью dots 26.11)
+        failed_ids: list[str] = []    # восстановление упало — запись осталась в архиве
         not_found: list[str] = []
         # MAJOR: semantic index_item (синхронный ML _encode) выносится ИЗ-ПОД
         # store-flock. Копим успешно восстановленные записи, индексируем после
@@ -607,6 +610,7 @@ class ArchiveManager:
                             if isinstance(created_id, str) and created_id:
                                 restored_id = created_id
                         unarchived_count += 1
+                        restored_ids.append(item_id)
                         if self._semantic_searcher is not None:
                             restore_text = restore_dict.get("text", "")
                             if restore_text and restore_text.strip():
@@ -616,6 +620,7 @@ class ArchiveManager:
                                 to_index.append((restored_id, restore_text))
                     except Exception as exc:
                         logger.error("Не удалось восстановить запись id=%s: %s", item_id, exc)
+                        failed_ids.append(item_id)
                         remaining.append(item)
                 else:
                     remaining.append(item)
@@ -643,7 +648,18 @@ class ArchiveManager:
                             item_id, exc,
                         )
 
-        return {"unarchived_count": unarchived_count, "not_found": not_found}
+        # Итог привязан к ID, а не к счётчику: клиент видит, КАКАЯ запись осталась в архиве (раньше сбой
+        # одной записи не попадал ни в unarchived_count, ни в not_found).
+        response: dict[str, Any] = {
+            "unarchived_count": unarchived_count,
+            "not_found": not_found,
+            "restored_ids": restored_ids,
+            "failed_ids": failed_ids,
+            "complete": not failed_ids,
+        }
+        if failed_ids:
+            response["reason"] = "restore_failed"
+        return response
 
     def list_archived(self, limit: int = 50) -> list[dict[str, Any]]:
         """Возвращает список архивированных записей (от новых к старым).
