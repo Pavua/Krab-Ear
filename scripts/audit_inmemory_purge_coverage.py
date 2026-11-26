@@ -51,9 +51,10 @@ Usage:
 Exit 0 → every registry entry is cleared by the purge (or report-only mode).
 Exit 1 → ``--fail-on-found`` and at least one registry entry is NOT cleared.
 
-REPORT-ONLY: this guard is NOT wired into CI or ``make audit-all``.  A human
-enforces it (``make audit-inmemory-purge-coverage ARGS=--fail-on-found``) after
-confirming there are zero findings.
+Wired into CI (``krabear-ci.yml``, wave-30) and ``make audit-all``. Only REACHABLE
+clear-calls count (G3-P04-11): nested defs, lambdas, code after return/raise and
+constant-false branches are ignored. It is a syntactic reachability check, not
+full control-flow analysis (see ``_reachable_calls`` for what it does not catch).
 """
 
 from __future__ import annotations
@@ -61,6 +62,7 @@ from __future__ import annotations
 import argparse
 import ast
 import json
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -210,18 +212,78 @@ def _receiver_attr(node: ast.AST) -> str | None:
     return None
 
 
+def _const_truth(test: ast.expr) -> bool | None:
+    """Истинность константного условия (``if False``/``if 0``/``if True``), иначе None."""
+    if isinstance(test, ast.Constant):
+        return bool(test.value)
+    return None
+
+
+def _reachable_calls(node: ast.AST):
+    """Генерирует ``ast.Call`` только из КОД, который purge реально исполняет.
+
+    Не заходит в тела вложенных ``def``/``async def``/``class`` и в ``lambda``
+    (объявление не есть вызов), пропускает ветку ``if``/``while`` с константным
+    условием, которое её отключает, и всё, что стоит после безусловного
+    ``return``/``raise``/``break``/``continue`` в том же списке операторов. Это
+    консервативно в нужную сторону: сомнительный clear() не засчитывается и виден
+    как дыра.
+
+    ЧЕГО ГАРД НЕ ЛОВИТ (нужен полноценный анализ потока управления, не делаем):
+    тупик после ``if``/``try``, где ВСЕ ветки завершаются ``return``; ``while True``
+    без выхода; константные ``IfExp``/``BoolOp`` (``x() if False else y``);
+    неисполненные генераторные выражения. Такие clear() всё ещё засчитываются —
+    «only reachable» здесь означает «синтаксически недостижимо», не «доказано
+    исполняется». Обратная сторона строгости: ``lambda``, переданная в helper
+    (``self._step(lambda: self.x.clear())``), НЕ засчитывается — гард покажет
+    ложную дыру (падает громко, это безопасное направление).
+    """
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+        return
+    if isinstance(node, ast.Call):
+        yield node
+    if isinstance(node, (ast.If, ast.While)):
+        yield from _reachable_calls(node.test)
+        truth = _const_truth(node.test)
+        if truth is not False:
+            yield from _reachable_list(node.body)
+        if truth is not True:
+            yield from _reachable_list(node.orelse)
+        return
+    for _name, value in ast.iter_fields(node):
+        if isinstance(value, list):
+            yield from _reachable_list(value)
+        elif isinstance(value, ast.AST):
+            yield from _reachable_calls(value)
+
+
+def _reachable_list(items: list) -> Iterator[ast.Call]:
+    for item in items:
+        if isinstance(item, ast.AST):
+            yield from _reachable_calls(item)
+        if isinstance(item, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+            break  # дальше в этом списке операторов исполнение не идёт
+
+
+def _func_calls(func: ast.FunctionDef):
+    """Достижимые вызовы тела функции (сама функция ``_reachable_calls`` не заходит)."""
+    yield from _reachable_list(func.body)
+
+
 def _collect_clear_calls(func: ast.FunctionDef) -> set[tuple[str, str]]:
-    """Collect every ``self.<receiver>.<method>(...)`` call inside ``func`` as a
-    ``(receiver_attr, method)`` pair.
+    """Collect every reachable ``self.<receiver>.<method>(...)`` call inside
+    ``func`` as a ``(receiver_attr, method)`` pair.
 
     Only calls whose receiver is ``self.<attr>`` (one hop off ``self``) are
     recorded — exactly the shape every registry clear-call takes.  Calls on
     deeper chains or on locals are ignored (they can never match a registry
-    entry, whose receiver is always a direct ``self`` attribute).
+    entry, whose receiver is always a direct ``self`` attribute).  Unreachable
+    code (nested defs, lambdas, code after return/raise, ``if False``) does not
+    count: purge never executes it (G3-P04-11).
     """
     pairs: set[tuple[str, str]] = set()
-    for node in ast.walk(func):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+    for node in _func_calls(func):
+        if not isinstance(node.func, ast.Attribute):
             continue
         method = node.func.attr
         recv = node.func.value
@@ -237,11 +299,11 @@ def _collect_clear_calls(func: ast.FunctionDef) -> set[tuple[str, str]]:
 
 def _same_module_helper_calls(func: ast.FunctionDef) -> set[str]:
     """Return names of same-object helper methods invoked as ``self.<name>(...)``
-    inside ``func`` (single-hop), so their bodies can be scanned for clear-calls
-    too (the purge may delegate a clear into a private helper)."""
+    from REACHABLE code of ``func`` (single-hop), so their bodies can be scanned
+    for clear-calls too (the purge may delegate a clear into a private helper)."""
     helpers: set[str] = set()
-    for node in ast.walk(func):
-        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+    for node in _func_calls(func):
+        if not isinstance(node.func, ast.Attribute):
             continue
         recv = node.func.value
         if isinstance(recv, ast.Name) and recv.id == "self":
