@@ -41,8 +41,14 @@ class PreRollBuffer:
         data = np.asarray(chunk, dtype="<i2").reshape(-1).tobytes()
         n = len(data) // 2
         with self._lock:
-            self._chunks.append((self._total, data))
-            self._held += n
+            if n == 0:  # пустой чанк не копится в очереди (ревью ChatGPT 26.11, п.19)
+                return self._total
+            start, kept = self._total, n
+            if n > self._max:  # чанк больше ёмкости: храним только последние отсчёты, позиции остаются абсолютными
+                drop = n - self._max
+                data, start, kept = data[drop * 2:], start + drop, self._max
+            self._chunks.append((start, data))
+            self._held += kept
             self._total += n
             while self._held - len(self._chunks[0][1]) // 2 >= self._max and len(self._chunks) > 1:
                 self._held -= len(self._chunks.popleft()[1]) // 2
