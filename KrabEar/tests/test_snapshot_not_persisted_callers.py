@@ -151,6 +151,58 @@ class TestMergeReportsIncomplete(_Base):
         self.assertNotIn("complete", result)
         self.assertNotIn("incomplete_ids", result)
 
+    def test_cascade_raising_after_tombstone_counts_as_deleted_incomplete(self) -> None:
+        """Ревью #2274: каскад бросил ПОСЛЕ tombstone — оригинал удалён, удаление неполное."""
+        a = self._add("первый")
+        b = self._add("второй")
+        merger = RecordingMerger()
+
+        def _cascade(item_id: str, item_ts: str):
+            if item_id == b.id:
+                raise RuntimeError("io error")
+            return []
+        merger.cascade_delete_fn = _cascade
+        result = merger.merge_items([a.id, b.id], self.store, delete_originals=True)
+        with self.store._lock():
+            active = {i.id for i in self.store._load_active_items_unlocked()}
+        self.assertNotIn(b.id, active, "tombstone записан")
+        self.assertCountEqual(result["deleted_ids"], [a.id, b.id])
+        self.assertIs(result.get("complete"), False)
+        self.assertEqual(result.get("reason"), "cascade_cleanup_failed")
+        self.assertEqual(result.get("incomplete_ids"), [b.id])
+
+    def test_reason_not_fooled_by_word_semantic_in_other_step(self) -> None:
+        """Ревью #2274 п.15: reason по коду шага, а не по подстроке в тексте ошибки."""
+        a = self._add("первый")
+        b = self._add("второй")
+        merger = RecordingMerger()
+        merger.cascade_delete_fn = lambda item_id, item_ts: (
+            ["md_erase: semantic remove_item каталог недоступен"] if item_id == a.id else [])
+        result = merger.merge_items([a.id, b.id], self.store, delete_originals=True)
+        self.assertEqual(result.get("reason"), "cascade_cleanup_failed")
+        self.assertEqual(result.get("incomplete_ids"), [a.id])
+
+
+class TestDeleteHistoryItemReason(_Base):
+    def test_reason_not_fooled_by_word_semantic_in_md_error(self) -> None:
+        a = self._add("запись")
+        svc = HistoryService(store=self.store)
+        svc._semantic_searcher = _FlakySearcher()
+
+        def _md_fail(*args, **kwargs):
+            raise OSError("semantic remove_item: чужой текст в ошибке .md")
+        svc._erase_transcript_md = _md_fail
+        result = svc.handle_delete_history_item({"id": a.id})
+        self.assertIs(result.get("complete"), False)
+        self.assertEqual(result.get("reason"), "cascade_cleanup_failed")
+
+    def test_semantic_failure_still_reported_as_semantic(self) -> None:
+        a = self._add("запись")
+        svc = HistoryService(store=self.store)
+        svc._semantic_searcher = _FlakySearcher(fail_ids={a.id})
+        result = svc.handle_delete_history_item({"id": a.id})
+        self.assertEqual(result.get("reason"), "semantic_index_cleanup_failed")
+
 
 if __name__ == "__main__":
     unittest.main()

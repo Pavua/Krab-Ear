@@ -10,6 +10,8 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from backend.semantic_search import SEMANTIC_CASCADE_STEP, cascade_failure_reason
+
 logger = logging.getLogger("KrabEar.Backend.RecordingMerger")
 
 _TIMESTAMP_SEP = "\n\n"
@@ -190,11 +192,9 @@ class RecordingMerger:
         if incomplete:
             # Follow-up #2229 F6: оригиналы удалены, но вторичные индексы (эмбеддинг,
             # .md, версии…) очищены не полностью — не выдаём за полное удаление.
-            semantic = any("semantic" in err.lower() or "remove_item" in err
-                           for errs in incomplete.values() for err in errs)
             result["complete"] = False
-            result["reason"] = ("semantic_index_cleanup_failed" if semantic
-                                else "cascade_cleanup_failed")
+            result["reason"] = cascade_failure_reason(
+                err for errs in incomplete.values() for err in errs)
             result["incomplete_ids"] = [i for i in deleted_ids if i in incomplete]
         return result
 
@@ -310,11 +310,14 @@ class RecordingMerger:
                 store.delete_history_item(item_id)
             try:
                 errors = self.cascade_delete_fn(item_id, item_ts)
-            except Exception:
+            except Exception as exc:
+                # Ревью #2274: tombstone уже записан (атомарной секцией или выше) —
+                # оригинал удалён, упал только каскад. Не прячем удаление из
+                # deleted_ids, а помечаем его неполным.
                 logger.exception(
                     "merge_items: каскадное удаление не удалось для id=%s", item_id
                 )
-                return False
+                errors = [f"cascade: {exc}"]
             if errors:
                 if incomplete_cleanup is not None:
                     incomplete_cleanup[item_id] = [str(e) for e in errors]
@@ -333,7 +336,7 @@ class RecordingMerger:
                 self._semantic_searcher.remove_item(item_id)
             except Exception as exc:
                 if incomplete_cleanup is not None:
-                    incomplete_cleanup[item_id] = [f"semantic remove_item: {exc}"]
+                    incomplete_cleanup[item_id] = [f"{SEMANTIC_CASCADE_STEP}: {exc}"]
                 logger.warning("semantic_searcher.remove_item failed for %s", item_id, exc_info=True)
         return True
 
