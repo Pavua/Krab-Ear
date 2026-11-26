@@ -16,7 +16,9 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -48,6 +50,80 @@ _ENV_DIR_VAR = "KRAB_EAR_PRIVACY_AUDIT_DIR"
 AUDIT_CONFIRMED = "confirmed"      # запись дошла до fsync без исключения
 AUDIT_NOT_WRITTEN = "not_written"  # сбой ДО начала записи — на диске ничего не появилось
 AUDIT_UNKNOWN = "unknown"          # сбой во время/после записи — запись могла лечь
+
+
+# G3-P04-08: централизованная санитизация details ДО расчёта HMAC. Журнал —
+# комплаенс-след, а не лог отладки: в нём должны лежать счётчики, флаги и короткие
+# метки, но не секреты и не содержимое пользовательских данных.
+REDACTED = "[redacted]"
+_MAX_STR_LEN = 200
+_MAX_KEY_LEN = 64
+_MAX_LIST_ITEMS = 20
+_MAX_DEPTH = 2
+# Ключ считается чувствительным по целому «слову» (границы — «_»/начало/конец),
+# поэтому encryption_key_shredded и transcripts_deleted не задеваются.
+_SENSITIVE_KEY_RE = re.compile(
+    r"(^|_)(secret|token|password|passwd|passphrase|apikey|api_key|authorization|"
+    r"cookie|credential|credentials|transcript|text|content|prompt|body)(_|$)",
+    re.IGNORECASE,
+)
+# Значение под безобидным ключом: Bearer-заголовок или длинная «токеноподобная»
+# строка без пробелов (ключи API, хеши, base64).
+_SECRET_VALUE_RE = re.compile(r"^(Bearer\s+\S+|[A-Za-z0-9_\-+/=]{32,})$")
+
+
+def _sanitize_value(key: str, value: Any, depth: int) -> Any:
+    """Санитизирует одно значение details (см. ``sanitize_audit_details``)."""
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        if _SENSITIVE_KEY_RE.search(key) or _SECRET_VALUE_RE.match(value.strip()):
+            return REDACTED
+        return value[:_MAX_STR_LEN]
+    if isinstance(value, dict):
+        if _SENSITIVE_KEY_RE.search(key) or depth >= _MAX_DEPTH:
+            return REDACTED
+        return _sanitize_mapping(value, depth + 1)
+    if isinstance(value, (list, tuple)):
+        if _SENSITIVE_KEY_RE.search(key) or depth >= _MAX_DEPTH:
+            return REDACTED
+        return [_sanitize_value(key, v, depth + 1) for v in list(value)[:_MAX_LIST_ITEMS]]
+    # bytes и произвольные объекты: только имя типа, содержимое не сериализуем.
+    return type(value).__name__
+
+
+def _sanitize_mapping(mapping: dict[Any, Any], depth: int) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for raw_key, value in mapping.items():
+        key = str(raw_key)[:_MAX_KEY_LEN] or "_"
+        # Коллизия урезанных/нормализованных ключей не должна терять значение.
+        base, n = key, 1
+        while key in out:
+            n += 1
+            key = f"{base[:_MAX_KEY_LEN - 4]}_{n}"
+        out[key] = _sanitize_value(key, value, depth)
+    return out
+
+
+def sanitize_audit_details(details: Any) -> dict[str, Any]:
+    """Возвращает безопасную копию ``details`` для записи в журнал.
+
+    Правила: числа/bool/None проходят как есть (NaN/Inf -> None); строки режутся
+    до ``_MAX_STR_LEN``; строка под чувствительным ключом или похожая на токен
+    заменяется на ``REDACTED``; вложенность не глубже ``_MAX_DEPTH``, списки не
+    длиннее ``_MAX_LIST_ITEMS``; bytes и произвольные объекты сводятся к имени типа.
+    Не-словарь -> ``{}``. Исключений не бросает.
+    """
+    if not isinstance(details, dict):
+        return {}
+    try:
+        return _sanitize_mapping(details, 0)
+    except Exception:  # noqa: BLE001 — аудит не должен падать на странном details
+        return {"details_error": "unserializable"}
 
 
 def _default_log_path() -> Path:
@@ -451,7 +527,7 @@ class PrivacyAuditLogger:
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "category": category,
                 "action": action,
-                "details": details or {},
+                "details": sanitize_audit_details(details),
             }
             # Фаза нужна, чтобы отличить «доказанно не записано» от «неизвестно»:
             #   pre     — до первого байта записи (open/flock/чтение tip/хеш);
