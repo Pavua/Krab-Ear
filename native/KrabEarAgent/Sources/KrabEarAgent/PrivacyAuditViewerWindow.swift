@@ -202,11 +202,17 @@ final class PrivacyAuditViewerWindowController: NSWindowController,
                 }
             } catch {
                 DispatchQueue.main.async {
-                    self.statusLabel.stringValue = "Ошибка: \(error.localizedDescription)"
+                    // G3-P04-12: без localizedDescription (может содержать пути/детали IPC).
+                    self.statusLabel.stringValue = Self.safeErrorText(error)
                     self.refreshButton.isEnabled = true
                 }
             }
         }
+    }
+
+    /// Безопасный текст ошибки для UI: только тип, без путей и деталей (G3-P04-12).
+    nonisolated static func safeErrorText(_ error: Error) -> String {
+        "Не удалось загрузить журнал (\(String(describing: type(of: error))))"
     }
 
     // MARK: - Actions

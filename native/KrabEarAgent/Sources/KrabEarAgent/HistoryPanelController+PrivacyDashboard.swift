@@ -58,14 +58,15 @@ struct PrivacyDashboardData {
     let privacyMode: Bool?
     let encryptionEnabled: Bool?
     // storage
-    let itemCount: Int
-    let transcriptsCount: Int
-    let totalDataMb: Double
+    // G3-P04-13: отсутствующее поле = nil («Неизвестно»), а не подтверждённый 0/false.
+    let itemCount: Int?
+    let transcriptsCount: Int?
+    let totalDataMb: Double?
     // retention
-    let autoPurgeEnabled: Bool
-    let autoPurgeRetentionDays: Int
+    let autoPurgeEnabled: Bool?
+    let autoPurgeRetentionDays: Int?
     // audit
-    let auditTotalEvents: Int
+    let auditTotalEvents: Int?
     let auditLastEventTs: String?
     let purgeAvailable: Bool
 
@@ -78,12 +79,12 @@ struct PrivacyDashboardData {
         let storage = result["storage"] as? [String: Any]
         let retention = result["retention"] as? [String: Any]
         let audit = result["audit"] as? [String: Any]
-        itemCount = storage?["item_count"] as? Int ?? 0
-        transcriptsCount = storage?["transcripts_count"] as? Int ?? 0
-        totalDataMb = HistoryPanelController.pdDouble(storage?["total_data_mb"])
-        autoPurgeEnabled = retention?["auto_purge_enabled"] as? Bool ?? false
-        autoPurgeRetentionDays = retention?["auto_purge_retention_days"] as? Int ?? 0
-        auditTotalEvents = audit?["total_events"] as? Int ?? 0
+        itemCount = storage?["item_count"] as? Int
+        transcriptsCount = storage?["transcripts_count"] as? Int
+        totalDataMb = HistoryPanelController.pdOptionalDouble(storage?["total_data_mb"])
+        autoPurgeEnabled = retention?["auto_purge_enabled"] as? Bool
+        autoPurgeRetentionDays = retention?["auto_purge_retention_days"] as? Int
+        auditTotalEvents = audit?["total_events"] as? Int
         auditLastEventTs = HistoryPanelController.pdTimestamp(audit?["last_event_ts"])
         purgeAvailable = result["purge_available"] as? Bool ?? false
     }
@@ -241,15 +242,15 @@ extension HistoryPanelController {
 
         // Хранилище.
         card.contentStackView.addArrangedSubview(
-            makeSettingRow(label: "Объём данных", control: pdValueLabel(pdMb(data.totalDataMb)))
+            makeSettingRow(label: "Объём данных", control: pdValueLabel(Self.pdMbText(data.totalDataMb)))
         )
         card.contentStackView.addArrangedSubview(pdSeparator())
         card.contentStackView.addArrangedSubview(
-            makeSettingRow(label: "Записей в истории", control: pdValueLabel("\(data.itemCount)"))
+            makeSettingRow(label: "Записей в истории", control: pdValueLabel(Self.pdCountText(data.itemCount)))
         )
         card.contentStackView.addArrangedSubview(pdSeparator())
         card.contentStackView.addArrangedSubview(
-            makeSettingRow(label: "Файлов транскриптов", control: pdValueLabel("\(data.transcriptsCount)"))
+            makeSettingRow(label: "Файлов транскриптов", control: pdValueLabel(Self.pdCountText(data.transcriptsCount)))
         )
         card.contentStackView.addArrangedSubview(pdSeparator())
 
@@ -257,7 +258,7 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(
             makeSettingRow(
                 label: "Авто-удаление (purge)",
-                control: pdValueLabel(pdRetentionValue(
+                control: pdValueLabel(Self.pdRetentionText(
                     enabled: data.autoPurgeEnabled, days: data.autoPurgeRetentionDays))
             )
         )
@@ -265,7 +266,7 @@ extension HistoryPanelController {
 
         // Аудит приватности.
         card.contentStackView.addArrangedSubview(
-            makeSettingRow(label: "Событий аудита", control: pdValueLabel("\(data.auditTotalEvents)"))
+            makeSettingRow(label: "Событий аудита", control: pdValueLabel(Self.pdCountText(data.auditTotalEvents)))
         )
         if let ts = data.auditLastEventTs, !ts.isEmpty {
             card.contentStackView.addArrangedSubview(pdSeparator())
@@ -310,24 +311,24 @@ extension HistoryPanelController {
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Объём данных", control: pdValueLabel(pdMb(data.totalDataMb)))
+            cdMakeRow(label: "Объём данных", control: pdValueLabel(Self.pdMbText(data.totalDataMb)))
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Записей в истории", control: pdValueLabel("\(data.itemCount)"))
+            cdMakeRow(label: "Записей в истории", control: pdValueLabel(Self.pdCountText(data.itemCount)))
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Файлов транскриптов", control: pdValueLabel("\(data.transcriptsCount)"))
+            cdMakeRow(label: "Файлов транскриптов", control: pdValueLabel(Self.pdCountText(data.transcriptsCount)))
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Авто-удаление (purge)", control: pdValueLabel(pdRetentionValue(
+            cdMakeRow(label: "Авто-удаление (purge)", control: pdValueLabel(Self.pdRetentionText(
                 enabled: data.autoPurgeEnabled, days: data.autoPurgeRetentionDays)))
         )
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(
-            cdMakeRow(label: "Событий аудита", control: pdValueLabel("\(data.auditTotalEvents)"))
+            cdMakeRow(label: "Событий аудита", control: pdValueLabel(Self.pdCountText(data.auditTotalEvents)))
         )
         if let ts = data.auditLastEventTs, !ts.isEmpty {
             card.contentStackView.addArrangedSubview(cdMakeSeparator())
@@ -461,18 +462,31 @@ extension HistoryPanelController {
         return on ? "Вкл" : "Выкл"
     }
 
-    /// Объём в МБ с одним знаком.
-    private func pdMb(_ mb: Double) -> String {
-        String(format: "%.1f МБ", mb)
+    /// Объём в МБ с одним знаком; nil = «Неизвестно» (G3-P04-13).
+    nonisolated static func pdMbText(_ mb: Double?) -> String {
+        guard let mb else { return "Неизвестно" }
+        return String(format: "%.1f МБ", mb)
     }
 
-    /// Подпись политики хранения: "Вкл · N дн." или "Выкл".
-    private func pdRetentionValue(enabled: Bool, days: Int) -> String {
+    nonisolated static func pdCountText(_ value: Int?) -> String {
+        guard let value else { return "Неизвестно" }
+        return "\(value)"
+    }
+
+    /// Подпись политики хранения: "Вкл · N дн.", "Выкл" или «Неизвестно».
+    nonisolated static func pdRetentionText(enabled: Bool?, days: Int?) -> String {
+        guard let enabled else { return "Неизвестно" }
         guard enabled else { return "Выкл" }
-        if days > 0 {
+        if let days, days > 0 {
             return "Вкл · \(days) дн."
         }
         return "Вкл"
+    }
+
+    /// Double из числового значения payload; JSON bool (CFBoolean) числом не считается.
+    nonisolated static func pdOptionalDouble(_ value: Any?) -> Double? {
+        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        return n.doubleValue
     }
 
     /// Цветной бейдж для булева флага (зелёный когда защита включена).
@@ -505,14 +519,6 @@ extension HistoryPanelController {
     }
 
     // MARK: - Парсинг payload (static, без MainActor)
-
-    /// Извлекает Double из Int/Double/NSNumber значения payload.
-    nonisolated static func pdDouble(_ value: Any?) -> Double {
-        if let d = value as? Double { return d }
-        if let i = value as? Int { return Double(i) }
-        if let n = value as? NSNumber { return n.doubleValue }
-        return 0
-    }
 
     /// Нормализует last_event_ts: может прийти строкой, числом (epoch) или null.
     nonisolated static func pdTimestamp(_ value: Any?) -> String? {
