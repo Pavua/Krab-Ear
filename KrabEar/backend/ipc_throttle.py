@@ -148,6 +148,9 @@ EXCLUDED_METHODS: Set[str] = {
     "live_subs_stop",
     # Phase 3 safeguards: polling calls from auto-end monitor loop
     "call_estimate_cost",
+    # Опрос агентом каждые 0,25 с (4/с) — «light» 120/мин отбрасывал половину;
+    # метод только читает счётчики и последнее срабатывание wake word.
+    "wake_word_status",
 }
 
 # Всё остальное — light (120/min)
