@@ -65,6 +65,10 @@ def _cleared(body: str, extra: str = "") -> set:
         "try:\n    self._a()\nexcept Exception:\n    pass\nelse:\n    self._w.clear()",
         "for _ in self._xs:\n    return {}\nself._w.clear()",
         "if not False:\n    self._w.clear()",
+        "with suppress(ValueError):\n    raise ValueError()\nself._w.clear()",
+        "with self._lk:\n    raise ValueError()\nself._w.clear()",
+        "with self._lk:\n    if self._x:\n        return {}\n    else:\n        raise ValueError()\nself._w.clear()",
+        "try:\n    with suppress(ValueError):\n        raise ValueError()\nexcept Exception:\n    return {}\nelse:\n    self._w.clear()",
     ],
 )
 def test_reachable_clear_is_counted(body: str) -> None:

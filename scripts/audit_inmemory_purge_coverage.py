@@ -225,11 +225,11 @@ def _const_truth(test: ast.expr) -> bool | None:
 _TRY_TYPES = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
 
 
-def _terminates_list(items: list) -> bool:
-    return any(_terminates(item) for item in items)
+def _terminates_list(items: list, raises: bool = True) -> bool:
+    return any(_terminates(item, raises) for item in items)
 
 
-def _terminates(stmt: ast.AST) -> bool:
+def _terminates(stmt: ast.AST, raises: bool = True) -> bool:
     """True, если оператор НИКОГДА не передаёт управление следующему за ним.
 
     ``return``/``raise``/``break``/``continue``; ``if`` с завершающими обеими
@@ -237,23 +237,33 @@ def _terminates(stmt: ast.AST) -> bool:
     телу; ``try``: ``finally`` завершается, либо (тело ИЛИ ``else`` завершаются И
     все ``except`` завершаются). Циклы и ``match`` не считаем завершающими
     (тело может не выполниться) — консервативно в сторону «достижимо».
+
+    ``raises=False`` — ``raise`` НЕ считается завершением: так проверяется тело
+    ``with``, потому что контекстный менеджер (``contextlib.suppress``) может
+    погасить исключение, и тогда код после ``with`` исполняется.
     """
-    if isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+    if isinstance(stmt, ast.Raise):
+        return raises
+    if isinstance(stmt, (ast.Return, ast.Break, ast.Continue)):
         return True
     if isinstance(stmt, ast.If):
         truth = _const_truth(stmt.test)
         if truth is True:
-            return _terminates_list(stmt.body)
+            return _terminates_list(stmt.body, raises)
         if truth is False:
-            return _terminates_list(stmt.orelse)
-        return _terminates_list(stmt.body) and bool(stmt.orelse) and _terminates_list(stmt.orelse)
+            return _terminates_list(stmt.orelse, raises)
+        return (
+            _terminates_list(stmt.body, raises)
+            and bool(stmt.orelse)
+            and _terminates_list(stmt.orelse, raises)
+        )
     if isinstance(stmt, (ast.With, ast.AsyncWith)):
-        return _terminates_list(stmt.body)
+        return _terminates_list(stmt.body, raises=False)
     if isinstance(stmt, _TRY_TYPES):
-        if _terminates_list(stmt.finalbody):
+        if _terminates_list(stmt.finalbody, raises):
             return True
-        flows_out = _terminates_list(stmt.body) or _terminates_list(stmt.orelse)
-        return flows_out and all(_terminates_list(h.body) for h in stmt.handlers)
+        flows_out = _terminates_list(stmt.body, raises) or _terminates_list(stmt.orelse, raises)
+        return flows_out and all(_terminates_list(h.body, raises) for h in stmt.handlers)
     return False
 
 
@@ -277,9 +287,10 @@ def _reachable_calls(node: ast.AST):
     Обратная сторона строгости (ложная дыра, падает громко — безопасное
     направление): ``lambda``, переданная в helper (``self._step(lambda:
     self.x.clear())``), а также значение аргумента по умолчанию и декоратор
-    вложенной функции НЕ засчитываются, хотя исполняются; так же ``with
-    suppress(Exception): raise X`` считается завершающим, хотя контекстный
-    менеджер гасит исключение и код после него исполняется.
+    вложенной функции НЕ засчитываются, хотя исполняются.
+    ``raise`` в теле ``with`` завершением не считается (``suppress`` может
+    погасить исключение), поэтому ``with lk: raise X`` + clear() после него
+    засчитывается — это пропуск в «тихую» сторону, принятый осознанно.
     """
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
         return
