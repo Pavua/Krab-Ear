@@ -41,6 +41,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2502,6 +2503,36 @@ def _apply_verified_snapshot_locked(
     }
 
 
+def _marker_files_evidence(marker: dict) -> list[dict] | None:
+    """``files`` из restore-маркера — только если это пригодное доказательство.
+
+    G3-P04-09: COMMITTED-маркер сам по себе ничего не доказывает; чтобы сверить с
+    ним живые журналы, он обязан нести непустой список уникальных записей с
+    именем из реестра журналов (или ``settings.json`` для legacy-транзакции),
+    целым ``size >= 0`` и ``sha256`` из 64 hex-символов. Имена вне реестра
+    (``../x``) недопустимы: сверка читает ``data_dir/<name>``.
+    """
+    files = marker.get("files")
+    if not isinstance(files, list) or not files:
+        return None
+    allowed = set(HISTORY_JOURNAL_FILENAMES) | {"settings.json"}
+    seen: set[str] = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            return None
+        name = entry.get("name")
+        size = entry.get("size")
+        digest = entry.get("sha256")
+        if not isinstance(name, str) or name not in allowed or name in seen:
+            return None
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return None
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return None
+        seen.add(name)
+    return files
+
+
 def _validated_marker_entries(marker: dict) -> int | None:
     """``restored_entries`` из маркера — только если значение пригодно.
 
@@ -2726,6 +2757,24 @@ def _recover_pending_restore(
 
     # --- Маркер COMMITTED: транзакция завершена, осталась только уборка. ---
     if marker.get("state") == RESTORE_STATE_COMMITTED:
+        # G3-P04-09: маркер лишь утверждает, что read-back когда-то прошёл. Прежде
+        # чем объявить успех и убрать staging, живые журналы заново сверяются с
+        # size/sha256 из маркера; без доказательства/при расхождении — fail-closed,
+        # а маркер и staging остаются единственным свидетельством для разбора.
+        evidence = _marker_files_evidence(marker)
+        if evidence is None:
+            return _blocked(REASON_MANIFEST_INVALID, **common)
+        try:
+            live_check = _readback_live_journals(data_dir=data_dir, files_meta=evidence)
+        except Exception:  # noqa: BLE001 — recovery не имеет права бросить
+            logger.exception("encrypted_snapshot: re-verify COMMITTED-маркера не выполнен")
+            return _blocked(REASON_READBACK_FAILED, **common)
+        if not live_check["ok"]:
+            logger.error(
+                "encrypted_snapshot: COMMITTED-маркер %s не подтверждён живыми журналами: %s",
+                transaction_id, live_check["mismatches"],
+            )
+            return _blocked(REASON_READBACK_FAILED, **common)
         _cancel_staging(staging)
         if transaction_id:
             _cleanup_restore_tmp(data_dir, transaction_id)

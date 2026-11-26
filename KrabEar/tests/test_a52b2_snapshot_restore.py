@@ -1382,6 +1382,20 @@ def _crash_restore(data_dir: Path, crypto: HistoryCrypto, snapshot_dir: Path, *,
             )
 
 
+def _live_files_meta(data_dir: Path) -> list[dict]:
+    """Честное доказательство для COMMITTED-маркера: size/sha256 ЖИВЫХ журналов.
+
+    G3-P04-09: recovery больше не верит COMMITTED на слово, поэтому тесты,
+    подкладывающие «оставшийся после crash» маркер, обязаны нести настоящие
+    данные о живых файлах, а не пустой список/выдуманные хеши.
+    """
+    meta = []
+    for name in HISTORY_JOURNAL_FILENAMES:
+        blob = (data_dir / name).read_bytes()
+        meta.append({"name": name, "size": len(blob), "sha256": hashlib.sha256(blob).hexdigest()})
+    return meta
+
+
 def _recover(data_dir: Path, crypto: HistoryCrypto) -> dict:
     return recover_pending_restore(
         data_dir=data_dir,
@@ -1519,7 +1533,7 @@ class TestRecoveryRollsForward:
                     "state": "COMMITTED",
                     "target_snapshot": str(snapshot_dir),
                     "pre_restore_snapshot": str(snapshot_dir),
-                    "files": [],
+                    "files": _live_files_meta(data_dir),
                 }
             ),
             encoding="utf-8",
@@ -2645,7 +2659,7 @@ class TestRestoreCountDegradation:
                     "target_snapshot": str(data_dir / "backups" / "snapshot_1"),
                     "pre_restore_snapshot": str(data_dir / "backups" / "snapshot_1"),
                     "restored_entries": "99",
-                    "files": [{"name": "history.ndjson", "size": 10, "sha256": "x" * 64}],
+                    "files": _live_files_meta(data_dir),
                 }
             ),
             encoding="utf-8",
@@ -2675,7 +2689,7 @@ class TestRestoreCountDegradation:
                     "target_snapshot": str(data_dir / "backups" / "snapshot_1"),
                     "pre_restore_snapshot": str(data_dir / "backups" / "snapshot_1"),
                     "restored_entries": 3,
-                    "files": [{"name": "history.ndjson", "size": 4096, "sha256": "x" * 64}],
+                    "files": _live_files_meta(data_dir),
                 }
             ),
             encoding="utf-8",
