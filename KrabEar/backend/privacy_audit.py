@@ -89,13 +89,25 @@ _SAFE_STRING_KEYS = frozenset(
 # Метка: короткий токен без пробелов (буквы любого алфавита, цифры, _ . : / -).
 _LABEL_RE = re.compile(r"^[\w.:/\-]{1,64}$")
 # Ключи идентификаторов/хешей: значение проходит, только если оно строго UUID или hex.
-_ID_KEY_RE = re.compile(r"(^|_)(id|ids|hash|sha)$")
+_ID_KEY_RE = re.compile(r"(^|_)(id|ids|hash|sha|sha1|sha256)$")
 _ID_VALUE_RE = re.compile(
     r"^(?:[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
     r"|[0-9a-fA-F]{8,128})$"
 )
 _CAMEL_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _KEY_SHAPE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+# Секрет в КЛЮЧЕ словаря: после casefold он всё ещё подходит под a-z0-9_, поэтому
+# дополнительно отсекаем ключи с длинным сегментом или сегментом из >=8 цифр.
+_MAX_KEY_SEGMENT = 20
+_DIGIT_RUN_RE = re.compile(r"[0-9]{8,}")
+
+
+def _key_looks_safe(norm: str) -> bool:
+    if not _KEY_SHAPE_RE.match(norm):
+        return False
+    if _DIGIT_RUN_RE.search(norm):
+        return False
+    return all(len(seg) <= _MAX_KEY_SEGMENT for seg in norm.split("_"))
 
 
 def _normalize_key(raw_key: Any) -> str:
@@ -143,7 +155,7 @@ def _sanitize_mapping(mapping: dict[Any, Any], depth: int) -> dict[str, Any]:
     unsafe_n = 0
     for raw_key, value in mapping.items():
         norm = _normalize_key(raw_key)
-        if _KEY_SHAPE_RE.match(norm):
+        if _key_looks_safe(norm):
             key = norm
         else:
             # Ключ сам может нести содержимое (текст, токен): в журнал идёт

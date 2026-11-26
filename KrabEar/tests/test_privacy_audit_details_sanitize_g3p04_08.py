@@ -109,6 +109,25 @@ class SanitizeUnitTests(unittest.TestCase):
         out = sanitize_audit_details({"pro\u200bvider": "groq", "originalMode": "online"})
         self.assertEqual(out, {"provider": "groq", "original_mode": "online"})
 
+    def test_secret_in_dict_key_is_not_written_even_after_normalization(self):
+        # После casefold/замены дефисов такой ключ подходит под a-z0-9_, но он — секрет.
+        secret_key = "sk-live-SECRETSECRETSECRETSECRET12"
+        digits_key = "tok_34612345678"
+        out = sanitize_audit_details({"ids": {secret_key: 1, digits_key: 2}})
+        dumped = json.dumps(out).lower()
+        self.assertNotIn("secretsecret", dumped)
+        self.assertNotIn("34612345678", dumped)
+        self.assertEqual(sorted(out["ids"].values()), [1, 2])
+
+    def test_legitimate_long_counter_keys_stay_readable(self):
+        details = {
+            "deletion_ledger_ids_preserved": 3,
+            "history_encryption_enabled_after": True,
+            "call_sessions_deleted": 1,
+            "sha256": "ab" * 32,
+        }
+        self.assertEqual(sanitize_audit_details(details), details)
+
     def test_text_in_dict_key_is_not_written_to_log(self):
         leak = "Привет, мой пароль 12345"
         out = sanitize_audit_details({leak: 7, "k" * 300: "b"})
