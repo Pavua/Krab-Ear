@@ -223,3 +223,156 @@ class TestProdEntryRetriesRetired:
 
         assert es.has_pending_restore(data_dir) is False
         assert es._is_retired_staging(leftover), "иначе каталог вечно глушит retention"
+
+
+class TestRetiredClassificationSurvivesPartialRmtree:
+    """Находки ChatGPT к #2292 (проверены по коду): rmtree удаляет файлы по одному.
+
+    Частичный сбой не должен терять признак retired: каталог без маркера и без
+    метки выглядит как «restore работает СЕЙЧАС» и вечно глушит retention.
+    """
+
+    @staticmethod
+    def _partial_rmtree(monkeypatch, leftover, victim_name):
+        """Удаляет victim_name из leftover и падает, как rmtree на следующем файле."""
+        real = shutil.rmtree
+
+        def boom(path, *a, **k):
+            if Path(path) == leftover:
+                (Path(path) / victim_name).unlink(missing_ok=True)
+                raise PermissionError(13, "denied", str(path))
+            return real(path, *a, **k)
+
+        monkeypatch.setattr(es.shutil, "rmtree", boom)
+
+    def test_rmtree_removed_marker_first_still_leaves_retired_label(self, tmp_path, monkeypatch):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-partial")
+        self._partial_rmtree(monkeypatch, leftover, es.RESTORE_MARKER_FILENAME)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert es.has_pending_restore(data_dir) is False
+        assert es._is_retired_staging(leftover), "метки нет — каталог вечно глушит retention"
+        pruned = es.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=5
+        )
+        assert pruned.get("skipped_reason") != es.REASON_RECOVERY_PENDING
+
+    def test_retry_that_deletes_label_then_fails_keeps_directory_retired(
+        self, tmp_path, monkeypatch
+    ):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-retry-partial")
+        _rmtree_always_fails(monkeypatch, leftover)
+        _recover(data_dir, crypto)
+        assert es._is_retired_staging(leftover)
+        monkeypatch.undo()
+        label = es.RESTORE_MARKER_FILENAME + es.RESTORE_MARKER_RETIRED_SUFFIX
+        self._partial_rmtree(monkeypatch, leftover, label)
+
+        es._retry_retired_staging(data_dir)
+
+        assert leftover.exists()
+        assert es._is_retired_staging(leftover), "повторная уборка потеряла метку"
+
+    def test_retry_rechecks_retired_right_before_rmtree(self, tmp_path, monkeypatch):
+        """Каталог, чей маркер вернулся (повторная докатка), повторная уборка не трогает."""
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-race")
+        _rmtree_always_fails(monkeypatch, leftover)
+        _recover(data_dir, crypto)
+        monkeypatch.undo()
+        real_is_retired = es._is_retired_staging
+        calls = {"n": 0}
+
+        def flip(path):
+            calls["n"] += 1
+            if calls["n"] == 2:  # второй вызов — перед rmtree: маркер вернули
+                (path / es.RESTORE_MARKER_FILENAME).write_text("{}", encoding="utf-8")
+            return real_is_retired(path)
+
+        monkeypatch.setattr(es, "_is_retired_staging", flip)
+        es._retry_retired_staging(data_dir)
+
+        assert leftover.exists(), "активный restore нельзя убирать по устаревшему списку"
+
+    def test_rmtree_file_not_found_with_directory_left_is_not_success(self, tmp_path, monkeypatch):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-fnf")
+        real = shutil.rmtree
+
+        def boom(path, *a, **k):
+            if Path(path) == leftover:
+                raise FileNotFoundError(2, "vanished", str(path))
+            return real(path, *a, **k)
+
+        monkeypatch.setattr(es.shutil, "rmtree", boom)
+
+        warning = es._remove_committed_staging(leftover)
+
+        assert warning and warning.startswith("committed_staging_cleanup_failed:")
+
+    def test_label_failure_log_has_no_absolute_path(self, tmp_path, monkeypatch, caplog):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-log")
+        _rmtree_always_fails(monkeypatch, leftover)
+
+        def no_replace(*a, **k):
+            raise PermissionError(13, "denied", str(leftover))
+
+        real_touch = Path.touch
+
+        def no_touch(self, *a, **k):
+            if self.name.endswith(es.RESTORE_MARKER_RETIRED_SUFFIX):
+                raise PermissionError(13, "denied", str(self))
+            return real_touch(self, *a, **k)
+
+        monkeypatch.setattr(es.os, "replace", no_replace)
+        monkeypatch.setattr(Path, "touch", no_touch)
+        with caplog.at_level("DEBUG"):
+            _recover(data_dir, crypto)
+
+        assert any("retired-метка не создана" in r.getMessage() for r in caplog.records)
+        text = caplog.text  # включает отформатированный traceback (str исключения с путём)
+        assert str(data_dir) not in text, "абсолютный путь профиля в логе/traceback"
+
+
+class TestRollForwardReflectsCleanupFailure:
+    def test_committing_roll_forward_reports_disk_pending_and_reason(self, tmp_path, monkeypatch):
+        from test_a52b2_snapshot_restore import (
+            _crash_on_nth_replace, _crypto, _data_dir, _fill_profile, _make_snapshot, _settings_on,
+        )
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        _crash_on_nth_replace(data_dir, crypto, snapshot_dir, nth=2)
+        leftover = es.restore_marker_dirs(data_dir)[0]
+        _rmtree_always_fails(monkeypatch, leftover)
+
+        real_replace = es.os.replace
+        real_unlink = Path.unlink
+
+        def selective_replace(src, dst, *a, **k):
+            if Path(src).name == es.RESTORE_MARKER_FILENAME:
+                raise PermissionError(13, "denied")
+            return real_replace(src, dst, *a, **k)
+
+        def selective_unlink(self, *a, **k):
+            if self.name == es.RESTORE_MARKER_FILENAME:
+                raise PermissionError(13, "denied")
+            return real_unlink(self, *a, **k)
+
+        monkeypatch.setattr(es.os, "replace", selective_replace)
+        monkeypatch.setattr(Path, "unlink", selective_unlink)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["ok"] is True
+        assert es.has_pending_restore(data_dir) is True
+        assert result["pending"] is True, "константа False при маркере на диске"
+        assert result["reason"] == es.REASON_COMMITTED_CLEANUP_FAILED
