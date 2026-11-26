@@ -44,6 +44,15 @@ final class PrivacyUIHonestyTests: XCTestCase {
         XCTAssertNil(data.autoPurgeEnabled)
     }
 
+    func test_jsonBoolIsNotANumber() throws {
+        let data = try XCTUnwrap(PrivacyDashboardData(result: [
+            "ok": true, "storage": ["total_data_mb": true],
+        ]))
+        XCTAssertNil(data.totalDataMb, "true не должно читаться как 1.0 МБ")
+        XCTAssertEqual(HistoryPanelController.pdOptionalDouble(NSNumber(value: 2.5)), 2.5)
+        XCTAssertEqual(HistoryPanelController.pdOptionalDouble(3), 3.0)
+    }
+
     func test_auditViewerErrorTextHasNoInternalDetails() {
         struct LeakyError: LocalizedError {
             var errorDescription: String? { "open /Users/pablito/secret/path.ndjson failed" }

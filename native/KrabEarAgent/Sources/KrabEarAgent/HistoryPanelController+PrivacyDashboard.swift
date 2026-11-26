@@ -483,11 +483,10 @@ extension HistoryPanelController {
         return "Вкл"
     }
 
+    /// Double из числового значения payload; JSON bool (CFBoolean) числом не считается.
     nonisolated static func pdOptionalDouble(_ value: Any?) -> Double? {
-        if let d = value as? Double { return d }
-        if let i = value as? Int { return Double(i) }
-        if let n = value as? NSNumber { return n.doubleValue }
-        return nil
+        guard let n = value as? NSNumber, CFGetTypeID(n) != CFBooleanGetTypeID() else { return nil }
+        return n.doubleValue
     }
 
     /// Цветной бейдж для булева флага (зелёный когда защита включена).
@@ -520,14 +519,6 @@ extension HistoryPanelController {
     }
 
     // MARK: - Парсинг payload (static, без MainActor)
-
-    /// Извлекает Double из Int/Double/NSNumber значения payload.
-    nonisolated static func pdDouble(_ value: Any?) -> Double {
-        if let d = value as? Double { return d }
-        if let i = value as? Int { return Double(i) }
-        if let n = value as? NSNumber { return n.doubleValue }
-        return 0
-    }
 
     /// Нормализует last_event_ts: может прийти строкой, числом (epoch) или null.
     nonisolated static func pdTimestamp(_ value: Any?) -> String? {
