@@ -154,3 +154,39 @@ class TestRestorePathReflectsDisk:
         assert "committed_staging_cleanup_failed:PermissionError" in result["warnings"]
         assert result["pending"] is False
         assert es.has_pending_restore(data_dir) is False
+
+
+class TestRetiredStagingDoesNotBlockRetention:
+    """Находка Codex к #2292: каталог со снятым маркером не должен глушить retention."""
+
+    def _stuck_retired(self, tmp_path, monkeypatch, txid):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, txid)
+        _rmtree_always_fails(monkeypatch, leftover)
+        _recover(data_dir, crypto)
+        assert es._is_retired_staging(leftover)
+        return data_dir, crypto, leftover
+
+    def test_retention_runs_with_retired_staging_present(self, tmp_path, monkeypatch):
+        data_dir, crypto, leftover = self._stuck_retired(tmp_path, monkeypatch, "tx-ret")
+        result = es.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=5
+        )
+        assert result.get("skipped_reason") != es.REASON_RECOVERY_PENDING
+        assert leftover.exists()
+
+    def test_active_staging_without_marker_still_blocks_retention(self, tmp_path):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        active = data_dir / f"{es.RESTORE_STAGING_PREFIX}active"
+        active.mkdir()
+        assert not es._is_retired_staging(active)
+        result = es.prune_snapshot_family(
+            backups_root=data_dir / "backups", data_dir=data_dir, max_copies=5
+        )
+        assert result["skipped_reason"] == es.REASON_RECOVERY_PENDING
+
+    def test_next_recovery_retries_removal_of_retired_staging(self, tmp_path, monkeypatch):
+        data_dir, crypto, leftover = self._stuck_retired(tmp_path, monkeypatch, "tx-retry2")
+        monkeypatch.undo()
+        _recover(data_dir, crypto)
+        assert not leftover.exists()

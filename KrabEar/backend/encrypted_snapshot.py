@@ -866,7 +866,9 @@ def prune_snapshot_family(
             # «есть незавершённая операция». Маркер в это окно ещё не написан,
             # а снимок уже читается, поэтому ориентироваться только на него —
             # значило бы удалять снимок из-под читающего restore (NIT-1).
-            return bool(restore_staging_dirs(data_dir))
+            return any(
+                not _is_retired_staging(p) for p in restore_staging_dirs(data_dir)
+            )
         except SnapshotOperationRefused:
             return True  # не смогли проверить — считаем «есть», не удаляем
 
@@ -1317,6 +1319,45 @@ def _cancel_staging(staging: Path) -> None:
     shutil.rmtree(staging, ignore_errors=True)
 
 
+RESTORE_MARKER_RETIRED_SUFFIX = ".committed-retired"
+
+
+def _is_retired_staging(path: Path) -> bool:
+    """Каталог, чей маркер COMMITTED снят после неудавшейся уборки.
+
+    Транзакция в нём ЗАВЕРШЕНА (маркер снимается только после COMMITTED), значит
+    он не «restore работает сейчас» и не должен глушить retention.
+    """
+    try:
+        return (
+            (path / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}").is_file()
+            and not (path / RESTORE_MARKER_FILENAME).exists()
+        )
+    except OSError:
+        return False
+
+
+def _retry_retired_staging(data_dir: Path) -> None:
+    """Повторная уборка каталогов с снятым маркером (находка Codex к #2292).
+
+    Без маркера recovery их больше не видит; без этой повторной попытки остаток
+    жил бы до purge. Сбой не фатален: каталог остаётся retired и retention его
+    игнорирует (``_is_retired_staging`` в guard).
+    """
+    try:
+        candidates = [p for p in restore_staging_dirs(data_dir) if _is_retired_staging(p)]
+    except SnapshotOperationRefused:
+        return
+    for path in candidates:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            logger.warning(
+                "encrypted_snapshot: retired staging не убран (%s errno=%s)",
+                type(exc).__name__, exc.errno,
+            )
+
+
 def _remove_committed_staging(staging: Path) -> str | None:
     """Уборка staging ПОСЛЕ COMMITTED с проверкой постусловия (G3-P04-09, п.4).
 
@@ -1353,7 +1394,7 @@ def _remove_committed_staging(staging: Path) -> str | None:
         return None
     marker = staging / RESTORE_MARKER_FILENAME
     try:
-        os.replace(marker, staging / f"{RESTORE_MARKER_FILENAME}.committed-retired")
+        os.replace(marker, staging / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}")
     except OSError:
         try:
             marker.unlink()
@@ -2751,6 +2792,7 @@ def _recover_pending_restore(
         )
         return _recovery_result(ok=False, pending=True, reason=reason, **kwargs)
 
+    _retry_retired_staging(data_dir)
     try:
         markers = restore_marker_dirs(data_dir)
     except SnapshotOperationRefused as exc:
