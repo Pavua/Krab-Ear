@@ -1,10 +1,11 @@
-"""G3-privacy-04 P04-09: recovery не доверяет маркеру COMMITTED на слово.
+"""G3-privacy-04 P04-09: recovery не доверяет маркеру COMMITTED на слово — но и не блокируется.
 
 Раньше ``_recover_pending_restore`` видел ``state == COMMITTED`` и без проверки
-возвращал ``ok: True`` и убирал приватный staging. Но маркер — лишь запись о том,
-что read-back когда-то прошёл: живые журналы после этого могли испортиться или
-исчезнуть. Теперь перед «успехом» они заново сверяются с size/sha256 из маркера;
-при расхождении recovery fail-closed, а маркер и staging остаются для разбора.
+возвращал ``ok: True`` с reason=None. Теперь живые журналы сверяются с size/sha256
+маркера. Расхождение НЕ блокирует (recovery зовётся из точек обслуживания, а не до
+записи: легитимные append диктовки после COMMITTED меняют журналы, и блокировка
+стала бы вечным отказом бэкапам без пути выхода): транзакция завершена, staging
+убирается, но ответ честно несёт ``snapshot_committed_unverified`` + warnings.
 """
 
 from __future__ import annotations
@@ -13,8 +14,7 @@ import json
 from pathlib import Path
 
 from backend.encrypted_snapshot import (
-    REASON_MANIFEST_INVALID,
-    REASON_READBACK_FAILED,
+    REASON_COMMITTED_UNVERIFIED,
     RESTORE_MARKER_FILENAME,
     RESTORE_STAGING_PREFIX,
     restore_encrypted_snapshot,
@@ -74,7 +74,7 @@ def _plant_committed_marker(data_dir: Path, snapshot_dir: Path, files, txid: str
 
 
 class TestCommittedMarkerIsReverified:
-    def test_intact_live_journals_are_cleaned_and_reported_ok(self, tmp_path):
+    def test_intact_live_journals_are_cleaned_and_reported_clean(self, tmp_path):
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
         leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-intact")
 
@@ -82,53 +82,69 @@ class TestCommittedMarkerIsReverified:
 
         assert result["ok"] is True
         assert result["pending"] is False
+        assert result["reason"] is None
+        assert result["warnings"] == []
         assert not leftover.exists()
 
-    def test_tampered_live_journal_blocks_recovery_and_keeps_marker(self, tmp_path):
+    def test_append_after_commit_does_not_block_recovery_forever(self, tmp_path):
+        """Легитимная диктовка после COMMITTED: журнал изменился, но блока нет."""
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
-        victim = data_dir / HISTORY_JOURNAL_FILENAMES[0]
-        victim.write_bytes(victim.read_bytes() + b"tampered-after-commit\n")
-        tampered_bytes = victim.read_bytes()
-        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-tampered")
+        journal = data_dir / HISTORY_JOURNAL_FILENAMES[0]
+        journal.write_bytes(journal.read_bytes() + b"new dictation after commit\n")
+        appended = journal.read_bytes()
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-append")
 
-        result = _recover(data_dir, crypto)
+        first = _recover(data_dir, crypto)
 
-        assert result["ok"] is False
-        assert result["pending"] is True
-        assert result["reason"] == REASON_READBACK_FAILED
-        assert leftover.exists(), "маркер — единственное доказательство; терять нельзя"
-        assert victim.read_bytes() == tampered_bytes, "recovery не имеет права править живое"
-        assert _restore_markers(data_dir), "маркер должен остаться для разбора"
+        assert first["ok"] is True
+        assert first["pending"] is False
+        assert first["reason"] == REASON_COMMITTED_UNVERIFIED
+        assert any(w.startswith("committed_marker_mismatch:") for w in first["warnings"])
+        assert not leftover.exists(), "маркер обязан убраться, иначе блок навсегда"
+        assert _restore_markers(data_dir) == []
+        assert journal.read_bytes() == appended, "recovery не имеет права править живое"
+        # Второй проход — чистый: самовосстановление без ручных действий.
+        second = _recover(data_dir, crypto)
+        assert second["ok"] is True
+        assert second["pending"] is False
 
-    def test_missing_live_journal_blocks_recovery(self, tmp_path):
+    def test_missing_live_journal_is_reported_but_not_blocking(self, tmp_path):
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
         (data_dir / HISTORY_JOURNAL_FILENAMES[1]).unlink()
         leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-missing")
 
         result = _recover(data_dir, crypto)
 
-        assert result["ok"] is False
-        assert result["reason"] == REASON_READBACK_FAILED
-        assert leftover.exists()
+        assert result["ok"] is True
+        assert result["pending"] is False
+        assert result["reason"] == REASON_COMMITTED_UNVERIFIED
+        assert any("отсутствует" in w for w in result["warnings"])
+        assert not leftover.exists()
 
-    def test_marker_without_file_evidence_is_not_trusted(self, tmp_path):
+    def test_marker_without_file_evidence_degrades_with_reason(self, tmp_path):
+        """Старые маркеры (до этого PR) могли не нести пригодный files."""
         data_dir, crypto, snapshot_dir, _files = _restored_profile(tmp_path)
         leftover = _plant_committed_marker(data_dir, snapshot_dir, [], "tx-empty")
 
         result = _recover(data_dir, crypto)
 
-        assert result["ok"] is False
-        assert result["pending"] is True
-        assert result["reason"] == REASON_MANIFEST_INVALID
-        assert leftover.exists()
+        assert result["ok"] is True
+        assert result["pending"] is False
+        assert result["reason"] == REASON_COMMITTED_UNVERIFIED
+        assert "committed_marker_without_valid_evidence" in result["warnings"]
+        assert not leftover.exists()
 
-    def test_marker_with_unknown_file_name_is_not_trusted(self, tmp_path):
+    def test_marker_with_forged_file_name_is_never_read_from_disk(self, tmp_path):
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
-        forged = list(files) + [{"name": "../../etc/passwd", "size": 1, "sha256": "0" * 64}]
+        outside = tmp_path / "outside.txt"
+        outside.write_text("do-not-touch", encoding="utf-8")
+        forged = list(files) + [{"name": "../outside.txt", "size": 1, "sha256": "0" * 64}]
         leftover = _plant_committed_marker(data_dir, snapshot_dir, forged, "tx-forged")
 
         result = _recover(data_dir, crypto)
 
-        assert result["ok"] is False
-        assert result["reason"] == REASON_MANIFEST_INVALID
-        assert leftover.exists()
+        assert result["ok"] is True
+        assert result["reason"] == REASON_COMMITTED_UNVERIFIED
+        assert "committed_marker_without_valid_evidence" in result["warnings"]
+        assert not leftover.exists()
+        assert outside.read_text(encoding="utf-8") == "do-not-touch"

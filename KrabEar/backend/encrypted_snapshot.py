@@ -1596,6 +1596,7 @@ REASON_LEDGER_UNREADABLE = "snapshot_ledger_unreadable"
 REASON_LEDGER_MALFORMED = "snapshot_ledger_malformed"
 REASON_RECORD_MALFORMED = "snapshot_record_malformed"
 REASON_APPLY_FAILED = "snapshot_apply_failed"
+REASON_COMMITTED_UNVERIFIED = "snapshot_committed_unverified"
 
 # Два журнала deletion ledger: tombstones ∪ purged (спека §5). Выходной ledger
 # restore пишется по объединению, поэтому порядок здесь важен только для
@@ -2757,24 +2758,35 @@ def _recover_pending_restore(
 
     # --- Маркер COMMITTED: транзакция завершена, осталась только уборка. ---
     if marker.get("state") == RESTORE_STATE_COMMITTED:
-        # G3-P04-09: маркер лишь утверждает, что read-back когда-то прошёл. Прежде
-        # чем объявить успех и убрать staging, живые журналы заново сверяются с
-        # size/sha256 из маркера; без доказательства/при расхождении — fail-closed,
-        # а маркер и staging остаются единственным свидетельством для разбора.
+        # G3-P04-09: маркер — свидетельство о том, ЧТО было восстановлено, а не о
+        # ТЕКУЩЕМ состоянии: recovery зовётся из точек обслуживания (авто-бэкап,
+        # backup/restore), а не на старте до записи, поэтому легитимные append
+        # диктовки после COMMITTED меняют размер/хеш живых журналов. Блокировать
+        # на расхождении нельзя (вечный отказ бэкапам без пути выхода) — транзакция
+        # ЗАВЕРШЕНА, staging убирается; но «успех» честно помечается
+        # snapshot_committed_unverified с громким логом и warnings, если живые
+        # журналы маркеру не соответствуют (или доказательства в нём нет).
+        committed_warnings: list[str] = []
         evidence = _marker_files_evidence(marker)
         if evidence is None:
-            return _blocked(REASON_MANIFEST_INVALID, **common)
-        try:
-            live_check = _readback_live_journals(data_dir=data_dir, files_meta=evidence)
-        except Exception:  # noqa: BLE001 — recovery не имеет права бросить
-            logger.exception("encrypted_snapshot: re-verify COMMITTED-маркера не выполнен")
-            return _blocked(REASON_READBACK_FAILED, **common)
-        if not live_check["ok"]:
+            committed_warnings.append("committed_marker_without_valid_evidence")
+        else:
+            try:
+                live_check = _readback_live_journals(data_dir=data_dir, files_meta=evidence)
+            except Exception:  # noqa: BLE001 — recovery не имеет права бросить
+                logger.exception("encrypted_snapshot: re-verify COMMITTED-маркера не выполнен")
+                committed_warnings.append("committed_marker_reverify_failed")
+            else:
+                if not live_check["ok"]:
+                    committed_warnings.extend(
+                        f"committed_marker_mismatch:{m}" for m in live_check["mismatches"]
+                    )
+        if committed_warnings:
             logger.error(
-                "encrypted_snapshot: COMMITTED-маркер %s не подтверждён живыми журналами: %s",
-                transaction_id, live_check["mismatches"],
+                "encrypted_snapshot: COMMITTED-маркер %s не подтверждён живыми журналами "
+                "(после COMMITTED они могли измениться легитимно или быть повреждены): %s",
+                transaction_id, committed_warnings,
             )
-            return _blocked(REASON_READBACK_FAILED, **common)
         _cancel_staging(staging)
         if transaction_id:
             _cleanup_restore_tmp(data_dir, transaction_id)
@@ -2793,8 +2805,9 @@ def _recover_pending_restore(
         return _recovery_result(
             ok=True,
             pending=False,
-            reason=None,
+            reason=REASON_COMMITTED_UNVERIFIED if committed_warnings else None,
             restored_entries=marker_entries or 0,
+            warnings=committed_warnings,
             **common,
         )
 
