@@ -512,6 +512,13 @@ final class ConversationViewController: NSViewController {
             noteConversationActivity()  // пользователь говорит — тишины нет
             if isFinal {
                 appendTranscriptLine("Вы: \(text)")
+                // Голосовое «отключись/заверши разговор»: у шлюза нет команды закрыть сессию, закрываем сами.
+                if ConversationVoiceEndSettings.isEnabled(in: userDefaults), ConversationVoiceEndPhrases.isEndRequest(text) {
+                    AgentLogger.shared.info("[ConversationVC] голосовая просьба завершить разговор")
+                    appendTranscriptLine("— Разговор завершён по вашей просьбе")
+                    stopConversation()
+                    return
+                }
                 conversationState = .thinking
             } else {
                 // Показываем частичный текст без сохранения в буфере.
