@@ -47,6 +47,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+from backend.fd_io import write_all
+
 logger = logging.getLogger("KrabEar.BrainLease")
 
 # Default shared lock path (кросс-проектный contract с Krab side).
@@ -122,7 +124,7 @@ def _write_payload(fd: int, payload: dict, path: Path) -> None:
     raw = json.dumps(payload, allow_nan=False).encode("utf-8")
     tmp_fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".brain_lease_tmp_")
     try:
-        os.write(tmp_fd, raw)
+        write_all(tmp_fd, raw)
         os.close(tmp_fd)
         tmp_fd = -1
         os.replace(tmp_path, str(path))

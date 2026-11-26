@@ -52,6 +52,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
+from backend.fd_io import write_all
+
 if TYPE_CHECKING:
     from core.config import Settings
 
@@ -140,7 +142,7 @@ def _load_or_create_token(data_dir: Path) -> str:
     try:
         fd, tmp_path = tempfile.mkstemp(dir=data_dir, prefix=".event_bridge_token.")
         try:
-            os.write(fd, token.encode("utf-8"))
+            write_all(fd, token.encode("utf-8"))
             os.fchmod(fd, 0o600)
             os.fsync(fd)
         finally:

@@ -29,6 +29,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from backend.fd_io import write_all
 from core.config import settings
 
 logger = logging.getLogger("KrabEar.Backend.RestApiKey")
@@ -52,7 +53,7 @@ def _create_atomically(path: Path, key: str) -> bool:
     try:
         try:
             os.fchmod(fd, 0o600)
-            os.write(fd, (key + "\n").encode("utf-8"))
+            write_all(fd, (key + "\n").encode("utf-8"))
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -74,7 +75,7 @@ def _replace_invalid(path: Path, key: str) -> None:
     try:
         try:
             os.fchmod(fd, 0o600)
-            os.write(fd, (key + "\n").encode("utf-8"))
+            write_all(fd, (key + "\n").encode("utf-8"))
             os.fsync(fd)
         finally:
             os.close(fd)
