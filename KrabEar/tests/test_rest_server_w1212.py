@@ -27,8 +27,10 @@ from __future__ import annotations
 import io
 import os
 import sys
+import tempfile
 import types
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 # ---------------------------------------------------------------------------
@@ -44,6 +46,10 @@ if _PROJECT_ROOT not in sys.path:
 # ---------------------------------------------------------------------------
 
 _REST_AVAILABLE = False
+# Ошибка импорта rest_server НЕ из-за отсутствующей зависимости (stub разошёлся
+# с модулем) — не повод для skip: TestRestStubImportHealthy падает громко.
+_REST_IMPORT_ERROR = None
+_STUB_DATA_DIR = Path(tempfile.gettempdir()) / "krab_ear_rest_stub_unused"
 _rest_mod = None
 
 
@@ -81,6 +87,10 @@ def _ensure_stubs():
         "backend.state_store": {
             "StateStore": type("_FSS", (), {
                 "__init__": lambda self, *a, **k: None,
+                # rest_server на импорте строит PhoneticVocabService(data_dir=store.data_dir)
+                # (W4, 2026-09-17): без атрибута импорт падал и все REST-тесты файла
+                # молча уходили в skip. Путь не создаётся — Path.mkdir пропатчен.
+                "data_dir": _STUB_DATA_DIR,
                 "is_idempotent": lambda self, *a, **k: False,
                 "load_vocabulary": lambda self: [],
                 "save_vocabulary": lambda self, *a, **k: None,
@@ -135,14 +145,20 @@ def _ensure_stubs():
 
 
 _inserted_stub_modules: list = []
+# A06-02: если rest_server ещё не загружен, наша копия свяжется с фейками —
+# её нельзя оставлять в sys.modules для соседних тест-файлов чанка.
+_REST_PRELOADED = "backend.rest_server" in sys.modules
 try:
     import flask  # noqa: F401
     _inserted_stub_modules = _ensure_stubs()
     with patch("pathlib.Path.mkdir"):
         import backend.rest_server as _rest_mod
     _REST_AVAILABLE = True
-except Exception as _import_err:
+except ImportError:
+    # Нет flask/тяжёлых зависимостей — честный skip.
     pass
+except Exception as _import_exc:
+    _REST_IMPORT_ERROR = repr(_import_exc)
 finally:
     # Снимаем ВСТАВЛЕННЫЕ НАМИ фейки из sys.modules: rest_server уже связал
     # свои top-level ссылки на них (module-level `from backend.state_store
@@ -154,6 +170,8 @@ finally:
     # вместо реальных StateStore/BackendService).
     for _name in _inserted_stub_modules:
         sys.modules.pop(_name, None)
+    if not _REST_PRELOADED and _inserted_stub_modules:
+        sys.modules.pop("backend.rest_server", None)
 
 
 def _make_client():
@@ -563,7 +581,7 @@ class TestHealthDashboardMasksOsBuild(_RestBase):
 
     def test_health_dashboard_masks_os_build(self):
         """Dashboard platform field should be 'darwin', 'linux', or 'win32' only."""
-        with patch("backend.rest_server._build_dashboard_html") as mock_html:
+        with patch.object(_rest_mod, "_build_dashboard_html") as mock_html:
             mock_html.return_value = "<html><body>platform: darwin</body></html>"
             resp = self.client.get("/health/dashboard")
         self.assertEqual(resp.status_code, 200)
@@ -663,6 +681,22 @@ class TestPublicEndpointsUnaffected(_RestBase):
         resp = self.client.get("/v1/readiness")
         self.assertEqual(resp.status_code, 401,
                          f"/v1/readiness should enforce auth, got {resp.status_code}")
+
+
+class TestStubbedRestServerNotCached(unittest.TestCase):
+    """A06-02: rest_server, связанный с фейками, не остаётся в sys.modules."""
+
+    def test_stub_bound_rest_server_not_left_in_sys_modules(self):
+        if not _REST_AVAILABLE or _REST_PRELOADED or not _inserted_stub_modules:
+            self.skipTest("rest_server импортирован без фейков")
+        self.assertIsNot(sys.modules.get("backend.rest_server"), _rest_mod)
+
+
+class TestRestStubImportHealthy(unittest.TestCase):
+    """Stub-импорт rest_server обязан проходить, иначе тесты файла — вечный skip."""
+
+    def test_rest_server_imports_with_stubs(self):
+        self.assertIsNone(_REST_IMPORT_ERROR, f"rest_server не импортируется со stub: {_REST_IMPORT_ERROR}")
 
 
 if __name__ == "__main__":
