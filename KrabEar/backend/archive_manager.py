@@ -74,6 +74,8 @@ class ArchiveResult:
     # Follow-up #2229 F6: id, чей эмбеддинг не удалён из semantic-индекса надёжно
     # (вернётся после рестарта). Пусто — побочные эффекты полные.
     incomplete_ids: list[str] = field(default_factory=list)
+    # semantic_index_cleanup_failed (сбой эмбеддинга) | cascade_cleanup_failed (прочие шаги).
+    incomplete_reason: str = ""
 
 
 class ArchiveManager:
@@ -246,35 +248,44 @@ class ArchiveManager:
             and hasattr(store, "tombstones_path")
         )
 
-    def _archive_side_effects(self, clean_id: str) -> bool:
+    def _archive_side_effects(self, clean_id: str) -> list[str]:
         """Побочные эффекты после удаления записи из активной истории.
 
         Каскадная очистка версий транскрипта, semantic-индекса и цепочек записей.
         Любая ошибка здесь не должна прерывать архивирование (data-loss было бы
         хуже, чем рассинхрон вторичных индексов) — поэтому всё в try/except.
 
-        Возвращает False, если эмбеддинг не удалён надёжно (в т.ч.
-        SnapshotNotPersistedError) — вызывающий помечает результат неполным.
+        Возвращает имена упавших шагов (``versions`` / ``semantic`` /
+        ``recording_chain``); пустой список — каскад полный. Непустой — вызывающий
+        помечает результат неполным (эмбеддинг мог не удалиться надёжно, в т.ч.
+        SnapshotNotPersistedError; ghost-ссылки в цепочках; версии с текстом).
         """
-        semantic_ok = True
+        failed: list[str] = []
         if self._transcript_versioner is not None:
             try:
                 self._transcript_versioner.purge_versions_for_item(clean_id)
             except Exception:
+                failed.append("versions")
                 logger.exception("archive_items: версии id=%s", clean_id)
         if self._semantic_searcher is not None:
             try:
                 self._semantic_searcher.remove_item(clean_id)
             except Exception as exc:
-                semantic_ok = False
+                failed.append("semantic")
                 logger.warning(
                     "archive_items: не удалось удалить %s из semantic index: %s",
                     clean_id, exc,
                 )
-        # Каскадное удаление ghost item_id из цепочек (W1253 RC-3).
+        # Каскадное удаление ghost item_id из цепочек (W1253 RC-3). Без try ошибка
+        # цепочек вылетала из archive_items после tombstone: часть записей уже в
+        # архиве, остальные нет, а вызывающий получал «отказ».
         if self._recording_chain_mgr is not None:
-            self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
-        return semantic_ok
+            try:
+                self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
+            except Exception:
+                failed.append("recording_chain")
+                logger.exception("archive_items: цепочки id=%s", clean_id)
+        return failed
 
     def _validate_archive_ids(
         self,
@@ -389,6 +400,7 @@ class ArchiveManager:
 
         archived_count = 0
         incomplete_ids: list[str] = []
+        semantic_failed = False
         # self._lock сериализует архивные операции (archive/unarchive/list) внутри процесса.
         with self._lock:
             if self._store_supports_atomic_archive(_store):
@@ -434,8 +446,10 @@ class ArchiveManager:
                         archived_count += 1
                         # Снимаем из снимка, чтобы повторный id в item_ids не дублировался.
                         active_by_id.pop(clean_id, None)
-                        if not self._archive_side_effects(clean_id):
+                        failed = self._archive_side_effects(clean_id)
+                        if failed:
                             incomplete_ids.append(clean_id)
+                            semantic_failed = semantic_failed or "semantic" in failed
             else:
                 # Fallback для тестовых двойников без unlocked-API StateStore.
                 # wave-25 (B1-a): epoch-перепроверка и здесь (purge мог пройти между
@@ -460,8 +474,10 @@ class ArchiveManager:
                     self._append_ndjson(self._archive_path, item_dict)
                     _store.delete_history_item(clean_id)
                     archived_count += 1
-                    if not self._archive_side_effects(clean_id):
+                    failed = self._archive_side_effects(clean_id)
+                    if failed:
                         incomplete_ids.append(clean_id)
+                        semantic_failed = semantic_failed or "semantic" in failed
 
         size_bytes = self._archive_path.stat().st_size if self._archive_path.exists() else 0
         return ArchiveResult(
@@ -469,6 +485,11 @@ class ArchiveManager:
             archive_path=str(self._archive_path),
             size_mb=round(size_bytes / (1024 * 1024), 3),
             incomplete_ids=incomplete_ids,
+            incomplete_reason=(
+                "" if not incomplete_ids
+                else "semantic_index_cleanup_failed" if semantic_failed
+                else "cascade_cleanup_failed"
+            ),
         )
 
     def unarchive_items(self, item_ids: list[str], store: Any | None = None) -> dict[str, Any]:
@@ -710,8 +731,10 @@ class ArchiveManager:
             "size_mb": result.size_mb,
         }
         if result.incomplete_ids:
-            # Follow-up #2229 F6: записи в архиве, но эмбеддинги могут вернуться.
-            response.update(complete=False, reason="semantic_index_cleanup_failed",
+            # Follow-up #2229 F6: записи в архиве, но вторичные индексы очищены не
+            # полностью (эмбеддинги могут вернуться, ghost-ссылки в цепочках…).
+            response.update(complete=False,
+                            reason=result.incomplete_reason or "cascade_cleanup_failed",
                             incomplete_ids=list(result.incomplete_ids))
         return response
 
