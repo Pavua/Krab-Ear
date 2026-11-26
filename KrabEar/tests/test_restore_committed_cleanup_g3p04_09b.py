@@ -22,52 +22,86 @@ from test_restore_committed_marker_reverify_g3p04_09 import (  # noqa: E402
 )
 
 
+def _rmtree_always_fails(monkeypatch, leftover):
+    real = shutil.rmtree
+
+    def boom(path, *a, **k):
+        if Path(path) == leftover:
+            raise PermissionError(13, "denied", str(path))
+        return real(path, *a, **k)
+
+    monkeypatch.setattr(es.shutil, "rmtree", boom)
+
+
 class TestCommittedCleanupPostcondition:
-    def test_failed_cleanup_is_reported_not_silent(self, tmp_path, monkeypatch):
+    def test_persistent_rmtree_failure_retires_marker_so_backups_not_blocked(
+        self, tmp_path, monkeypatch
+    ):
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
         leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-stuck")
-        real = shutil.rmtree
+        _rmtree_always_fails(monkeypatch, leftover)
 
-        def boom(path, *a, **k):
-            if Path(path) == leftover:
-                raise PermissionError(13, "denied", str(path))
-            return real(path, *a, **k)
-
-        monkeypatch.setattr(es.shutil, "rmtree", boom)
         result = _recover(data_dir, crypto)
 
         assert result["ok"] is True
+        assert result["reason"] == es.REASON_COMMITTED_CLEANUP_FAILED
         assert "committed_staging_cleanup_failed:PermissionError" in result["warnings"]
-        assert leftover.exists()
-        # Абсолютный путь профиля не утекает в ответ.
         assert str(data_dir) not in repr(result["warnings"])
+        # Диск — источник истины: маркера нет, бэкапы/restore не блокируются.
+        assert es.has_pending_restore(data_dir) is False
+        assert result["pending"] is False
+        assert leftover.exists(), "остаток каталога честно остаётся для purge"
+        assert leftover in es.restore_staging_dirs(data_dir), "purge его видит без маркера"
 
-    def test_next_recovery_retries_and_clears(self, tmp_path, monkeypatch):
+    def test_marker_that_cannot_be_retired_reports_pending_true(self, tmp_path, monkeypatch):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-glued")
+        _rmtree_always_fails(monkeypatch, leftover)
+
+        def no_replace(*a, **k):
+            raise PermissionError(13, "denied")
+
+        monkeypatch.setattr(es.os, "replace", no_replace)
+        monkeypatch.setattr(Path, "unlink", lambda self, *a, **k: (_ for _ in ()).throw(PermissionError(13, "denied")))
+
+        result = _recover(data_dir, crypto)
+
+        assert es.has_pending_restore(data_dir) is True
+        assert result["pending"] is True
+        assert result["reason"] == es.REASON_COMMITTED_CLEANUP_FAILED
+
+    def test_unverified_has_priority_over_cleanup_failed(self, tmp_path, monkeypatch):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        journal = data_dir / HISTORY_JOURNAL_FILENAMES[0]
+        journal.write_bytes(journal.read_bytes() + b"x\n")
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-both")
+        _rmtree_always_fails(monkeypatch, leftover)
+
+        result = _recover(data_dir, crypto)
+
+        assert result["reason"] == es.REASON_COMMITTED_UNVERIFIED
+        assert any(w.startswith("committed_marker_mismatch:") for w in result["warnings"])
+        assert any(w.startswith("committed_staging_cleanup_failed:") for w in result["warnings"])
+
+    def test_next_recovery_after_retired_marker_is_clean(self, tmp_path, monkeypatch):
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
         leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-retry")
-        real = shutil.rmtree
-        calls = {"n": 0}
+        _rmtree_always_fails(monkeypatch, leftover)
+        _recover(data_dir, crypto)
+        monkeypatch.undo()
 
-        def flaky(path, *a, **k):
-            if Path(path) == leftover and calls["n"] == 0:
-                calls["n"] += 1
-                raise OSError(5, "io")
-            return real(path, *a, **k)
-
-        monkeypatch.setattr(es.shutil, "rmtree", flaky)
-        first = _recover(data_dir, crypto)
-        assert any(w.startswith("committed_staging_cleanup_failed:") for w in first["warnings"])
         second = _recover(data_dir, crypto)
+
         assert second["ok"] is True
         assert second["warnings"] == []
-        assert not leftover.exists()
-        assert _restore_markers(data_dir) == []
+        assert second["pending"] is False
 
     def test_successful_cleanup_has_no_warning(self, tmp_path):
         data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
         leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-ok")
         result = _recover(data_dir, crypto)
         assert result["warnings"] == []
+        assert result["pending"] is False
         assert not leftover.exists()
 
 
@@ -89,3 +123,34 @@ class TestMismatchDoesNotLeakPath:
         text = repr(out["mismatches"])
         assert "PermissionError errno=13" in text
         assert str(data_dir) not in text
+
+
+class TestRestorePathReflectsDisk:
+    def test_restore_reports_cleanup_failure_and_retires_marker(self, tmp_path, monkeypatch):
+        from backend.encrypted_snapshot import restore_encrypted_snapshot
+        from test_a52b2_snapshot_restore import (
+            _crypto, _data_dir, _fill_profile, _make_snapshot, _policy_on, _settings_on,
+        )
+
+        data_dir = _data_dir(tmp_path)
+        crypto = _crypto()
+        _fill_profile(data_dir, crypto)
+        _settings_on(data_dir)
+        snapshot_dir = _make_snapshot(data_dir, crypto)
+        real = shutil.rmtree
+
+        def boom(path, *a, **k):
+            if Path(path).name.startswith(es.RESTORE_STAGING_PREFIX):
+                raise PermissionError(13, "denied", str(path))
+            return real(path, *a, **k)
+
+        monkeypatch.setattr(es.shutil, "rmtree", boom)
+        result = restore_encrypted_snapshot(
+            data_dir=data_dir, backups_root=data_dir / "backups", snapshot_dir=snapshot_dir,
+            crypto=crypto, policy_read=_policy_on(data_dir),
+        )
+
+        assert result["ok"] is True
+        assert "committed_staging_cleanup_failed:PermissionError" in result["warnings"]
+        assert result["pending"] is False
+        assert es.has_pending_restore(data_dir) is False

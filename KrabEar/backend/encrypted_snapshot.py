@@ -1318,11 +1318,21 @@ def _cancel_staging(staging: Path) -> None:
 
 
 def _remove_committed_staging(staging: Path) -> str | None:
-    """Уборка staging ПОСЛЕ COMMITTED с проверкой постусловия (G3-P04-09, находка 4).
+    """Уборка staging ПОСЛЕ COMMITTED с проверкой постусловия (G3-P04-09, п.4).
 
     ignore_errors молча оставлял каталог с маркером: has_pending_restore был бы
-    вечно True без следа в ответе. Возвращает None при успехе, иначе короткий
-    код предупреждения БЕЗ абсолютного пути (только тип ошибки/errno).
+    вечно True, а бэкапы/restore отказывали бы с ДИСКА (``has_pending_restore``),
+    пока recovery рапортовал успех. Порядок деградации:
+
+    1. rmtree без ignore_errors;
+    2. если каталог остался — снять ТОЛЬКО файл маркера (переименование в
+       ``*.committed-retired``, иначе unlink): без маркера каталог не считается
+       незавершённым restore (``restore_marker_dirs``), бэкапы идут, а остаток
+       убирает privacy purge (он чистит ``RESTORE_STAGING_PREFIX*`` без маркера).
+
+    Возвращает None при полном успехе, иначе код предупреждения БЕЗ абсолютного
+    пути (только тип ошибки). Фактический «маркер ещё на диске» вызывающий берёт
+    из ``has_pending_restore`` — это единственный источник истины.
     """
     try:
         shutil.rmtree(staging)
@@ -1331,15 +1341,30 @@ def _remove_committed_staging(staging: Path) -> str | None:
     except OSError as exc:
         logger.error(
             "encrypted_snapshot: staging после COMMITTED не убран (%s errno=%s); "
-            "следующий recovery повторит уборку",
+            "пробуем снять маркер, следующий recovery повторит уборку",
             type(exc).__name__, exc.errno,
         )
-        if staging.exists():
-            return f"committed_staging_cleanup_failed:{type(exc).__name__}"
+        failure = f"committed_staging_cleanup_failed:{type(exc).__name__}"
+    else:
+        failure = None if not staging.exists() else (
+            "committed_staging_cleanup_failed:still_exists"
+        )
+    if failure is None:
         return None
-    if staging.exists():
-        return "committed_staging_cleanup_failed:still_exists"
-    return None
+    marker = staging / RESTORE_MARKER_FILENAME
+    try:
+        os.replace(marker, staging / f"{RESTORE_MARKER_FILENAME}.committed-retired")
+    except OSError:
+        try:
+            marker.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.error(
+                "encrypted_snapshot: маркер COMMITTED не снят (%s errno=%s)",
+                type(exc).__name__, exc.errno,
+            )
+    return failure
 
 
 def _publish_staging(staging: Path, backup_dir: Path) -> None:
@@ -1622,6 +1647,7 @@ REASON_LEDGER_MALFORMED = "snapshot_ledger_malformed"
 REASON_RECORD_MALFORMED = "snapshot_record_malformed"
 REASON_APPLY_FAILED = "snapshot_apply_failed"
 REASON_COMMITTED_UNVERIFIED = "snapshot_committed_unverified"
+REASON_COMMITTED_CLEANUP_FAILED = "snapshot_committed_cleanup_failed"
 
 # Два журнала deletion ledger: tombstones ∪ purged (спека §5). Выходной ledger
 # restore пишется по объединению, поэтому порядок здесь важен только для
@@ -2499,6 +2525,7 @@ def _apply_verified_snapshot_locked(
     if cleanup_warning:
         carry_warnings = [*carry_warnings, cleanup_warning]
     _fsync_dir(data_dir)
+    marker_left_on_disk = bool(cleanup_warning) and has_pending_restore(data_dir)
     logger.info(
         "encrypted_snapshot: restore %s зафиксирован (COMMITTED) из %s, "
         "%d записей, отфильтровано строк по ledger %d",
@@ -2525,6 +2552,9 @@ def _apply_verified_snapshot_locked(
         "records_excluded_deleted": carry_counters.get("excluded_deleted", 0),
         "records_unparsable": carry_counters.get("unparsable", 0),
         "warnings": carry_warnings,
+        # Факт с диска, не константа: маркер, который не удалось убрать, продолжает
+        # блокировать бэкапы/restore до следующего recovery.
+        "pending": marker_left_on_disk,
         "files": files_meta,
         "readback": readback,
         "recovered": recovered,
@@ -2817,6 +2847,7 @@ def _recover_pending_restore(
         cleanup_warning = _remove_committed_staging(staging)
         if cleanup_warning:
             committed_warnings.append(cleanup_warning)
+        cleanup_failed = bool(cleanup_warning)
         if transaction_id:
             _cleanup_restore_tmp(data_dir, transaction_id)
         _fsync_dir(data_dir)
@@ -2831,10 +2862,19 @@ def _recover_pending_restore(
                 "не отдаём непроверенное значение",
                 transaction_id, marker.get("restored_entries"),
             )
+        verification_failed = any(
+            not w.startswith("committed_staging_cleanup_failed:") for w in committed_warnings
+        )
+        if verification_failed:
+            commit_reason = REASON_COMMITTED_UNVERIFIED
+        elif cleanup_failed:
+            commit_reason = REASON_COMMITTED_CLEANUP_FAILED
+        else:
+            commit_reason = None
         return _recovery_result(
             ok=True,
-            pending=False,
-            reason=REASON_COMMITTED_UNVERIFIED if committed_warnings else None,
+            pending=cleanup_failed and has_pending_restore(data_dir),
+            reason=commit_reason,
             restored_entries=marker_entries or 0,
             warnings=committed_warnings,
             **common,
