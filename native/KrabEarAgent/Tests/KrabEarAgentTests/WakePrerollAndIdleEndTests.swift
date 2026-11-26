@@ -263,7 +263,8 @@ final class WakePrerollAndIdleEndTests: XCTestCase {
         vc.handleDownlinkEvent(.replyFinal(text: "Готово."))
         uptime += 3; wall = wall.addingTimeInterval(3); vc.idleEndTick()
         XCTAssertEqual(vc.conversationState, .listening, "метка не висит на «говорю»")
-        uptime += 600; wall = wall.addingTimeInterval(600); vc.idleEndTick()
+        // 500 с — дольше любого порога тишины, но короче жёсткого потолка сессии (600 с, ConversationHardCapTests).
+        uptime += 500; wall = wall.addingTimeInterval(500); vc.idleEndTick()
         XCTAssertTrue(vc.isSessionActive, "автозавершение выключено")
         vc.stopConversation()
         XCTAssertNil(vc.idleEndTimer)

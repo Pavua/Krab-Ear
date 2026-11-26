@@ -65,6 +65,44 @@ struct ConversationIdleEndPolicy {
     }
 }
 
+/// Жёсткий потолок длительности одной сессии разговора.
+///
+/// Живая проверка владельца 25–26.11: разговор висел 4–5 часов и отвечал на ролики и шум.
+/// Тишина тут не наступает никогда — ролик это «речь» и для локального VAD, и для Voice Gateway,
+/// отсчёт `ConversationIdleEndPolicy` обнуляется вечно. Потолок считается только от старта
+/// сессии: не зависит ни от активности, ни от состояния (в том числе застрявшего «говорю»), ни от
+/// тумблера тишины. Дальше — снова «Краб»; микрофон не остаётся открытым без присмотра.
+enum ConversationMaxDurationSettings {
+    static let secondsKey = "KrabEar_ConversationMaxSec"
+    static let defaultSeconds: TimeInterval = 600
+    static let range: ClosedRange<TimeInterval> = 120...3_600
+
+    /// Порог в пределах 2–60 минут; мусор, NaN и неположительное — 10 минут.
+    static func seconds(in defaults: UserDefaults) -> TimeInterval {
+        let raw = defaults.double(forKey: secondsKey)
+        guard raw.isFinite, raw > 0 else { return defaultSeconds }
+        return min(max(raw, range.lowerBound), range.upperBound)
+    }
+
+    static func title(_ seconds: TimeInterval) -> String {
+        "\(Int((seconds / 60).rounded())) мин"
+    }
+}
+
+struct ConversationMaxDurationPolicy {
+    let limit: TimeInterval
+    let startedAt: TimeInterval
+
+    init(limit: TimeInterval, startedAt now: TimeInterval) {
+        self.limit = limit
+        self.startedAt = now
+    }
+
+    func isExpired(now: TimeInterval) -> Bool {
+        now - startedAt >= limit
+    }
+}
+
 /// Ответ AI доигран: пора вернуться из «говорю» в «слушаю».
 ///
 /// Ревью Codex #2270: replyFinal и downlink ставят `.speaking`, а воспроизведение
