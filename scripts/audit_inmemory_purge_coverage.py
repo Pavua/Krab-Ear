@@ -216,7 +216,55 @@ def _const_truth(test: ast.expr) -> bool | None:
     """Истинность константного условия (``if False``/``if 0``/``if True``), иначе None."""
     if isinstance(test, ast.Constant):
         return bool(test.value)
+    if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+        inner = _const_truth(test.operand)
+        return None if inner is None else not inner
     return None
+
+
+_TRY_TYPES = (ast.Try,) + ((ast.TryStar,) if hasattr(ast, "TryStar") else ())
+
+
+def _terminates_list(items: list, raises: bool = True) -> bool:
+    return any(_terminates(item, raises) for item in items)
+
+
+def _terminates(stmt: ast.AST, raises: bool = True) -> bool:
+    """True, если оператор НИКОГДА не передаёт управление следующему за ним.
+
+    ``return``/``raise``/``break``/``continue``; ``if`` с завершающими обеими
+    ветками (или константным условием и завершающей живой веткой); ``with`` по
+    телу; ``try``: ``finally`` завершается, либо (тело ИЛИ ``else`` завершаются И
+    все ``except`` завершаются). Циклы и ``match`` не считаем завершающими
+    (тело может не выполниться) — консервативно в сторону «достижимо».
+
+    ``raises=False`` — ``raise`` НЕ считается завершением: так проверяется тело
+    ``with``, потому что контекстный менеджер (``contextlib.suppress``) может
+    погасить исключение, и тогда код после ``with`` исполняется.
+    """
+    if isinstance(stmt, ast.Raise):
+        return raises
+    if isinstance(stmt, (ast.Return, ast.Break, ast.Continue)):
+        return True
+    if isinstance(stmt, ast.If):
+        truth = _const_truth(stmt.test)
+        if truth is True:
+            return _terminates_list(stmt.body, raises)
+        if truth is False:
+            return _terminates_list(stmt.orelse, raises)
+        return (
+            _terminates_list(stmt.body, raises)
+            and bool(stmt.orelse)
+            and _terminates_list(stmt.orelse, raises)
+        )
+    if isinstance(stmt, (ast.With, ast.AsyncWith)):
+        return _terminates_list(stmt.body, raises=False)
+    if isinstance(stmt, _TRY_TYPES):
+        if _terminates_list(stmt.finalbody, raises):
+            return True
+        flows_out = _terminates_list(stmt.body, raises) or _terminates_list(stmt.orelse, raises)
+        return flows_out and all(_terminates_list(h.body, raises) for h in stmt.handlers)
+    return False
 
 
 def _reachable_calls(node: ast.AST):
@@ -230,13 +278,19 @@ def _reachable_calls(node: ast.AST):
     как дыра.
 
     ЧЕГО ГАРД НЕ ЛОВИТ (нужен полноценный анализ потока управления, не делаем):
-    тупик после ``if``/``try``, где ВСЕ ветки завершаются ``return``; ``while True``
-    без выхода; константные ``IfExp``/``BoolOp`` (``x() if False else y``);
-    неисполненные генераторные выражения. Такие clear() всё ещё засчитываются —
-    «only reachable» здесь означает «синтаксически недостижимо», не «доказано
-    исполняется». Обратная сторона строгости: ``lambda``, переданная в helper
-    (``self._step(lambda: self.x.clear())``), НЕ засчитывается — гард покажет
-    ложную дыру (падает громко, это безопасное направление).
+    ``while True`` без выхода; константные ``IfExp``/``BoolOp``
+    (``x() if False else y``); неисполненные генераторные выражения и
+    comprehension над пустой последовательностью; ``match`` с недостижимой
+    веткой; аннотации локальных переменных (``m: self.c.clear()`` в рантайме не
+    вычисляется). Такие clear() всё ещё засчитываются — «only reachable» здесь
+    означает «синтаксически недостижимо», не «доказано исполняется».
+    Обратная сторона строгости (ложная дыра, падает громко — безопасное
+    направление): ``lambda``, переданная в helper (``self._step(lambda:
+    self.x.clear())``), а также значение аргумента по умолчанию и декоратор
+    вложенной функции НЕ засчитываются, хотя исполняются.
+    ``raise`` в теле ``with`` завершением не считается (``suppress`` может
+    погасить исключение), поэтому ``with lk: raise X`` + clear() после него
+    засчитывается — это пропуск в «тихую» сторону, принятый осознанно.
     """
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
         return
@@ -250,6 +304,16 @@ def _reachable_calls(node: ast.AST):
         if truth is not True:
             yield from _reachable_list(node.orelse)
         return
+    if isinstance(node, _TRY_TYPES):
+        yield from _reachable_list(node.body)
+        for handler in node.handlers:
+            if handler.type is not None:
+                yield from _reachable_calls(handler.type)
+            yield from _reachable_list(handler.body)
+        if not _terminates_list(node.body):  # иначе ``else`` не исполняется никогда
+            yield from _reachable_list(node.orelse)
+        yield from _reachable_list(node.finalbody)
+        return
     for _name, value in ast.iter_fields(node):
         if isinstance(value, list):
             yield from _reachable_list(value)
@@ -261,7 +325,7 @@ def _reachable_list(items: list) -> Iterator[ast.Call]:
     for item in items:
         if isinstance(item, ast.AST):
             yield from _reachable_calls(item)
-        if isinstance(item, (ast.Return, ast.Raise, ast.Break, ast.Continue)):
+        if _terminates(item):
             break  # дальше в этом списке операторов исполнение не идёт
 
 
