@@ -18,6 +18,9 @@ from backend.service import BackendService, _shutdown_backend
 
 def _closing_backend(call_stt, transcriber):
     service = BackendService.__new__(BackendService)
+    service._close_guard = threading.Lock()
+    service._close_state = "OPEN"
+    service._rest_gate_unknown = False
     service._memory_conductor = Mock()
     service._meeting_svc = Mock()
     service._meeting_svc.close.return_value = True
@@ -49,6 +52,7 @@ def test_backend_propagates_transcriber_close_refusal():
 def test_shutdown_closes_phone_admission_before_ipc_drain():
     events = []
     service = SimpleNamespace(
+        _close_guard=threading.Lock(),
         _call_stt=SimpleNamespace(begin_shutdown=lambda: events.append("admission_closed")),
         close=lambda: events.append("owner_closed") or True,
     )
