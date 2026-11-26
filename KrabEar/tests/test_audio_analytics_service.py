@@ -155,7 +155,7 @@ class TestAnalyzeQualityTrends(unittest.TestCase):
         svc.handle_analyze_quality_trends({})
         qt.analyze_trends.assert_called_once_with([], days=30)
 
-    def test_store_error_falls_back_to_empty(self) -> None:
+    def test_store_error_is_reported_not_empty_report(self) -> None:
         qt = MagicMock()
         report = MagicMock()
         report.daily_confidence = {}
@@ -171,10 +171,11 @@ class TestAnalyzeQualityTrends(unittest.TestCase):
                 raise Exception("lock fail")
 
         svc = _make_service(quality_trends=qt, store=_ErrorStore())
-        # should not raise — falls back to items=[]
+        # G3-audio-01 A11: ошибка чтения истории — честный отказ, а не отчёт
+        # «stable» по пустой выборке, выданный за реальные данные.
         result = svc.handle_analyze_quality_trends({"days": 14})
-        qt.analyze_trends.assert_called_once_with([], days=14)
-        self.assertIsInstance(result, dict)
+        self.assertEqual(result, {"ok": False, "reason": "history_unavailable"})
+        qt.analyze_trends.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

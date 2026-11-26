@@ -70,14 +70,18 @@ class PlaybackTracker:
         except Exception as exc:
             _log.warning("Не удалось загрузить статистику воспроизведения: %s", exc)
 
-    def _save(self) -> None:
+    def _save(self) -> Optional[bool]:
         """Сохраняет статистику воспроизведения в файл (не бросает исключений).
+
+        Возвращает True после подтверждённой атомарной записи, False при ошибке,
+        None — если хранилище на диске не настроено (G3-audio-04 A04-09: вызывающий
+        не должен выдавать неудачную запись за сохранённую).
 
         Использует атомарный паттерн tmp+fsync+rename для предотвращения потери
         данных при сбое в середине записи (BUG-3 HIGH, W877 audit).
         """
         if self._path is None:
-            return
+            return None
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             payload = json.dumps(self._stats, ensure_ascii=False, indent=2)
@@ -100,6 +104,8 @@ class PlaybackTracker:
                 raise
         except Exception as exc:
             _log.warning("Не удалось сохранить статистику воспроизведения: %s", exc)
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -173,8 +179,15 @@ class PlaybackTracker:
                 new_total = old_total
             entry["total_listened_sec"] = new_total
             entry["last_played"] = now_iso
-            self._save()
-        return self.get_playback_stats(item_id)
+            persisted = self._save()
+        result = self.get_playback_stats(item_id)
+        if persisted is not None:
+            # Счётчик в памяти обновлён в любом случае (следующая запись повторит
+            # сохранение), но durable-успех подтверждается только фактом записи.
+            result["persisted"] = persisted
+            if not persisted:
+                result["reason"] = "persist_failed"
+        return result
 
     def get_playback_stats(self, item_id: str) -> dict[str, Any]:
         """Возвращает статистику воспроизведения для указанной записи.

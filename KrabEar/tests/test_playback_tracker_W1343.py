@@ -65,13 +65,24 @@ class TestAtomicSave(unittest.TestCase):
             # Simulate crash: inject an OSError during os.replace so the tmp
             # file never replaces the original.
             with patch("os.replace", side_effect=OSError("simulated crash")):
-                # Should not raise — exception is swallowed internally.
-                tracker.record_playback("safe_item", duration_listened_sec=3.0)
+                # Should not raise — but must not report a durable save either
+                # (G3-audio-04 A04-09).
+                result = tracker.record_playback("safe_item", duration_listened_sec=3.0)
+            self.assertIs(result.get("persisted"), False)
+            self.assertEqual(result.get("reason"), "persist_failed")
 
             # Original file must be intact (untouched by the failed write).
             surviving_data = path.read_text(encoding="utf-8")
             self.assertEqual(surviving_data, original_data,
                              "Original file was corrupted by failed atomic write")
+
+    def test_successful_save_reports_persisted(self):
+        """G3-audio-04 A04-09: успех записи подтверждается явно."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tracker = PlaybackTracker(data_dir=tmpdir)
+            result = tracker.record_playback("item_ok", duration_listened_sec=2.0)
+            self.assertIs(result.get("persisted"), True)
+            self.assertEqual(result.get("play_count"), 1)
 
     def test_atomic_save_uses_os_replace(self):
         """Verify _save() calls os.replace (not Path.write_text directly)."""
