@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from backend.semantic_search import SEMANTIC_CASCADE_STEP, cascade_failure_reason
 from backend.plaintext_export_authorization import POLICY_REVISION_KEY
 from backend.timeline_purge_guard import guard_timeline_purge, timeline_guard
 from backend.plaintext_export_sinks import (
@@ -1183,10 +1184,9 @@ class HistoryService:
         if secondary_errors:
             # Семантический индекс (или другой каскад) не очищен — частичный статус.
             # Основная запись удалена; durable retry остаётся на стороне вызывающего.
-            if any("semantic" in str(e).lower() or "remove_item" in str(e) for e in secondary_errors):
-                return {"deleted": True, "complete": False,
-                        "reason": "semantic_index_cleanup_failed"}
-            return {"deleted": True, "complete": False, "reason": "cascade_cleanup_failed"}
+            # reason — по коду шага (префиксу), не по подстроке в тексте (ревью #2274).
+            return {"deleted": True, "complete": False,
+                    "reason": cascade_failure_reason(secondary_errors)}
         return {"deleted": True}
 
     def cascade_delete_artifacts(
@@ -1228,7 +1228,7 @@ class HistoryService:
                 logger.warning(
                     "semantic_search remove failed for %s", item_id, exc_info=True
                 )
-                errors.append(f"semantic remove_item: {exc}")
+                errors.append(f"{SEMANTIC_CASCADE_STEP}: {exc}")
         # Каскадное удаление ghost item_id из всех цепочек (W1253 RC-3).
         if self._recording_chain_mgr is not None:
             try:

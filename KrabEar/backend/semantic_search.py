@@ -21,6 +21,24 @@ logger = logging.getLogger(__name__)
 _SNAPSHOT_VERSION = 1
 
 
+#: Код шага «удаление эмбеддинга» в списке ошибок каскада удаления
+#: (HistoryService.cascade_delete_artifacts, RecordingMerger). reason ответа
+#: определяется по этому префиксу, а не по подстроке в тексте ошибки (ревью #2274).
+SEMANTIC_CASCADE_STEP = "semantic remove_item"
+
+
+def is_semantic_cascade_error(error: object) -> bool:
+    """True, если ошибка каскада относится к шагу удаления эмбеддинга."""
+    return str(error).startswith(SEMANTIC_CASCADE_STEP + ":")
+
+
+def cascade_failure_reason(errors) -> str:
+    """reason неполного удаления: сбой эмбеддинга важнее прочих шагов."""
+    if any(is_semantic_cascade_error(e) for e in errors):
+        return "semantic_index_cleanup_failed"
+    return "cascade_cleanup_failed"
+
+
 class SnapshotNotPersistedError(RuntimeError):
     """Запись удалена из RAM-индекса, но снимок на диске обновить не удалось.
 
