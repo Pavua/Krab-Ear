@@ -18,6 +18,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT / "KrabEar") not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT / "KrabEar"))
 
+# Токеноподобная строка собирается из повторов, а не литералом: сканеры секретов
+# (GitGuardian) принимают высокоэнтропийный литерал за настоящий ключ.
+TOKEN_SHAPED = "Zq7k" * 9
+
 from backend.privacy_audit import (  # noqa: E402
     REDACTED,
     PrivacyAuditLogger,
@@ -49,7 +53,7 @@ class SanitizeUnitTests(unittest.TestCase):
         self.assertEqual(out, {"text_length": 5, "token_count": 3, "transcripts_deleted": 2})
 
     def test_token_shaped_value_is_redacted_under_innocent_key(self):
-        secret = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+        secret = TOKEN_SHAPED
         out = sanitize_audit_details({"note": secret, "hdr": "Bearer abc.def"})
         self.assertEqual(out, {"note": REDACTED, "hdr": REDACTED})
 
@@ -93,11 +97,11 @@ class PhysicalLogTests(unittest.TestCase):
     def test_secret_never_reaches_physical_log_and_chain_stays_valid(self):
         audit = PrivacyAuditLogger(log_path=self.log_path)
         audit.log_event("sentry", "blocked", {"api_key": "sk-TESTSECRET-9", "reason": "r"})
-        outcome = audit.log_event_strict("privacy", "x", {"note": "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"})
+        outcome = audit.log_event_strict("privacy", "x", {"note": TOKEN_SHAPED})
         self.assertEqual(outcome, "confirmed")
         raw = self.log_path.read_text("utf-8")
         self.assertNotIn("sk-TESTSECRET-9", raw)
-        self.assertNotIn("A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8", raw)
+        self.assertNotIn(TOKEN_SHAPED, raw)
         self.assertIn("reason", raw)
         self.assertTrue(audit.verify_chain()["valid"])
 
