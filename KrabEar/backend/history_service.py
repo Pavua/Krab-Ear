@@ -1191,8 +1191,8 @@ class HistoryService:
 
     def cascade_delete_artifacts(
         self, item_id: str, item_ts: str, item: HistoryItem | None = None, *,
-        siblings: list[HistoryItem] | None = None, return_errors: bool = False,
-    ) -> list[str] | None:
+        siblings: list[HistoryItem] | None = None, return_errors: bool = True,
+    ) -> list[str]:
         """Выполняет ВСЕ каскады удаления, КРОМE tombstone'а самой записи.
 
         Tombstone должен быть записан вызывающей стороной ДО этого вызова
@@ -1204,7 +1204,13 @@ class HistoryService:
         Покрывает: .md-транскрипт (W1762), эмбеддинг семантического поиска
         (W1426 F2), ghost-ссылки в цепочках (W1253 RC-3), playback-статистику
         (W1343), версии транскрипта (W1045 F2).  Каждый шаг отказоустойчив.
+
+        Всегда возвращает список ошибок вторичных шагов (пустой — каскад полный):
+        RecordingMerger подключён к этой функции напрямую и обязан видеть неполное
+        удаление (follow-up ревью #2229 F6). ``return_errors`` оставлен для
+        совместимости вызовов и ни на что не влияет.
         """
+        del return_errors
         errors: list[str] = []
 
         # W1762: стираем .md файл транскрипта (privacy gap — файл пережил tombstone).
@@ -1247,9 +1253,7 @@ class HistoryService:
                 )
                 errors.append(f"transcript_versions: {exc}")
 
-        if return_errors:
-            return errors
-        return None
+        return errors
 
     def handle_compact_history(self, params: dict[str, Any]) -> dict[str, Any]:
         stats = self.store.compact_with_stats()
@@ -2762,11 +2766,15 @@ class HistoryService:
         # self._semantic_searcher.remove_item; mirror the same pattern here so
         # age-deleted transcripts don't leave orphan embedding rows in
         # embeddings.npy.
+        # Follow-up #2229 F6: SnapshotNotPersistedError (и любая ошибка) — эмбеддинг
+        # вернётся после рестарта; такие id уходят в incomplete_ids ответа.
+        semantic_failed_ids: list[str] = []
         if to_delete and self._semantic_searcher is not None:
             for item in to_delete:
                 try:
                     self._semantic_searcher.remove_item(item.id)
                 except Exception:
+                    semantic_failed_ids.append(item.id)
                     logger.warning(
                         "semantic_search bulk cleanup failed for item %s", item.id, exc_info=True
                     )
@@ -2793,7 +2801,12 @@ class HistoryService:
             level="info",
             data={"deleted_count": len(to_delete), "remaining": remaining, "older_than_days": older_than_days},
         )
-        return {"deleted_count": len(to_delete), "remaining": remaining}
+        result: dict[str, Any] = {"deleted_count": len(to_delete), "remaining": remaining}
+        if semantic_failed_ids:
+            # Записи удалены, но их эмбеддинги могут вернуться — не выдаём за полное.
+            result.update(complete=False, reason="semantic_index_cleanup_failed",
+                          incomplete_ids=semantic_failed_ids)
+        return result
 
     @guard_timeline_purge
     def handle_purge_all_data(self, params: dict[str, Any]) -> dict[str, Any]:

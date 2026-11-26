@@ -356,13 +356,14 @@ Returns: полный dict добавленной записи (`item.to_dict()`
 *(history_service.py)*  
 Мягкое удаление записи (tombstone в NDJSON; реальная запись остаётся до compact).  
 Params: `{id}` (str, required)  
-Returns: `{deleted, id}`
+Returns: `{deleted: true}`; при неполном каскаде — `+ complete: false, reason` (`semantic_index_cleanup_failed` | `cascade_cleanup_failed`)
 
 ### `cleanup_old_history`
 *(history_service.py)*  
 Удаляет записи истории старше указанного числа дней (tombstone).  
-Params: `{days}` (int, required) — записи с ts старше days удаляются  
-Returns: `{deleted}`
+Params: `{older_than_days}` (int, по умолчанию 90) — записи с ts старше N дней удаляются  
+Returns: `{deleted_count, remaining}`  
+Неполное удаление (follow-up #2229 F6): если эмбеддинг не удалён надёжно (`SnapshotNotPersistedError` — вернётся после рестарта), ответ дополняется `complete: false`, `reason` (`semantic_index_cleanup_failed`) и `incomplete_ids`. При полном удалении этих ключей нет.
 
 ### `compact_history`
 *(history_service.py)*  
@@ -1090,7 +1091,8 @@ Returns: `{fixed, skipped, details}`. Ремонт NDJSON пропускаетс
 *(service.py → recording_merger.py)*  
 Объединяет несколько записей истории в одну новую.  
 Params: `{item_ids, delete_originals?, separator?}` — минимум 2 ID  
-Returns: словарь новой записи истории
+Returns: словарь новой записи истории + `merged_from, deleted_originals, deleted_ids, skipped_protected_ids`  
+Неполное удаление (follow-up #2229 F6): если эмбеддинг не удалён надёжно (`SnapshotNotPersistedError` — вернётся после рестарта) или другой вторичный каскад упал, ответ дополняется `complete: false`, `reason` (`semantic_index_cleanup_failed` | `cascade_cleanup_failed`) и `incomplete_ids`. При полном удалении этих ключей нет.
 
 ### `preview_merge`
 *(service.py → recording_merger.py)*  
@@ -3055,8 +3057,9 @@ Returns: `{ok, deleted}`
 ### `archive_items`
 *(archive_manager.py)*  
 Переместить записи истории в отдельный `archive.ndjson` (lean main store).  
-Params: `{ids: [...]}` или `{before_date}`  
-Returns: `{ok, archived_count}`
+Params: `{item_ids: [...]}` (≤100)  
+Returns: `{archived_count, archive_path, size_mb}` (ошибка — `{ok: false, reason}`)  
+Неполное удаление (follow-up #2229 F6): если эмбеддинг не удалён надёжно (`SnapshotNotPersistedError` — вернётся после рестарта), ответ дополняется `complete: false`, `reason` (`semantic_index_cleanup_failed`) и `incomplete_ids`. При полном удалении этих ключей нет.
 
 ### `unarchive_items`
 *(archive_manager.py)*  
