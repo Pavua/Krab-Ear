@@ -150,8 +150,9 @@ try:
     with patch("pathlib.Path.mkdir"):
         import backend.rest_server as _rest_mod
     _REST_AVAILABLE = True
-except ImportError:
-    # Нет flask/тяжёлых зависимостей — честный skip.
+except ModuleNotFoundError:
+    # Нет модуля flask/тяжёлой зависимости — честный skip. «cannot import name»
+    # (дрейф stub) — обычный ImportError и уходит в громкую ветку ниже.
     pass
 except Exception as _import_exc:
     _REST_IMPORT_ERROR = repr(_import_exc)
