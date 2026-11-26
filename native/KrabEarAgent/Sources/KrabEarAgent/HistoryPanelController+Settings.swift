@@ -1347,7 +1347,13 @@ extension HistoryPanelController {
             description: "Отсчёт идёт, только пока ассистент слушает.",
             control: vaIdleEndSelector
         )
-        return [toggleRow, secondsRow]
+        let maxRow = makeSettingRow(
+            label: "Максимальная длительность разговора",
+            description: "Страховка: даже при шуме или ролике в комнате разговор закроется сам и микрофон освободится. "
+                + "Если потолок наступил посреди ответа, ассистент договорит (не дольше минуты).",
+            control: vaMaxDurationSelector
+        )
+        return [toggleRow, secondsRow, maxRow]
     }
 
     @MainActor
@@ -1359,6 +1365,10 @@ extension HistoryPanelController {
             vaIdleEndSelector.addItems(withTitles: ConversationIdleEndSettings.choices.map(ConversationIdleEndSettings.choiceTitle))
         }
         vaIdleEndSelector.setAccessibilityLabel("Сколько секунд тишины до завершения разговора")
+        if vaMaxDurationSelector.numberOfItems == 0 {
+            vaMaxDurationSelector.addItems(withTitles: ConversationMaxDurationSettings.choices.map(ConversationMaxDurationSettings.title))
+        }
+        vaMaxDurationSelector.setAccessibilityLabel("Максимальная длительность разговора с AI")
         syncIdleEndControls()
     }
 
@@ -1371,6 +1381,17 @@ extension HistoryPanelController {
         let nearest = choices.indices.min { abs(choices[$0] - seconds) < abs(choices[$1] - seconds) } ?? 2
         vaIdleEndSelector.selectItem(at: nearest)
         vaIdleEndSelector.isEnabled = enabled
+        let maxSeconds = ConversationMaxDurationSettings.seconds(in: defaults)
+        let maxChoices = ConversationMaxDurationSettings.choices
+        let maxNearest = maxChoices.indices.min { abs(maxChoices[$0] - maxSeconds) < abs(maxChoices[$1] - maxSeconds) } ?? 1
+        vaMaxDurationSelector.selectItem(at: maxNearest)
+    }
+
+    @objc func onVAMaxDurationChanged() {
+        let choices = ConversationMaxDurationSettings.choices
+        let idx = vaMaxDurationSelector.indexOfSelectedItem
+        guard choices.indices.contains(idx) else { return }
+        UserDefaults.standard.set(choices[idx], forKey: ConversationMaxDurationSettings.secondsKey)
     }
 
     @objc func onVAIdleEndToggleChanged() {
@@ -1927,6 +1948,7 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(cdMakeSeparator())
         card.contentStackView.addArrangedSubview(cdMakeRow(label: "Завершать после тишины", control: vaIdleEndToggle))
         card.contentStackView.addArrangedSubview(cdMakeRow(label: "Тишина до завершения", control: vaIdleEndSelector))
+        card.contentStackView.addArrangedSubview(cdMakeRow(label: "Максимум разговора", control: vaMaxDurationSelector))
 
         section.contentStackView.addArrangedSubview(card)
         return section
