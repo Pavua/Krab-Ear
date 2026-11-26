@@ -59,6 +59,33 @@ def test_fifo_is_mismatch_and_does_not_block(tmp_path: Path) -> None:
         data_dir=tmp_path, files_meta=[_meta("history.ndjson", b"x")]
     )
     assert out["ok"] is False and len(out["mismatches"]) == 1
+    # Именно по типу, а не по size: FIFO с писателем мог бы отдать ровно ожидаемые байты.
+    assert "не обычный файл" in out["mismatches"][0]
+
+
+def test_directory_is_mismatch_by_type(tmp_path: Path) -> None:
+    (tmp_path / "history.ndjson").mkdir()
+    out = es._readback_live_journals(
+        data_dir=tmp_path, files_meta=[_meta("history.ndjson", b"")]
+    )
+    assert out["ok"] is False
+    assert "не обычный файл" in out["mismatches"][0]
+
+
+def test_fifo_with_writer_cannot_pass_with_expected_bytes(tmp_path: Path) -> None:
+    body = b"line\n"
+    fifo = tmp_path / "history.ndjson"
+    os.mkfifo(fifo)
+    wfd = os.open(str(fifo), os.O_RDWR | os.O_NONBLOCK)  # «писатель» с нужными байтами
+    try:
+        os.write(wfd, body)
+        out = es._readback_live_journals(
+            data_dir=tmp_path, files_meta=[_meta("history.ndjson", body)]
+        )
+    finally:
+        os.close(wfd)
+    assert out["ok"] is False
+    assert "не обычный файл" in out["mismatches"][0]
 
 
 def test_mismatch_text_has_no_absolute_path(tmp_path: Path) -> None:
