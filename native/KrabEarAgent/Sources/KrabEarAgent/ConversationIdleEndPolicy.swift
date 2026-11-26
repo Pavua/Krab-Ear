@@ -76,6 +76,10 @@ enum ConversationMaxDurationSettings {
     static let secondsKey = "KrabEar_ConversationMaxSec"
     static let defaultSeconds: TimeInterval = 600
     static let range: ClosedRange<TimeInterval> = 120...3_600
+    /// Варианты выбора в панели (секунды) — внутри `range`.
+    static let choices: [TimeInterval] = [300, 600, 900, 1_800, 3_600]
+    /// Если потолок наступил посреди ответа AI («говорю»), даём договорить, но не дольше этого запаса.
+    static let speakingGrace: TimeInterval = 60
 
     /// Порог в пределах 2–60 минут; мусор, NaN и неположительное — 10 минут.
     static func seconds(in defaults: UserDefaults) -> TimeInterval {
@@ -98,8 +102,12 @@ struct ConversationMaxDurationPolicy {
         self.startedAt = now
     }
 
-    func isExpired(now: TimeInterval) -> Bool {
-        now - startedAt >= limit
+    /// Потолок по монотонным часам (`idleEndClock` = uptime, во сне не идёт — для защиты микрофона достаточно).
+    /// Наступил посреди ответа AI — даём договорить, но не дольше `speakingGrace`.
+    func isExpired(now: TimeInterval, state: ConversationState = .listening) -> Bool {
+        let elapsed = now - startedAt
+        guard elapsed >= limit else { return false }
+        return state != .speaking || elapsed >= limit + ConversationMaxDurationSettings.speakingGrace
     }
 }
 

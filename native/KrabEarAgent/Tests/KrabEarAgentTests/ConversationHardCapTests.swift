@@ -22,12 +22,29 @@ final class ConversationHardCapTests: XCTestCase {
         XCTAssertEqual(ConversationMaxDurationSettings.seconds(in: defaults), 600, "отрицательное — по умолчанию")
     }
 
-    func test_maxDurationPolicy_expiresByWallClockOnly() {
+    func test_maxDurationPolicy_expiresByElapsedUptimeOnly() {
         let policy = ConversationMaxDurationPolicy(limit: 600, startedAt: 100)
         XCTAssertFalse(policy.isExpired(now: 100))
         XCTAssertFalse(policy.isExpired(now: 699.9))
         XCTAssertTrue(policy.isExpired(now: 700))
         XCTAssertTrue(policy.isExpired(now: 10_000))
+    }
+
+    func test_maxDurationChoices_insideRange_andTitles() {
+        XCTAssertTrue(ConversationMaxDurationSettings.choices.allSatisfy { ConversationMaxDurationSettings.range.contains($0) })
+        XCTAssertTrue(ConversationMaxDurationSettings.choices.contains(ConversationMaxDurationSettings.defaultSeconds))
+        XCTAssertEqual(ConversationMaxDurationSettings.title(600), "10 мин")
+        XCTAssertEqual(ConversationMaxDurationSettings.title(3_600), "60 мин")
+    }
+
+    /// Потолок посреди ответа AI: даём договорить, но не дольше speakingGrace.
+    func test_maxDurationPolicy_speakingGetsGrace_thenEnds() {
+        let policy = ConversationMaxDurationPolicy(limit: 600, startedAt: 0)
+        XCTAssertFalse(policy.isExpired(now: 601, state: .speaking), "договаривает")
+        XCTAssertFalse(policy.isExpired(now: 659, state: .speaking))
+        XCTAssertTrue(policy.isExpired(now: 660, state: .speaking), "запас кончился")
+        XCTAssertTrue(policy.isExpired(now: 601, state: .listening))
+        XCTAssertTrue(policy.isExpired(now: 601, state: .thinking))
     }
 
     private func makeVC(defaults: UserDefaults) -> ConversationViewController {
@@ -73,7 +90,10 @@ final class ConversationHardCapTests: XCTestCase {
         vc.conversationState = .speaking
         now += 121
         vc.idleEndTick()
-        XCTAssertFalse(vc.isSessionActive)
+        XCTAssertTrue(vc.isSessionActive, "посреди ответа AI — даём договорить")
+        now += ConversationMaxDurationSettings.speakingGrace
+        vc.idleEndTick()
+        XCTAssertFalse(vc.isSessionActive, "запас кончился — застрявшее «говорю» не вечно")
     }
 
     /// Потолок не зависит от тумблера «Завершать после тишины».

@@ -248,7 +248,7 @@ final class WakePrerollAndIdleEndTests: XCTestCase {
 
     /// Нит гейта #2270: с выключенной настройкой разговор сам не завершается, но метка после
     /// ответа всё равно возвращается в «слушаю» (тик идёт всю сессию).
-    func test_vc_idleEndDisabled_neverEnds_butLabelSettles() {
+    func test_vc_idleEndDisabled_noSilenceEnd_butLabelSettles() {
         let defaults = UserDefaults(suiteName: "idle-off-\(UUID().uuidString)")!
         defaults.set(false, forKey: ConversationIdleEndSettings.enabledKey)
         let vc = makeVC(defaults: defaults)

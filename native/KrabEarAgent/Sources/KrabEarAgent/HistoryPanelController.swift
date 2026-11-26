@@ -286,6 +286,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
     // Автозавершение разговора по тишине (ConversationIdleEndSettings): тумблер + порог.
     let vaIdleEndToggle = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     let vaIdleEndSelector = NSPopUpButton(frame: .zero, pullsDown: false)
+    // Жёсткий потолок длительности разговора (ConversationMaxDurationSettings).
+    let vaMaxDurationSelector = NSPopUpButton(frame: .zero, pullsDown: false)
     // Режимы двух движков голосовой активации (#2258): сегмент Выкл/В тени/Вживую
     // и строка чисел из wake_word_status.engines (см. HistoryPanelController+WakeEngines).
     lazy var wakeEngineModeControls: [WakeEngine: NSSegmentedControl] = Dictionary(
@@ -2111,6 +2113,8 @@ final class HistoryPanelController: NSWindowController, NSTableViewDataSource, N
         vaIdleEndToggle.action = #selector(onVAIdleEndToggleChanged)
         vaIdleEndSelector.target = self
         vaIdleEndSelector.action = #selector(onVAIdleEndSecondsChanged)
+        vaMaxDurationSelector.target = self
+        vaMaxDurationSelector.action = #selector(onVAMaxDurationChanged)
         for control in wakeEngineModeControls.values {
             control.target = self
             control.action = #selector(onWakeEngineModeChanged(_:))

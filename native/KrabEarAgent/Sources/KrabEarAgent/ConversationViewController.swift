@@ -413,7 +413,7 @@ final class ConversationViewController: NSViewController {
     func idleEndTick() {
         guard isSessionActive else { return }
         // Жёсткий потолок — раньше всего: шум/ролик обнуляют тишину вечно, застрявшее «говорю» тоже.
-        if let cap = maxDurationPolicy, cap.isExpired(now: idleEndClock()) {
+        if let cap = maxDurationPolicy, cap.isExpired(now: idleEndClock(), state: conversationState) {
             let after = ConversationMaxDurationSettings.title(cap.limit)
             AgentLogger.shared.info("[ConversationVC] Потолок \(after) — разговор завершён автоматически")
             appendTranscriptLine("— Разговор завершён: прошло \(after)")
