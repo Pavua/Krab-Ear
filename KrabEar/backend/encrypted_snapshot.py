@@ -1337,18 +1337,41 @@ def _is_retired_staging(path: Path) -> bool:
         return False
 
 
+def _mark_retired(staging: Path) -> None:
+    """Ставит (идемпотентно) пустую метку retired; сбой — warning без пути.
+
+    ``shutil.rmtree`` удаляет файлы по одному: после частичного сбоя метки или
+    маркера может не быть вовсе, и каталог выглядел бы как «restore работает
+    СЕЙЧАС» (вечно глушил бы retention). Поэтому метку переставляем после КАЖДОГО
+    неудачного rmtree, пока каталог остаётся.
+    """
+    try:
+        (staging / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}").touch()
+    except OSError as exc:
+        logger.warning(
+            "encrypted_snapshot: retired-метка не создана (%s errno=%s)",
+            type(exc).__name__, exc.errno,
+        )
+
+
 def _retry_retired_staging(data_dir: Path) -> None:
     """Повторная уборка каталогов с снятым маркером (находка Codex к #2292).
 
     Без маркера recovery их больше не видит; без этой повторной попытки остаток
     жил бы до purge. Сбой не фатален: каталог остаётся retired и retention его
     игнорирует (``_is_retired_staging`` в guard).
+
+    Классификацию перепроверяем непосредственно перед ``rmtree``: список мог
+    устареть (маркер вернули повторной докаткой) — активный restore не убираем.
+    После неудачи метку переставляем: частичный ``rmtree`` мог её удалить.
     """
     try:
         candidates = [p for p in restore_staging_dirs(data_dir) if _is_retired_staging(p)]
     except SnapshotOperationRefused:
         return
     for path in candidates:
+        if not _is_retired_staging(path):
+            continue
         try:
             shutil.rmtree(path)
         except OSError as exc:
@@ -1356,6 +1379,8 @@ def _retry_retired_staging(data_dir: Path) -> None:
                 "encrypted_snapshot: retired staging не убран (%s errno=%s)",
                 type(exc).__name__, exc.errno,
             )
+            if path.exists():
+                _mark_retired(path)
 
 
 def _remove_committed_staging(staging: Path) -> str | None:
@@ -1377,9 +1402,9 @@ def _remove_committed_staging(staging: Path) -> str | None:
     """
     try:
         shutil.rmtree(staging)
-    except FileNotFoundError:
-        return None
     except OSError as exc:
+        if isinstance(exc, FileNotFoundError) and not staging.exists():
+            return None
         logger.error(
             "encrypted_snapshot: staging после COMMITTED не убран (%s errno=%s); "
             "пробуем снять маркер, следующий recovery повторит уборку",
@@ -1396,14 +1421,10 @@ def _remove_committed_staging(staging: Path) -> str | None:
     try:
         os.replace(marker, staging / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}")
     except OSError:
+        # Маркер мог быть уже удалён частичным rmtree (FileNotFoundError) — тогда
+        # unlink тоже FileNotFoundError, но метку всё равно надо поставить.
         try:
             marker.unlink()
-            # Fallback: без retired-метки каталог без маркера выглядел бы как
-            # «restore работает СЕЙЧАС» и вечно глушил retention.
-            try:
-                (staging / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}").touch()
-            except OSError:
-                logger.warning("encrypted_snapshot: retired-метка не создана", exc_info=True)
         except FileNotFoundError:
             pass
         except OSError as exc:
@@ -1411,6 +1432,10 @@ def _remove_committed_staging(staging: Path) -> str | None:
                 "encrypted_snapshot: маркер COMMITTED не снят (%s errno=%s)",
                 type(exc).__name__, exc.errno,
             )
+            return failure
+        # Без retired-метки каталог без маркера выглядел бы как «restore работает
+        # СЕЙЧАС» и вечно глушил retention.
+        _mark_retired(staging)
     return failure
 
 
@@ -3013,10 +3038,16 @@ def _recover_pending_restore(
             REASON_RECOVERY_PENDING, **common
         )
 
+    # Факт с диска из применения, не константа: сбой уборки staging после COMMITTED
+    # оставляет маркер, и бэкапы/restore продолжают отказывать до следующего recovery.
+    rolled_cleanup_failed = any(
+        str(w).startswith("committed_staging_cleanup_failed:")
+        for w in result.get("warnings") or []
+    )
     return _recovery_result(
         ok=True,
-        pending=False,
-        reason=None,
+        pending=bool(result.get("pending")),
+        reason=REASON_COMMITTED_CLEANUP_FAILED if rolled_cleanup_failed else None,
         state=result["state"],
         transaction_id=result["transaction_id"],
         snapshot_dir=result["snapshot_dir"],
