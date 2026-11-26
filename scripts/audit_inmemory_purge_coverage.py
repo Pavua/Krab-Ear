@@ -277,7 +277,9 @@ def _reachable_calls(node: ast.AST):
     Обратная сторона строгости (ложная дыра, падает громко — безопасное
     направление): ``lambda``, переданная в helper (``self._step(lambda:
     self.x.clear())``), а также значение аргумента по умолчанию и декоратор
-    вложенной функции НЕ засчитываются, хотя исполняются.
+    вложенной функции НЕ засчитываются, хотя исполняются; так же ``with
+    suppress(Exception): raise X`` считается завершающим, хотя контекстный
+    менеджер гасит исключение и код после него исполняется.
     """
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
         return
