@@ -175,6 +175,21 @@ final class ArchiveTabModelTests: XCTestCase {
         XCTAssertFalse(body.contains("!isPrivacyModeEnabled"), "reload решает backend, не кэш-флаг")
     }
 
+    func test_restoreButtonReenabledAfterFailedRestoreWithoutListRefresh() throws {
+        let vc = makeVC()
+        let table = try XCTUnwrap(findTable(vc.view))
+        vc.archivedItems = [entry("a1")]
+        vc.beginRestoreForTesting(id: "a1")
+        func button() -> NSButton? {
+            let cell = vc.tableView(table, viewFor: nil, row: 0)
+            return (cell?.subviews.first as? NSStackView)?.arrangedSubviews.last as? NSButton
+        }
+        XCTAssertEqual(button()?.isEnabled, false)
+        vc.finishRestore(id: "a1", response: nil)  // restore упал, ipcProvider нет → reload не сработает
+        XCTAssertFalse(vc.restoringIDs.contains("a1"))
+        XCTAssertEqual(button()?.isEnabled, true, "повтор должен быть возможен без успешного list_archived")
+    }
+
     func test_unknownRestoreResponseShowsNoSuccessText() {
         let vc = makeVC()
         vc.apply(restoreOutcome: .unknown)

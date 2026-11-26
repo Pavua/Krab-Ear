@@ -51,7 +51,7 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
     /// Поколение запроса списка: опоздавший ответ предыдущего reload() не затирает свежий.
     private var loadGeneration = 0
     /// Записи, чьё восстановление уже идёт (защита от двойного клика).
-    private var restoringIDs = Set<String>()
+    private(set) var restoringIDs = Set<String>()
     private var ledger = ArchiveWarningLedger()
     private var transientMessage: String?
     private let noticeLabel = NSTextField(labelWithString: "")
@@ -337,12 +337,25 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let response = try? ipc.call(method: "unarchive_items", params: ["item_ids": [id]], timeoutSec: 15)
             DispatchQueue.main.async {
-                guard let self else { return }
-                self.restoringIDs.remove(id)
-                self.apply(restoreOutcome: ArchiveRestoreDecoder.decode(response, requested: [id]))
-                self.reload()
+                self?.finishRestore(id: id, response: response)
             }
         }
+    }
+
+    /// Только для тестов: пометить запись «восстанавливается» без IPC.
+    func beginRestoreForTesting(id: String) {
+        restoringIDs.insert(id)
+        tableView.reloadData()
+    }
+
+    /// Завершение восстановления на main: снимает «в процессе» и перерисовывает таблицу
+    /// независимо от того, удастся ли следующий `list_archived` (иначе при сбое списка
+    /// кнопка остаётся серой и повтор невозможен — ревью Codex #2283).
+    func finishRestore(id: String, response: [String: Any]?) {
+        restoringIDs.remove(id)
+        tableView.reloadData()
+        apply(restoreOutcome: ArchiveRestoreDecoder.decode(response, requested: [id]))
+        reload()
     }
 
     func apply(restoreOutcome: ArchiveRestoreOutcome) {
