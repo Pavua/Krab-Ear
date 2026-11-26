@@ -190,3 +190,36 @@ class TestRetiredStagingDoesNotBlockRetention:
         monkeypatch.undo()
         _recover(data_dir, crypto)
         assert not leftover.exists()
+
+
+class TestProdEntryRetriesRetired:
+    """REVISE пары: прод-вход recover_pending_restore_from_store обязан убирать retired."""
+
+    def test_from_store_removes_retired_staging_without_any_marker(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-prod")
+        _rmtree_always_fails(monkeypatch, leftover)
+        _recover(data_dir, crypto)
+        assert es._is_retired_staging(leftover) and es.has_pending_restore(data_dir) is False
+        monkeypatch.undo()
+
+        out = es.recover_pending_restore_from_store(SimpleNamespace(data_dir=data_dir))
+
+        assert out is None, "маркера нет — вердикт не нужен"
+        assert not leftover.exists()
+
+    def test_unlink_fallback_still_marks_retired(self, tmp_path, monkeypatch):
+        data_dir, crypto, snapshot_dir, files = _restored_profile(tmp_path)
+        leftover = _plant_committed_marker(data_dir, snapshot_dir, files, "tx-fb")
+        _rmtree_always_fails(monkeypatch, leftover)
+
+        def no_replace(*a, **k):
+            raise PermissionError(13, "denied")
+
+        monkeypatch.setattr(es.os, "replace", no_replace)
+        _recover(data_dir, crypto)
+
+        assert es.has_pending_restore(data_dir) is False
+        assert es._is_retired_staging(leftover), "иначе каталог вечно глушит retention"

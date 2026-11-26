@@ -1398,6 +1398,12 @@ def _remove_committed_staging(staging: Path) -> str | None:
     except OSError:
         try:
             marker.unlink()
+            # Fallback: без retired-метки каталог без маркера выглядел бы как
+            # «restore работает СЕЙЧАС» и вечно глушил retention.
+            try:
+                (staging / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}").touch()
+            except OSError:
+                logger.warning("encrypted_snapshot: retired-метка не создана", exc_info=True)
         except FileNotFoundError:
             pass
         except OSError as exc:
@@ -3228,6 +3234,10 @@ def recover_pending_restore_from_store(store: Any) -> dict | None:
     она обязана блокировать работу, и её вердикт кэшируется для статуса.
     """
     data_dir = Path(store.data_dir)
+    # Остатки с снятым маркером убираем ДО гейта: у них маркера нет, и без этого
+    # прод-вход до повторной уборки не дошёл бы (REVISE пары к #2292). Дёшево:
+    # один iterdir, Keychain не трогает.
+    _retry_retired_staging(data_dir)
     if not has_pending_restore(data_dir):
         return None
     from backend.history_encryption_policy import store_policy_reader
