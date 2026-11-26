@@ -1353,7 +1353,13 @@ extension HistoryPanelController {
                 + "Если потолок наступил посреди ответа, ассистент договорит (не дольше минуты).",
             control: vaMaxDurationSelector
         )
-        return [toggleRow, secondsRow, maxRow]
+        let voiceEndRow = makeSwitchRow(
+            label: "Завершать разговор голосом",
+            description: "Скажите «отключись» или «заверши разговор» (также «до свидания», «пока»), и разговор закроется, "
+                + "а микрофон освободится. Без этого ассистент отвечал «хорошо», но продолжал слушать.",
+            button: vaVoiceEndToggle
+        )
+        return [toggleRow, secondsRow, maxRow, voiceEndRow]
     }
 
     @MainActor
@@ -1361,6 +1367,9 @@ extension HistoryPanelController {
         vaIdleEndToggle.title = ""
         vaIdleEndToggle.setButtonType(.switch)
         vaIdleEndToggle.setAccessibilityLabel("Завершать разговор с AI после тишины")
+        vaVoiceEndToggle.title = ""
+        vaVoiceEndToggle.setButtonType(.switch)
+        vaVoiceEndToggle.setAccessibilityLabel("Завершать разговор с AI по голосовой команде")
         if vaIdleEndSelector.numberOfItems == 0 {
             vaIdleEndSelector.addItems(withTitles: ConversationIdleEndSettings.choices.map(ConversationIdleEndSettings.choiceTitle))
         }
@@ -1376,6 +1385,7 @@ extension HistoryPanelController {
         let defaults = UserDefaults.standard
         let enabled = ConversationIdleEndSettings.isEnabled(in: defaults)
         vaIdleEndToggle.state = enabled ? .on : .off
+        vaVoiceEndToggle.state = ConversationVoiceEndSettings.isEnabled(in: defaults) ? .on : .off
         let seconds = ConversationIdleEndSettings.seconds(in: defaults)
         let choices = ConversationIdleEndSettings.choices
         let nearest = choices.indices.min { abs(choices[$0] - seconds) < abs(choices[$1] - seconds) } ?? 2
@@ -1392,6 +1402,10 @@ extension HistoryPanelController {
         let idx = vaMaxDurationSelector.indexOfSelectedItem
         guard choices.indices.contains(idx) else { return }
         UserDefaults.standard.set(choices[idx], forKey: ConversationMaxDurationSettings.secondsKey)
+    }
+
+    @objc func onVAVoiceEndToggleChanged() {
+        UserDefaults.standard.set(vaVoiceEndToggle.state == .on, forKey: ConversationVoiceEndSettings.enabledKey)
     }
 
     @objc func onVAIdleEndToggleChanged() {
@@ -1949,6 +1963,7 @@ extension HistoryPanelController {
         card.contentStackView.addArrangedSubview(cdMakeRow(label: "Завершать после тишины", control: vaIdleEndToggle))
         card.contentStackView.addArrangedSubview(cdMakeRow(label: "Тишина до завершения", control: vaIdleEndSelector))
         card.contentStackView.addArrangedSubview(cdMakeRow(label: "Максимум разговора", control: vaMaxDurationSelector))
+        card.contentStackView.addArrangedSubview(cdMakeRow(label: "Завершать голосом", control: vaVoiceEndToggle))
 
         section.contentStackView.addArrangedSubview(card)
         return section
