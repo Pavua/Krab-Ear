@@ -6,7 +6,7 @@ import AppKit
 /// - NSView (view)
 ///   - NSStackView (mainStack, vertical)
 ///     - NSStackView (statsBar, horizontal)
-///       - NSTextField (statsLabel: "N записей • X MB • старейшая: DD.MM")
+///       - NSTextField (statsLabel: "N записей | X MB | старейшая: DD.MM")
 ///       - NSView (spacer)
 ///     - NSScrollView (tableScroll)
 ///       - NSTableView (tableView) -> NSTableCellView -> NSStackView (row content)
@@ -22,7 +22,7 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
     private let mainStack = NSStackView()
     private let statsBar = NSStackView()
     // Wave 621/658 (AGENT-J): no dangerous Unicode glyphs in NSTextField(labelWithString:)
-    // Use " | " separator instead of "•" (U+2022) which triggers CoreText hang.
+    // Use " | " separator instead of the bullet glyph (U+2022) which triggers CoreText hang.
     private let statsLabel = NSTextField(labelWithString: "0 записей | 0 MB | старейшая: --.--")
     
     private let tableScroll = NSScrollView()
@@ -44,14 +44,18 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         }
     }
     
-    // Mock Model for now, since we just design the UI
-    struct HistoryItem {
-        let id: String
-        let text: String
-        let date: Date
-        let sizeBytes: Int
-    }
-    
+    typealias HistoryItem = ArchivedEntry
+
+    /// Канал IPC (задаёт HistoryPanelController). Без него вкладка не пытается грузить архив.
+    var ipcProvider: (() -> IPCClient?)?
+    /// Поколение запроса списка: опоздавший ответ предыдущего reload() не затирает свежий.
+    private var loadGeneration = 0
+    /// Записи, чьё восстановление уже идёт (защита от двойного клика).
+    private(set) var restoringIDs = Set<String>()
+    private var ledger = ArchiveWarningLedger()
+    private var transientMessage: String?
+    private let noticeLabel = NSTextField(labelWithString: "")
+
     init() {
         super.init(nibName: nil, bundle: nil)
     }
@@ -98,6 +102,12 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         statsBar.addArrangedSubview(spacer)
         
         mainStack.addArrangedSubview(statsBar)
+
+        // Строка состояния: итог восстановления / предупреждение / ошибка загрузки.
+        noticeLabel.isHidden = true
+        noticeLabel.lineBreakMode = .byWordWrapping
+        noticeLabel.maximumNumberOfLines = 3
+        mainStack.addArrangedSubview(noticeLabel)
         
         // TableView
         tableScroll.hasVerticalScroller = true
@@ -210,7 +220,8 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
         formatter.dateFormat = "dd.MM"
         let oldestStr = oldest != nil ? formatter.string(from: oldest!) : "--.--"
         
-        statsLabel.stringValue = "\(archivedItems.count) записей • \(String(format: "%.1f", mb)) MB • старейшая: \(oldestStr)"
+        // Без U+2022: этот глиф вешает CoreText (Wave 621/658), разделитель — " | ".
+        statsLabel.stringValue = "\(archivedItems.count) записей | \(String(format: "%.1f", mb)) MB | старейшая: \(oldestStr)"
     }
     
     // MARK: - NSTableViewDataSource & Delegate
@@ -269,9 +280,10 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
            let label = stack.viewWithTag(100) as? NSTextField {
             label.stringValue = item.text
             
-            // Button target action can use row index or bind to item ID.
+            // Кнопка привязана к ID записи, а не к номеру строки: после обновления списка строки сдвигаются.
             if let button = stack.arrangedSubviews.last as? NSButton {
-                button.tag = row
+                button.identifier = NSUserInterfaceItemIdentifier(item.id)
+                button.isEnabled = !restoringIDs.contains(item.id)
             }
         }
         
@@ -279,11 +291,102 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
     }
     
     @objc private func onUnarchiveClicked(_ sender: NSButton) {
-        let rowIndex = sender.tag
-        guard rowIndex >= 0 && rowIndex < archivedItems.count else { return }
-        let item = archivedItems[rowIndex]
-        print("Восстановить item: \(item.id)")
-        // IPC call would happen here.
-        // On success -> reload.
+        guard let id = sender.identifier?.rawValue, !id.isEmpty else { return }
+        restore(id: id)
     }
+
+    // MARK: - Загрузка и восстановление (IPC вне main: sync read() на main = AppHang)
+
+    /// Перечитывает архив. Вызывается при показе вкладки и после восстановления.
+    /// Не гейтится кэш-флагом приватности: решает backend (`privacy_mode_active`),
+    /// иначе выключение приватности после блокировки не сняло бы заглушку (ревью #2283).
+    func reload() {
+        guard let ipc = ipcProvider?() else { return }
+        loadGeneration += 1
+        let generation = loadGeneration
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let response = try? ipc.call(method: "list_archived", params: ["limit": 500], timeoutSec: 5)
+            DispatchQueue.main.async {
+                guard let self, generation == self.loadGeneration else { return }
+                self.apply(listOutcome: ArchiveListDecoder.decode(response))
+            }
+        }
+    }
+
+    func apply(listOutcome: ArchiveListOutcome) {
+        switch listOutcome {
+        case .items(let entries):
+            isPrivacyModeEnabled = false
+            archivedItems = entries
+            ledger.reconcile(archiveIDs: Set(entries.map { $0.id }))
+        case .privacyBlocked:
+            isPrivacyModeEnabled = true
+            archivedItems = []
+            ledger.reset()
+            transientMessage = nil
+        case .unavailable:
+            transientMessage = "Не удалось загрузить архив. Показан прежний список."
+        }
+        updateNotice()
+    }
+
+    func restore(id: String) {
+        guard !restoringIDs.contains(id), let ipc = ipcProvider?() else { return }
+        restoringIDs.insert(id)
+        tableView.reloadData()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let response = try? ipc.call(method: "unarchive_items", params: ["item_ids": [id]], timeoutSec: 15)
+            DispatchQueue.main.async {
+                self?.finishRestore(id: id, response: response)
+            }
+        }
+    }
+
+    /// Только для тестов: пометить запись «восстанавливается» без IPC.
+    func beginRestoreForTesting(id: String) {
+        restoringIDs.insert(id)
+        tableView.reloadData()
+    }
+
+    /// Завершение восстановления на main: снимает «в процессе» и перерисовывает таблицу
+    /// независимо от того, удастся ли следующий `list_archived` (иначе при сбое списка
+    /// кнопка остаётся серой и повтор невозможен — ревью Codex #2283).
+    func finishRestore(id: String, response: [String: Any]?) {
+        restoringIDs.remove(id)
+        tableView.reloadData()
+        apply(restoreOutcome: ArchiveRestoreDecoder.decode(response, requested: [id]))
+        reload()
+    }
+
+    func apply(restoreOutcome: ArchiveRestoreOutcome) {
+        ledger.record(restoreOutcome)
+        switch restoreOutcome {
+        case .complete(let restored):
+            transientMessage = "Восстановлено записей: \(restored.count)."
+        case .partial:
+            transientMessage = nil  // предупреждение строится из реестра по ID
+        case .rejected(let reason):
+            transientMessage = "Восстановление отклонено (\(reason))."
+        case .unknown:
+            transientMessage = "Нет подтверждения восстановления от backend. Проверьте список."
+        }
+        updateNotice()
+    }
+
+    private func updateNotice() {
+        if !ledger.isClear {
+            let ids = ledger.unresolved.sorted().prefix(3).map { String($0.prefix(8)) }.joined(separator: ", ")
+            noticeLabel.stringValue = "Не восстановлено записей: \(ledger.unresolved.count) (\(ids)). Они остались в архиве, повторите попытку."
+            noticeLabel.isHidden = false
+        } else if let message = transientMessage {
+            noticeLabel.stringValue = message
+            noticeLabel.isHidden = false
+        } else {
+            noticeLabel.stringValue = ""
+            noticeLabel.isHidden = true
+        }
+    }
+
+    /// Для тестов: текущий текст строки состояния и видимость.
+    var noticeTextForTesting: String? { noticeLabel.isHidden ? nil : noticeLabel.stringValue }
 }
