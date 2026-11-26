@@ -1273,7 +1273,7 @@ def verify_snapshot_readback(*, backup_dir: Any) -> dict:
         try:
             blob = path.read_bytes()
         except OSError as exc:
-            mismatches.append(f"{name}: не читается ({exc})")
+            mismatches.append(f"{name}: не читается ({type(exc).__name__} errno={exc.errno})")
             continue
         if len(blob) != entry.get("size"):
             mismatches.append(f"{name}: size {len(blob)} != {entry.get('size')}")
@@ -1315,6 +1315,31 @@ def _cancel_staging(staging: Path) -> None:
     там признак незавершённости обязан пережить crash ради b2-доказки.
     """
     shutil.rmtree(staging, ignore_errors=True)
+
+
+def _remove_committed_staging(staging: Path) -> str | None:
+    """Уборка staging ПОСЛЕ COMMITTED с проверкой постусловия (G3-P04-09, находка 4).
+
+    ignore_errors молча оставлял каталог с маркером: has_pending_restore был бы
+    вечно True без следа в ответе. Возвращает None при успехе, иначе короткий
+    код предупреждения БЕЗ абсолютного пути (только тип ошибки/errno).
+    """
+    try:
+        shutil.rmtree(staging)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.error(
+            "encrypted_snapshot: staging после COMMITTED не убран (%s errno=%s); "
+            "следующий recovery повторит уборку",
+            type(exc).__name__, exc.errno,
+        )
+        if staging.exists():
+            return f"committed_staging_cleanup_failed:{type(exc).__name__}"
+        return None
+    if staging.exists():
+        return "committed_staging_cleanup_failed:still_exists"
+    return None
 
 
 def _publish_staging(staging: Path, backup_dir: Path) -> None:
@@ -2287,7 +2312,7 @@ def _readback_live_journals(*, data_dir: Path, files_meta: list[dict]) -> dict:
         try:
             blob = journal_file.read_bytes()
         except OSError as exc:
-            mismatches.append(f"{name}: не читается ({exc})")
+            mismatches.append(f"{name}: не читается ({type(exc).__name__} errno={exc.errno})")
             continue
         if len(blob) != entry.get("size"):
             mismatches.append(f"{name}: size {len(blob)} != {entry.get('size')}")
@@ -2470,7 +2495,9 @@ def _apply_verified_snapshot_locked(
 
     # Транзакция завершена: приватный staging больше не нужен. Маркер COMMITTED,
     # оставшийся после crash здесь, recovery уберёт как «уже завершённую».
-    _cancel_staging(staging)
+    cleanup_warning = _remove_committed_staging(staging)
+    if cleanup_warning:
+        carry_warnings = [*carry_warnings, cleanup_warning]
     _fsync_dir(data_dir)
     logger.info(
         "encrypted_snapshot: restore %s зафиксирован (COMMITTED) из %s, "
@@ -2787,7 +2814,9 @@ def _recover_pending_restore(
                 "(после COMMITTED они могли измениться легитимно или быть повреждены): %s",
                 transaction_id, committed_warnings,
             )
-        _cancel_staging(staging)
+        cleanup_warning = _remove_committed_staging(staging)
+        if cleanup_warning:
+            committed_warnings.append(cleanup_warning)
         if transaction_id:
             _cleanup_restore_tmp(data_dir, transaction_id)
         _fsync_dir(data_dir)
