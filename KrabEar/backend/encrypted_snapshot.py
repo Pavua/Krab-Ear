@@ -41,6 +41,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1595,6 +1596,7 @@ REASON_LEDGER_UNREADABLE = "snapshot_ledger_unreadable"
 REASON_LEDGER_MALFORMED = "snapshot_ledger_malformed"
 REASON_RECORD_MALFORMED = "snapshot_record_malformed"
 REASON_APPLY_FAILED = "snapshot_apply_failed"
+REASON_COMMITTED_UNVERIFIED = "snapshot_committed_unverified"
 
 # Два журнала deletion ledger: tombstones ∪ purged (спека §5). Выходной ledger
 # restore пишется по объединению, поэтому порядок здесь важен только для
@@ -2502,6 +2504,36 @@ def _apply_verified_snapshot_locked(
     }
 
 
+def _marker_files_evidence(marker: dict) -> list[dict] | None:
+    """``files`` из restore-маркера — только если это пригодное доказательство.
+
+    G3-P04-09: COMMITTED-маркер сам по себе ничего не доказывает; чтобы сверить с
+    ним живые журналы, он обязан нести непустой список уникальных записей с
+    именем из реестра журналов (или ``settings.json`` для legacy-транзакции),
+    целым ``size >= 0`` и ``sha256`` из 64 hex-символов. Имена вне реестра
+    (``../x``) недопустимы: сверка читает ``data_dir/<name>``.
+    """
+    files = marker.get("files")
+    if not isinstance(files, list) or not files:
+        return None
+    allowed = set(HISTORY_JOURNAL_FILENAMES) | {"settings.json"}
+    seen: set[str] = set()
+    for entry in files:
+        if not isinstance(entry, dict):
+            return None
+        name = entry.get("name")
+        size = entry.get("size")
+        digest = entry.get("sha256")
+        if not isinstance(name, str) or name not in allowed or name in seen:
+            return None
+        if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+            return None
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            return None
+        seen.add(name)
+    return files
+
+
 def _validated_marker_entries(marker: dict) -> int | None:
     """``restored_entries`` из маркера — только если значение пригодно.
 
@@ -2726,6 +2758,35 @@ def _recover_pending_restore(
 
     # --- Маркер COMMITTED: транзакция завершена, осталась только уборка. ---
     if marker.get("state") == RESTORE_STATE_COMMITTED:
+        # G3-P04-09: маркер — свидетельство о том, ЧТО было восстановлено, а не о
+        # ТЕКУЩЕМ состоянии: recovery зовётся из точек обслуживания (авто-бэкап,
+        # backup/restore), а не на старте до записи, поэтому легитимные append
+        # диктовки после COMMITTED меняют размер/хеш живых журналов. Блокировать
+        # на расхождении нельзя (вечный отказ бэкапам без пути выхода) — транзакция
+        # ЗАВЕРШЕНА, staging убирается; но «успех» честно помечается
+        # snapshot_committed_unverified с громким логом и warnings, если живые
+        # журналы маркеру не соответствуют (или доказательства в нём нет).
+        committed_warnings: list[str] = []
+        evidence = _marker_files_evidence(marker)
+        if evidence is None:
+            committed_warnings.append("committed_marker_without_valid_evidence")
+        else:
+            try:
+                live_check = _readback_live_journals(data_dir=data_dir, files_meta=evidence)
+            except Exception:  # noqa: BLE001 — recovery не имеет права бросить
+                logger.exception("encrypted_snapshot: re-verify COMMITTED-маркера не выполнен")
+                committed_warnings.append("committed_marker_reverify_failed")
+            else:
+                if not live_check["ok"]:
+                    committed_warnings.extend(
+                        f"committed_marker_mismatch:{m}" for m in live_check["mismatches"]
+                    )
+        if committed_warnings:
+            logger.error(
+                "encrypted_snapshot: COMMITTED-маркер %s не подтверждён живыми журналами "
+                "(после COMMITTED они могли измениться легитимно или быть повреждены): %s",
+                transaction_id, committed_warnings,
+            )
         _cancel_staging(staging)
         if transaction_id:
             _cleanup_restore_tmp(data_dir, transaction_id)
@@ -2744,8 +2805,9 @@ def _recover_pending_restore(
         return _recovery_result(
             ok=True,
             pending=False,
-            reason=None,
+            reason=REASON_COMMITTED_UNVERIFIED if committed_warnings else None,
             restored_entries=marker_entries or 0,
+            warnings=committed_warnings,
             **common,
         )
 
