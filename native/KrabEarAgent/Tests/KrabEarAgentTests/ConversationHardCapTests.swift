@@ -79,21 +79,38 @@ final class ConversationHardCapTests: XCTestCase {
         XCTAssertNil(vc.idleEndTimer)
     }
 
-    /// Застрявшее «говорю» (воспроизведение не вернуло состояние) тоже не вечно.
-    func test_vc_stuckSpeaking_endsAtHardCap() {
+    /// Застрявшее «говорю» (очередь воспроизведения не кончается) тоже не вечно: потолок + запас на договаривание.
+    /// Ревью ChatGPT 26.11 (п.12): прежняя версия теста не держала .speaking — settleFinishedPlayback сразу
+    /// возвращал «слушаю», и потолок срабатывал в другом состоянии. Теперь очередь «бесконечна» и состояние проверяется.
+    func test_vc_stuckSpeaking_endsAtHardCapPlusGrace() {
         let defaults = UserDefaults(suiteName: "cap-stuck-\(UUID().uuidString)")!
         defaults.set(120, forKey: ConversationMaxDurationSettings.secondsKey)
         let vc = makeVC(defaults: defaults)
         var now: TimeInterval = 50
+        let wall = Date(timeIntervalSince1970: 70_000)
         vc.idleEndClock = { now }
+        vc.playbackClock = { wall }   // стенные часы воспроизведения стоят: «реплика AI только что была» — не доиграно
         vc.startConversation()
-        vc.conversationState = .speaking
-        now += 121
+        vc.conversationState = .listening
+        vc.handleDownlinkEvent(.replyFinal(text: "Договариваю."))
+        XCTAssertEqual(vc.conversationState, .speaking)
+        let grace = ConversationMaxDurationSettings.speakingGrace
+        now += 119
+        vc.idleEndTick()
+        XCTAssertTrue(vc.isSessionActive)
+        XCTAssertEqual(vc.conversationState, .speaking, "очередь воспроизведения не кончилась — остаёмся в «говорю»")
+        now += 2   // 121 с: потолок наступил посреди ответа
         vc.idleEndTick()
         XCTAssertTrue(vc.isSessionActive, "посреди ответа AI — даём договорить")
-        now += ConversationMaxDurationSettings.speakingGrace
+        XCTAssertEqual(vc.conversationState, .speaking)
+        now += grace - 3   // 178 с
+        vc.idleEndTick()
+        XCTAssertTrue(vc.isSessionActive)
+        XCTAssertEqual(vc.conversationState, .speaking)
+        now += 2   // 180 с = limit + grace
         vc.idleEndTick()
         XCTAssertFalse(vc.isSessionActive, "запас кончился — застрявшее «говорю» не вечно")
+        XCTAssertEqual(vc.conversationState, .idle)
     }
 
     /// Потолок не зависит от тумблера «Завершать после тишины».
