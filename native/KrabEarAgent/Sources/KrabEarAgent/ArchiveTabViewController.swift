@@ -298,8 +298,10 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
     // MARK: - Загрузка и восстановление (IPC вне main: sync read() на main = AppHang)
 
     /// Перечитывает архив. Вызывается при показе вкладки и после восстановления.
+    /// Не гейтится кэш-флагом приватности: решает backend (`privacy_mode_active`),
+    /// иначе выключение приватности после блокировки не сняло бы заглушку (ревью #2283).
     func reload() {
-        guard !isPrivacyModeEnabled, let ipc = ipcProvider?() else { return }
+        guard let ipc = ipcProvider?() else { return }
         loadGeneration += 1
         let generation = loadGeneration
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -314,6 +316,7 @@ final class ArchiveTabViewController: NSViewController, NSTableViewDataSource, N
     func apply(listOutcome: ArchiveListOutcome) {
         switch listOutcome {
         case .items(let entries):
+            isPrivacyModeEnabled = false
             archivedItems = entries
             ledger.reconcile(archiveIDs: Set(entries.map { $0.id }))
         case .privacyBlocked:

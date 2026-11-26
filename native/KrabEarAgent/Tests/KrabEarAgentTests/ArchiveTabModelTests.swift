@@ -155,6 +155,26 @@ final class ArchiveTabModelTests: XCTestCase {
         XCTAssertNil(vc.noticeTextForTesting)
     }
 
+    func test_privacyBlockIsLiftedWhenBackendReturnsItems() {
+        let vc = makeVC()
+        vc.isPrivacyModeEnabled = true  // приватность была включена при создании панели
+        vc.apply(listOutcome: .privacyBlocked)
+        XCTAssertTrue(vc.isPrivacyModeEnabled)
+        vc.apply(listOutcome: .items([entry("a1")]))  // приватность выключили, backend отдал список
+        XCTAssertFalse(vc.isPrivacyModeEnabled)
+        XCTAssertEqual(vc.archivedItems.map { $0.id }, ["a1"])
+    }
+
+    func test_reloadIsNotGatedByCachedPrivacyFlag() {
+        let source = (try? String(contentsOfFile: #filePath.replacingOccurrences(
+            of: "Tests/KrabEarAgentTests/ArchiveTabModelTests.swift",
+            with: "Sources/KrabEarAgent/ArchiveTabViewController.swift"), encoding: .utf8)) ?? ""
+        let start = source.range(of: "func reload()")
+        XCTAssertNotNil(start)
+        let body = String(source[start!.upperBound...].prefix(200))
+        XCTAssertFalse(body.contains("!isPrivacyModeEnabled"), "reload решает backend, не кэш-флаг")
+    }
+
     func test_unknownRestoreResponseShowsNoSuccessText() {
         let vc = makeVC()
         vc.apply(restoreOutcome: .unknown)
