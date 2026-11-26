@@ -23,8 +23,18 @@ enum ConversationVoiceEndPhrases {
         "закончи разговор", "закончить разговор", "закончим разговор",
         "закрой разговор", "прекрати разговор", "останови разговор",
         "заверши диалог", "закончи диалог", "закрой диалог",
-        "до свидания", "конец связи", "хватит разговаривать"
+        "конец связи", "хватит разговаривать"
     ]
+
+    /// Прощание закрывает разговор, только если стоит на краю реплики («ну всё, до свидания»), и перед ним нет слов
+    /// перевода/цитаты: «как по-испански до свидания», «переведи до свидания на английский» — это просьба, а не конец.
+    private static let edgeAnchoredPhrases: [String] = ["до свидания"]
+    private static let quotingWords: Set<String> = [
+        "как", "переведи", "перевести", "перевод", "переводится", "скажи", "означает", "значит", "по", "слово", "фраза"
+    ]
+
+    /// Слово перед фразой переворачивает смысл: «не отключайся», «нельзя выключаться», «ни в коем случае не…».
+    private static let negations: Set<String> = ["не", "нельзя", "ни", "нет"]
 
     /// Реплика целиком — одно из этих слов («пока» внутри фразы не считается).
     private static let exactPhrases: Set<String> = [
@@ -45,7 +55,21 @@ enum ConversationVoiceEndPhrases {
         let wordCount = normalized.split(separator: " ").count
         guard wordCount <= maxWords else { return false }
         if exactPhrases.contains(normalized) { return true }
-        let padded = " \(normalized) "
-        return containedPhrases.contains { padded.contains(" \($0) ") }
+        let words = normalized.split(separator: " ").map(String.init)
+        if containedPhrases.contains(where: { containsPhrase($0, in: words, anchored: false) }) { return true }
+        let hasQuotingWord = !quotingWords.isDisjoint(with: words)
+        return !hasQuotingWord && edgeAnchoredPhrases.contains { containsPhrase($0, in: words, anchored: true) }
+    }
+
+    /// Фраза целыми словами; не засчитывается, если перед ней отрицание. `anchored` — только в начале или в конце реплики.
+    private static func containsPhrase(_ phrase: String, in words: [String], anchored: Bool) -> Bool {
+        let target = phrase.split(separator: " ").map(String.init)
+        guard !target.isEmpty, words.count >= target.count else { return false }
+        for start in 0...(words.count - target.count) where Array(words[start..<(start + target.count)]) == target {
+            if anchored && start != 0 && start + target.count != words.count { continue }
+            if start > 0 && negations.contains(words[start - 1]) { continue }
+            return true
+        }
+        return false
     }
 }

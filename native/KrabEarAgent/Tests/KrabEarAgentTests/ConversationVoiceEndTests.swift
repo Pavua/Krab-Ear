@@ -21,6 +21,25 @@ final class ConversationVoiceEndTests: XCTestCase {
         }
     }
 
+    /// Ревью Opus-пары 26.11 (блок 1): отрицание переворачивает смысл.
+    func test_phrases_negationDoesNotEnd() {
+        for text in ["не отключайся", "Не отключайся, я сейчас вернусь", "пожалуйста не выключайся",
+                     "нет, не заканчивай разговор", "нельзя завершать разговор", "не заверши разговор"] {
+            XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest(text), text)
+        }
+    }
+
+    /// Ревью Opus-пары 26.11 (блок 2): «до свидания» внутри просьбы о переводе — не конец разговора.
+    func test_phrases_goodbyeInsideQuotingDoesNotEnd() {
+        for text in ["как по-испански до свидания", "переведи до свидания на английский", "скажи до свидания по-итальянски",
+                     "что означает до свидания"] {
+            XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest(text), text)
+        }
+        for text in ["до свидания", "ну всё, до свидания", "до свидания, спасибо"] {
+            XCTAssertTrue(ConversationVoiceEndPhrases.isEndRequest(text), text)
+        }
+    }
+
     func test_settings_defaultOn_explicitOff() {
         let defaults = UserDefaults(suiteName: "vend-\(UUID().uuidString)")!
         XCTAssertTrue(ConversationVoiceEndSettings.isEnabled(in: defaults))
