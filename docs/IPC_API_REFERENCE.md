@@ -812,6 +812,7 @@ Returns (успех, ON):
 | `snapshot_source_symlink` | symlink на пути к снимку или к ledger-журналу |
 | `snapshot_stale_staging` | указан неопубликованный staging, а не снимок |
 | `snapshot_committed_unverified` | recovery нашёл COMMITTED-маркер restore и убрал staging (`ok: true`, `pending: false`), но живые журналы не подтвердили маркер: `warnings` — `committed_marker_mismatch:<файл…>` / `committed_marker_without_valid_evidence` / `committed_marker_reverify_failed` (после COMMITTED журналы могли легитимно измениться) |
+| `snapshot_committed_cleanup_failed` | сверка COMMITTED прошла, но staging убрать не удалось: `warnings` — `committed_staging_cleanup_failed:<тип ошибки>`; сначала снимается только файл маркера (бэкапы идут, `pending: false`), остаток каталога убирает privacy purge; `pending: true`, если и маркер снять не вышло (следующий recovery повторит). При одновременном расхождении журналов приоритет у `snapshot_committed_unverified` |
 | `snapshot_policy_unavailable` | флаг политики не читается (fail-closed: доказать ON не смогли) либо политика изменилась под lock |
 | `snapshot_destination_exists` | каталог назначения/staging уже существует (в т.ч. transaction_id занят) |
 | `snapshot_prepared_missing` | recovery: каталог незавершённой транзакции исчез с диска |

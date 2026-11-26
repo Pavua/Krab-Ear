@@ -866,7 +866,9 @@ def prune_snapshot_family(
             # «есть незавершённая операция». Маркер в это окно ещё не написан,
             # а снимок уже читается, поэтому ориентироваться только на него —
             # значило бы удалять снимок из-под читающего restore (NIT-1).
-            return bool(restore_staging_dirs(data_dir))
+            return any(
+                not _is_retired_staging(p) for p in restore_staging_dirs(data_dir)
+            )
         except SnapshotOperationRefused:
             return True  # не смогли проверить — считаем «есть», не удаляем
 
@@ -1273,7 +1275,7 @@ def verify_snapshot_readback(*, backup_dir: Any) -> dict:
         try:
             blob = path.read_bytes()
         except OSError as exc:
-            mismatches.append(f"{name}: не читается ({exc})")
+            mismatches.append(f"{name}: не читается ({type(exc).__name__} errno={exc.errno})")
             continue
         if len(blob) != entry.get("size"):
             mismatches.append(f"{name}: size {len(blob)} != {entry.get('size')}")
@@ -1315,6 +1317,101 @@ def _cancel_staging(staging: Path) -> None:
     там признак незавершённости обязан пережить crash ради b2-доказки.
     """
     shutil.rmtree(staging, ignore_errors=True)
+
+
+RESTORE_MARKER_RETIRED_SUFFIX = ".committed-retired"
+
+
+def _is_retired_staging(path: Path) -> bool:
+    """Каталог, чей маркер COMMITTED снят после неудавшейся уборки.
+
+    Транзакция в нём ЗАВЕРШЕНА (маркер снимается только после COMMITTED), значит
+    он не «restore работает сейчас» и не должен глушить retention.
+    """
+    try:
+        return (
+            (path / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}").is_file()
+            and not (path / RESTORE_MARKER_FILENAME).exists()
+        )
+    except OSError:
+        return False
+
+
+def _retry_retired_staging(data_dir: Path) -> None:
+    """Повторная уборка каталогов с снятым маркером (находка Codex к #2292).
+
+    Без маркера recovery их больше не видит; без этой повторной попытки остаток
+    жил бы до purge. Сбой не фатален: каталог остаётся retired и retention его
+    игнорирует (``_is_retired_staging`` в guard).
+    """
+    try:
+        candidates = [p for p in restore_staging_dirs(data_dir) if _is_retired_staging(p)]
+    except SnapshotOperationRefused:
+        return
+    for path in candidates:
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            logger.warning(
+                "encrypted_snapshot: retired staging не убран (%s errno=%s)",
+                type(exc).__name__, exc.errno,
+            )
+
+
+def _remove_committed_staging(staging: Path) -> str | None:
+    """Уборка staging ПОСЛЕ COMMITTED с проверкой постусловия (G3-P04-09, п.4).
+
+    ignore_errors молча оставлял каталог с маркером: has_pending_restore был бы
+    вечно True, а бэкапы/restore отказывали бы с ДИСКА (``has_pending_restore``),
+    пока recovery рапортовал успех. Порядок деградации:
+
+    1. rmtree без ignore_errors;
+    2. если каталог остался — снять ТОЛЬКО файл маркера (переименование в
+       ``*.committed-retired``, иначе unlink): без маркера каталог не считается
+       незавершённым restore (``restore_marker_dirs``), бэкапы идут, а остаток
+       убирает privacy purge (он чистит ``RESTORE_STAGING_PREFIX*`` без маркера).
+
+    Возвращает None при полном успехе, иначе код предупреждения БЕЗ абсолютного
+    пути (только тип ошибки). Фактический «маркер ещё на диске» вызывающий берёт
+    из ``has_pending_restore`` — это единственный источник истины.
+    """
+    try:
+        shutil.rmtree(staging)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.error(
+            "encrypted_snapshot: staging после COMMITTED не убран (%s errno=%s); "
+            "пробуем снять маркер, следующий recovery повторит уборку",
+            type(exc).__name__, exc.errno,
+        )
+        failure = f"committed_staging_cleanup_failed:{type(exc).__name__}"
+    else:
+        failure = None if not staging.exists() else (
+            "committed_staging_cleanup_failed:still_exists"
+        )
+    if failure is None:
+        return None
+    marker = staging / RESTORE_MARKER_FILENAME
+    try:
+        os.replace(marker, staging / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}")
+    except OSError:
+        try:
+            marker.unlink()
+            # Fallback: без retired-метки каталог без маркера выглядел бы как
+            # «restore работает СЕЙЧАС» и вечно глушил retention.
+            try:
+                (staging / f"{RESTORE_MARKER_FILENAME}{RESTORE_MARKER_RETIRED_SUFFIX}").touch()
+            except OSError:
+                logger.warning("encrypted_snapshot: retired-метка не создана", exc_info=True)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logger.error(
+                "encrypted_snapshot: маркер COMMITTED не снят (%s errno=%s)",
+                type(exc).__name__, exc.errno,
+            )
+    return failure
 
 
 def _publish_staging(staging: Path, backup_dir: Path) -> None:
@@ -1597,6 +1694,7 @@ REASON_LEDGER_MALFORMED = "snapshot_ledger_malformed"
 REASON_RECORD_MALFORMED = "snapshot_record_malformed"
 REASON_APPLY_FAILED = "snapshot_apply_failed"
 REASON_COMMITTED_UNVERIFIED = "snapshot_committed_unverified"
+REASON_COMMITTED_CLEANUP_FAILED = "snapshot_committed_cleanup_failed"
 
 # Два журнала deletion ledger: tombstones ∪ purged (спека §5). Выходной ledger
 # restore пишется по объединению, поэтому порядок здесь важен только для
@@ -2287,7 +2385,7 @@ def _readback_live_journals(*, data_dir: Path, files_meta: list[dict]) -> dict:
         try:
             blob = journal_file.read_bytes()
         except OSError as exc:
-            mismatches.append(f"{name}: не читается ({exc})")
+            mismatches.append(f"{name}: не читается ({type(exc).__name__} errno={exc.errno})")
             continue
         if len(blob) != entry.get("size"):
             mismatches.append(f"{name}: size {len(blob)} != {entry.get('size')}")
@@ -2470,8 +2568,11 @@ def _apply_verified_snapshot_locked(
 
     # Транзакция завершена: приватный staging больше не нужен. Маркер COMMITTED,
     # оставшийся после crash здесь, recovery уберёт как «уже завершённую».
-    _cancel_staging(staging)
+    cleanup_warning = _remove_committed_staging(staging)
+    if cleanup_warning:
+        carry_warnings = [*carry_warnings, cleanup_warning]
     _fsync_dir(data_dir)
+    marker_left_on_disk = bool(cleanup_warning) and has_pending_restore(data_dir)
     logger.info(
         "encrypted_snapshot: restore %s зафиксирован (COMMITTED) из %s, "
         "%d записей, отфильтровано строк по ledger %d",
@@ -2498,6 +2599,9 @@ def _apply_verified_snapshot_locked(
         "records_excluded_deleted": carry_counters.get("excluded_deleted", 0),
         "records_unparsable": carry_counters.get("unparsable", 0),
         "warnings": carry_warnings,
+        # Факт с диска, не константа: маркер, который не удалось убрать, продолжает
+        # блокировать бэкапы/restore до следующего recovery.
+        "pending": marker_left_on_disk,
         "files": files_meta,
         "readback": readback,
         "recovered": recovered,
@@ -2694,6 +2798,7 @@ def _recover_pending_restore(
         )
         return _recovery_result(ok=False, pending=True, reason=reason, **kwargs)
 
+    _retry_retired_staging(data_dir)
     try:
         markers = restore_marker_dirs(data_dir)
     except SnapshotOperationRefused as exc:
@@ -2787,7 +2892,10 @@ def _recover_pending_restore(
                 "(после COMMITTED они могли измениться легитимно или быть повреждены): %s",
                 transaction_id, committed_warnings,
             )
-        _cancel_staging(staging)
+        cleanup_warning = _remove_committed_staging(staging)
+        if cleanup_warning:
+            committed_warnings.append(cleanup_warning)
+        cleanup_failed = bool(cleanup_warning)
         if transaction_id:
             _cleanup_restore_tmp(data_dir, transaction_id)
         _fsync_dir(data_dir)
@@ -2802,10 +2910,19 @@ def _recover_pending_restore(
                 "не отдаём непроверенное значение",
                 transaction_id, marker.get("restored_entries"),
             )
+        verification_failed = any(
+            not w.startswith("committed_staging_cleanup_failed:") for w in committed_warnings
+        )
+        if verification_failed:
+            commit_reason = REASON_COMMITTED_UNVERIFIED
+        elif cleanup_failed:
+            commit_reason = REASON_COMMITTED_CLEANUP_FAILED
+        else:
+            commit_reason = None
         return _recovery_result(
             ok=True,
-            pending=False,
-            reason=REASON_COMMITTED_UNVERIFIED if committed_warnings else None,
+            pending=cleanup_failed and has_pending_restore(data_dir),
+            reason=commit_reason,
             restored_entries=marker_entries or 0,
             warnings=committed_warnings,
             **common,
@@ -3117,6 +3234,10 @@ def recover_pending_restore_from_store(store: Any) -> dict | None:
     она обязана блокировать работу, и её вердикт кэшируется для статуса.
     """
     data_dir = Path(store.data_dir)
+    # Остатки с снятым маркером убираем ДО гейта: у них маркера нет, и без этого
+    # прод-вход до повторной уборки не дошёл бы (REVISE пары к #2292). Дёшево:
+    # один iterdir, Keychain не трогает.
+    _retry_retired_staging(data_dir)
     if not has_pending_restore(data_dir):
         return None
     from backend.history_encryption_policy import store_policy_reader
