@@ -18,11 +18,25 @@ def test_unreadable_privacy_wins_before_invalid_rest_auth(rest, monkeypatch):
     client, deps = rest
     deps.store.call_privacy_mode.side_effect = OSError("settings are unavailable")
     monkeypatch.setattr(rs.settings, "REST_API_KEY", "test-only-key")
+    # G3 audio-06 A06-05: без включённого auth путь «невалидный ключ» не
+    # проходился вовсе — фикстура держит REST_API_AUTH_ENABLED=False.
+    monkeypatch.setattr(rs.settings, "REST_API_AUTH_ENABLED", True)
     ipc = Mock(side_effect=AssertionError("must not send"))
     monkeypatch.setattr(call_client, "transcribe_ephemeral_call", ipc)
     assert _post(client).status_code == 403
     ipc.assert_not_called()
     deps.transcriber.transcribe.assert_not_called()
+
+
+def test_invalid_rest_auth_is_enforced_when_privacy_readable(rest, monkeypatch):
+    """Контроль к A06-05: auth в этой конфигурации действительно включён."""
+    client, deps = rest
+    monkeypatch.setattr(rs.settings, "REST_API_KEY", "test-only-key")
+    monkeypatch.setattr(rs.settings, "REST_API_AUTH_ENABLED", True)
+    ipc = Mock(side_effect=AssertionError("must not send"))
+    monkeypatch.setattr(call_client, "transcribe_ephemeral_call", ipc)
+    assert _post(client).status_code == 401
+    ipc.assert_not_called()
 
 
 @pytest.mark.parametrize("error_type", [call_client.CallSTTTimeoutError, call_client.CallSTTProtocolError])

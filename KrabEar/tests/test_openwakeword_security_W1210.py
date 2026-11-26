@@ -83,36 +83,38 @@ class TestThresholdValidation(unittest.TestCase):
 
     # ---- clamping ---------------------------------------------------------
 
+    def _start_with(self, raw: float) -> tuple[dict, float]:
+        """Запуск с замоканным start(): возвращает ответ и РЕАЛЬНО переданный порог.
+
+        G3 audio-04 A04-04: прежние тесты допускали ok=False (нет библиотеки) и
+        тогда не проверяли фактический порог вовсе — снятие clamp оставалось
+        зелёным.
+        """
+        with patch.object(self._adapter, "start") as start_mock:
+            result = self._adapter.handle_wake_word_start(
+                {"model": "hey_jarvis", "threshold": raw}
+            )
+        self.assertTrue(result.get("ok"), result)
+        start_mock.assert_called_once()
+        return result, start_mock.call_args.kwargs["threshold"]
+
     def test_threshold_zero_clamped_to_minimum(self) -> None:
         """threshold=0.0 must be clamped to _THRESHOLD_MIN (0.05) not rejected."""
-        # start() will raise RuntimeError (no library), but threshold must be clamped first.
-        result = self._adapter.handle_wake_word_start(
-            {"model": "hey_jarvis", "threshold": 0.0}
-        )
-        # ok may be False (no library) but the response must not be a 'negative' rejection
-        self.assertNotIn("отрицательным", result.get("error", ""))
-        # If the adapter tried to start (library unavailable → RuntimeError), threshold
-        # was already accepted/clamped. If it somehow succeeded (stub), check value.
-        if result.get("ok"):
-            self.assertAlmostEqual(result["threshold"], _THRESHOLD_MIN)
+        result, passed = self._start_with(0.0)
+        self.assertAlmostEqual(passed, _THRESHOLD_MIN)
+        self.assertAlmostEqual(result["threshold"], _THRESHOLD_MIN)
 
     def test_threshold_very_small_positive_clamped(self) -> None:
         """threshold=0.001 (positive but below min) must be clamped to _THRESHOLD_MIN."""
-        result = self._adapter.handle_wake_word_start(
-            {"model": "hey_jarvis", "threshold": 0.001}
-        )
-        self.assertNotIn("отрицательным", result.get("error", ""))
-        if result.get("ok"):
-            self.assertAlmostEqual(result["threshold"], _THRESHOLD_MIN)
+        result, passed = self._start_with(0.001)
+        self.assertAlmostEqual(passed, _THRESHOLD_MIN)
+        self.assertAlmostEqual(result["threshold"], _THRESHOLD_MIN)
 
     def test_threshold_above_one_clamped_to_one(self) -> None:
         """threshold=1.5 must be clamped to 1.0."""
-        result = self._adapter.handle_wake_word_start(
-            {"model": "hey_jarvis", "threshold": 1.5}
-        )
-        self.assertNotIn("отрицательным", result.get("error", ""))
-        if result.get("ok"):
-            self.assertAlmostEqual(result["threshold"], _THRESHOLD_MAX)
+        result, passed = self._start_with(1.5)
+        self.assertAlmostEqual(passed, _THRESHOLD_MAX)
+        self.assertAlmostEqual(result["threshold"], _THRESHOLD_MAX)
 
     def test_threshold_exactly_at_min_accepted(self) -> None:
         """threshold=_THRESHOLD_MIN must pass through unmodified."""

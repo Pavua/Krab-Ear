@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import json
-import os
 import socket
 import sys
 import tempfile
@@ -378,11 +377,16 @@ class BindFailureFdLeakTestCase(unittest.TestCase):
         ipc = _make_ipc_server()
 
         captured_umask_calls: list[int] = []
-        original_umask = os.umask
+        # G3 audio-03 A03-03: фейковое состояние umask вместо настоящего
+        # os.umask — тест не меняет umask процесса, а нетипичное исходное
+        # значение (0o027) ловит «восстановление» захардкоженным 0o022.
+        umask_state = {"value": 0o027}
 
         def _spy_umask(mask: int) -> int:
             captured_umask_calls.append(mask)
-            return original_umask(mask)
+            previous = umask_state["value"]
+            umask_state["value"] = mask
+            return previous
 
         original_socket_class = socket.socket
 
@@ -411,6 +415,10 @@ class BindFailureFdLeakTestCase(unittest.TestCase):
             "umask() должен быть вызван минимум дважды (set + restore)",
         )
         self.assertEqual(captured_umask_calls[0], 0o077, "Первый вызов umask — 0o077")
+        self.assertEqual(captured_umask_calls[-1], 0o027,
+                         "Последний вызов umask обязан вернуть исходное значение")
+        self.assertEqual(umask_state["value"], 0o027,
+                         "После сбоя bind() umask процесса — исходный")
 
 
 # ---------------------------------------------------------------------------

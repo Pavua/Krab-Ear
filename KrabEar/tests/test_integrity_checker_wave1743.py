@@ -295,6 +295,11 @@ class TestLockAcquiredDuringRepair(unittest.TestCase):
             encoding="utf-8",
         )
 
+        # G3 audio-03 A03-04: отчёт снимаем ДО захвата лока. Если вызывать
+        # check_integrity в потоке, блокировку мог давать он, и снятие лока в
+        # repair() оставалось зелёным.
+        report = self.checker.check_integrity(self.data_dir)
+
         lock_path = self.data_dir / "history.lock"
         lock_path.touch(exist_ok=True)
 
@@ -307,7 +312,6 @@ class TestLockAcquiredDuringRepair(unittest.TestCase):
 
         def _do_repair():
             repair_started.set()
-            report = self.checker.check_integrity(self.data_dir)
             self.checker.repair(self.data_dir, report)
             repair_done.set()
 

@@ -11,7 +11,7 @@ import sys
 import os
 import threading
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import patch, PropertyMock
 
 import numpy as np
 
@@ -104,84 +104,88 @@ class TestChunksCappedAt4Hours(unittest.TestCase):
         self.assertEqual(MAX_RECORDING_SAMPLES, expected)
 
     def test_chunks_capped_at_4_hours(self):
-        """When _chunks_total_samples approaches the cap, _worker must stop recording."""
-        # We'll simulate the worker loop logic directly without a real sounddevice.
-        # Pre-fill to just below the cap
-        chunk_size = self.recorder.chunk_size  # 1600 samples per chunk
-        # Fill to one chunk below the cap
+        """Реальный _worker останавливает запись на глобальном 4-часовом потолке.
+
+        G3 audio-02 A02-01: прежний тест копировал if из _worker и проверял сам
+        себя. Счётчик подкручен до потолка, поэтому реальный буфер ~1 чанк.
+        """
+        chunk_size = self.recorder.chunk_size
         samples_near_cap = MAX_RECORDING_SAMPLES - chunk_size + 1
-        with self.recorder._lock:
-            # Don't actually store all the data — just advance the counter
-            self.recorder._chunks_total_samples = samples_near_cap
-            self.recorder._is_recording = True
-            self.recorder._started_at = 0.0
+        pushes = _run_worker_until_cap(self.recorder, samples_near_cap)
 
-        # Now simulate what _worker does with the NEXT chunk
-        next_data = _make_chunk(chunk_size)
-        next_samples = next_data.reshape(-1).size
-        cap_exceeded = False
-        with self.recorder._lock:
-            if self.recorder._chunks_total_samples + next_samples > MAX_RECORDING_SAMPLES:
-                self.recorder._is_recording = False
-                cap_exceeded = True
-            else:
-                self.recorder._chunks.append(next_data.copy())
-                self.recorder._chunks_total_samples += next_samples
-
-        self.assertTrue(cap_exceeded, "Cap should have been triggered")
-        self.assertFalse(self.recorder._is_recording,
-                         "_is_recording must be False after cap")
+        self.assertFalse(self.recorder._is_recording)
+        self.assertEqual(pushes, [MAX_RECORDING_SAMPLES],
+                         "остановка обязана идти через max-duration, не иначе")
+        audio, _duration = self.recorder._pending_result
+        # Влезающий хвост последнего чанка сохранён (chunk_size - 1 сэмплов).
+        self.assertEqual(audio.size, chunk_size - 1)
 
     def test_worker_stops_when_cap_exceeded(self):
-        """End-to-end: _worker loop breaks when the recording-sample cap is exceeded.
+        """End-to-end: _worker останавливается РОВНО на маленьком cap.
 
-        W1753: используем крошечный cap (2 сек = 32 000 семплов) вместо глобального
-        MAX_RECORDING_SAMPLES (4 ч ≈ 880 МБ). Это тестирует тот же код-путь в _worker
-        (строка ``if _chunks_total_samples + chunk_samples > self._max_recording_samples``),
-        но выделяет ~200 КБ вместо ~880 МБ — безопасно для CI-воркеров с ограниченной RAM.
+        W1753: крошечный cap (2 с = 32 000 семплов) вместо 4 ч ≈ 880 МБ.
+        A02-01: стрим отдаёт настоящий int read_available (guarded read и
+        дренаж идут боевым путём), а проверяем сохранённое аудио и причину
+        остановки — после cap счётчик обнуляется, и прежнее «<= cap» было
+        истинно всегда.
         """
-        sample_rate = 16000
-        # Tiny cap: 2 seconds at 16 kHz = 32 000 samples (~200 KB total allocation)
-        tiny_cap = sample_rate * 2  # 32 000 samples
-        recorder = AudioRecorder(sample_rate=sample_rate, max_recording_samples=tiny_cap)
+        tiny_cap = 16000 * 2
+        recorder = AudioRecorder(sample_rate=16000, max_recording_samples=tiny_cap)
+        pushes = _run_worker_until_cap(recorder, 0)
 
-        chunk_size = recorder.chunk_size  # 1600 samples per chunk
+        self.assertFalse(recorder._is_recording)
+        self.assertEqual(pushes, [tiny_cap])
+        audio, _duration = recorder._pending_result
+        self.assertEqual(audio.size, tiny_cap,
+                         "в запись обязано попасть ровно cap сэмплов")
 
-        call_count = [0]
 
-        def fake_read(_n):
-            call_count[0] += 1
-            data = np.zeros((chunk_size, 1), dtype=np.float32)
-            return data, False
+class _ReadyStream:
+    """Поток с целым read_available: перед чтением готов ровно один чанк."""
 
-        mock_stream = MagicMock()
-        mock_stream.__enter__ = lambda s: s
-        mock_stream.__exit__ = MagicMock(return_value=False)
-        mock_stream.read = fake_read
+    def __init__(self, chunk_size: int) -> None:
+        self._chunk = chunk_size
+        self._just_read = False
+        self.reads = 0
 
-        with patch('backend.recorder.sd') as mock_sd:
-            mock_sd.InputStream.return_value = mock_stream
-            recorder._stop_event.clear()
-            with recorder._lock:
-                recorder._is_recording = True
-                recorder._started_at = 0.0
-                recorder._chunks = []
-                recorder._chunks_total_samples = 0
+    @property
+    def read_available(self) -> int:
+        if self._just_read:  # дренаж после read(): накопленного нет
+            self._just_read = False
+            return 0
+        return self._chunk
 
-            # Run _worker in a thread; it should stop itself after tiny_cap is exceeded
-            t = threading.Thread(target=recorder._worker, daemon=True)
-            t.start()
-            t.join(timeout=5.0)
+    def __enter__(self):
+        return self
 
-        self.assertFalse(t.is_alive(), "Worker thread must have stopped")
-        self.assertFalse(recorder._is_recording,
-                         "_is_recording must be False after cap stop")
-        # Should have stopped at or below the (tiny) cap
-        self.assertLessEqual(
-            recorder._chunks_total_samples,
-            tiny_cap,
-            "Must not exceed cap",
-        )
+    def __exit__(self, *_a):
+        return False
+
+    def read(self, frames):
+        self.reads += 1
+        if self.reads > 10_000:  # предохранитель: cap так и не сработал
+            raise RuntimeError("cap не сработал")
+        self._just_read = True
+        return np.zeros((int(frames), 1), dtype=np.float32), False
+
+
+def _run_worker_until_cap(recorder: AudioRecorder, primed_samples: int) -> list:
+    pushes: list = []
+    recorder._push_max_duration_error = lambda max_samples: pushes.append(max_samples)
+    stream = _ReadyStream(recorder.chunk_size)
+    with patch("backend.recorder.sd") as mock_sd:
+        mock_sd.InputStream.return_value = stream
+        recorder._stop_event.clear()
+        with recorder._lock:
+            recorder._is_recording = True
+            recorder._started_at = 0.0
+            recorder._chunks = []
+            recorder._chunks_total_samples = primed_samples
+        t = threading.Thread(target=recorder._worker, daemon=True)
+        t.start()
+        t.join(timeout=5.0)
+    assert not t.is_alive(), "worker не остановился"
+    return pushes
 
 
 # ---------------------------------------------------------------------------
