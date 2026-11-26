@@ -30,7 +30,7 @@ from backend.privacy_audit import (  # noqa: E402
 
 
 class SanitizeUnitTests(unittest.TestCase):
-    def test_counters_flags_and_short_strings_pass_unchanged(self):
+    def test_counters_flags_and_labels_pass_unchanged(self):
         details = {
             "history_deleted": 12,
             "encryption_key_shredded": True,
@@ -38,37 +38,134 @@ class SanitizeUnitTests(unittest.TestCase):
             "provider": "groq",
             "ratio": 0.5,
             "none_value": None,
-            "secondary_errors": ["a", "b"],
+            "secondary_errors": ["data_dir", "privacy_audit"],
+            "ledger_entry": "каталог",
+            "content_type": "audio/wav",
         }
         self.assertEqual(sanitize_audit_details(details), details)
 
-    def test_sensitive_key_with_string_value_is_redacted(self):
+    def test_every_real_producer_payload_survives_unchanged(self):
+        producers = [
+            {"result": "refused", "reason": "preflight_failed", "ledger_entry": "symlink",
+             "secondary_errors": ["a_step"]},
+            {"provider": "openai", "input_chars": 10, "output_chars": 9, "language": "ru"},
+            {"provider": "openai", "language": "es"},
+            {"original_mode": "online", "method": "handle_translate_text"},
+            {"reason": "privacy_mode_enabled"},
+            {"key_length": 32, "quarantined_as": "privacy_audit.key.quarantine-1"},
+        ]
+        for payload in producers:
+            with self.subTest(payload=payload):
+                self.assertEqual(sanitize_audit_details(payload), payload)
+
+    def test_unknown_key_with_string_is_redacted(self):
+        out = sanitize_audit_details({"note": "any text", "message": "hi", "x": "y"})
+        self.assertEqual(out, {"note": REDACTED, "message": REDACTED, "x": REDACTED})
+
+    def test_sensitive_names_with_string_value_are_redacted(self):
         out = sanitize_audit_details(
             {"api_key": "sk-TESTSECRET", "transcript": "привет мир", "password": "p"}
         )
         self.assertEqual(out, {"api_key": REDACTED, "transcript": REDACTED, "password": REDACTED})
 
-    def test_sensitive_key_with_numeric_value_is_kept(self):
+    def test_numbers_under_sensitive_names_are_kept(self):
         out = sanitize_audit_details({"text_length": 5, "token_count": 3, "transcripts_deleted": 2})
         self.assertEqual(out, {"text_length": 5, "token_count": 3, "transcripts_deleted": 2})
 
-    def test_token_shaped_value_is_redacted_under_innocent_key(self):
-        secret = TOKEN_SHAPED
-        out = sanitize_audit_details({"note": secret, "hdr": "Bearer abc.def"})
-        self.assertEqual(out, {"note": REDACTED, "hdr": REDACTED})
+    def test_short_secret_under_innocent_key_is_redacted(self):
+        # Короткая строка не попадала под «токеноподобную» (>=32) эвристику denylist.
+        out = sanitize_audit_details({"hdr": "Bearer abc.def", "pin": "sk-short-1", "tag": "hunter2"})
+        self.assertEqual(out, {"hdr": REDACTED, "pin": REDACTED, "tag": REDACTED})
 
-    def test_long_string_is_truncated(self):
-        out = sanitize_audit_details({"reason": "x " * 400})
-        self.assertLessEqual(len(out["reason"]), 200)
+    def test_token_shaped_value_is_redacted_even_under_safe_key_with_spaces_or_length(self):
+        out = sanitize_audit_details({"reason": TOKEN_SHAPED + " " + TOKEN_SHAPED, "provider": "x" * 80})
+        self.assertEqual(out, {"reason": REDACTED, "provider": REDACTED})
 
-    def test_nested_values_are_sanitized_and_depth_capped(self):
+    def test_sentence_under_safe_key_is_redacted(self):
+        out = sanitize_audit_details({"reason": "пользователь сказал секретную фразу"})
+        self.assertEqual(out, {"reason": REDACTED})
+
+    def test_key_spelling_variants_do_not_bypass(self):
         out = sanitize_audit_details(
-            {"ctx": {"secret": "s", "n": 1, "deep": {"a": {"b": {"c": "z"}}}}, "items": list(range(100))}
+            {
+                "apiKey": "v1",
+                "api-key": "v2",
+                "API_KEY": "v3",
+                "api\u200bkey": "v4",
+                "Reason\u200b": "has space here",
+                "tränscript": "v5",
+            }
         )
+        for value in out.values():
+            self.assertEqual(value, REDACTED)
+
+    def test_zero_width_in_key_does_not_turn_unsafe_value_into_safe(self):
+        # «re\u200bason» нормализуется в safe-ключ, но значение-предложение всё равно режется.
+        out = sanitize_audit_details({"re\u200bason": "secret sentence"})
+        self.assertEqual(list(out.values()), [REDACTED])
+
+    def test_invisible_chars_and_camel_case_in_safe_keys_are_normalized(self):
+        # Нормализация работает в обе стороны: легитимный ключ с мусором не теряется.
+        out = sanitize_audit_details({"pro\u200bvider": "groq", "originalMode": "online"})
+        self.assertEqual(out, {"provider": "groq", "original_mode": "online"})
+
+    def test_text_in_dict_key_is_not_written_to_log(self):
+        leak = "Привет, мой пароль 12345"
+        out = sanitize_audit_details({leak: 7, "k" * 300: "b"})
+        dumped = json.dumps(out, ensure_ascii=False)
+        self.assertNotIn("пароль", dumped)
+        self.assertNotIn("kkkkkkkk", dumped)
+        self.assertTrue(all(len(k) <= 64 for k in out))
+        self.assertEqual(len(out), 2)
+        self.assertIn(7, out.values())
+
+    def test_nested_strings_in_lists_and_dicts_are_redacted(self):
+        out = sanitize_audit_details(
+            {
+                "secondary_errors": ["ok_step", "free text with spaces", TOKEN_SHAPED[:10] + " x"],
+                "ctx": {"secret": "s", "n": 1, "inner": {"note": "z"}},
+                "items": ["abc", "def"],
+            }
+        )
+        self.assertEqual(out["secondary_errors"], ["ok_step", REDACTED, REDACTED])
         self.assertEqual(out["ctx"]["secret"], REDACTED)
         self.assertEqual(out["ctx"]["n"], 1)
+        self.assertEqual(out["items"], [REDACTED, REDACTED])
+
+    def test_depth_and_list_length_are_capped(self):
+        out = sanitize_audit_details(
+            {"deep": {"a": {"b": {"c": "z"}}}, "items": list(range(100))}
+        )
         self.assertLessEqual(len(out["items"]), 20)
-        self.assertNotIn("z", json.dumps(out))
+        self.assertNotIn("\"z\"", json.dumps(out))
+        # Число на третьем уровне вложенности не должно просачиваться как есть.
+        numeric = sanitize_audit_details({"a": {"b": {"c": {"d": 5}}}})
+        self.assertEqual(numeric["a"]["b"]["c"], REDACTED)
+
+    def test_set_values_are_sanitized_not_dropped_to_type_name_with_content(self):
+        out = sanitize_audit_details({"secondary_errors": {"step_a"}, "other": {"free text"}})
+        self.assertEqual(out["secondary_errors"], ["step_a"])
+        self.assertEqual(out["other"], [REDACTED])
+
+    def test_id_hash_keys_accept_uuid_or_hex_only(self):
+        uid = "123e4567-e89b-12d3-a456-426614174000"
+        sha = "deadbeef" * 8
+        out = sanitize_audit_details(
+            {
+                "request_id": uid,
+                "file_sha": sha,
+                "chain_hash": "ABCDEF0123456789",
+                "item_ids": [uid],
+                "session_id": "my secret session text",
+                "doc_id": "not-hex-zzzz",
+            }
+        )
+        self.assertEqual(out["request_id"], uid)
+        self.assertEqual(out["file_sha"], sha)
+        self.assertEqual(out["chain_hash"], "ABCDEF0123456789")
+        self.assertEqual(out["item_ids"], [uid])
+        self.assertEqual(out["session_id"], REDACTED)
+        self.assertEqual(out["doc_id"], REDACTED)
 
     def test_non_json_values_degrade_to_type_name_and_nan_to_none(self):
         out = sanitize_audit_details({"obj": object(), "nan": float("nan"), "raw": b"\x00secret"})
@@ -76,10 +173,15 @@ class SanitizeUnitTests(unittest.TestCase):
         self.assertIsNone(out["nan"])
         self.assertEqual(out["raw"], "bytes")
 
-    def test_bad_keys_are_normalized_not_dropped_silently(self):
+    def test_non_string_keys_are_normalized_not_dropped_silently(self):
         out = sanitize_audit_details({1: "a", "k" * 300: "b"})
         self.assertEqual(len(out), 2)
         self.assertTrue(all(isinstance(k, str) and len(k) <= 64 for k in out))
+        self.assertNotIn("a", out.values())
+
+    def test_colliding_normalized_keys_keep_both_values(self):
+        out = sanitize_audit_details({"apiKey": 1, "api_key": 2})
+        self.assertEqual(sorted(out.values()), [1, 2])
 
     def test_non_dict_details_become_empty(self):
         self.assertEqual(sanitize_audit_details(None), {})
