@@ -74,6 +74,8 @@ extension HistoryPanelController {
         // Зеркалим всегда (и при тихом восстановлении ui_last_tab): иначе подсветка
         // раздела расходится с показанным содержимым. Сохранение — только по действию пользователя.
         syncTabSelectorFromTabView()
+        // Архив читаем при каждом показе вкладки: список живёт в backend, локальная копия может устареть.
+        if String(describing: tabViewItem?.identifier ?? "") == PanelTab.archive.rawValue { archiveVC?.reload() }
         guard !isSyncingTabs, !isSyncingSettings else { return }
         let raw = String(describing: tabViewItem?.identifier ?? PanelTab.history.rawValue)
         let tab = PanelTab.from(settingsValue: raw)

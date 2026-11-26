@@ -28,6 +28,8 @@ extension HistoryPanelController {
             vc.view.bottomAnchor.constraint(equalTo: archiveContentView.bottomAnchor),
         ])
         
+        // Канал IPC: вкладка сама грузит список и восстанавливает записи по ID.
+        vc.ipcProvider = { [weak self] in self?.ipcClient }
         // Pass current privacy state
         vc.isPrivacyModeEnabled = settingsProvider().privacyModeEnabled
         
