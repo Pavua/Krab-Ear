@@ -169,6 +169,8 @@ final class ConversationViewController: NSViewController {
     var interruptFallbackTimer: Timer?
     /// Автозавершение по тишине (ConversationIdleEndPolicy): решение и тик раз в секунду.
     var idleEndPolicy: ConversationIdleEndPolicy?
+    /// Жёсткий потолок длительности сессии (ConversationMaxDurationPolicy): живёт всегда, не зависит от тумблера тишины.
+    var maxDurationPolicy: ConversationMaxDurationPolicy?
     var idleEndTimer: Timer?
     /// Часы автозавершения; тесты подменяют, чтобы не ждать реальные секунды.
     var idleEndClock: () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
@@ -381,6 +383,8 @@ final class ConversationViewController: NSViewController {
     func startIdleEndWatch() {
         idleEndTimer?.invalidate()
         idleEndTimer = nil
+        maxDurationPolicy = ConversationMaxDurationPolicy(
+            limit: ConversationMaxDurationSettings.seconds(in: userDefaults), startedAt: idleEndClock())
         idleEndPolicy = ConversationIdleEndSettings.isEnabled(in: userDefaults)
             ? ConversationIdleEndPolicy(
                 timeout: ConversationIdleEndSettings.seconds(in: userDefaults), startedAt: idleEndClock())
@@ -396,6 +400,7 @@ final class ConversationViewController: NSViewController {
         idleEndTimer?.invalidate()
         idleEndTimer = nil
         idleEndPolicy = nil
+        maxDurationPolicy = nil
     }
 
     /// Речь пользователя / реплика AI / смена состояния сбрасывают отсчёт.
@@ -407,6 +412,14 @@ final class ConversationViewController: NSViewController {
     /// пауза wake word снимается через .krabConversationStopped).
     func idleEndTick() {
         guard isSessionActive else { return }
+        // Жёсткий потолок — раньше всего: шум/ролик обнуляют тишину вечно, застрявшее «говорю» тоже.
+        if let cap = maxDurationPolicy, cap.isExpired(now: idleEndClock(), state: conversationState) {
+            let after = ConversationMaxDurationSettings.title(cap.limit)
+            AgentLogger.shared.info("[ConversationVC] Потолок \(after) — разговор завершён автоматически")
+            appendTranscriptLine("— Разговор завершён: прошло \(after)")
+            stopConversation()
+            return
+        }
         // Ответ доигран — назад в «слушаю» (метка и отсчёт тишины), независимо от настройки.
         settleFinishedPlayback()
         guard var policy = idleEndPolicy else { return }

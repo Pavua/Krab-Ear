@@ -390,6 +390,12 @@ class OpenWakeWordAdapter:
         with self._lock:
             self._stop_epoch += 1
             self._last_detection = None
+            # Остановка отзывает ещё не забранное срабатывание СИНХРОННО (раньше — только в finally цикла, то есть
+            # после закрытия потока; при зависшем join звук оставался доступен). Порядок локов self._lock → _preroll_lock.
+            with self._preroll_lock:
+                if self._preroll_fire is not None:
+                    self._preroll_fire = None
+                    self._preroll_ended = True
             # Спека §4.1: heartbeat сбрасывается и в start(), и в stop().
             # wedged здесь НЕ трогаем — флаг обязан пережить pause/resume
             # циклы поллера (wake_word_stop при паузе), его снимает только
@@ -970,7 +976,10 @@ class OpenWakeWordAdapter:
             if revision is None or revision != fire["rev"]:
                 reason = "privacy"
         if reason is not None:
-            ring.clear()
+            # Кольцо принадлежит живой сессии прослушивания: после истёкшего take там мог уже ждать звук следующего
+            # срабатывания — не трогаем. Чистим только при смене политики приватности (звук снят под старой).
+            if reason == "privacy":
+                ring.clear()
             return {"ok": True, "available": False, "reason": reason}
         rate = int(fire["rate"])
         pcm = ring.slice_from(fire["anchor"], int(PREROLL_MAX_SEC * rate))
