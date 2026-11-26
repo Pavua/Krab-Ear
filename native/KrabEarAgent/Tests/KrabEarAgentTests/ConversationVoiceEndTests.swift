@@ -61,7 +61,8 @@ final class ConversationVoiceEndTests: XCTestCase {
         for text in ["adiós", "Hasta luego", "ok, hasta luego", "Desconéctate", "termina la conversación", "goodbye",
                      "Bye", "bye bye", "end the conversation", "disconnect", "ok goodbye", "Eso es todo",
                      "Desconéctate, por favor", "termina la conversación por favor", "see you", "see you later",
-                     "ok, disconnect", "please stop listening", "end the call"] {
+                     "ok, disconnect", "please stop listening", "end the call", "disconnect please", "end the call now",
+                     "desconéctate por favor", "I want to end the conversation"] {
             XCTAssertTrue(ConversationVoiceEndPhrases.isEndRequest(text), text)
         }
         for text in ["cómo se dice adiós en inglés", "qué significa hasta luego", "how do I say goodbye in Spanish",
@@ -69,7 +70,10 @@ final class ConversationVoiceEndTests: XCTestCase {
                      "never say goodbye", "translate goodbye to russian", "no me gusta el adiós de ayer",
                      // Нит/блоки Opus-пары (#2281): приветствие и переходные глаголы — не конец разговора.
                      "nice to see you", "good to see you", "disconnect my headphones", "disconnect the bluetooth speaker",
-                     "stop listening to that song", "remind me to end the call at five"] {
+                     "stop listening to that song", "remind me to end the call at five",
+                     // Codex P2 (#2281): отрицание через слово и вопросительные формы.
+                     "I don't want to end the conversation", "don't ever disconnect", "Should I end the call",
+                     "Could you explain goodbye", "would you disconnect", "no quiero que te desconéctate ahora"] {
             XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest(text), text)
         }
     }

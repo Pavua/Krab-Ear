@@ -45,11 +45,20 @@ enum ConversationVoiceEndPhrases {
         "что", "почему", "зачем", "можно", "ли", "нужно", "надо",
         // ES/EN: вопрос, перевод, цитата.
         "como", "cómo", "que", "qué", "traduce", "traducir", "significa", "di", "decir", "cuando", "cuándo",
-        "how", "translate", "say", "means", "mean", "what", "why", "does", "can", "when", "word", "phrase"
+        "how", "translate", "say", "means", "mean", "what", "why", "does", "can", "when", "word", "phrase",
+        "should", "could", "would", "will", "shall", "explain", "tell", "do", "did", "is", "are", "if", "whether",
+        "podria", "podría", "puedes", "puedo", "deberia", "debería", "explica", "si"
     ]
 
     /// Слово перед фразой переворачивает смысл: «не отключайся», «нельзя выключаться», «ни в коем случае не…».
     private static let negations: Set<String> = ["не", "нельзя", "ни", "нет", "no", "not", "never", "nunca", "dont", "don", "t"]  // «t» — хвост «don't» после снятия апострофа
+
+    /// Английское/испанское отрицание действует на всю реплику до фразы, а не только на соседнее слово:
+    /// «I don't want to end the conversation», «don't ever disconnect» (Codex P2 #2281). Русское — только соседнее.
+    private static let wideNegations: Set<String> = ["no", "not", "never", "nunca", "dont", "don", "t"]
+
+    /// Вежливый хвост после хвостовой фразы: «disconnect please», «end the call now», «desconéctate por favor».
+    private static let politeTail: Set<String> = ["please", "now", "thanks", "por", "favor", "ahora"]
 
     /// Реплика целиком — одно из этих слов («пока» внутри фразы не считается).
     private static let exactPhrases: Set<String> = [
@@ -79,13 +88,22 @@ enum ConversationVoiceEndPhrases {
         return edgeAnchoredPhrases.contains { containsPhrase($0, in: words, anchored: true) }
     }
 
+    /// Перед фразой, начинающейся с `start`, стоит отрицание: соседнее слово (любой язык) или en/es-отрицание где угодно раньше.
+    private static func isNegated(_ words: [String], before start: Int) -> Bool {
+        guard start > 0 else { return false }
+        if negations.contains(words[start - 1]) { return true }
+        return words[..<start].contains { wideNegations.contains($0) }
+    }
+
     /// Фраза в самом конце реплики, перед ней не больше `maxLeadingWords` слов и нет отрицания.
     private static func containsTail(_ phrase: String, in words: [String]) -> Bool {
         let target = phrase.split(separator: " ").map(String.init)
         guard !target.isEmpty, words.count >= target.count else { return false }
+        var words = words
+        while let last = words.last, politeTail.contains(last), words.count > target.count { words.removeLast() }
         let start = words.count - target.count
         guard Array(words[start...]) == target, start <= maxLeadingWords else { return false }
-        return start == 0 || !negations.contains(words[start - 1])
+        return !isNegated(words, before: start)
     }
 
     /// Фраза целыми словами; не засчитывается, если перед ней отрицание. `anchored` — только в начале или в конце реплики.
@@ -94,7 +112,7 @@ enum ConversationVoiceEndPhrases {
         guard !target.isEmpty, words.count >= target.count else { return false }
         for start in 0...(words.count - target.count) where Array(words[start..<(start + target.count)]) == target {
             if anchored && start != 0 && start + target.count != words.count { continue }
-            if start > 0 && negations.contains(words[start - 1]) { continue }
+            if isNegated(words, before: start) { continue }
             return true
         }
         return false
