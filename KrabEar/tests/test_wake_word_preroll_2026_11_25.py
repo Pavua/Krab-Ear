@@ -365,3 +365,18 @@ def test_stale_generation_thread_does_not_arm_a_new_sessions_preroll(tmp_path, m
 
     _run(adapter, monkeypatch, chunks=4, stt=_RacingStt(fire_on={2}, back=CHUNK))
     assert adapter._preroll_fire is marker  # зомби старого поколения не армирует и не затирает срабатывание новой сессии
+
+
+def test_fire_logs_utterance_geometry_for_first_phrase_diagnosis(caplog):
+    """Диагностика потери первой фразы (26.11): срабатывание пишет words/длину реплики/паузу до сработки/pre-roll."""
+    import logging
+
+    model = sk.SttKeywordModel(lambda _s: "краб как дела", name="krab_stt", cooldown_sec=0.0)
+    with caplog.at_level(logging.INFO, logger="KrabEar.Backend.SttKeywordSpotter"):
+        _, back = _drive(model, _silence(10) + _tone(12) + _silence(12))
+    model.close()
+    assert back is not None
+    lines = [r.getMessage() for r in caplog.records if "срабатывание" in r.getMessage()]
+    assert len(lines) == 1
+    assert "words=3" in lines[0] and "pre-roll_назад=%d мс" % (back * 1000 // sk.SAMPLE_RATE) in lines[0]
+    assert "краб" not in lines[0].lower().replace("pre-roll", "")  # текст реплики в лог не попадает
