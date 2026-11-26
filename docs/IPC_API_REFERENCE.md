@@ -3064,14 +3064,14 @@ Returns: `{archived_count, archive_path, size_mb}` (ошибка — `{ok: false
 ### `unarchive_items`
 *(archive_manager.py)*  
 Восстановить записи из архива в основную историю.  
-Params: `{ids: [...]}`  
-Returns: `{ok, restored_count}`
+Params: `{item_ids: [...]}` (≤ `_MAX_UNARCHIVE_BATCH`)  
+Returns: `{unarchived_count, not_found, restored_ids, failed_ids, complete}` — итог по ID записей архива, а не по позиции: `restored_ids` — реально восстановленные, `failed_ids` — восстановление упало (запись осталась в архиве, можно повторить), `not_found` — нет в архиве. При `failed_ids` дополнительно `reason: "restore_failed"` и `complete: false`. Ошибка целиком — `{ok: false, reason}`; клиент не должен считать ответ без `restored_ids` успехом.
 
 ### `list_archived`
 *(archive_manager.py)*  
 Список архивированных записей.  
-Params: `{page?, page_size?}`  
-Returns: `{items: [...], total}`
+Params: `{limit?}` (1–500, по умолчанию 50; от новых к старым)  
+Returns: `{items: [...], total}` (в приватном режиме `items: []`, `reason: "privacy_mode_active"`)
 
 ### `get_archive_stats`
 *(archive_manager.py)*  
