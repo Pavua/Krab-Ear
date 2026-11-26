@@ -195,3 +195,63 @@ class SaveErrorPropagationTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FailedSaveRollsBackMemoryTestCase(unittest.TestCase):
+    """G3 audio-05 A05-08: отклонённая мутация не остаётся в памяти.
+
+    Раньше после ошибки записи изменение оставалось в self._data: API отвечал
+    ok=False, но list/get показывали «несохранённое», а СЛЕДУЮЩАЯ удачная
+    запись молча сохраняла отклонённую операцию на диск.
+    """
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, self._tmpdir, True)
+        self._mgr = RecordingChainManager(store=FakeStore(data_dir=self._tmpdir))
+        self._chain_id = self._mgr.start_chain("База")
+        self._mgr.add_to_chain(self._chain_id, "item-keep")
+
+    def _reloaded(self) -> RecordingChainManager:
+        return RecordingChainManager(store=FakeStore(data_dir=self._tmpdir))
+
+    def test_rejected_add_not_persisted_by_next_save(self) -> None:
+        with _patch_atomic_write_to_raise():
+            resp = self._mgr.handle_add_to_chain(
+                {"chain_id": self._chain_id, "item_id": "item-rejected"}
+            )
+        self.assertFalse(resp.get("ok", False))
+        self.assertNotIn("item-rejected",
+                         self._mgr.get_chain(self._chain_id)["item_ids"])
+        self._mgr.add_to_chain(self._chain_id, "item-next")
+        self.assertEqual(
+            self._reloaded().get_chain(self._chain_id)["item_ids"],
+            ["item-keep", "item-next"],
+        )
+
+    def test_rejected_start_chain_not_listed(self) -> None:
+        with _patch_atomic_write_to_raise():
+            resp = self._mgr.handle_start_chain({"name": "Отклонённая"})
+        self.assertFalse(resp.get("ok", False))
+        names = [c["name"] for c in self._mgr.list_chains(limit=50)]
+        self.assertNotIn("Отклонённая", names)
+
+    def test_rejected_end_chain_keeps_chain_open(self) -> None:
+        with _patch_atomic_write_to_raise():
+            resp = self._mgr.handle_end_chain({"chain_id": self._chain_id})
+        self.assertFalse(resp.get("ok", False))
+        self.assertIsNone(self._mgr.get_chain(self._chain_id)["ended_at"])
+
+    def test_rejected_unlink_keeps_item(self) -> None:
+        with _patch_atomic_write_to_raise():
+            resp = self._mgr.handle_unlink_recording_from_chain(
+                {"chain_id": self._chain_id, "item_id": "item-keep"}
+            )
+        self.assertFalse(resp.get("ok", False))
+        self.assertIn("item-keep", self._mgr.get_chain(self._chain_id)["item_ids"])
+
+    def test_rejected_replace_keeps_old_ids(self) -> None:
+        with _patch_atomic_write_to_raise():
+            with self.assertRaises(OSError):
+                self._mgr.replace_items_in_chain(self._chain_id, ["item-keep"], "merged")
+        self.assertEqual(self._mgr.get_chain(self._chain_id)["item_ids"], ["item-keep"])
