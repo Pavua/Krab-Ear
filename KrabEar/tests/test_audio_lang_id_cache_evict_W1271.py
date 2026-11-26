@@ -12,10 +12,8 @@ Tests:
 
 from __future__ import annotations
 
-import importlib
 import sys
 import os
-import types
 import unittest
 from unittest.mock import MagicMock, patch, call
 
@@ -29,26 +27,18 @@ if _PROJECT_ROOT not in sys.path:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _install_mlx_whisper_stub():
-    """Register stub mlx_whisper so audio_lang_id can be imported."""
-    stub = types.ModuleType("mlx_whisper")
-    stub_load = types.ModuleType("mlx_whisper.load_models")
-    stub_load.load_model = MagicMock(side_effect=lambda p: {"model": p})
-    stub.load_models = stub_load
-    sys.modules.setdefault("mlx_whisper", stub)
-    sys.modules.setdefault("mlx_whisper.load_models", stub_load)
-
-
 def _fresh_audio_lang_id_class():
-    """Return a fresh AudioLanguageID class with an empty cache."""
-    _install_mlx_whisper_stub()
-    mod_key = "core.audio_lang_id"
-    if mod_key in sys.modules:
-        del sys.modules[mod_key]
-    mod = importlib.import_module(mod_key)
-    cls = mod.AudioLanguageID
-    cls._model_cache.clear()
-    return cls
+    """AudioLanguageID с пустым кэшем — БЕЗ переимпорта модуля и заглушек.
+
+    G3-audio-01 A02: прежний хелпер удалял core.audio_lang_id из sys.modules и
+    ставил постоянную заглушку mlx_whisper — соседние тесты видели чужой класс
+    и «установленный» mlx. mlx_whisper в модуле импортируется лениво, так что
+    для clear_model_cache заглушка не нужна.
+    """
+    from core.audio_lang_id import AudioLanguageID
+
+    AudioLanguageID._model_cache.clear()
+    return AudioLanguageID
 
 
 # ---------------------------------------------------------------------------
@@ -251,3 +241,17 @@ class TestLangIdHookUnit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFreshHelperDoesNotPolluteModules(unittest.TestCase):
+    """G3-audio-01 A02: хелпер не подменяет модуль и не оставляет заглушку mlx_whisper."""
+
+    def test_helper_preserves_module_identity_and_mlx_absence(self):
+        import core.audio_lang_id as original
+        had_mlx = "mlx_whisper" in sys.modules
+        before_mlx = sys.modules.get("mlx_whisper")
+        cls = _fresh_audio_lang_id_class()
+        self.assertIs(sys.modules["core.audio_lang_id"], original)
+        self.assertIs(cls, original.AudioLanguageID)
+        self.assertEqual("mlx_whisper" in sys.modules, had_mlx)
+        self.assertIs(sys.modules.get("mlx_whisper"), before_mlx)

@@ -396,16 +396,13 @@ class TestOpenWakeWordAdapterWave178(unittest.TestCase):
         oww_model_mod.Model = mock_model_cls
         oww_pkg.model = oww_model_mod
 
-        sys.modules.setdefault("openwakeword", oww_pkg)
-        sys.modules["openwakeword.model"] = oww_model_mod
-
-        try:
+        # A04-11: patch.dict восстанавливает sys.modules целиком — настоящий
+        # openwakeword (если установлен) не удаляется после теста.
+        stub_modules = {"openwakeword": oww_pkg, "openwakeword.model": oww_model_mod}
+        with patch.dict(sys.modules, stub_modules):
             adapter = OpenWakeWordAdapter(data_dir=self.tmp)
             adapter._oww_available = True
             result = adapter._load_model("alexa", None)
-        finally:
-            del sys.modules["openwakeword.model"]
-            sys.modules.pop("openwakeword", None)
 
         mock_model_cls.assert_called_once_with(wakeword_models=["alexa"])
         self.assertIs(result, mock_model_instance)
@@ -643,16 +640,13 @@ class TestOpenWakeWordAdapterWave178(unittest.TestCase):
         oww_model_mod.Model = mock_model_cls
         oww_pkg.model = oww_model_mod
 
-        sys.modules.setdefault("openwakeword", oww_pkg)
-        sys.modules["openwakeword.model"] = oww_model_mod
-
-        try:
+        # A04-11: patch.dict восстанавливает sys.modules целиком — настоящий
+        # openwakeword (если установлен) не удаляется после теста.
+        stub_modules = {"openwakeword": oww_pkg, "openwakeword.model": oww_model_mod}
+        with patch.dict(sys.modules, stub_modules):
             adapter = OpenWakeWordAdapter(data_dir=self.tmp)
             adapter._oww_available = True
             result = adapter._load_model("краб", str(model_file))
-        finally:
-            del sys.modules["openwakeword.model"]
-            sys.modules.pop("openwakeword", None)
 
         # _load_model с model_path != None должен передать путь в OWWModel
         mock_model_cls.assert_called_once_with(wakeword_models=[str(model_file)])
@@ -881,6 +875,22 @@ class TestStreamFailureCircuitBreaker(unittest.TestCase):
 
         self.assertEqual(adapter._consecutive_stream_failures, 0)
         self.assertEqual(adapter._stream_failure_cooldown_until, 0.0)
+
+
+class TestLoadModelKeepsSysModules(unittest.TestCase):
+    """A04-11: тест _load_model не удаляет уже загруженный openwakeword."""
+
+    def test_preexisting_openwakeword_survives(self):
+        import types
+        sentinel_pkg = types.ModuleType("openwakeword")
+        sentinel_model = types.ModuleType("openwakeword.model")
+        with patch.dict(sys.modules, {"openwakeword": sentinel_pkg,
+                                      "openwakeword.model": sentinel_model}):
+            case = TestOpenWakeWordAdapterWave178("test_init_loads_default_model")
+            case.setUp()
+            case.test_init_loads_default_model()
+            self.assertIs(sys.modules.get("openwakeword"), sentinel_pkg)
+            self.assertIs(sys.modules.get("openwakeword.model"), sentinel_model)
 
 
 if __name__ == "__main__":
