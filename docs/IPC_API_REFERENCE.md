@@ -2392,6 +2392,7 @@ Returns: `{trend: "improving"|"stable"|"declining", daily: [...], avg_sentiment}
 Анализирует тренды качества распознавания за последние N дней.  
 Params: `{days?}` (default 30)  
 Returns: `{trend, daily: [{date, avg_confidence, count}]}`
+Ошибка чтения истории → `{ok: false, reason: "history_unavailable"}` (не пустой отчёт; G3-audio-01 A11).
 
 ### `get_topic_timeline`
 *(service.py)*  
@@ -2994,7 +2995,7 @@ Returns: `{configured, vault_path?, last_sync_ts?, synced_count}`
 *(playback_tracker.py)*  
 Зарегистрировать событие воспроизведения (play count, total listened).  
 Params: `{item_id, duration_listened_sec?}`  
-Returns: `{ok, play_count}`
+Returns: `{item_id, play_count, total_listened_sec, last_played, persisted}`; при сбое записи на диск `persisted: false, reason: "persist_failed"` (G3-audio-04 A04-09).
 
 ### `get_playback_stats`
 *(playback_tracker.py)*  

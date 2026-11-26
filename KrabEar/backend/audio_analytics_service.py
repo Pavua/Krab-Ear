@@ -168,8 +168,11 @@ class AudioAnalyticsService:
         try:
             with self._store._lock():
                 items = self._store._load_active_items_unlocked()
-        except Exception:
-            items = []
+        except Exception as exc:
+            # G3-audio-01 A11: пустая выборка из-за сбоя чтения — не «нет данных»;
+            # честный отказ вместо отчёта «stable», выданного за реальный.
+            logger.warning("analyze_quality_trends: история недоступна: %s", type(exc).__name__)
+            return {"ok": False, "reason": "history_unavailable"}
         report = self._quality_trends.analyze_trends(items, days=days)
         return {
             "daily_confidence": report.daily_confidence,
