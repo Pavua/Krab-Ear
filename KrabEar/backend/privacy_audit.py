@@ -87,7 +87,14 @@ _SAFE_STRING_KEYS = frozenset(
     }
 )
 # Метка: короткий токен без пробелов (буквы любого алфавита, цифры, _ . : / -).
-_LABEL_RE = re.compile(r"^[\w.:/\-]{1,64}$")
+# «/» в обычную метку не входит: иначе под safe-ключом проходит абсолютный путь.
+_LABEL_RE = re.compile(r"[\w.:\-]{1,64}")
+# MIME-тип (``content_type``) — единственное место, где «/» легитимен.
+_MIME_RE = re.compile(r"[A-Za-z0-9.+\-]{1,40}/[A-Za-z0-9.+\-]{1,40}")
+# Метка со словом-секретом (secret_token, bearer-…) — не метка, даже без пробелов.
+_SECRET_WORD_RE = re.compile(r"secret|token|passw|bearer|credential", re.IGNORECASE)
+_MAX_KEYS = 50
+_MAX_INT = 2**63
 # Ключи идентификаторов/хешей: значение проходит, только если оно строго UUID или hex.
 _ID_KEY_RE = re.compile(r"(^|_)(id|ids|hash|sha|sha1|sha256)$")
 _ID_VALUE_RE = re.compile(
@@ -121,9 +128,11 @@ def _normalize_key(raw_key: Any) -> str:
 
 def _string_allowed(norm_key: str, value: str) -> bool:
     if norm_key in _SAFE_STRING_KEYS:
-        return bool(_LABEL_RE.match(value))
+        if norm_key == "content_type":
+            return bool(_MIME_RE.fullmatch(value))
+        return bool(_LABEL_RE.fullmatch(value)) and not _SECRET_WORD_RE.search(value)
     if _ID_KEY_RE.search(norm_key):
-        return bool(_ID_VALUE_RE.match(value))
+        return bool(_ID_VALUE_RE.fullmatch(value))
     return False
 
 
@@ -132,7 +141,9 @@ def _sanitize_value(norm_key: str, value: Any, depth: int) -> Any:
     if isinstance(value, bool) or value is None:
         return value
     if isinstance(value, int):
-        return value
+        # json.dumps падает на int с тысячами цифр (лимит int->str); счётчикам
+        # такая величина не нужна — зажимаем в разумный диапазон.
+        return max(-_MAX_INT, min(_MAX_INT, value))
     if isinstance(value, float):
         return value if math.isfinite(value) else None
     if isinstance(value, str):
@@ -153,7 +164,10 @@ def _sanitize_value(norm_key: str, value: Any, depth: int) -> Any:
 def _sanitize_mapping(mapping: dict[Any, Any], depth: int) -> dict[str, Any]:
     out: dict[str, Any] = {}
     unsafe_n = 0
-    for raw_key, value in mapping.items():
+    for index, (raw_key, value) in enumerate(mapping.items()):
+        if index >= _MAX_KEYS:
+            out["_dropped_keys"] = len(mapping) - _MAX_KEYS
+            break
         norm = _normalize_key(raw_key)
         if _key_looks_safe(norm):
             key = norm

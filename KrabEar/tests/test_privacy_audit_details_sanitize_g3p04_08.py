@@ -202,6 +202,41 @@ class SanitizeUnitTests(unittest.TestCase):
         out = sanitize_audit_details({"apiKey": 1, "api_key": 2})
         self.assertEqual(sorted(out.values()), [1, 2])
 
+    def test_path_under_safe_key_is_redacted(self):
+        # ChatGPT-ревью: «/» в метке пропускал абсолютный путь под reason.
+        out = sanitize_audit_details(
+            {"reason": "/Users/alice/Documents/PrivateNotes.txt", "method": "C:\\Users\\a\\x"}
+        )
+        self.assertEqual(out, {"reason": REDACTED, "method": REDACTED})
+
+    def test_secret_word_label_under_safe_key_is_redacted(self):
+        out = sanitize_audit_details({"provider": "abc_secret_token", "reason": "bearer-xyz"})
+        self.assertEqual(out, {"provider": REDACTED, "reason": REDACTED})
+
+    def test_content_type_keeps_mime_but_not_a_path(self):
+        out = sanitize_audit_details({"content_type": "audio/wav"})
+        self.assertEqual(out, {"content_type": "audio/wav"})
+        self.assertEqual(
+            sanitize_audit_details({"content_type": "/etc/passwd"}), {"content_type": REDACTED}
+        )
+
+    def test_trailing_newline_does_not_slip_through(self):
+        # re.match с «$» принимал хвостовой перевод строки.
+        uid = "123e4567-e89b-12d3-a456-426614174000"
+        out = sanitize_audit_details({"reason": "ok\n", "request_id": uid + "\n"})
+        self.assertEqual(out, {"reason": REDACTED, "request_id": REDACTED})
+
+    def test_huge_int_is_clamped_and_log_serializable(self):
+        out = sanitize_audit_details({"count": 2**20000, "neg": -(2**20000)})
+        json.dumps(out)  # раньше ValueError: лимит int -> str
+        self.assertEqual(out["count"], 2**63)
+        self.assertEqual(out["neg"], -(2**63))
+
+    def test_key_count_is_capped(self):
+        out = sanitize_audit_details({f"k{i}": i for i in range(500)})
+        self.assertLessEqual(len(out), 51)
+        self.assertEqual(out["_dropped_keys"], 450)
+
     def test_non_dict_details_become_empty(self):
         self.assertEqual(sanitize_audit_details(None), {})
         self.assertEqual(sanitize_audit_details("oops"), {})  # type: ignore[arg-type]
