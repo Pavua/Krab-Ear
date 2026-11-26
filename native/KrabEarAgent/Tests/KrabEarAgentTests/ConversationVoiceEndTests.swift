@@ -40,6 +40,15 @@ final class ConversationVoiceEndTests: XCTestCase {
         }
     }
 
+    /// Codex P2 (#2279): вопрос о завершении — не команда.
+    func test_phrases_questionsAboutEndingDoNotEnd() {
+        for text in ["Как завершить разговор с банком?", "Что значит отключись", "Можно ли завершить разговор голосом",
+                     "Почему ты не отключаешься", "Как закончить разговор вежливо"] {
+            XCTAssertFalse(ConversationVoiceEndPhrases.isEndRequest(text), text)
+        }
+        XCTAssertTrue(ConversationVoiceEndPhrases.isEndRequest("Заверши разговор"))
+    }
+
     func test_settings_defaultOn_explicitOff() {
         let defaults = UserDefaults(suiteName: "vend-\(UUID().uuidString)")!
         XCTAssertTrue(ConversationVoiceEndSettings.isEnabled(in: defaults))
