@@ -439,9 +439,6 @@ class TestVerifyTokenLazyWrite(unittest.TestCase):
 
 from datetime import datetime, timezone  # noqa: E402  (used in test above)
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestStubbedRestServerNotCached(unittest.TestCase):
     """A06-02: rest_server, связанный с фейками, не остаётся в sys.modules."""
@@ -450,3 +447,7 @@ class TestStubbedRestServerNotCached(unittest.TestCase):
         if not _REST_AVAILABLE or _REST_PRELOADED or not _inserted_stub_modules:
             self.skipTest("rest_server импортирован без фейков")
         self.assertIsNot(sys.modules.get("backend.rest_server"), _rest_mod)
+
+
+if __name__ == "__main__":
+    unittest.main()
