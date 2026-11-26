@@ -283,10 +283,14 @@ class TestMergePurgeFailDoesNotBreakDelete(unittest.TestCase):
 
         self.assertIn("merged_from", result)
         self.assertEqual(len(self.store._added), 1)
-        # tombstone оригиналов записан (fallback), но cascade упал → не в deleted_ids.
+        # tombstone оригиналов записан (fallback), cascade упал → оригиналы удалены,
+        # но удаление неполное (ревью #2274: раньше пропадали из deleted_ids).
         self.assertIn("d1", self.store._deleted)
         self.assertIn("d2", self.store._deleted)
-        self.assertEqual(result["deleted_ids"], [])
+        self.assertEqual(result["deleted_ids"], ["d1", "d2"])
+        self.assertIs(result["complete"], False)
+        self.assertEqual(result["reason"], "cascade_cleanup_failed")
+        self.assertEqual(result["incomplete_ids"], ["d1", "d2"])
 
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,8 @@ import logging
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from backend.semantic_search import SEMANTIC_CASCADE_STEP, cascade_failure_reason
+
 logger = logging.getLogger("KrabEar.Backend.RecordingMerger")
 
 _TIMESTAMP_SEP = "\n\n"
@@ -78,8 +80,10 @@ class RecordingMerger:
         self._privacy_mode_fn = privacy_mode_fn
         # Late-injection: см. docstring класса.
         self.recording_chain_mgr: Any | None = None
-        # wave1776 HIGH 1: каноническая cascade-функция (item_id, item_ts) -> None.
-        self.cascade_delete_fn: Callable[[str, str], None] | None = None
+        # wave1776 HIGH 1: каноническая cascade-функция (item_id, item_ts) -> ошибки.
+        # Возвращает список ошибок вторичных шагов (HistoryService.cascade_delete_artifacts);
+        # None (тестовые двойники) читается как «каскад полный».
+        self.cascade_delete_fn: Callable[[str, str], list[str] | None] | None = None
 
     # ------------------------------------------------------------------
     # Публичный API
@@ -162,9 +166,12 @@ class RecordingMerger:
                 logger.warning("semantic_searcher.index_item failed for %s", new_item.id, exc_info=True)
 
         deleted_ids: list[str] = []
+        # Follow-up #2229 F6: id → ошибки неполного каскада (локально — merge_items
+        # может идти параллельно из разных IPC-потоков).
+        incomplete_cleanup: dict[str, list[str]] = {}
         if delete_originals:
             deleted_ids = self._run_delete_cascades(
-                deletable_ids, ts_by_id, new_item, store
+                deletable_ids, ts_by_id, new_item, store, incomplete_cleanup
             )
             logger.info(
                 "Объединено %d записей → %s; удалено %d оригиналов; пропущено защищённых %d",
@@ -181,6 +188,14 @@ class RecordingMerger:
         result["deleted_originals"] = delete_originals
         result["deleted_ids"] = deleted_ids
         result["skipped_protected_ids"] = list(protected_ids)
+        incomplete = {i: e for i, e in incomplete_cleanup.items() if i in deleted_ids}
+        if incomplete:
+            # Follow-up #2229 F6: оригиналы удалены, но вторичные индексы (эмбеддинг,
+            # .md, версии…) очищены не полностью — не выдаём за полное удаление.
+            result["complete"] = False
+            result["reason"] = cascade_failure_reason(
+                err for errs in incomplete.values() for err in errs)
+            result["incomplete_ids"] = [i for i in deleted_ids if i in incomplete]
         return result
 
     # ------------------------------------------------------------------
@@ -228,8 +243,12 @@ class RecordingMerger:
         ts_by_id: dict[str, str],
         new_item: Any,
         store: Any,
+        incomplete_cleanup: dict[str, list[str]] | None = None,
     ) -> list[str]:
         """Выполняет богатые delete-каскады для оригиналов (вне lock'а).
+
+        ``incomplete_cleanup`` (если передан) получает id удалённых оригиналов,
+        чьи вторичные индексы очищены не полностью, и их ошибки.
 
         Chain-replace (orig→merged) выполняется ПЕРВЫМ — каноническое удаление
         лишь УДАЛЯЕТ ghost-ссылки, поэтому замену нужно сделать до него (W1282).
@@ -269,11 +288,14 @@ class RecordingMerger:
 
         deleted_ids: list[str] = []
         for oid in deletable_ids:
-            if self._delete_one(oid, ts_by_id.get(oid, ""), store):
+            if self._delete_one(oid, ts_by_id.get(oid, ""), store, incomplete_cleanup):
                 deleted_ids.append(oid)
         return deleted_ids
 
-    def _delete_one(self, item_id: str, item_ts: str, store: Any) -> bool:
+    def _delete_one(
+        self, item_id: str, item_ts: str, store: Any,
+        incomplete_cleanup: dict[str, list[str]] | None = None,
+    ) -> bool:
         """Запускает delete-каскады для одного оригинала.
 
         wave1776 HIGH 1: при подключённом ``cascade_delete_fn`` tombstone уже
@@ -287,12 +309,18 @@ class RecordingMerger:
             if not self._supports_atomic_write(store):
                 store.delete_history_item(item_id)
             try:
-                self.cascade_delete_fn(item_id, item_ts)
-            except Exception:
+                errors = self.cascade_delete_fn(item_id, item_ts)
+            except Exception as exc:
+                # Ревью #2274: tombstone уже записан (атомарной секцией или выше) —
+                # оригинал удалён, упал только каскад. Не прячем удаление из
+                # deleted_ids, а помечаем его неполным.
                 logger.exception(
                     "merge_items: каскадное удаление не удалось для id=%s", item_id
                 )
-                return False
+                errors = [f"cascade: {exc}"]
+            if errors:
+                if incomplete_cleanup is not None:
+                    incomplete_cleanup[item_id] = [str(e) for e in errors]
             return True
 
         # Fallback (standalone/тесты): прямой tombstone + semantic remove.
@@ -306,7 +334,9 @@ class RecordingMerger:
         if self._semantic_searcher is not None:
             try:
                 self._semantic_searcher.remove_item(item_id)
-            except Exception:
+            except Exception as exc:
+                if incomplete_cleanup is not None:
+                    incomplete_cleanup[item_id] = [f"{SEMANTIC_CASCADE_STEP}: {exc}"]
                 logger.warning("semantic_searcher.remove_item failed for %s", item_id, exc_info=True)
         return True
 

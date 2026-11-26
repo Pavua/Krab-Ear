@@ -11,7 +11,7 @@ import json
 import logging
 import threading
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -71,6 +71,9 @@ class ArchiveResult:
     archived_count: int
     archive_path: str
     size_mb: float
+    # Follow-up #2229 F6: id, чей эмбеддинг не удалён из semantic-индекса надёжно
+    # (вернётся после рестарта). Пусто — побочные эффекты полные.
+    incomplete_ids: list[str] = field(default_factory=list)
 
 
 class ArchiveManager:
@@ -243,13 +246,17 @@ class ArchiveManager:
             and hasattr(store, "tombstones_path")
         )
 
-    def _archive_side_effects(self, clean_id: str) -> None:
+    def _archive_side_effects(self, clean_id: str) -> bool:
         """Побочные эффекты после удаления записи из активной истории.
 
         Каскадная очистка версий транскрипта, semantic-индекса и цепочек записей.
         Любая ошибка здесь не должна прерывать архивирование (data-loss было бы
         хуже, чем рассинхрон вторичных индексов) — поэтому всё в try/except.
+
+        Возвращает False, если эмбеддинг не удалён надёжно (в т.ч.
+        SnapshotNotPersistedError) — вызывающий помечает результат неполным.
         """
+        semantic_ok = True
         if self._transcript_versioner is not None:
             try:
                 self._transcript_versioner.purge_versions_for_item(clean_id)
@@ -259,6 +266,7 @@ class ArchiveManager:
             try:
                 self._semantic_searcher.remove_item(clean_id)
             except Exception as exc:
+                semantic_ok = False
                 logger.warning(
                     "archive_items: не удалось удалить %s из semantic index: %s",
                     clean_id, exc,
@@ -266,6 +274,7 @@ class ArchiveManager:
         # Каскадное удаление ghost item_id из цепочек (W1253 RC-3).
         if self._recording_chain_mgr is not None:
             self._recording_chain_mgr.remove_item_from_all_chains(clean_id)
+        return semantic_ok
 
     def _validate_archive_ids(
         self,
@@ -379,6 +388,7 @@ class ArchiveManager:
         epoch_before = self._current_epoch()
 
         archived_count = 0
+        incomplete_ids: list[str] = []
         # self._lock сериализует архивные операции (archive/unarchive/list) внутри процесса.
         with self._lock:
             if self._store_supports_atomic_archive(_store):
@@ -424,7 +434,8 @@ class ArchiveManager:
                         archived_count += 1
                         # Снимаем из снимка, чтобы повторный id в item_ids не дублировался.
                         active_by_id.pop(clean_id, None)
-                        self._archive_side_effects(clean_id)
+                        if not self._archive_side_effects(clean_id):
+                            incomplete_ids.append(clean_id)
             else:
                 # Fallback для тестовых двойников без unlocked-API StateStore.
                 # wave-25 (B1-a): epoch-перепроверка и здесь (purge мог пройти между
@@ -449,13 +460,15 @@ class ArchiveManager:
                     self._append_ndjson(self._archive_path, item_dict)
                     _store.delete_history_item(clean_id)
                     archived_count += 1
-                    self._archive_side_effects(clean_id)
+                    if not self._archive_side_effects(clean_id):
+                        incomplete_ids.append(clean_id)
 
         size_bytes = self._archive_path.stat().st_size if self._archive_path.exists() else 0
         return ArchiveResult(
             archived_count=archived_count,
             archive_path=str(self._archive_path),
             size_mb=round(size_bytes / (1024 * 1024), 3),
+            incomplete_ids=incomplete_ids,
         )
 
     def unarchive_items(self, item_ids: list[str], store: Any | None = None) -> dict[str, Any]:
@@ -691,11 +704,16 @@ class ArchiveManager:
         result = self.archive_items(item_ids=raw_ids)
         if isinstance(result, dict):
             return result  # {"ok": False, "reason": ...}
-        return {
+        response: dict[str, Any] = {
             "archived_count": result.archived_count,
             "archive_path": result.archive_path,
             "size_mb": result.size_mb,
         }
+        if result.incomplete_ids:
+            # Follow-up #2229 F6: записи в архиве, но эмбеддинги могут вернуться.
+            response.update(complete=False, reason="semantic_index_cleanup_failed",
+                            incomplete_ids=list(result.incomplete_ids))
+        return response
 
     def handle_unarchive_items(self, params: dict[str, Any]) -> dict[str, Any]:
         """IPC-обработчик unarchive_items.
