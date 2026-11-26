@@ -250,6 +250,7 @@ class SttKeywordModel:
         now_pos = self._frame_no * FRAME_SAMPLES
         if utterance is not None:
             self._submit(utterance, now_pos)
+        diag = None
         with self._lock:
             fired, self._fired = self._fired, False
             anchor, self._fire_anchor = self._fire_anchor, None
@@ -259,6 +260,14 @@ class SttKeywordModel:
                 # Длиннее: команда уже внутри реплики — звук с её начала, чтобы ничего не потерять.
                 from_pos = max(start_pos, end_pos - 2 * FRAME_SAMPLES) if words <= 1 else start_pos
                 self._fire_back = max(0, now_pos - from_pos)
+                diag = (words, end_pos - start_pos, now_pos - end_pos, self._fire_back)
+        if diag is not None:
+            # Диагностика потери первой фразы (живая проверка владельца 26.11): по этим числам видно, резал ли
+            # сегментатор «Краб, <фраза>» на две реплики и сколько звука реально уйдёт в pre-roll. Только числа.
+            logger.info(
+                "SttKeywordSpotter: срабатывание words=%d реплика=%d мс после_конца=%d мс pre-roll_назад=%d мс",
+                diag[0], diag[1] * 1000 // SAMPLE_RATE, diag[2] * 1000 // SAMPLE_RATE, diag[3] * 1000 // SAMPLE_RATE,
+            )
         return {self._name: 1.0 if fired else 0.0}
 
     def fire_preroll_back(self) -> Optional[int]:
