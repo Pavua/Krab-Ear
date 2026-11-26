@@ -26,13 +26,14 @@ enum ConversationVoiceEndPhrases {
         "конец связи", "хватит разговаривать",
         // Испанский и английский (проект RU/ES/EN): те же просьбы закончить.
         "desconectate", "desconéctate", "termina la conversacion", "termina la conversación",
-        "cierra la conversacion", "cierra la conversación", "fin de la conversacion", "fin de la conversación",
-        "end the conversation", "end conversation"
+        "cierra la conversacion", "cierra la conversación", "fin de la conversacion", "fin de la conversación"
     ]
 
-    /// Переходные глаголы («disconnect my headphones», «stop listening to that song», «end the call at five»): закрывают
+    /// Переходные глаголы («disconnect my headphones», «stop listening to that song», «end the call at five», «end the conversation with my boss», «I need to end the conversation»): закрывают
     /// разговор, только если стоят в самом конце короткой реплики (не больше `maxLeadingWords` слов перед ними).
-    private static let tailAnchoredPhrases: [String] = ["disconnect", "stop listening", "end the call"]
+    private static let tailAnchoredPhrases: [String] = [
+        "disconnect", "stop listening", "end the call", "end the conversation", "end conversation"
+    ]
     private static let maxLeadingWords = 2
 
     /// Прощание закрывает разговор, только если стоит на краю реплики («ну всё, до свидания»). Слова вопроса и
