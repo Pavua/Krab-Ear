@@ -811,6 +811,7 @@ Returns (успех, ON):
 | `snapshot_outside_backups_root` | путь вне `data_dir/backups` (вызывающий получает `RuntimeError`, как и раньше) |
 | `snapshot_source_symlink` | symlink на пути к снимку или к ledger-журналу |
 | `snapshot_stale_staging` | указан неопубликованный staging, а не снимок |
+| `snapshot_committed_unverified` | recovery нашёл COMMITTED-маркер restore и убрал staging (`ok: true`, `pending: false`), но живые журналы не подтвердили маркер: `warnings` — `committed_marker_mismatch:<файл…>` / `committed_marker_without_valid_evidence` / `committed_marker_reverify_failed` (после COMMITTED журналы могли легитимно измениться) |
 | `snapshot_policy_unavailable` | флаг политики не читается (fail-closed: доказать ON не смогли) либо политика изменилась под lock |
 | `snapshot_destination_exists` | каталог назначения/staging уже существует (в т.ч. transaction_id занят) |
 | `snapshot_prepared_missing` | recovery: каталог незавершённой транзакции исчез с диска |
