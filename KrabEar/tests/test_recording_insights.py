@@ -908,10 +908,15 @@ class Wave1725SecurityTestCase(unittest.TestCase):
         """source_lang='<script>alert(1)</script>' must NOT appear in Insight title."""
         items = self._items_with_lang("<script>alert(1)</script>")
         insights = self.gen.generate_insights(items, days=7)
+        # G3 audio-05 A05-10: инсайт про язык обязан существовать (иначе цикл
+        # пуст), а сравнение — без учёта регистра: lang_display = upper(), и
+        # «<SCRIPT>» проходил мимо проверки «<script>».
+        self.assertTrue(any(i.type == "language_shift" for i in insights),
+                        "сценарий обязан породить language_shift")
         for ins in insights:
-            self.assertNotIn("<script>", ins.title,
+            self.assertNotIn("<script>", ins.title.lower(),
                              f"XSS payload in title: {ins.title!r}")
-            self.assertNotIn("<script>", ins.description,
+            self.assertNotIn("<script>", ins.description.lower(),
                              f"XSS payload in description: {ins.description!r}")
 
     def test_xss_payload_stripped_from_description(self) -> None:
@@ -923,11 +928,20 @@ class Wave1725SecurityTestCase(unittest.TestCase):
                   for i in range(5)]
         items = prev + recent
         insights = self.gen.generate_insights(items, days=7)
+        # G3 audio-05 A05-10: инсайт про язык обязан существовать (иначе цикл
+        # пуст), а сравнение — без учёта регистра: lang_display = upper(), и
+        # «<SCRIPT>» проходил мимо проверки «<script>».
+        self.assertTrue(any(i.type == "language_shift" for i in insights),
+                        "сценарий обязан породить language_shift")
         for ins in insights:
-            self.assertNotIn("<img", ins.title)
-            self.assertNotIn("<img", ins.description)
-            self.assertNotIn("onerror", ins.title)
-            self.assertNotIn("onerror", ins.description)
+            self.assertNotIn("<img", ins.title.lower())
+            self.assertNotIn("<img", ins.description.lower())
+        # Буквы «onerror» без разметки безопасны (санитайзер оставляет
+        # [a-z-]); проверяем, что в инсайт языка не попал ни один спецсимвол.
+        lang_ins = next(i for i in insights if i.type == "language_shift")
+        for ch in '<>"=':
+            self.assertNotIn(ch, lang_ins.title)
+            self.assertNotIn(ch, lang_ins.description)
 
     def test_valid_lang_code_preserved(self) -> None:
         """Normal language codes (ru, en, zh-hans) survive sanitization intact."""

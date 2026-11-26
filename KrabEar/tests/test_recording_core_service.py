@@ -10,6 +10,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1504,10 +1505,20 @@ class TestPersistLockAtomic(unittest.TestCase):
         store_mock = MagicMock()
         fake_item = self._fake_item("concurrent-id")
 
+        # G3 audio-05 A05-07: меряем максимум одновременных вызовов — прежде
+        # тест считал только число вызовов, и снятие лока оставалось зелёным.
+        in_flight = [0]
+        max_concurrent = [0]
+
         def _tracking_add(*args, **kwargs):
             with order_lock:
                 call_seq[0] += 1
                 add_call_order.append(call_seq[0])
+                in_flight[0] += 1
+                max_concurrent[0] = max(max_concurrent[0], in_flight[0])
+            time.sleep(0.1)  # окно, в котором второй поток обязан ждать лок
+            with order_lock:
+                in_flight[0] -= 1
             return fake_item
 
         store_mock.add_history_item.side_effect = _tracking_add
@@ -1550,6 +1561,8 @@ class TestPersistLockAtomic(unittest.TestCase):
             2,
             "Expected exactly 2 add_history_item calls for 2 concurrent phase_e calls",
         )
+        self.assertEqual(max_concurrent[0], 1,
+                         "add_history_item выполнялся параллельно — _persist_lock не сериализует")
 
     def test_dedup_check_and_add_history_item_atomic(self):
         """Dedup guard + persist are atomic — duplicate detected inside the lock

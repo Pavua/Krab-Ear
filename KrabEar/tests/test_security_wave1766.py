@@ -1,11 +1,12 @@
 """Тесты безопасности Wave 1766: REST/telephony surface hardening.
 
-Охватывает 5 уязвимостей:
+Охватывает 4 уязвимости (#8 снят, G3 audio-06 A06-11):
   #1 (HIGH) — CRLF header-injection в api_versioning.py
   #3 (MED)  — утечка temp-файла при ошибке file.save в rest_server.py
   #5 (MED)  — TOCTOU 0644 window в rest_auth.py _save()
   #6 (MED)  — timing oracle в rest_auth.py verify_token()
-  #8 (MED)  — телефонный PII в логах telnyx_adapter.py
+  #8 — телефонный PII в логах telnyx_adapter.py: адаптер удалён целиком
+       (#1990, звонки через Voice Gateway), тестировать здесь нечего.
 """
 from __future__ import annotations
 
