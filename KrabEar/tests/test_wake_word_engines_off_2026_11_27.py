@@ -124,6 +124,20 @@ def test_start_with_both_engines_off_returns_dedicated_reason(tmp_path):
     result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
     assert result["ok"] is False
     assert result["reason"] == oa.ENGINES_OFF_REASON, result
+    # Swift (WakeWordPoller.sendStart) читает `error` раньше `reason`: если рядом с reason есть error, why
+    # перестаёт совпадать с enginesOffReason и бюджет self-heal жжётся (ревью Opus #2309).
+    assert "error" not in result, result
+
+
+def test_engines_off_start_does_not_log_info_every_poll(tmp_path, caplog):
+    import logging
+    adapter, _ = _adapter(tmp_path, {"wake_word_enabled": True, "wake_word_oww_mode": "off",
+                                     "wake_word_stt_mode": "off"})
+    adapter._oww_available = True
+    with caplog.at_level(logging.INFO, logger=oa.logger.name):
+        for _ in range(3):
+            adapter.handle_wake_word_start({"model": "hey_jarvis"})
+    assert not [r for r in caplog.records if r.levelno >= logging.INFO], "INFO каждые 10 с заливает лог"
 
 
 def test_engines_off_reason_matches_swift_and_is_checked_before_budget():

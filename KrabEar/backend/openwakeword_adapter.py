@@ -339,7 +339,8 @@ class OpenWakeWordAdapter:
                     "Выполните: pip install openwakeword"
                 )
             if oww_mode == "off" and not stt_wanted:
-                logger.info("OpenWakeWordAdapter.start: все движки wake word выключены (режим off)")
+                # DEBUG: поллер стучится каждые ~10 с, INFO заливал бы лог (как и в ветке «идёт запись»).
+                logger.debug("OpenWakeWordAdapter.start: все движки wake word выключены (режим off)")
                 raise WakeEnginesOffError("все движки wake word выключены в настройках")
             use_oww = oww_mode != "off" and self._oww_available
 
@@ -963,8 +964,10 @@ class OpenWakeWordAdapter:
         try:
             self.start(model_name, _on_detected, threshold=threshold)
             return {"ok": True, "model": model_name, "threshold": threshold}
-        except WakeEnginesOffError as e:
-            return {"ok": False, "reason": ENGINES_OFF_REASON, "error": str(e)}
+        except WakeEnginesOffError:
+            # ТОЛЬКО reason (как в ветке записи): Swift-поллер берёт `error` раньше `reason`, и при наличии
+            # обоих полей why != enginesOffReason — бюджет self-heal сгорал бы (ревью Opus, #2309).
+            return {"ok": False, "reason": ENGINES_OFF_REASON}
         except RuntimeError as e:
             return {"ok": False, "error": str(e)}
         except ValueError as e:
