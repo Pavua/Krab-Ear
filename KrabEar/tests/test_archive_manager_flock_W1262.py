@@ -225,14 +225,15 @@ class TestFlockHeldAcrossFullOperation(unittest.TestCase):
                     event_log.append("LOCK_UN")
                 return real_flock(fd, op)
 
-            real_path_replace = Path.replace
+            real_os_replace = os.replace
 
-            def tracking_replace(self_path, target):
+            def tracking_replace(src, dst):
+                # замена идёт через os.replace уникального mkstemp-файла (RF10), а не Path.replace
                 event_log.append("REPLACE")
-                return real_path_replace(self_path, target)
+                return real_os_replace(src, dst)
 
             with patch("fcntl.flock", side_effect=tracking_flock):
-                with patch.object(Path, "replace", tracking_replace):
+                with patch("backend.archive_manager.os.replace", tracking_replace):
                     mgr._rewrite_archive([{"id": "r", "text": "rewrite"}])
 
             self.assertIn("LOCK_EX", event_log)

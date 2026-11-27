@@ -9,6 +9,8 @@ from __future__ import annotations
 import fcntl
 import json
 import logging
+import os
+import tempfile
 import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -177,18 +179,12 @@ class ArchiveManager:
 
     def _rewrite_archive(self, items: list[dict[str, Any]]) -> None:
         """Перезаписывает файл архива атомарно через tmp-файл с cross-process flock."""
-        tmp = self._archive_path.with_suffix(".ndjson.tmp")
         with self._lock_path.open("a", encoding="utf-8") as lock_f:
             fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
-                try:
-                    with tmp.open("w", encoding="utf-8") as fh:
-                        for item in items:
-                            fh.write(json.dumps(item, ensure_ascii=False) + "\n")
-                    tmp.replace(self._archive_path)
-                except Exception:
-                    tmp.unlink(missing_ok=True)
-                    raise
+                self._write_archive_atomic(
+                    [json.dumps(item, ensure_ascii=False) + "\n" for item in items],
+                )
             finally:
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
 
@@ -218,20 +214,39 @@ class ArchiveManager:
             # работать даже если конструктор при ON не создавал storage.
             self._archive_dir.mkdir(parents=True, exist_ok=True)
             archived_before = len(self._read_archive())
-            tmp = self._archive_path.with_suffix(".ndjson.tmp")
             with self._lock_path.open("a", encoding="utf-8") as lock_f:
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
                 try:
-                    try:
-                        # Truncate to empty via atomic tmp-replace
-                        tmp.write_text("", encoding="utf-8")
-                        tmp.replace(self._archive_path)
-                    except Exception:
-                        tmp.unlink(missing_ok=True)
-                        raise
+                    # Truncate to empty via atomic unique-tmp replace
+                    self._write_archive_atomic()
                 finally:
                     fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
         return archived_before
+
+    def _write_archive_atomic(self, lines: "list[str] | None" = None) -> None:
+        """Атомарно записать archive.ndjson через УНИКАЛЬНЫЙ временный файл рядом (mkstemp, 0600).
+
+        Фиксированное имя ``archive.ndjson.tmp`` позволяло заранее подложить симлинк: ``open("w")``
+        шёл по нему и перезаписывал чужой файл, а ``replace`` превращал сам архив в симлинк.
+        mkstemp создаёт файл с O_EXCL и правами 0600 и не следует по подложенным именам.
+
+        Метод (а не функция модуля) намеренно пишет ``self._archive_path``: аудит purge-покрытия
+        засчитывает очистку ``archive.ndjson`` только по _write*-методу, чей replace видит этот атрибут.
+        """
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(self._archive_path.parent), prefix=".archive_", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                for line in lines or ():
+                    fh.write(line)
+            os.replace(tmp_name, self._archive_path)
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def _store_supports_atomic_archive(self, store: Any) -> bool:
         """Проверяет, что store предоставляет unlocked-API StateStore для атомарного пути.

@@ -376,7 +376,11 @@ class AutoBackupManager:
                     logger.warning("auto_backup: не удалось прочитать settings.json для редакции: %s", exc)
                     safe = {}
                 dst = backup_dir / settings_src.name
-                dst.write_text(json.dumps(safe, ensure_ascii=False, indent=2), encoding="utf-8")
+                # Сразу 0600 при создании (write_text + последующий chmod оставлял окно с umask-правами)
+                # и без перехода по подложенному симлинку.
+                dst_fd = os.open(str(dst), os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(dst_fd, "w", encoding="utf-8") as dst_fh:
+                    dst_fh.write(json.dumps(safe, ensure_ascii=False, indent=2))
                 try:
                     os.chmod(dst, 0o600)
                 except OSError:
