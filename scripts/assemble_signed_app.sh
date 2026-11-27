@@ -68,8 +68,18 @@ rm -rf "$APP_OUT/Contents/Frameworks/Sparkle.framework"
 ditto "$SPARKLE_FW" "$APP_OUT/Contents/Frameworks/Sparkle.framework"
 
 mkdir -p "$APP_OUT/Contents/Resources"
-cp -f "$ROOT_DIR/scripts/bootstrap_backend.command" "$APP_OUT/Contents/Resources/bootstrap_backend.command"
-chmod +x "$APP_OUT/Contents/Resources/bootstrap_backend.command"
+# KEG2-20: инсталлятор ставит ровно коммит этой сборки, а не плавающую ветку.
+# Коммит должен быть запушен — иначе bootstrap на чистом Mac честно откажет.
+BOOTSTRAP_COMMIT="$(git -C "$ROOT_DIR" rev-parse HEAD)"
+[[ "$BOOTSTRAP_COMMIT" =~ '^[0-9a-f]{40}$' ]] || { echo "assemble: не удалось определить коммит для bootstrap" >&2; exit 1; }
+BOOTSTRAP_OUT="$APP_OUT/Contents/Resources/bootstrap_backend.command"
+awk -v sha="$BOOTSTRAP_COMMIT" '
+  /^PINNED_COMMIT="" *# KRAB_EAR_PINNED_COMMIT_STAMP$/ { print "PINNED_COMMIT=\"" sha "\"  # KRAB_EAR_PINNED_COMMIT_STAMP"; n++; next }
+  { print }
+  END { if (n != 1) exit 1 }
+' "$ROOT_DIR/scripts/bootstrap_backend.command" > "$BOOTSTRAP_OUT" \
+  || { echo "assemble: штамп коммита в bootstrap_backend.command не применён" >&2; exit 1; }
+chmod +x "$BOOTSTRAP_OUT"
 
 if [[ -n "$VENDOR_DIR" ]]; then
   # ditto (не cp -R) — сохраняет симлинк .venv_krab_ear/bin/python -> python3,

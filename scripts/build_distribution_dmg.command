@@ -165,15 +165,16 @@ if $DO_NOTARIZE; then
 
   echo "$NOTARY_OUTPUT"
 
+  # KEG2-21: отказ notary или сбой staple — ошибка сборки, а не предупреждение перед
+  # итоговым «Notarized + Stapled».
   if echo "$NOTARY_OUTPUT" | grep -q "status: Accepted"; then
     ok "Notarization accepted"
   else
-    warn "Notarization may have failed — check output above"
-    warn "You can check status with: xcrun notarytool log <submission-id> ..."
+    err "Notarization not accepted — check output above (xcrun notarytool log <submission-id> ...)"
   fi
 
   log "Stapling notarization ticket to DMG..."
-  xcrun stapler staple "$DMG_PATH" || warn "Stapler failed — DMG may still be notarized but without inline ticket"
+  xcrun stapler staple "$DMG_PATH" || err "Stapler failed — DMG is not ready for distribution"
   ok "Notarization stapled"
 fi
 
