@@ -149,6 +149,70 @@ class ExternalObsidianVaultPurgeTestCase(unittest.TestCase):
         self.assertFalse(result.get("complete"))
         self.assertIn("obsidian", result.get("errors", []))
 
+    def _restart_manager(self) -> ObsidianSyncManager:
+        """Новый менеджер читает state-файл, как после перезапуска backend.
+
+        Проверка «vault под $HOME» из _load_state здесь мешала бы: временные
+        каталоги лежат вне $HOME, и менеджер просто отверг бы vault. Корнем
+        считаем общий временный каталог — тогда проверяется именно подмена.
+        """
+        tmp_root = Path(tempfile.gettempdir()).resolve()
+        with patch("pathlib.Path.home", return_value=tmp_root):
+            restarted = ObsidianSyncManager(
+                data_dir=str(self.profile), plaintext_export_authorizer=off_authorizer(),
+            )
+        self.svc._obsidian_sync = restarted
+        return restarted
+
+    def test_vault_swapped_to_symlink_before_restart_is_refused(self) -> None:
+        """Подмена ДО перезапуска: загрузка state не должна «отмывать» путь через resolve().
+
+        Если _load_state хранит resolve()-путь, после рестарта vault указывает
+        на чужой каталог, проверка resolve()==vault_path проходит, и purge
+        удаляет чужие transcript_*.md.
+        """
+        elsewhere = _tmpdir(self)
+        (elsewhere / "Transcriptions").mkdir()
+        bait = elsewhere / "Transcriptions" / "transcript_2026-11-27_14-00-00_ee.md"
+        bait.write_text("чужой файл с подходящим именем", encoding="utf-8")
+        shutil.rmtree(self.vault)
+        self.vault.symlink_to(elsewhere, target_is_directory=True)
+        self._restart_manager()
+
+        result = _run_purge(self.svc)
+
+        self.assertTrue(bait.exists(), "purge удалил чужой файл после рестарта по подменённому vault")
+        self.assertFalse(result.get("complete"), "очистка по подменённому vault выдана за полную")
+        self.assertIn("obsidian", result.get("errors", []))
+        self.assertEqual(result.get("history_deleted"), 1, "история должна очищаться независимо")
+
+    def test_legacy_state_with_symlink_component_refused_until_reconfigured(self) -> None:
+        """Старый state хранил путь как есть, с симлинком внутри — purge не подтверждает очистку."""
+        alias_root = _tmpdir(self)
+        alias = alias_root / "vault_alias"
+        alias.symlink_to(self.vault, target_is_directory=True)
+        state_path = self.profile / "obsidian_sync.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["vault_path"] = str(alias)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        restarted = self._restart_manager()
+
+        refused = _run_purge(self.svc)
+
+        self.assertFalse(refused.get("complete"), "purge по пути с симлинком выдан за полный")
+        self.assertIn("obsidian", refused.get("errors", []))
+        for path in self.synced:
+            self.assertTrue(path.exists(), f"{path.name} удалён по непроверенному пути")
+
+        restarted.configure(str(alias), folder="Transcriptions")
+        retried = _run_purge(self.svc)
+
+        self.assertTrue(retried.get("complete"), retried.get("errors"))
+        for path in self.synced:
+            self.assertFalse(path.exists(), f"{path.name} пережил purge после перенастройки")
+        for path, text in self.foreign.items():
+            self.assertEqual(path.read_text(encoding="utf-8"), text, f"purge задел чужой {path}")
+
 
 # ---------------------------------------------------------------------------
 # P03-05 — FakeStore-ы не расходятся со StateStore
@@ -312,6 +376,131 @@ class PurgeLinkBoundaryTestCase(unittest.TestCase):
         self.assertTrue(result.get("ok"), result)
         self.assertFalse(os.path.lexists(link))
         self.assertEqual(self.external.read_bytes(), self.external_bytes)
+
+
+class FlatStoreDirPurgeTestCase(unittest.TestCase):
+    """rescue/ и temp_uploads/ — плоские каталоги; purge чистит их через fd каталога.
+
+    Ошибка, которую pathlib прячет (на 3.14 is_dir()/is_symlink() отвечают False
+    на PermissionError), обязана стать ошибкой шага, а не «каталога нет».
+    """
+
+    STORE_DIRS = ("rescue", "temp_uploads")
+
+    def setUp(self) -> None:
+        self.profile = _tmpdir(self)
+        self.outside = _tmpdir(self)
+        self.external = self.outside / "external.f32.part"
+        self.external.write_bytes(b"outside")
+
+    def _purge(self) -> dict:
+        return _run_purge(HistoryService(store=StateStore(data_dir=self.profile)))
+
+    def test_regular_files_and_symlinks_removed_targets_kept(self) -> None:
+        for name in self.STORE_DIRS:
+            store_dir = self.profile / name
+            store_dir.mkdir()
+            (store_dir / "a.f32.part").write_bytes(PII.encode("utf-8"))
+            (store_dir / "b.meta.json").write_text("{}", encoding="utf-8")
+            (store_dir / "link.f32.part").symlink_to(self.external)
+            (store_dir / "dir_link").symlink_to(self.outside, target_is_directory=True)
+            (store_dir / "dangling.f32.part").symlink_to(self.outside / "нет_такого")
+
+        result = self._purge()
+
+        self.assertTrue(result.get("complete"), result.get("errors"))
+        self.assertEqual(result.get("rescue_deleted"), 5)
+        for name in self.STORE_DIRS:
+            store_dir = self.profile / name
+            self.assertTrue(store_dir.is_dir(), f"{name}/ должен остаться пустым каталогом")
+            self.assertEqual(os.listdir(store_dir), [], f"{name}/ не очищен")
+        self.assertEqual(self.external.read_bytes(), b"outside", "purge задел цель симлинка")
+        self.assertEqual(os.listdir(self.outside), ["external.f32.part"], "purge зашёл в каталог по симлинку")
+
+    def test_non_directory_store_entry_is_reported(self) -> None:
+        for name in self.STORE_DIRS:
+            (self.profile / name).write_text("не каталог", encoding="utf-8")
+
+        result = self._purge()
+
+        self.assertFalse(result.get("complete"), "файл на месте каталога выдан за пустой каталог")
+        for name in self.STORE_DIRS:
+            self.assertIn(name, result.get("errors", []))
+
+    def test_subdirectory_inside_store_dir_is_reported_and_untouched(self) -> None:
+        for name in self.STORE_DIRS:
+            nested = self.profile / name / "nested"
+            nested.mkdir(parents=True)
+            (nested / "inner.f32.part").write_bytes(b"inner")
+            (self.profile / name / "top.f32.part").write_bytes(b"top")
+
+        result = self._purge()
+
+        self.assertFalse(result.get("complete"))
+        for name in self.STORE_DIRS:
+            self.assertIn(name, result.get("errors", []))
+            self.assertFalse((self.profile / name / "top.f32.part").exists(),
+                             f"обычный файл {name}/ пережил purge")
+            self.assertEqual((self.profile / name / "nested" / "inner.f32.part").read_bytes(), b"inner")
+
+    def test_missing_store_dirs_are_benign(self) -> None:
+        result = self._purge()
+
+        self.assertTrue(result.get("complete"), result.get("errors"))
+        self.assertEqual(result.get("rescue_deleted"), 0)
+
+    def test_helper_unreadable_parent_raises_not_absent(self) -> None:
+        from backend.purge_fs import purge_flat_dir_contents
+
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            self.skipTest("root игнорирует права каталога")
+        parent = self.profile / "locked"
+        (parent / "rescue").mkdir(parents=True)
+        (parent / "rescue" / "a.f32.part").write_bytes(b"x")
+        os.chmod(parent, 0)
+        try:
+            with self.assertRaises(PermissionError):
+                purge_flat_dir_contents(parent / "rescue")
+        finally:
+            os.chmod(parent, 0o700)
+        self.assertTrue((parent / "rescue" / "a.f32.part").exists())
+
+    def test_helper_missing_dir_is_noop(self) -> None:
+        from backend.purge_fs import purge_flat_dir_contents
+
+        self.assertEqual(purge_flat_dir_contents(self.profile / "absent"), (0, []))
+
+    def test_helper_symlinked_dir_raises(self) -> None:
+        from backend.purge_fs import purge_flat_dir_contents
+
+        link = self.profile / "rescue"
+        link.symlink_to(self.outside, target_is_directory=True)
+
+        with self.assertRaises(OSError):
+            purge_flat_dir_contents(link)
+        self.assertEqual(self.external.read_bytes(), b"outside")
+
+    def test_helper_dir_swapped_after_open_never_reaches_new_target(self) -> None:
+        """TOCTOU: каталог подменили симлинком после открытия — удаление идёт по fd старого."""
+        import backend.purge_fs as purge_fs
+
+        store_dir = self.profile / "rescue"
+        store_dir.mkdir()
+        (store_dir / "a.f32.part").write_bytes(b"a")
+        moved = self.profile / "rescue.moved"
+        real_listdir = os.listdir
+
+        def _swap_then_list(fd):
+            store_dir.rename(moved)
+            store_dir.symlink_to(self.outside, target_is_directory=True)
+            return real_listdir(fd)
+
+        with patch.object(purge_fs.os, "listdir", side_effect=_swap_then_list):
+            deleted, problems = purge_fs.purge_flat_dir_contents(store_dir)
+
+        self.assertEqual((deleted, problems), (1, []))
+        self.assertEqual(os.listdir(moved), [], "исходный каталог не очищен")
+        self.assertEqual(self.external.read_bytes(), b"outside", "удаление ушло по подменённому пути")
 
 
 # ---------------------------------------------------------------------------
