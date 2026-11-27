@@ -60,7 +60,11 @@ pass() {
 # clean | dirty | unknown — работает и в обычном clone, и в linked worktree.
 git_worktree_state() {
   git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo unknown; return 0; }
-  if git -C "$ROOT_DIR" diff-index --quiet HEAD -- 2>/dev/null; then echo clean; else echo dirty; fi
+  # `diff-index --quiet HEAD` не видит НЕОТСЛЕЖИВАЕМЫХ файлов (новые исходники/конфиги), а сбой
+  # git не должен читаться как dirty или clean: status --porcelain отдаёт и их (игнорируемые — нет).
+  local out
+  out="$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all 2>/dev/null)" || { echo unknown; return 0; }
+  if [ -z "$out" ]; then echo clean; else echo dirty; fi
 }
 
 print_section() {
