@@ -18,6 +18,10 @@ struct PasteAttemptResult {
 }
 struct PasteInputSnapshot { let pid: pid_t; let epoch: UInt64; let changeCount: Int; let isAlive: () -> Bool }
 struct PasteKeyEventPair { let down: () -> Void; let up: () -> Void }
+/// Резервная копия текста, который не дошёл до адресата: сам текст и снимок
+/// очереди/буфера, сделанный при резерве ввода (до ожидания и активации).
+struct PasteClipboardFallback { let text: String; let snapshot: PasteInputSnapshot }
+enum PasteClipboardFallbackOutcome: Equatable { case copied, concealed, stale }
 
 /// Один accepted запрос хранит исходные clipboard/target/deadline и место общей FIFO.
 @MainActor final class PasteInputReservation {
@@ -126,6 +130,17 @@ final class PasteService {
         inputQueue.invalidatePending()
         guard !pasteboardHoldsConcealedContent(pasteboard) else { onConcealedClipboardSkipped?(); return false }
         pasteboard.clearContents(); return pasteboard.setString(text, forType: .string)
+    }
+    /// Копия после отказа активации адресата (Cmd+V не отправлялся). Пишем, только
+    /// если с момента снимка ничего не произошло: очередь пуста, поколение то же, буфер
+    /// менял лишь собственный ввод. Иначе поздняя запись затёрла бы более новую копию
+    /// пользователя и через invalidatePending() сорвала бы ждущую операцию.
+    @MainActor func putToClipboardIfUnchanged(_ fallback: PasteClipboardFallback) -> PasteClipboardFallbackOutcome {
+        let snapshot = fallback.snapshot
+        guard inputQueue.isIdle, inputQueue.generation == snapshot.epoch,
+              inputQueue.ownsClipboardChanges(board: pasteboard.name.rawValue, from: snapshot.changeCount, to: pasteboard.changeCount)
+        else { return .stale }
+        return putToClipboard(fallback.text) ? .copied : .concealed
     }
     func putToClipboardUserInitiated(_ text: String) {
         inputQueue.invalidatePending(); pasteboard.clearContents(); pasteboard.setString(text, forType: .string)
