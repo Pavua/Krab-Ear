@@ -108,7 +108,7 @@ DMG-сборка несёт `bootstrap_backend.command` внутри `Krab Ear.a
 
 Что делает скрипт (идемпотентно, без sudo): проверяет Apple Silicon → ищет Python ≥ 3.12 (Homebrew/python.org; если нет — печатает, как поставить) → клонирует репозиторий в `~/KrabEar` (git; fallback: curl-tarball) → создаёт `.venv_krab_ear` + `pip install -r requirements.txt` → пишет указатель `~/Library/Application Support/KrabEar/project_root` (по нему агент из `/Applications` находит backend) → ставит launchd-сервис backend.
 
-Переопределения через env: `KRAB_EAR_INSTALL_DIR`, `KRAB_EAR_REPO_URL`, `KRAB_EAR_BRANCH`; флаг `--dry-run` печатает план без изменений. Скрипт можно запускать и напрямую из репозитория (`scripts/bootstrap_backend.command`).
+Скрипт ставит ровно коммит сборки (его впечатывает `assemble_signed_app.sh`) и проверяет, что скачан именно он: git — по `rev-parse HEAD`, tarball — по SHA в pax-заголовке архива (KEG2-20). Переопределения через env: `KRAB_EAR_INSTALL_DIR`, `KRAB_EAR_REPO_URL`, `KRAB_EAR_COMMIT` (полный 40-символьный SHA); флаг `--dry-run` печатает план без изменений. Скрипт можно запускать и напрямую из репозитория (`scripts/bootstrap_backend.command`).
 
 ### Ручная установка (эквивалент того, что делает инсталлятор)
 

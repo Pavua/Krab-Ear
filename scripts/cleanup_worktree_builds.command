@@ -120,6 +120,29 @@ verify_build_dir() {
 
 WORKTREES_REAL="$(cd "$WORKTREES_DIR" && pwd -P)"
 
+# KEG2-18: файловая идентичность каталога (устройство:inode, lstat — симлинк не разыменовывается).
+# Абсолютный /usr/bin/stat: GNU stat из Homebrew в PATH понимает `-f` иначе и молча ломает разбор.
+build_dir_identity() {
+  /usr/bin/stat -f '%d:%i' "$1" 2>/dev/null
+}
+
+# KEG2-18: удаление без повторного прохода по абсолютному пути. Подоболочка делает `cd` в
+# проверенный родитель — дальше cwd держит его inode, и подмена любого предка симлинком уже
+# не перенаправит `rm`. Перед удалением сверяем: родитель тот же, `.build` не симлинк и это
+# ТОТ ЖЕ inode, что был найден при сборе кандидатов. Код 3 — отказ, иначе код rm.
+remove_build_dir_pinned() {
+  local real="$1" want_id="$2"
+  local parent="${real%/.build}"
+  (
+    [[ -n "$want_id" && "$parent" != "$real" ]] || exit 3
+    cd -P -- "$parent" 2>/dev/null || exit 3
+    [[ "$(pwd -P)" == "$parent" ]] || exit 3
+    [[ ! -L .build && -d .build ]] || exit 3
+    [[ "$(build_dir_identity .build)" == "$want_id" ]] || exit 3
+    /bin/rm -rf -- ./.build
+  )
+}
+
 # ── Gather candidates ────────────────────────────────────────────────
 # Cutoff epoch seconds
 NOW_EPOCH=$(date +%s)
@@ -127,6 +150,7 @@ CUTOFF_EPOCH=$(( NOW_EPOCH - DAYS * 86400 ))
 
 # Arrays
 typeset -a BUILD_DIRS
+typeset -a BUILD_IDS
 typeset -a BUILD_SIZES
 typeset -a BUILD_MTIMES
 typeset -a BUILD_AGES
@@ -154,11 +178,19 @@ while IFS= read -r build_dir; do
   fi
 
   # ── Check age via mtime of the .build directory itself ──
-  mtime=$(stat -f "%m" "$build_dir" 2>/dev/null || echo 0)
+  mtime=$(/usr/bin/stat -f "%m" "$build_dir" 2>/dev/null || echo 0)
   age_days=$(( (NOW_EPOCH - mtime) / 86400 ))
 
   if (( mtime > CUTOFF_EPOCH )); then
     echo "  ${YELLOW}SKIP${RESET} ${DIM}$wt_name${RESET}  ${DIM}← ${age_days}d old (< ${DAYS}d threshold)${RESET}"
+    SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
+    continue
+  fi
+
+  # ── Identity for the final re-check (KEG2-18); unknown identity = never delete ──
+  build_id="$(build_dir_identity "$build_dir")"
+  if [[ -z "$build_id" || -L "$build_dir" ]]; then
+    echo "  ${YELLOW}SKIP${RESET} ${DIM}$wt_name${RESET}  ${DIM}← cannot verify identity${RESET}"
     SKIPPED_COUNT=$(( SKIPPED_COUNT + 1 ))
     continue
   fi
@@ -168,6 +200,7 @@ while IFS= read -r build_dir; do
   size_mb=$(( size_kb / 1024 ))
 
   BUILD_DIRS+=("$build_dir")
+  BUILD_IDS+=("$build_id")
   BUILD_SIZES+=("$size_kb")
   BUILD_MTIMES+=("$mtime")
   BUILD_AGES+=("$age_days")
@@ -266,7 +299,12 @@ for (( idx=1; idx<=${#BUILD_DIRS}; idx++ )); do
     continue
   }
 
-  if rm -rf "$real_build_dir" 2>/dev/null; then
+  remove_build_dir_pinned "$real_build_dir" "${BUILD_IDS[$idx]}" 2>/dev/null
+  rm_rc=$?
+  if (( rm_rc == 3 )); then
+    echo "  ${RED}REFUSED${RESET} (каталог подменён после проверки): $build_dir" >&2
+    FAILED_COUNT=$(( FAILED_COUNT + 1 ))
+  elif (( rm_rc == 0 )); then
     DELETED_COUNT=$(( DELETED_COUNT + 1 ))
     DELETED_KB=$(( DELETED_KB + ${size_kb:-0} ))
     DELETED_MB=$(( ${size_kb:-0} / 1024 ))
@@ -292,3 +330,5 @@ if (( FAILED_COUNT > 0 )); then
 fi
 echo "${BOLD}${GREEN}─────────────────────────────────────────────────────────${RESET}"
 echo ""
+# Отказ или сбой удаления — не «успех»: вызывающий видит ненулевой код.
+(( FAILED_COUNT == 0 )) || exit 1
