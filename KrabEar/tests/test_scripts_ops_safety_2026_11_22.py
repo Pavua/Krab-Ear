@@ -1727,6 +1727,15 @@ class TestReleaseChecklistGitState:
         (repo / ".git" / "index").write_bytes(b"corrupt")
         assert _git_state(repo) == "unknown"
 
+    def test_unknown_state_fails_the_checklist_not_just_warns(self):
+        """Fail-closed (ревью Opus #2305, P2): ветка `unknown` обязана звать fail(), а не echo-предупреждение."""
+        src = (SCRIPTS / "run_release_checklist.command").read_text(encoding="utf-8")
+        start = src.index('GIT_STATE="$(git_worktree_state)"')
+        block = src[start:src.index("esac", start)]
+        wildcard = block[block.index("*)"):]
+        assert 'fail "git_status"' in wildcard, block
+        assert "⚠" not in wildcard, "unknown снова только предупреждает"
+
 
 # ── G2-KE02a-F06/F09 validate_c1_mps_fix ────────────────────────────────────
 

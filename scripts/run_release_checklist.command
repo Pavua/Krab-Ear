@@ -119,7 +119,9 @@ GIT_STATE="$(git_worktree_state)"
 case "$GIT_STATE" in
   dirty) fail "git_status" "Uncommitted changes detected; run: git status" ;;
   clean) pass "git status clean" ;;
-  *) echo "  ⚠ git status: unknown (не git work tree)" ;;
+  # unknown (не git work tree ИЛИ сбой git) — fail-closed: чеклист не вправе вернуть PASS,
+  # не зная состояния дерева (раньше сбой git давал dirty → fail; ревью Opus #2305, P2).
+  *) fail "git_status" "git status unknown (не git work tree или сбой git) — состояние дерева не проверено" ;;
 esac
 
 # =====================================================================
@@ -194,10 +196,7 @@ print_section "FINAL REPORT"
   echo "| python version | ✓ $PY_VERSION |"
   echo "| pip dependencies | ✓ |"
   echo "| disk space | ✓ $(($DISK_AVAIL / 1048576)) GB |"
-  case "$GIT_STATE" in
-    clean) echo "| git status | ✓ clean |" ;;
-    *) echo "| git status | ⚠ unknown (не git work tree) |" ;;
-  esac
+  echo "| git status | ✓ clean |"  # unknown/dirty завершают чеклист раньше (fail)
   echo "| shell scripts | ✓ |"
   echo "| swift build | ✓ |"
   if [ "$QUICK_MODE" = "--quick" ]; then
