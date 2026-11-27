@@ -86,6 +86,18 @@ def response_contains_secret(resp):
     return SECRET in json.dumps(resp, ensure_ascii=False)
 
 
+def gate_answered(resp):
+    """True, если метод ОТВЕТИЛ (есть ``result`` и нет ``error``).
+
+    G3-privacy-05 (05-11): раньше проверялось только отсутствие канарейки, а
+    ответ ``{"error": ...}`` (неизвестный метод, внутренняя ошибка, таймаут
+    гейта) её тоже не содержит — сломанный или переименованный метод считался
+    «защищённым». Теперь пустой/ошибочный ответ — провал проверки.
+    """
+    return (isinstance(resp, dict) and not resp.get("error")
+            and resp.get("result") is not None)
+
+
 def secret_paths(value, path="", limit=5):
     """Пути полей ответа, где встретилась канарейка (``result.items[0]``).
 
@@ -167,6 +179,7 @@ def run(seed_ids):
             results.append((method, False))
             continue
         leaked = response_contains_secret(resp)
+        check(gate_answered(resp), f"{method}: answered with a result (not an error/empty reply)")
         check(not leaked, f"{method}: secret NOT leaked under privacy"
               + (f"  <<< LEAK in: {', '.join(secret_paths(resp)) or '<serialized>'}" if leaked else ""))
 
