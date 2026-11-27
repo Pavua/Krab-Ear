@@ -39,6 +39,7 @@ from backend.rest_auth import RestAuth
 from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
+from backend.temp_uploads_sweep import maybe_sweep_stale_uploads, sweep_stale_uploads
 from backend.phonetic_vocab_service import PhoneticVocabService
 from backend.metrics_collector import metrics  # noqa: F401
 from backend.api_versioning import api_version_header, get_api_info
@@ -1100,6 +1101,9 @@ atexit.register(_rest_engine_cleanup)
 
 TEMP_DIR = settings.DATA_DIR / "temp_uploads"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
+# Сырое аудио осиротевших загрузок (процесс умер до finally) не должно жить неделями:
+# при старте стираем обычные файлы старше часа, дальше — не чаще раза в 10 минут на запросе.
+sweep_stale_uploads(TEMP_DIR)
 
 
 # ---------------------------------------------------------------------------
@@ -2084,6 +2088,7 @@ def transcribe_audio():
     if not safe_base.endswith(original_ext):
         safe_base = os.path.splitext(safe_base)[0] + original_ext
 
+    maybe_sweep_stale_uploads(TEMP_DIR)
     temp_path = TEMP_DIR / f"{uuid.uuid4().hex[:12]}_{safe_base}"
     temp_cleanup_deferred = False
 
