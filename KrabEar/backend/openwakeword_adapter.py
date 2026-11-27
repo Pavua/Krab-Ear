@@ -150,6 +150,7 @@ class OpenWakeWordAdapter:
         # Последняя детекция для IPC-поллинга агента (wake_word_status).
         # Монотонный ts — агент дебаунсит по росту, wall-clock не нужен.
         self._last_detection: dict[str, Any] | None = None
+        self._detection_seq: int = 0  # id срабатывания: связывает status.last_detection и wake_word_take_preroll (B2)
         # Pre-roll: ссылка на кольцо ТОЙ сессии, что сработала, якорь (абсолютная позиция), время и ревизия политики.
         self._preroll_lock = threading.Lock()
         self._preroll_fire: dict[str, Any] | None = None
@@ -758,7 +759,7 @@ class OpenWakeWordAdapter:
 
     def _record_detection(
         self, model_name: str, score: float, *,
-        capture_revision: str | None = None, generation: int | None = None,
+        capture_revision: str | None = None, generation: int | None = None, detection_id: int | None = None,
     ) -> bool:
         """Публикует детекцию только для текущей ревизии политики захвата и живой сессии.
 
@@ -772,8 +773,12 @@ class OpenWakeWordAdapter:
             revision = self._privacy_revision()
             if revision is None or (capture_revision is not None and revision != capture_revision):
                 return False
+            if detection_id is None:  # прямой вызов без арминга pre-roll (тесты, будущие потребители): свой id
+                self._detection_seq += 1
+                detection_id = self._detection_seq
             self._last_detection = {
                 "_privacy_revision": revision,
+                "id": detection_id,
                 "model": model_name,
                 "score": float(score),
                 "ts": time.monotonic(),
@@ -970,7 +975,13 @@ class OpenWakeWordAdapter:
         Агент вызывает сразу при детекции (до ``wake_word_stop``): пока слушатель жив, кольцо не сброшено. Недоступно
         (``available: false`` + код причины, без аудио): нет свежего срабатывания, истёк TTL, сменилась ревизия политики
         захвата. Звук не пишется на диск и не логируется."""
+        requested = (params or {}).get("detection_id")
         with self._preroll_lock:
+            current = self._preroll_fire
+            if requested is not None and current is not None and current.get("id") != requested:
+                # Агент пришёл за звуком ДРУГОГО срабатывания (его слот уже вытеснен новым или id не наш): чужое
+                # аудио не отдаём и новый слот не расходуем — его заберёт тот, кто увидел его id (ревью B2).
+                return {"ok": True, "available": False, "reason": "superseded"}
             fire, self._preroll_fire = self._preroll_fire, None
             ended, self._preroll_ended = self._preroll_ended, False
         if fire is None:
@@ -1393,14 +1404,18 @@ class OpenWakeWordAdapter:
                                 return  # зомби старого поколения не армирует чужую сессию
                             if self._stop_event.is_set():
                                 return  # stop() уже отозвал срабатывание: не вооружаем и не публикуем после остановки
+                            self._detection_seq += 1
+                            detection_id = self._detection_seq
                             with self._preroll_lock:
                                 self._preroll_ended = False
                                 self._preroll_fire = {
                                     "ring": ring, "rate": sample_rate, "ts": time.monotonic(), "rev": capture_revision,
                                     "anchor": max(0, ring_total - (back if back is not None else 0)),
+                                    "id": detection_id,
                                 }
                         if not self._record_detection(
                             mdl_name, score, capture_revision=capture_revision, generation=generation,
+                            detection_id=detection_id,
                         ):
                             return
                         live_published = True
