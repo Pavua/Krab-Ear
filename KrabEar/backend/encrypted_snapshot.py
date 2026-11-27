@@ -2618,7 +2618,8 @@ def _apply_verified_snapshot_locked(
     logger.info(
         "encrypted_snapshot: restore %s зафиксирован (COMMITTED) из %s, "
         "%d записей, отфильтровано строк по ledger %d",
-        transaction_id, snapshot_dir, restored_entries, filtered_out_lines,
+        # Только имя каталога: абсолютный путь профиля (с именем пользователя) в лог не пишем.
+        transaction_id, Path(snapshot_dir).name, restored_entries, filtered_out_lines,
     )
     return {
         "ok": True,
