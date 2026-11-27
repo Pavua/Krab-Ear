@@ -16,6 +16,10 @@ from backend.openwakeword_adapter import OpenWakeWordAdapter
 CHUNK = 1280
 
 
+class _SessionDone(BaseException):
+    """Конец сценария теста: BaseException, чтобы `except Exception` цикла прослушивания его не глотал."""
+
+
 class _Stream:
     def __init__(self, adapter, chunks, on_read=None):
         self._adapter, self._chunks, self._reads, self._on_read = adapter, chunks, 0, on_read
@@ -28,10 +32,14 @@ class _Stream:
 
     def read(self, frames):
         self._reads += 1
+        if self._reads > self._chunks:
+            # Ровно `chunks` чанков обработано: заканчиваем цикл. Флаг остановки взводим ДО выхода, но чанк
+            # не отдаём: после stop() цикл не вправе вооружать/публиковать срабатывание (B4), так что
+            # «последний чанк со взведённым stop» больше не считается обработанным.
+            self._adapter._stop_event.set()
+            raise _SessionDone
         if self._on_read is not None:
             self._on_read(self._reads)
-        if self._reads >= self._chunks:
-            self._adapter._stop_event.set()
         return np.ones(frames, dtype=np.int16), False
 
 
@@ -70,7 +78,10 @@ def _adapter(tmp_path, settings=None, stt_transcribe=None):
 def _run(adapter, monkeypatch, chunks=6, on_read=None):
     monkeypatch.setitem(sys.modules, "sounddevice",
                         SimpleNamespace(InputStream=lambda **kw: _Stream(adapter, chunks, on_read)))
-    adapter._listen_loop(threshold=0.5, chunk_size=CHUNK, sample_rate=16000, generation=adapter._generation)
+    try:
+        adapter._listen_loop(threshold=0.5, chunk_size=CHUNK, sample_rate=16000, generation=adapter._generation)
+    except _SessionDone:
+        pass
 
 
 def _arm(adapter, oww=None, stt=None):
