@@ -1672,16 +1672,12 @@ class RecordingCoreService:
             # R1: STT упал — спилл ОСТАВИТЬ (восстановление на следующем старте
             # вернёт аудио, которое сейчас потеряно). close() уже сделан
             # recorder.stop() внутри phase_a — повторный вызов безопасен.
-            # Исключение — privacy (fail-closed): тот же приговор, что у спасательного WAV в
-            # phase_c, — plaintext-аудио после краха STT на диске не остаётся, иначе рескан
-            # (_process_one) сохранил бы WAV под privacy (ревью Opus #2307, P1). Цена —
-            # запись теряется осознанно; спилл ЖИВОЙ записи (на случай падения процесса)
-            # это не меняет и покрыт purge.
+            # Политика владельца (27.11.2026, ревью Opus #2307, P1): это верно и под privacy —
+            # спилл и восстановленный из него WAV остаются на диске ОСОЗНАННО (для восстановления),
+            # транскрипция при этом не запускается (recording_rescue._process_one). Plaintext-аудио
+            # под privacy в таком случае НЕ исчезает; чистит его только purge.
             if spill is not None:
-                if self._privacy_mode_enabled():
-                    spill.discard()
-                else:
-                    spill.close()
+                spill.close()
             return phase_c["early_return"]
         transcribe_payload = phase_c["transcribe_payload"]
 
@@ -3277,9 +3273,9 @@ class RecordingCoreService:
             import uuid as _uuid
 
             import soundfile as _sf
-            # Privacy ON (или состояние неизвестно — гейт fail-closed): сырой голос на диск
-            # не пишем. Ценой этого краш STT под privacy теряет аудио — осознанно: приватный
-            # режим обещает, что plaintext-аудио не оседает на диске.
+            # Privacy ON (или состояние неизвестно — гейт fail-closed): отдельную копию
+            # failed_recordings/*.wav не создаём. Это НЕ обещание, что аудио не оседает на диске:
+            # R1-спилл (rescue/*.f32.part) под privacy остаётся осознанно — см. handle_stop_recording.
             if self._privacy_mode_enabled():
                 raise _RecoveryWavSkipped("privacy_mode")
             _failed_dir = Path(self.store.data_dir) / "failed_recordings"
@@ -3317,7 +3313,7 @@ class RecordingCoreService:
             logger.exception("phase_c: STT crashed", extra={"quality_profile": quality_profile})
             # Спасательная копия уже на диске (см. presave выше) — её и отдаём, КРОМЕ случая,
             # когда privacy включили, пока STT работал (или состояние неизвестно): тогда
-            # plaintext-аудио удаляется, а путь не отдаётся. Не удалилось — путь остаётся
+            # копия failed_recordings/*.wav удаляется, а путь не отдаётся (R1-спилл остаётся). Не удалилось — путь остаётся
             # (файл реально на диске), сбой громко логируется.
             if _presaved_path is not None and self._privacy_mode_enabled():
                 try:

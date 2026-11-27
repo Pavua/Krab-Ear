@@ -1,7 +1,8 @@
 """Спасательный WAV и privacy (ревью ChatGPT R-Krab-Ear-fix-02, RKE-F02-01/-07; 27.11.2026).
 
 На base phase_c писал сырой голос в ``failed_recordings/`` БЕЗУСЛОВНО и оставлял его после
-краха STT — при включённом privacy plaintext-аудио оседало на диске. Теперь:
+краха STT. Теперь (ТОЛЬКО эта отдельная копия; R1-спилл ``rescue/`` под privacy остаётся
+осознанно по решению владельца 27.11.2026 — см. ``TestRescueSpillPolicyUnderPrivacy``):
   - privacy ON ⇒ (неизвестное состояние — fail-closed ``_privacy_mode_enabled``, тестируется отдельно)
      спасательная копия не создаётся;
   - privacy включили, пока STT работал, и он упал ⇒ файл удаляется, путь не отдаётся;
@@ -96,8 +97,10 @@ class TestRecoveryWavPrivacy(unittest.TestCase):
         self.assertIsNone(result.get("audio_recovery_path"))
 
 
-class TestRescueSpillPrivacy(unittest.TestCase):
-    """Ревью Opus #2307 (P1): R1-спилл (rescue/*.f32.part) тоже не переживает краш STT под privacy."""
+class TestRescueSpillPolicyUnderPrivacy(unittest.TestCase):
+    """Политика владельца (27.11.2026): под privacy при stt_failed R1-спилл и восстановленный WAV
+    остаются на диске ОСОЗНАННО (для восстановления), транскрипция не запускается. Тест фиксирует
+    это поведение, чтобы дрейф в любую сторону не прошёл молча (ревью Opus #2307, P1)."""
 
     def setUp(self):
         self._tmp_ctx = tempfile.TemporaryDirectory()
@@ -105,7 +108,7 @@ class TestRescueSpillPrivacy(unittest.TestCase):
         self.addCleanup(self._tmp_ctx.cleanup)
         self.rescue_dir = Path(self._tmp) / "rescue"
 
-    def _run(self, privacy: bool):
+    def _stop_with_failed_stt(self, privacy: bool):
         from tests.test_recording_spill_wiring import _FakeRecorder, _RaisingTranscriber, _make_service as _mk
         recorder = _FakeRecorder()
         svc = _mk(
@@ -114,19 +117,30 @@ class TestRescueSpillPrivacy(unittest.TestCase):
         )
         svc.handle_start_recording({})
         self.assertIsNotNone(recorder.received_spill, "предусловие: рекордер получил spill")
-        self.assertTrue(list(self.rescue_dir.glob("*.part")), "предусловие: спилл создан")
-        result = svc.handle_stop_recording({})
-        return result
+        return svc.handle_stop_recording({})
 
-    def test_privacy_on_stt_crash_discards_rescue_spill(self):
-        result = self._run(privacy=True)
+    def test_privacy_on_stt_crash_keeps_spill_deliberately(self):
+        result = self._stop_with_failed_stt(privacy=True)
         self.assertEqual(result.get("status"), "stt_failed")
-        self.assertEqual(list(self.rescue_dir.glob("*.part")), [], "plaintext-спилл пережил краш STT под privacy")
-        self.assertEqual(list(self.rescue_dir.glob("*.meta.json")), [])
+        self.assertTrue(list(self.rescue_dir.glob("*.part")), "спилл должен остаться для восстановления")
+        self.assertIsNone(result.get("audio_recovery_path"), "копия failed_recordings под privacy не создаётся")
 
-    def test_privacy_off_stt_crash_keeps_rescue_spill(self):
-        """Регресс R1: без privacy спилл после краха STT остаётся — рескан вернёт запись."""
-        result = self._run(privacy=False)
+    def test_privacy_on_rescan_keeps_wav_and_does_not_transcribe(self):
+        from backend.recording_rescue import run_rescue_scan
+        from tests.test_recording_rescue import FakeCollectionManager, FakeErrorBus, FakeRecordingCore, _seed_part
+        _seed_part(self.rescue_dir)
+        core = FakeRecordingCore()
+        result = run_rescue_scan(
+            rescue_dir=self.rescue_dir, recording_core=core, error_bus=FakeErrorBus(),
+            settings_get=lambda key, default=None: True if key == "privacy_mode_enabled" else default,
+            collection_manager=FakeCollectionManager(),
+        )
+        self.assertEqual(result, {"rescued": 1, "transcribed": 0, "kept_wavs": 1})
+        self.assertEqual(core.calls, [], "под privacy транскрипция рескана не запускается")
+        self.assertTrue(list(self.rescue_dir.glob("*.rescued.wav")))
+
+    def test_privacy_off_stt_crash_keeps_spill(self):
+        result = self._stop_with_failed_stt(privacy=False)
         self.assertEqual(result.get("status"), "stt_failed")
         self.assertTrue(list(self.rescue_dir.glob("*.part")))
 
