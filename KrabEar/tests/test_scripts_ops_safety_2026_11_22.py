@@ -1159,7 +1159,7 @@ def _update_agent_tree(tmp_path: Path, swift_ok: bool):
                  f'chmod +x "{build_out}/KrabEarAgent"; exit 0') if swift_ok else "exit 1"
     _exe(stub / "swift", 'echo "swift $*" >> "$STUB_LOG"\n' + build_cmd + "\n")
     # Агент «появляется» только после `open` (KE02B2-11: отсутствие процесса после open — ошибка).
-    _exe(stub / "pgrep", 'grep -q "^open " "$STUB_LOG" 2>/dev/null && exit 0\nexit 1\n')
+    _exe(stub / "pgrep", 'if grep -q "^open " "$STUB_LOG" 2>/dev/null; then echo 99999; exit 0; fi\nexit 1\n')
     _exe(stub / "codesign", "exit 0\n")
     _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
     return root, ctx

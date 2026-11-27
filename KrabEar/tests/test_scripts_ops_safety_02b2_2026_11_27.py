@@ -173,6 +173,34 @@ class TestVerifyBinaries:
         assert res.returncode == 1, res.stdout + res.stderr
         assert "различаются" in res.stdout
 
+    @pytest.mark.skipif(shutil.which("clang") is None, reason="нужен clang для реального Mach-O")
+    def test_correctly_synced_signed_pair_is_not_drift(self, tmp_path):
+        """Ревью Opus #2304 (P1): подпись бандла даёт +32 байта к размеру копии, но содержимое то же.
+        Реальные подписанные Mach-O (ad-hoc, во временном дереве; живой агент/TCC не затрагиваются)."""
+        root = _vb_tree(tmp_path, None, None)
+        src = tmp_path / "t.c"
+        src.write_text("int main(void){return 0;}\n")
+        built = tmp_path / "built"
+        subprocess.run(["clang", "-o", str(built), str(src)], check=True, capture_output=True, timeout=120)
+        app_dir = root / "Krab Ear.app"
+        app_bin = app_dir / "Contents" / "MacOS" / "KrabEarAgent"
+        app_bin.parent.mkdir(parents=True, exist_ok=True)
+        (app_dir / "Contents" / "Info.plist").write_text(
+            '<?xml version="1.0"?><plist version="1.0"><dict><key>CFBundleIdentifier</key>'
+            "<string>com.antigravity.krab-ear-test</string><key>CFBundleExecutable</key>"
+            "<string>KrabEarAgent</string></dict></plist>")
+        runtime = root / "native" / "runtime" / "KrabEarAgent"
+        runtime.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(built, app_bin)
+        shutil.copy2(built, runtime)
+        ident = ["--force", "--sign", "-", "--identifier", "com.antigravity.krab-ear-test"]
+        subprocess.run(["/usr/bin/codesign", *ident, str(runtime)], check=True, capture_output=True, timeout=60)
+        subprocess.run(["/usr/bin/codesign", *ident, str(app_dir)], check=True, capture_output=True, timeout=60)
+        assert app_bin.stat().st_size != runtime.stat().st_size, "предусловие: подписанные копии различаются размером"
+        res = self._vb(root, tmp_path, _pgrep_stub(tmp_path, []))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "различаются" not in res.stdout
+
     def test_pgrep_is_exact_name_not_substring(self, tmp_path):
         root = _vb_tree(tmp_path, "AAAA", "AAAA")
         self._vb(root, tmp_path, _pgrep_stub(tmp_path, []))
@@ -239,7 +267,10 @@ class TestVerifyBinaries:
 # ═══ update_agent ══════════════════════════════════════════════════════════
 
 
-def _ua_tree(tmp_path: Path, agent_appears: bool) -> Path:
+def _ua_tree(tmp_path: Path, agent_appears: bool, *, running_pid: int | None = None, kill_old: bool = False,
+             always_old: bool = False) -> Path:
+    """running_pid — «прежний агент» (реальный процесс теста); kill_old — pkill-заглушка его гасит;
+    always_old — pgrep и ПОСЛЕ open продолжает отдавать прежний PID (старый не выдаёт себя за новый)."""
     root = tmp_path / "proj"
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPTS / "update_agent.command", root / "scripts")
@@ -258,19 +289,106 @@ def _ua_tree(tmp_path: Path, agent_appears: bool) -> Path:
         f'mkdir -p "{build_out}"; echo NEW-BUILD > "{build_out}/KrabEarAgent"; chmod +x "{build_out}/KrabEarAgent"; exit 0\n',
     )
     _exe(stub / "codesign", "exit 0\n")
-    _exe(stub / "pkill", "exit 0\n")
+    kill = f'kill {running_pid} 2>/dev/null\n' if (kill_old and running_pid) else ""
+    _exe(stub / "pkill", f'echo "pkill $*" >> "$STUB_LOG"\n{kill}exit 0\n')
     _exe(stub / "sleep", "exit 0\n")
     _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
-    # агент «появляется» только после open — и только если agent_appears
-    pg = 'grep -q "^open " "$STUB_LOG" 2>/dev/null && exit 0\nexit 1\n' if agent_appears else "exit 1\n"
+    old = f"echo {running_pid}; exit 0\n" if running_pid else "exit 1\n"
+    if agent_appears and not always_old:
+        # агент «появляется» только после open — новым PID, которого раньше не было
+        pg = 'if grep -q "^open " "$STUB_LOG" 2>/dev/null; then echo 99999; exit 0; fi\n' + old
+    else:
+        pg = old
     _exe(stub / "pgrep", pg)
     return root
 
 
 @needs_zsh
 class TestUpdateAgentDelivery:
-    def _run(self, root: Path, tmp_path: Path) -> subprocess.CompletedProcess:
-        return _run([ZSH, str(root / "scripts" / "update_agent.command")], _env(tmp_path))
+    def _run(self, root: Path, tmp_path: Path, *args: str) -> subprocess.CompletedProcess:
+        return _run([ZSH, str(root / "scripts" / "update_agent.command"), *args], _env(tmp_path))
+
+    @staticmethod
+    def _ua_gate(root: Path, rc: int) -> None:
+        _exe(root / "scripts" / "safe_backend_restart.command", f'echo "gate $*" >> "$STUB_LOG"\nexit {rc}\n')
+
+    @staticmethod
+    def _live_agent() -> subprocess.Popen:
+        return subprocess.Popen(["sleep", "60"])
+
+    # ── ревью Opus #2304 (P2): busy-гейт и «старый процесс не выдаёт себя за новый» ──
+    def test_busy_backend_refuses_before_stopping_agent_or_replacing_binaries(self, tmp_path):
+        victim = self._live_agent()
+        try:
+            root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=True)
+            self._ua_gate(root, rc=1)
+            res = self._run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert victim.poll() is None, "агент остановлен под активной записью"
+            assert not any(c.startswith("pkill") for c in _calls(tmp_path))
+            assert (root / "native" / "runtime" / "KrabEarAgent").read_text() == "OLD-RUNTIME"
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_force_bypasses_the_gate(self, tmp_path):
+        victim = self._live_agent()
+        try:
+            root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=True)
+            self._ua_gate(root, rc=1)
+            res = self._run(root, tmp_path, "--force")
+            assert res.returncode == 0, res.stdout + res.stderr
+            assert not any(c.startswith("gate") for c in _calls(tmp_path))
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_gate_is_not_called_when_no_agent_is_running(self, tmp_path):
+        root = _ua_tree(tmp_path, agent_appears=True)
+        self._ua_gate(root, rc=1)
+        res = self._run(root, tmp_path)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert not any(c.startswith("gate") for c in _calls(tmp_path))
+
+    def test_unknown_argument_is_usage_error(self, tmp_path):
+        root = _ua_tree(tmp_path, agent_appears=True)
+        assert self._run(root, tmp_path, "--forse").returncode == 2
+
+    def test_old_agent_that_ignores_sigterm_aborts_before_binaries_change(self, tmp_path):
+        victim = self._live_agent()
+        try:
+            root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=False, always_old=True)
+            self._ua_gate(root, rc=0)
+            res = self._run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert (root / "native" / "runtime" / "KrabEarAgent").read_text() == "OLD-RUNTIME"
+            assert not any(c.startswith("open") for c in _calls(tmp_path))
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_stale_old_pid_after_open_is_not_a_successful_start(self, tmp_path):
+        victim = self._live_agent()
+        try:
+            root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=True, always_old=True)
+            self._ua_gate(root, rc=0)
+            res = self._run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert "не появился" in res.stdout
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_respawn_with_new_pid_is_success(self, tmp_path):
+        victim = self._live_agent()
+        try:
+            root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=True)
+            self._ua_gate(root, rc=0)
+            res = self._run(root, tmp_path)
+            assert res.returncode == 0, res.stdout + res.stderr
+        finally:
+            victim.kill()
+            victim.wait()
 
     def test_agent_that_never_appears_is_an_error_not_a_warning(self, tmp_path):
         root = _ua_tree(tmp_path, agent_appears=False)
@@ -303,12 +421,20 @@ class TestUpdateAgentDelivery:
 # ═══ repair_permissions ════════════════════════════════════════════════════
 
 
-def _rp_tree(tmp_path: Path, *, agent_dies: bool = True, tcc_fail: str = "") -> Path:
+def _rp_tree(tmp_path: Path, *, agent_dies: bool = True, tcc_fail: str = "", old_pid: int | None = None,
+             respawn_pid: int | None = None, kill_old: bool = False) -> Path:
+    """old_pid — работающий агент (реальный процесс теста); kill_old — pkill-заглушка его гасит;
+    respawn_pid — после pkill pgrep отдаёт ДРУГОЙ PID (как launchd KeepAlive)."""
     root = _copy(tmp_path, "repair_permissions.command")
     (root / "Krab Ear.app").mkdir()
     stub = tmp_path / "stubbin"
-    _exe(stub / "pkill", 'echo "pkill $*" >> "$STUB_LOG"\nexit 0\n')
-    _exe(stub / "pgrep", "exit 1\n" if agent_dies else "exit 0\n")
+    kill = f'kill {old_pid} 2>/dev/null\n' if (kill_old and old_pid) else ""
+    _exe(stub / "pkill", f'echo "pkill $*" >> "$STUB_LOG"\ntouch "$STUB_LOG.killed"\n{kill}exit 0\n')
+    if old_pid is None:
+        _exe(stub / "pgrep", "exit 1\n")
+    else:
+        respawn = f'[ -f "$STUB_LOG.killed" ] && echo {respawn_pid} && exit 0\n' if respawn_pid else ""
+        _exe(stub / "pgrep", f"{respawn}echo {old_pid}\nexit 0\n")
     _exe(stub / "sleep", "exit 0\n")
     _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
     # tcc_fail: подстрока вызова, на которой tccutil падает (например "Accessibility com.antigravity")
@@ -352,13 +478,33 @@ class TestRepairPermissions:
         assert not any(c.startswith("gate") for c in _calls(tmp_path))
 
     def test_agent_that_ignores_sigterm_aborts_without_sigkill(self, tmp_path):
-        root = _rp_tree(tmp_path, agent_dies=False)
-        _gate(tmp_path, rc=0)
-        res = self._run(root, tmp_path)
-        assert res.returncode == 1, res.stdout + res.stderr
-        calls = _calls(tmp_path)
-        assert not any(c.startswith("tccutil") for c in calls), "TCC сброшен при живом агенте"
-        assert not any("-9" in c for c in calls if c.startswith("pkill")), calls
+        victim = subprocess.Popen(["sleep", "60"])
+        try:
+            root = _rp_tree(tmp_path, old_pid=victim.pid)
+            _gate(tmp_path, rc=0)
+            res = self._run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            calls = _calls(tmp_path)
+            assert not any(c.startswith("tccutil") for c in calls), "TCC сброшен при живом агенте"
+            assert not any("-9" in c for c in calls if c.startswith("pkill")), calls
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_respawned_agent_does_not_abort_the_reset(self, tmp_path):
+        """Ревью Opus #2304 (P2): под launchd KeepAlive агент поднимается заново сразу после SIGTERM —
+        ждать надо смерти СТАРОГО PID, а не «процессов нет», иначе скрипт падал бы до сброса TCC."""
+        old, new = subprocess.Popen(["sleep", "60"]), subprocess.Popen(["sleep", "60"])
+        try:
+            root = _rp_tree(tmp_path, old_pid=old.pid, respawn_pid=new.pid, kill_old=True)
+            _gate(tmp_path, rc=0)
+            res = self._run(root, tmp_path)
+            assert res.returncode == 0, res.stdout + res.stderr
+            assert any(c.startswith("tccutil") for c in _calls(tmp_path))
+        finally:
+            for p in (old, new):
+                p.kill()
+                p.wait()
 
     def test_failed_accessibility_reset_is_not_swallowed(self, tmp_path):
         root = _rp_tree(tmp_path, tcc_fail="Accessibility com.antigravity.krab-ear")

@@ -60,15 +60,29 @@ AGENT_PATTERNS=(
   "native/KrabEarAgent/.build/release/KrabEarAgent"
 )
 
+# Процесс жив и не зомби.
+pid_alive() {
+  local st
+  st="$(/bin/ps -p "$1" -o stat= 2>/dev/null || true)"
+  [ -n "$st" ] && [ "${st#Z}" = "$st" ]
+}
+
 echo "1/5 Останавливаем старые процессы (SIGTERM)..."
+# Запоминаем PID ДО остановки и ждём смерти именно их: в проде агент под launchd (KeepAlive) и
+# поднимается заново сразу после SIGTERM — «процессов нет» там не наступит никогда, а скрипт
+# падал бы ещё до сброса TCC (ревью Opus #2304, P2).
+OLD_PIDS=""
+for pattern in "${AGENT_PATTERNS[@]}"; do
+  OLD_PIDS="$OLD_PIDS $(pgrep -f "$pattern" 2>/dev/null | tr '\n' ' ' || true)"
+done
 for pattern in "${AGENT_PATTERNS[@]}"; do
   pkill -f "$pattern" 2>/dev/null || true
 done
 agent_gone=0
 for _ in {1..20}; do
   alive=0
-  for pattern in "${AGENT_PATTERNS[@]}"; do
-    if pgrep -f "$pattern" >/dev/null 2>&1; then alive=1; fi
+  for pid in $(printf '%s' "$OLD_PIDS"); do  # разбиение по пробелам: одинаково в zsh и bash
+    if pid_alive "$pid"; then alive=1; fi
   done
   if [ "$alive" -eq 0 ]; then agent_gone=1; break; fi
   sleep 0.5

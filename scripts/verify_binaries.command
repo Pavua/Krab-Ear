@@ -85,6 +85,31 @@ hash_or_missing() {
   printf "size=%s hdr=%s" "$size" "${hdr:0:16}"
 }
 
+# Ревью Opus #2304, P1: размер ПОДПИСАННОГО файла не годится для сверки копий. Подпись bare-бинарника и
+# подпись бандла различаются (у бандла есть special slot Info.plist: +32 байта), поэтому корректно
+# синхронизированная пара давала ложный DRIFT после любого update_agent/--fix. Сверяем содержимое БЕЗ
+# подписи: sha256 временной копии после `codesign --remove-signature` (не Mach-O/не подписан — хэш как есть).
+unsigned_digest() {
+  local file_path="$1" tmpd digest
+  [ -f "$file_path" ] || { echo "MISSING"; return; }
+  tmpd="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/verify_binaries.XXXXXX")" || { echo "ERROR"; return; }
+  if /bin/cp "$file_path" "$tmpd/bin" 2>/dev/null; then
+    /usr/bin/codesign --remove-signature "$tmpd/bin" >/dev/null 2>&1 || true
+    digest="$(/usr/bin/shasum -a 256 "$tmpd/bin" | awk '{print $1}')"
+  else
+    digest="ERROR"
+  fi
+  /bin/rm -rf "$tmpd"
+  echo "$digest"
+}
+
+# Процесс жив и не зомби (зомби — уже завершённый, ждёт wait() родителя).
+pid_alive() {
+  local st
+  st="$(/bin/ps -p "$1" -o stat= 2>/dev/null || true)"
+  [ -n "$st" ] && [ "${st#Z}" = "$st" ]
+}
+
 APP_HASH="$(hash_or_missing "$APP_BIN")"
 RUNTIME_HASH="$(hash_or_missing "$RUNTIME_BIN")"
 BUILD_HASH="$(hash_or_missing "$BUILD_BIN")"
@@ -136,15 +161,17 @@ if [ "$RUNNING_COUNT" -gt 1 ]; then
   echo "  ⚠️  DRIFT: запущено $RUNNING_COUNT экземпляров KrabEarAgent (PID: $(printf '%s' "$RUNNING_PIDS" | tr '\n' ' '))"
   DRIFT=true
 fi
-# KE02B2-06: deploy-копии сверяем между собой, а не только процесс с путём.
-APP_SIZE="${APP_HASH%% hdr=*}"
-RUNTIME_SIZE="${RUNTIME_HASH%% hdr=*}"
+# KE02B2-06: deploy-копии сверяем между собой по содержимому БЕЗ подписи (см. unsigned_digest).
 if [ "$APP_HASH" = "MISSING" ]; then
   echo "  ⚠️  DRIFT: нет $APP_BIN"
   DRIFT=true
-elif [ "$RUNTIME_HASH" != "MISSING" ] && [ "$APP_SIZE" != "$RUNTIME_SIZE" ]; then
-  echo "  ⚠️  DRIFT: .app и native/runtime различаются ($APP_SIZE vs $RUNTIME_SIZE)"
-  DRIFT=true
+elif [ "$RUNTIME_HASH" != "MISSING" ]; then
+  APP_UNSIGNED="$(unsigned_digest "$APP_BIN")"
+  RUNTIME_UNSIGNED="$(unsigned_digest "$RUNTIME_BIN")"
+  if [ "$APP_UNSIGNED" = "ERROR" ] || [ "$RUNTIME_UNSIGNED" = "ERROR" ] || [ "$APP_UNSIGNED" != "$RUNTIME_UNSIGNED" ]; then
+    echo "  ⚠️  DRIFT: .app и native/runtime различаются (содержимое без подписи: ${APP_UNSIGNED:0:12} vs ${RUNTIME_UNSIGNED:0:12})"
+    DRIFT=true
+  fi
 fi
 RUNNING_BIN_REAL="$(/usr/bin/python3 -c "import os, sys; p=os.path.realpath(sys.argv[1]) if sys.argv[1] else ''; print(p)" "${RUNNING_BIN:-}" 2>/dev/null)"
 APP_BIN_REAL="$(/usr/bin/python3 -c "import os; print(os.path.realpath('$APP_BIN'))" 2>/dev/null)"
@@ -207,11 +234,21 @@ fi
 echo "  Auto-fixing drift…"
 echo ""
 
-# 1. Kill running.
+# 1. Kill running. Ждём смерти именно СТАРОГО PID (а не «процессов нет»): под launchd (KeepAlive)
+# агент поднимается заново сразу после SIGTERM, и это нормально. Не вышел за 10 с — SIGKILL не шлём
+# (мог бы оборвать запись) и ничего не подменяем (ревью Opus #2304, P2).
 if [ -n "$RUNNING_PID" ]; then
   echo "  → kill running PID $RUNNING_PID"
   /bin/kill "$RUNNING_PID" 2>/dev/null || true
-  /bin/sleep 2
+  old_gone=false
+  for _ in {1..50}; do
+    if ! pid_alive "$RUNNING_PID"; then old_gone=true; break; fi
+    /bin/sleep 0.2
+  done
+  if [ "$old_gone" != true ]; then
+    echo "  ❌ Агент (PID $RUNNING_PID) не завершился по SIGTERM за 10 с — SIGKILL не посылаю, бинарники не тронуты." >&2
+    exit 3
+  fi
 fi
 
 # 2. Source binary picked by **newest mtime** (avoid возврат к старому).
@@ -267,8 +304,16 @@ echo "  → synced both paths to source"
 
 # 4. Restart .app.
 /usr/bin/open "$ROOT_DIR/Krab Ear.app"
-/bin/sleep 2
-NEW_PID="$("$PGREP_BIN" -x "KrabEarAgent" 2>/dev/null | head -1 || true)"
+# Успех — процесс с PID, которого не было до остановки (старый не выдаёт себя за новый).
+NEW_PID=""
+for _ in {1..40}; do
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    if [ -z "$RUNNING_PID" ] || ! printf '%s\n' "$RUNNING_PIDS" | grep -qx "$cand"; then NEW_PID="$cand"; break; fi
+  done < <("$PGREP_BIN" -x "KrabEarAgent" 2>/dev/null || true)
+  [ -n "$NEW_PID" ] && break
+  /bin/sleep 0.25
+done
 if [ -n "$NEW_PID" ]; then
   echo "  ✅ .app restarted (PID $NEW_PID)"
 else

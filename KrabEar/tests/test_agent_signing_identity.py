@@ -62,12 +62,17 @@ elif tool == "pgrep":
     # Процесс агента «появляется» после open (как в реальности) либо задан заранее через SIGN_TEST_RUNNING.
     opened = any(json.loads(row)[0] == "open"
                  for row in pathlib.Path(os.environ["SIGN_TEST_TRACE"]).read_text().splitlines())
-    if os.environ.get("SIGN_TEST_RUNNING") or opened:
+    # Старый агент (до open) — 424242; после open «поднимается» НОВЫЙ процесс с другим PID.
+    if opened:
+        print("515151")
+    elif os.environ.get("SIGN_TEST_RUNNING"):
         print("424242")
     else:
         sys.exit(1)
 elif tool == "ps":
-    print("/fixture/foreign/KrabEarAgent")
+    # `ps -p PID -o stat=` — проверка «жив ли старый PID»: SIGTERM в фикстуре срабатывает, процесса уже нет.
+    if "stat=" not in args:
+        print("/fixture/foreign/KrabEarAgent")
 elif tool == "stat":
     path = pathlib.Path(args[-1])
     print(int(path.stat().st_mtime) if args[-2] == "%m" else path.stat().st_size)
@@ -298,15 +303,25 @@ class TestAgentSigningIdentity(unittest.TestCase):
     def test_report_only_newer_build_never_executes_signing_hint(self) -> None:
         newer = time.time() + 10
         os.utime(self.build, (newer, newer))
+        # Копии синхронизированы (одно содержимое): иначе отчёт справедливо покажет DRIFT .app ≠ runtime.
+        self.runtime.write_text("synced")
+        self.app_bin.write_text("synced")
         result = subprocess.run(
             ["bash", str(self.root / "scripts/verify_binaries.command")],
             cwd=self.root, env=self.env, capture_output=True, text=True, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         prohibited = {"security", "swift", "cp", "codesign", "pkill", "kill", "open"}
-        self.assertFalse([event for event in self.events() if event[0] in prohibited])
-        self.assertEqual(self.app_bin.read_text(), "old-app")
-        self.assertEqual(self.runtime.read_text(), "old-rtm")
+        # Сверка копий по содержимому БЕЗ подписи работает на временных копиях (verify_binaries.XXXXXX):
+        # cp/codesign --remove-signature над ними — не подпись и не изменение доставленных файлов.
+
+        def _tmp_copy_op(event) -> bool:
+            return event[0] in ("cp", "codesign") and bool(event[1]) and "verify_binaries." in event[1][-1]
+
+        offending = [event for event in self.events() if event[0] in prohibited and not _tmp_copy_op(event)]
+        self.assertFalse(offending, offending)
+        self.assertEqual(self.app_bin.read_text(), "synced")
+        self.assertEqual(self.runtime.read_text(), "synced")
 
 
 if __name__ == "__main__":
