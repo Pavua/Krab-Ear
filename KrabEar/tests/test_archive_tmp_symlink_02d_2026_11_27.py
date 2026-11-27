@@ -106,3 +106,52 @@ def test_settings_backup_is_private_at_creation(tmp_path, monkeypatch):
     assert copies, f"settings.json не скопирован: {result}"
     mode = stat.S_IMODE(copies[0].stat().st_mode)
     assert mode == 0o600, f"settings.json создан с правами {oct(mode)}"
+
+
+# ── ревью Opus #2306 (P2): сироты после краша переживали purge ──
+
+
+def _plant_orphans(mgr) -> list:
+    mgr._archive_dir.mkdir(parents=True, exist_ok=True)
+    orphans = [mgr._archive_dir / ".archive_crashed1.tmp", mgr._archive_dir / "archive.ndjson.tmp"]
+    for orphan in orphans:
+        orphan.write_text('{"id": "x", "text": "SECRET TRANSCRIPT"}\n')
+    return orphans
+
+
+def test_clear_all_removes_orphan_tmp_files(tmp_path):
+    mgr = ArchiveManager(_Store(str(tmp_path)))
+    orphans = _plant_orphans(mgr)
+    mgr.clear_all()
+    assert not [p.name for p in orphans if p.exists()], "purge оставил сироту с текстом архива"
+
+
+def test_next_rewrite_removes_orphan_tmp_files(tmp_path):
+    mgr = ArchiveManager(_Store(str(tmp_path)))
+    orphans = _plant_orphans(mgr)
+    mgr._rewrite_archive([{"id": "a", "text": "t"}])
+    assert not [p.name for p in orphans if p.exists()]
+    assert '"id": "a"' in mgr._archive_path.read_text()
+
+
+def test_orphan_sweep_does_not_follow_symlink_orphan(tmp_path):
+    mgr = ArchiveManager(_Store(str(tmp_path)))
+    mgr._archive_dir.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("VICTIM")
+    (mgr._archive_dir / ".archive_link.tmp").symlink_to(victim)
+    mgr.clear_all()
+    assert victim.read_text() == "VICTIM"
+    assert not (mgr._archive_dir / ".archive_link.tmp").exists()
+
+
+def test_append_does_not_follow_symlinked_archive(tmp_path):
+    mgr = ArchiveManager(_Store(str(tmp_path)))
+    mgr._archive_dir.mkdir(parents=True, exist_ok=True)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("VICTIM")
+    mgr._archive_path.unlink(missing_ok=True)
+    mgr._archive_path.symlink_to(victim)
+    with pytest.raises(OSError):
+        mgr._append_ndjson(mgr._archive_path, {"id": "a", "text": "t"})
+    assert victim.read_text() == "VICTIM"

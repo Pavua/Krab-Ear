@@ -172,7 +172,10 @@ class ArchiveManager:
         with self._lock_path.open("a", encoding="utf-8") as lock_f:
             fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
             try:
-                with path.open("a", encoding="utf-8") as fh:
+                # O_NOFOLLOW: подложенный симлинк на сам archive.ndjson не должен уводить дозапись
+                # в чужой файл (ревью Opus #2306, P3); новый файл — сразу 0600.
+                fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+                with os.fdopen(fd, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(payload, ensure_ascii=False) + "\n")
             finally:
                 fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
@@ -223,6 +226,30 @@ class ArchiveManager:
                     fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
         return archived_before
 
+    def _sweep_orphan_tmps(self) -> int:
+        """Удаляет осиротевшие ``.archive_*.tmp`` и legacy ``archive.ndjson.tmp`` рядом с архивом.
+
+        Краш между mkstemp и replace оставлял файл с ПОЛНЫМ текстом архива, который не удаляли ни
+        следующая запись, ни privacy-purge (ревью Opus #2306, P2). unlink не следует по симлинку.
+        Вызывать только под flock (см. ``_write_archive_atomic``).
+        """
+        parent = self._archive_path.parent
+        removed = 0
+        try:
+            candidates = list(parent.glob(".archive_*.tmp"))
+            candidates.append(parent / (self._archive_path.name + ".tmp"))
+        except OSError:
+            return 0
+        for tmp in candidates:
+            try:
+                os.unlink(tmp)
+                removed += 1
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                logger.warning("archive: не удалось удалить осиротевший tmp %s: %s", tmp.name, exc)
+        return removed
+
     def _write_archive_atomic(self, lines: "list[str] | None" = None) -> None:
         """Атомарно записать archive.ndjson через УНИКАЛЬНЫЙ временный файл рядом (mkstemp, 0600).
 
@@ -233,6 +260,9 @@ class ArchiveManager:
         Метод (а не функция модуля) намеренно пишет ``self._archive_path``: аудит purge-покрытия
         засчитывает очистку ``archive.ndjson`` только по _write*-методу, чей replace видит этот атрибут.
         """
+        # Вызывается ТОЛЬКО под cross-process flock: сирота прошлого процесса (kill -9/питание между
+        # mkstemp и replace) не может быть живым tmp соседнего писателя — их мы не заденем.
+        self._sweep_orphan_tmps()
         fd, tmp_name = tempfile.mkstemp(
             dir=str(self._archive_path.parent), prefix=".archive_", suffix=".tmp"
         )
