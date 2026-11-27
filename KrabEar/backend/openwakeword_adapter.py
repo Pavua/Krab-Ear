@@ -757,10 +757,18 @@ class OpenWakeWordAdapter:
         return None
 
     def _record_detection(
-        self, model_name: str, score: float, *, capture_revision: str | None = None,
+        self, model_name: str, score: float, *,
+        capture_revision: str | None = None, generation: int | None = None,
     ) -> bool:
-        """Публикует детекцию только для текущей ревизии политики захвата."""
+        """Публикует детекцию только для текущей ревизии политики захвата и живой сессии.
+
+        Остановка (``stop()``) отзывает детекцию синхронно, но поток, уже стоящий на этом локе, иначе опубликовал бы
+        её ПОСЛЕ остановки: агент увидел бы чужое срабатывание. Поэтому под тем же локом проверяем флаг остановки и,
+        если передано, поколение сессии (зомби старого цикла не пишет в новую).
+        """
         with self._lock:
+            if self._stop_event.is_set() or (generation is not None and self._generation != generation):
+                return False
             revision = self._privacy_revision()
             if revision is None or (capture_revision is not None and revision != capture_revision):
                 return False
@@ -1383,6 +1391,8 @@ class OpenWakeWordAdapter:
                         with self._lock:
                             if self._generation != generation:
                                 return  # зомби старого поколения не армирует чужую сессию
+                            if self._stop_event.is_set():
+                                return  # stop() уже отозвал срабатывание: не вооружаем и не публикуем после остановки
                             with self._preroll_lock:
                                 self._preroll_ended = False
                                 self._preroll_fire = {
@@ -1390,7 +1400,7 @@ class OpenWakeWordAdapter:
                                     "anchor": max(0, ring_total - (back if back is not None else 0)),
                                 }
                         if not self._record_detection(
-                            mdl_name, score, capture_revision=capture_revision,
+                            mdl_name, score, capture_revision=capture_revision, generation=generation,
                         ):
                             return
                         live_published = True
