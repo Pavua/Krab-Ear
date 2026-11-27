@@ -818,6 +818,12 @@ class ObsidianSyncManager:
             return 0
         if not vault_path.is_dir():
             raise OSError("obsidian purge: configured vault unavailable")
+        # G3-P03-04: configure() хранит resolve()-путь — симлинков в нём нет. Если корень
+        # vault или его родителя позже подменили симлинком, проверка folder ниже пройдёт
+        # (vault и folder резолвятся в одну цель) и purge удалил бы transcript_*.md чужого
+        # каталога. Цель не трогаем — очистка не подтверждена.
+        if vault_path.resolve() != vault_path:
+            raise OSError("obsidian purge: vault path redirected by symlink, cleanup unverified")
 
         # W1768 (MED, path-traversal): повторно проверяем тот же инвариант перед
         # удалением — folder перезагружается из state-файла и не является
@@ -950,7 +956,9 @@ class ObsidianSyncManager:
                             "ObsidianSync: vault из state-файла отвергнут: %s", exc
                         )
                     else:
-                        self._vault_path = p
+                        # G3-P03-04: храним resolve()-путь, как configure(): иначе старый
+                        # state с симлинком в пути ложно отказал бы в purge.
+                        self._vault_path = p.resolve()
             # W1768 (MED, path-traversal): folder из state-файла может быть подделан
             # (например внешним процессом). Валидируем при загрузке: если он выходит
             # за пределы vault (или vault ещё не настроен и folder сам по себе

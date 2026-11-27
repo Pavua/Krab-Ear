@@ -3352,7 +3352,12 @@ class HistoryService:
         rescue_deleted = 0
         try:
             rescue_dir = Path(self.store.data_dir) / "rescue"
-            if rescue_dir.is_dir():
+            if rescue_dir.is_symlink():
+                # G3-P03-06: iterdir() шёл по симлинку и удалял файлы ВНЕ профиля.
+                # Цель не трогаем; что в ней, purge не знает — очистка не подтверждена.
+                logger.warning("purge_all_data: rescue/ — симлинк, цель не трогаем")
+                secondary_errors.append("rescue")
+            elif rescue_dir.is_dir():
                 for f in rescue_dir.iterdir():
                     if f.is_file():
                         f.unlink(missing_ok=True)
@@ -4293,6 +4298,9 @@ class HistoryService:
         try:
             if _data_dir is not None:
                 _temp_uploads_dir = _data_dir / "temp_uploads"
+                if _temp_uploads_dir.is_symlink():
+                    # G3-P03-06: как rescue/ — по симлинку не ходим, цель вне профиля.
+                    raise OSError("temp_uploads/ — симлинк, цель не трогаем")
                 if _temp_uploads_dir.is_dir():
                     _temp_upload_files = [p for p in _temp_uploads_dir.iterdir() if p.is_file()]
                     for _upload_path in _temp_upload_files:
