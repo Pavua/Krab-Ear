@@ -352,6 +352,33 @@ class ReviewFixesTests(unittest.TestCase):
             model.close()
 
 
+class CloseDiscardsInflightTests(unittest.TestCase):
+    """ChatGPT 26.11, п.9: распознавание, летящее при close(), не публикует срабатывание."""
+
+    def test_close_during_inflight_transcription_publishes_nothing(self) -> None:
+        gate = threading.Event()
+        started = threading.Event()
+
+        def slow(_samples):
+            started.set()
+            gate.wait(5.0)
+            return "краб"
+
+        model = sk.SttKeywordModel(slow, name="krab_stt", cooldown_sec=0.0)
+        burst = _silence(10) + _tone(6) + _silence(8)
+        for i in range(0, len(burst) - FRAME + 1, FRAME):
+            model.predict(burst[i:i + FRAME])
+        self.assertTrue(started.wait(2.0))
+        model.close(timeout=0.05)  # воркер ещё внутри распознавания
+        gate.set()
+        model._worker.join(2.0)
+        self.assertFalse(model._worker.is_alive())
+        self.assertEqual(model.stats()["matched"], 0)
+        self.assertEqual(model.stats()["stale_discarded"], 1)
+        self.assertIsNone(model.fire_preroll_back())
+        self.assertLess(model.predict(_silence(1)[:FRAME])["krab_stt"], 0.5)
+
+
 class RateLimitRefundTests(unittest.TestCase):
     """Лимит 20/мин защищает от шторма СОВПАДЕНИЙ, а не от шума: пустые реплики лимит не едят (иначе шум комнаты
     оглушает споттер и настоящий «Краб» попадает в dropped_rate)."""
