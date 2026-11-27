@@ -39,6 +39,7 @@ from backend.rest_auth import RestAuth
 from backend.service import BackendService
 from backend.state_store import StateStore
 from backend.transcriber import Transcriber
+from backend.private_upload import ensure_private_dir, save_private
 from backend.temp_uploads_sweep import maybe_sweep_stale_uploads, sweep_stale_uploads
 from backend.phonetic_vocab_service import PhoneticVocabService
 from backend.metrics_collector import metrics  # noqa: F401
@@ -1100,7 +1101,10 @@ def _rest_engine_cleanup() -> None:
 atexit.register(_rest_engine_cleanup)
 
 TEMP_DIR = settings.DATA_DIR / "temp_uploads"
-TEMP_DIR.mkdir(parents=True, exist_ok=True)
+try:
+    ensure_private_dir(TEMP_DIR)
+except OSError as _temp_dir_exc:  # не валим импорт: обработчик загрузки повторит и вернёт ошибку
+    logger.warning("temp_uploads: каталог недоступен при старте: %s", _temp_dir_exc)
 # Сырое аудио осиротевших загрузок (процесс умер до finally) не должно жить неделями.
 # Стартовая уборка — в блоке ``__main__`` (НЕ на импорте: модуль импортируют десятки
 # тестов, и они чистили бы реальный ~/.krab_ear_data); дальше — не чаще раза в 10 минут
@@ -2098,7 +2102,7 @@ def transcribe_audio():
         # удалял частичный файл при ошибках записи (ENOSPC и т.п.).
         # Каталог мог исчезнуть после импорта из-за системной очистки или изоляции теста.
         # mkdir остаётся внутри try: ошибки прав/ENOSPC проходят общий обработчик ниже.
-        TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        ensure_private_dir(TEMP_DIR)
         if call_profile:
             from backend.call_stt_wire import CALL_MAX_WAV_BYTES, CallSTTValidationError, decode_call_wav
             try:
@@ -2106,9 +2110,9 @@ def transcribe_audio():
                 decode_call_wav(call_wav)
             except CallSTTValidationError:
                 return jsonify({"error": "invalid call WAV"}), 400
-            temp_path.write_bytes(call_wav)
+            save_private(call_wav, temp_path)
         else:
-            file.save(str(temp_path))
+            save_private(file, temp_path)
 
         # F1: Validate magic bytes before handing the file to any decoder.
         with open(str(temp_path), "rb") as _fh:
