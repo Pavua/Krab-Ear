@@ -14,7 +14,8 @@ struct WakeWordRearmHarness {
         let poller = WakeWordPoller(
             ipcProvider: { ipc },
             isToggleEnabled: { true },
-            onDetection: { exit(0) }
+            // Поллер ставит wake_word_take_preroll в очередь ДО onDetection; даём ему дойти до сервера.
+            onDetection: { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) } }
         )
         poller.activate()
         withExtendedLifetime(poller) { RunLoop.main.run() }
