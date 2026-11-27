@@ -222,6 +222,10 @@ final class WakeWordPoller {
     /// хронический клин, а не обычная диктовка. Строка обязана совпадать с
     /// `RECORDER_WORKER_HUNG_REASON` в KrabEar/backend/openwakeword_adapter.py.
     static let recorderWorkerHungReason = "recorder worker hung"
+    /// B17: оба движка выключены (off/off) — это выбор владельца, а не сбой. Бюджет self-heal НЕ
+    /// расходуется, иначе после трёх отказов wake word молчал бы и после включения движка в панели.
+    /// Строка обязана совпадать с `ENGINES_OFF_REASON` в KrabEar/backend/openwakeword_adapter.py.
+    static let enginesOffReason = "wake engines off"
 
     /// Все wake word IPC идут через ОДНУ серийную очередь: конкурентная
     /// global не гарантирует порядок ЗАВЕРШЕНИЯ независимых async-блоков,
@@ -253,6 +257,7 @@ final class WakeWordPoller {
     /// (часовая встреча дала бы сотни одинаковых строк).
     private var recordingRejectionLogged = false
     private var workerHungRejectionLogged = false
+    private var enginesOffRejectionLogged = false
     /// Последний известный engine_available (для Settings-статуса).
     private(set) var lastEngineAvailable: Bool?
 
@@ -482,6 +487,15 @@ final class WakeWordPoller {
                     self.failedStartAttempts = 0
                     self.recordingRejectionLogged = false
                     self.workerHungRejectionLogged = false
+                    self.enginesOffRejectionLogged = false
+                } else if why == Self.enginesOffReason {
+                    // Бюджет НЕ жжём: следующий self-heal (restartMinGapSec) подхватит движок сразу после
+                    // включения в панели; лог — один раз на эпизод, не каждые 10 секунд.
+                    if !self.enginesOffRejectionLogged {
+                        self.enginesOffRejectionLogged = true
+                        AgentLogger.shared.info(
+                            "[WakeWord] оба движка выключены — ждём включения (бюджет self-heal не расходуется)")
+                    }
                 } else if why == Self.recorderWorkerHungReason {
                     // Бюджет НЕ жжём (гейт снимется сам, когда тред выйдет), но
                     // это состояние хроническое: watchdog backend'а ведёт по

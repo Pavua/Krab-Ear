@@ -112,3 +112,29 @@ def test_both_off_from_the_start_never_appends_to_ring(tmp_path, monkeypatch):
     stream = _Stream(lambda n: None)
     _run(adapter, stream, monkeypatch)
     assert stream.closed and stream.reads == 1 and appended == []
+
+
+# ── ревью Opus #2309 (P2): off/off не должен жечь бюджет self-heal Swift-поллера ──
+
+
+def test_start_with_both_engines_off_returns_dedicated_reason(tmp_path):
+    adapter, _ = _adapter(tmp_path, {"wake_word_enabled": True, "wake_word_oww_mode": "off",
+                                     "wake_word_stt_mode": "off"})
+    adapter._oww_available = True
+    result = adapter.handle_wake_word_start({"model": "hey_jarvis"})
+    assert result["ok"] is False
+    assert result["reason"] == oa.ENGINES_OFF_REASON, result
+
+
+def test_engines_off_reason_matches_swift_and_is_checked_before_budget():
+    import re
+    from pathlib import Path
+
+    swift = (Path(__file__).resolve().parents[2] / "native/KrabEarAgent/Sources/KrabEarAgent/WakeWordPoller.swift"
+             ).read_text(encoding="utf-8")
+    m = re.search(r'static\s+let\s+enginesOffReason\s*=\s*"([^"]+)"', swift)
+    assert m, "константа enginesOffReason не найдена в WakeWordPoller.swift"
+    assert m.group(1) == oa.ENGINES_OFF_REASON
+    cmp_pos = swift.find("why == Self.enginesOffReason")
+    assert cmp_pos > 0, "sendStart не сравнивает reason с enginesOffReason — off/off снова жжёт бюджет"
+    assert swift.find("failedStartAttempts += 1") > cmp_pos
