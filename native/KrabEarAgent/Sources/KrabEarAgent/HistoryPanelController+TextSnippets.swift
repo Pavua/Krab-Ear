@@ -224,22 +224,45 @@ extension HistoryPanelController {
         let ipc = ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            var saved = false
             do {
                 _ = try ipc.call(method: "add_text_snippet", params: ["trigger": t, "expansion": txt])
+                saved = true
             } catch {
-                print("[Agent] add_text_snippet failed: \(error)")
+                // KEM08-07: в лог — только тип ошибки; описание IPC-ошибки может
+                // содержать триггер/текст сниппета (пользовательские данные).
+                NSLog("[Agent] add_text_snippet failed (%@)", String(describing: type(of: error)))
             }
             DispatchQueue.main.async {
-                // Clear fields
-                if isClaudeDesign {
-                    if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.cdAddTriggerField) as? NSTextField { tf.stringValue = "" }
-                    if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.cdAddTextField) as? NSTextField { tf.stringValue = "" }
-                } else {
-                    if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.addTriggerField) as? NSTextField { tf.stringValue = "" }
-                    if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.addTextField) as? NSTextField { tf.stringValue = "" }
+                guard saved else {
+                    // KEM08-02: при неудаче поля НЕ очищаем — пользователь не теряет текст.
+                    BackendToast.shared.show("Не удалось сохранить сниппет — текст оставлен в полях", duration: 4.0)
+                    return
                 }
+                self.clearSnippetFields(
+                    isClaudeDesign: isClaudeDesign,
+                    submittedTrigger: trigger,
+                    submittedText: text
+                )
                 self.fetchAndRebuildTextSnippetsList(isClaudeDesign: isClaudeDesign)
             }
+        }
+    }
+
+    /// Очищает поля добавления только после подтверждённой записи и только если
+    /// пользователь не успел изменить их, пока шёл IPC (иначе стёрли бы новый черновик).
+    @MainActor
+    private func clearSnippetFields(isClaudeDesign: Bool, submittedTrigger: String, submittedText: String) {
+        if isClaudeDesign {
+            if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.cdAddTriggerField) as? NSTextField,
+               DraftFieldClearing.shouldClear(current: tf.stringValue, submitted: submittedTrigger) { tf.stringValue = "" }
+            if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.cdAddTextField) as? NSTextField,
+               DraftFieldClearing.shouldClear(current: tf.stringValue, submitted: submittedText) { tf.stringValue = "" }
+        } else {
+            if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.addTriggerField) as? NSTextField,
+               DraftFieldClearing.shouldClear(current: tf.stringValue, submitted: submittedTrigger) { tf.stringValue = "" }
+            if let tf = objc_getAssociatedObject(self, &TextSnippetsAssocKeys.addTextField) as? NSTextField,
+               DraftFieldClearing.shouldClear(current: tf.stringValue, submitted: submittedText) { tf.stringValue = "" }
         }
     }
 
@@ -247,12 +270,18 @@ extension HistoryPanelController {
         let ipc = ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
+            var removed = true
             do {
                 _ = try ipc.call(method: "remove_text_snippet", params: ["trigger": trigger])
             } catch {
-                print("[Agent] remove_text_snippet failed: \(error)")
+                removed = false
+                // KEM08-07: тип ошибки, без описания (может содержать триггер).
+                NSLog("[Agent] remove_text_snippet failed (%@)", String(describing: type(of: error)))
             }
             DispatchQueue.main.async {
+                if !removed {
+                    BackendToast.shared.show("Не удалось удалить сниппет", duration: 3.0)
+                }
                 self.fetchAndRebuildTextSnippetsList(isClaudeDesign: isClaudeDesign)
             }
         }
@@ -263,17 +292,27 @@ extension HistoryPanelController {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
 
-            let snippets: [[String: Any]]
+            // KEM08-06: ошибка чтения ≠ «нет сниппетов». Раньше catch давал [] и UI
+            // показывал «Нет сниппетов» поверх живых данных; теперь список при
+            // ошибке не трогаем (nil), а пользователю сообщаем о недоступности.
+            var loaded: [[String: Any]]?
             do {
                 let resp = try ipc.call(method: "list_text_snippets", params: [:])
-                let result = resp["result"] as? [String: Any]
-                snippets = result?["snippets"] as? [[String: Any]] ?? []
+                if let result = resp["result"] as? [String: Any],
+                   let list = result["snippets"] as? [[String: Any]] {
+                    loaded = list
+                }
             } catch {
-                snippets = []
+                loaded = nil
             }
 
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
+                guard let snippets = loaded else {
+                    self.markSnippetsListUnavailableIfStillLoading(isClaudeDesign: isClaudeDesign)
+                    BackendToast.shared.show("Не удалось загрузить список сниппетов", duration: 3.0)
+                    return
+                }
                 if isClaudeDesign {
                     self.rebuildCDTextSnippetsList(snippets: snippets)
                 } else {
@@ -281,6 +320,20 @@ extension HistoryPanelController {
                 }
             }
         }
+    }
+
+    /// Если карточка ещё показывает только «Загрузка…» (первая загрузка не удалась) —
+    /// заменяем её честной надписью; готовый список (с данными) не трогаем.
+    @MainActor
+    private func markSnippetsListUnavailableIfStillLoading(isClaudeDesign: Bool) {
+        let obj = isClaudeDesign
+            ? objc_getAssociatedObject(self, &TextSnippetsAssocKeys.cdSnippetsCard)
+            : objc_getAssociatedObject(self, &TextSnippetsAssocKeys.snippetsCard)
+        let stack = (obj as? ThemeCardView)?.contentStackView ?? (obj as? CDSettingsCardView)?.contentStackView
+        guard let stack, stack.arrangedSubviews.count == 1,
+              let label = stack.arrangedSubviews.first as? NSTextField,
+              label.stringValue == "Загрузка…" else { return }
+        label.stringValue = "Список сниппетов недоступен"
     }
 
     // MARK: - Rebuild Lists
