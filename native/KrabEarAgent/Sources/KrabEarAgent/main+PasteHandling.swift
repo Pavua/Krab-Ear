@@ -206,7 +206,8 @@ extension AgentAppDelegate {
 
             if !pasteResult.ok {
                 // Отказ очереди/target/clipboard не разрешает позднюю запись stale text.
-                handlePasteFailure(reason: pasteResult.reason)
+                // Снимок резерва даёт handlePasteFailure проверить, что копия не устарела.
+                handlePasteFailure(reason: pasteResult.reason, fallback: request.snapshot.map { PasteClipboardFallback(text: textToInsert, snapshot: $0) })
             }
 
             // Звук завершения транскрибации (off main thread: AudioQueueXPC.Start синхронный).
@@ -262,16 +263,16 @@ extension AgentAppDelegate {
             markPasteStatus(historyId: historyId, status: pasteResult.ok ? "ok" : "failed")
             historyPanel?.onHistoryDidUpdate()
             if !pasteResult.ok {
-                handlePasteFailure(reason: pasteResult.reason)
+                handlePasteFailure(reason: pasteResult.reason, fallback: request.snapshot.map { PasteClipboardFallback(text: textToInsert, snapshot: $0) })
             }
         }
     }
 
-    func handlePasteFailure(reason: String, text: String? = nil) {
-        // До PasteService дело не дошло: clipboard не обещаем и не перезаписываем.
+    func handlePasteFailure(reason: String, text: String? = nil, fallback: PasteClipboardFallback? = nil) {
+        // До PasteService дело не дошло: Cmd+V не отправлялся, адресат не менялся.
         if reason.hasPrefix("target_activation_") {
             logger.warn("Вставка остановлена до отправки текста: \(reason)")
-            notify(title: "Krab Ear", body: "Не удалось подтвердить приложение для вставки. Текст сохранён в истории.")
+            notify(title: "Krab Ear", body: activationRefusalMessage(reason: reason, fallback: fallback))
             return
         }
 
@@ -346,6 +347,27 @@ extension AgentAppDelegate {
             title: "Krab Ear",
             body: "Вставка не удалась. \(details) \(clipboardNote)"
         )
+    }
+
+    /// Отказ активации адресата: копия в буфер только для отказов со стороны адресата
+    /// (failed/timeout/terminated) — операция была своя и текущая. busy: ввод и буфер
+    /// держит другая собственная операция; cancelled: операцию отменили, текст уже не
+    /// актуален. Для них поздняя запись нарушила бы правило «stale text» — без копии.
+    /// Даже разрешённая копия пишется лишь при неизменных очереди и буфере (см.
+    /// PasteService.putToClipboardIfUnchanged).
+    private func activationRefusalMessage(reason: String, fallback: PasteClipboardFallback?) -> String {
+        let plain = "Не удалось подтвердить приложение для вставки. Текст сохранён в истории."
+        let copyAllowed: Set<String> = ["target_activation_failed", "target_activation_timeout", "target_activation_terminated"]
+        guard let fallback, copyAllowed.contains(reason), settings.clipboardMode != "never_copy" else { return plain }
+        switch pasteService.putToClipboardIfUnchanged(fallback) {
+        case .copied:
+            return "Не удалось переключиться в приложение для вставки. Текст сохранён в истории и скопирован в буфер обмена, вставьте вручную (⌘V)."
+        case .concealed:
+            return "Не удалось переключиться в приложение для вставки. Текст сохранён в истории (буфер обмена защищён — не скопирован)."
+        case .stale:
+            logger.info("[Clipboard] Копия после отказа активации пропущена: очередь или буфер изменились")
+            return plain
+        }
     }
 
     func markPasteStatus(historyId: String?, status: String) {

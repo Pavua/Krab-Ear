@@ -39,6 +39,8 @@ final class InputAutomationQueue: @unchecked Sendable {
     init(capacity: Int = 8) { self.capacity = max(0, capacity) }
     var pendingCount: Int { lock.withLock { waiting.count } }
     var generation: UInt64 { lock.withLock { epoch } }
+    /// Ни активного, ни ждущего ввода: поздняя запись в буфер никого не инвалидирует.
+    var isIdle: Bool { lock.withLock { active == nil && waiting.isEmpty } }
     /// Даже writer без await инвалидирует ещё не отправленный собственный input.
     func invalidatePending() { lock.withLock { epoch &+= 1 } }
     func quarantine() { lock.withLock { quarantined = true } }
