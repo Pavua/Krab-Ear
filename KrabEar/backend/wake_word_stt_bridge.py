@@ -86,10 +86,17 @@ class GigaAmMemoryTranscriber:
         self._last_error: Optional[str] = None  # код последнего сбоя загрузки модели (без текста), для статуса
         self._gen = 0  # release() увеличивает: прогрев, начатый до выгрузки, не должен вернуть модель в память
         self._gen_lock = threading.Lock()  # отдельный лёгкий лок: release() не ждёт конца идущей загрузки, чтобы объявить отмену
+        self._loading = 0  # сколько потоков сейчас грузят/ждут загрузку: идущая загрузка тоже «есть что выгружать» (B18)
 
     # ------------------------------------------------------------------ модель
     def is_loaded(self) -> bool:
         return self._model is not None
+
+    def is_loading(self) -> bool:
+        """Идёт загрузка модели (прогрев или первая реплика). Выгрузка обязана учитывать её: ``is_loaded()`` в этот
+        момент False, а по окончании загрузки модель осталась бы в памяти при уже выключенном режиме."""
+        with self._gen_lock:
+            return self._loading > 0
 
     def last_error(self) -> Optional[str]:
         """Код последнего сбоя загрузки (``model_load_failed``) или None: виден в статусе СРАЗУ после прогрева, а не только
@@ -98,16 +105,30 @@ class GigaAmMemoryTranscriber:
 
     def _ensure_model(self) -> tuple[Any, Any]:
         if self._model is None:
-            with self._load_lock:  # загрузка ВНЕ mlx_lock: на первом запуске это секунды и скачивание весов
-                if self._model is None:
-                    try:
-                        self._model, self._tokenizer = self._loader(self._mode)
-                        self._last_error = None
-                    except Exception as exc:  # noqa: BLE001 — нет пакета/весов: споттер глохнет, backend живёт
-                        logger.warning("WakeWordSttBridge: модель не загрузилась (%s)", type(exc).__name__)
-                        self._last_error = "model_load_failed"
-                        raise TranscriberUnavailable("model_load_failed") from None
+            with self._gen_lock:
+                self._loading += 1
+            try:
+                with self._load_lock:  # загрузка ВНЕ mlx_lock: на первом запуске это секунды и скачивание весов
+                    if self._model is None:
+                        try:
+                            self._model, self._tokenizer = self._loader(self._mode)
+                            self._last_error = None
+                        except Exception as exc:  # noqa: BLE001 — нет пакета/весов: споттер глохнет, backend живёт
+                            logger.warning("WakeWordSttBridge: модель не загрузилась (%s)", type(exc).__name__)
+                            self._last_error = "model_load_failed"
+                            raise TranscriberUnavailable("model_load_failed") from None
+            finally:
+                with self._gen_lock:
+                    self._loading -= 1
         return self._model, self._tokenizer
+
+    def _drop_if_current(self, model: Any) -> None:
+        """Сброс СВОЕЙ устаревшей модели после release(): модель, которую уже загрузил более новый прогрев, не трогаем
+        (B18: поток со старым поколением раньше обнулял чужую свежезагруженную модель)."""
+        with self._load_lock:
+            if self._model is model:
+                self._model = self._tokenizer = None
+                self._warmed = False
 
     def release(self) -> None:
         """Выгружает модель (владелец выключил режим): ссылки сбрасываются сразу, кэш MLX — под mlx_lock с коротким
@@ -177,9 +198,7 @@ class GigaAmMemoryTranscriber:
             gen = self._gen
             model, tokenizer = self._ensure_model()
             if self._gen != gen:  # release() случился, пока грузились: модель не должна остаться в памяти
-                with self._load_lock:
-                    if self._gen != gen:
-                        self._model = self._tokenizer = None
+                self._drop_if_current(model)
                 return
             self._run_locked(model, tokenizer, np.zeros(SAMPLE_RATE, dtype=np.float32))
             if self._gen == gen:
@@ -193,9 +212,7 @@ class GigaAmMemoryTranscriber:
         gen = self._gen
         model, tokenizer = self._ensure_model()
         if self._gen != gen:  # release() случился, пока грузились: реплика перед выключением не возвращает 1,1 ГБ
-            with self._load_lock:
-                if self._gen != gen:
-                    self._model = self._tokenizer = None
+            self._drop_if_current(model)
             raise TranscriberUnavailable("released")
         audio = np.asarray(samples, dtype=np.int16).astype(np.float32) / 32768.0
         text = self._run_locked(model, tokenizer, audio)

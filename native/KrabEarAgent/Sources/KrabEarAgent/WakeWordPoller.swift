@@ -222,6 +222,10 @@ final class WakeWordPoller {
     /// хронический клин, а не обычная диктовка. Строка обязана совпадать с
     /// `RECORDER_WORKER_HUNG_REASON` в KrabEar/backend/openwakeword_adapter.py.
     static let recorderWorkerHungReason = "recorder worker hung"
+    /// B17: оба движка выключены (off/off) — это выбор владельца, а не сбой. Бюджет self-heal НЕ
+    /// расходуется, иначе после трёх отказов wake word молчал бы и после включения движка в панели.
+    /// Строка обязана совпадать с `ENGINES_OFF_REASON` в KrabEar/backend/openwakeword_adapter.py.
+    static let enginesOffReason = "wake engines off"
 
     /// Все wake word IPC идут через ОДНУ серийную очередь: конкурентная
     /// global не гарантирует порядок ЗАВЕРШЕНИЯ независимых async-блоков,
@@ -253,6 +257,7 @@ final class WakeWordPoller {
     /// (часовая встреча дала бы сотни одинаковых строк).
     private var recordingRejectionLogged = false
     private var workerHungRejectionLogged = false
+    private var enginesOffRejectionLogged = false
     /// Последний известный engine_available (для Settings-статуса).
     private(set) var lastEngineAvailable: Bool?
 
@@ -387,7 +392,11 @@ final class WakeWordPoller {
                 if !self.wedgedTracker.exhausted {
                     self.gaveUpNotified = false
                 }
-                let ts = (result["last_detection"] as? [String: Any])?["ts"] as? Double
+                let lastDetection = result["last_detection"] as? [String: Any]
+                let ts = lastDetection?["ts"] as? Double
+                // id срабатывания (ревью B2): take_preroll вернёт звук ИМЕННО этого срабатывания,
+                // а не вытеснившего его следующего. Старый backend id не шлёт → nil → прежний контракт.
+                let detectionId = lastDetection?["id"] as? Int
                 if self.tracker.shouldTrigger(lastDetectionTs: ts) {
                     var justTripped = false
                     let allowed = self.stormBreaker.allow(
@@ -404,7 +413,7 @@ final class WakeWordPoller {
                     AgentLogger.shared.info("[WakeWord] Детекция — запускаю разговор")
                     // Pre-roll ДО onDetection: разговор ставит паузу wake word (wake_word_stop),
                     // а серийная ipcQueue гарантирует, что take_preroll уйдёт раньше stop.
-                    self.requestPreroll(ipc: ipc)
+                    self.requestPreroll(ipc: ipc, detectionId: detectionId)
                     self.onDetection()
                     return
                 }
@@ -482,6 +491,15 @@ final class WakeWordPoller {
                     self.failedStartAttempts = 0
                     self.recordingRejectionLogged = false
                     self.workerHungRejectionLogged = false
+                    self.enginesOffRejectionLogged = false
+                } else if why == Self.enginesOffReason {
+                    // Бюджет НЕ жжём: следующий self-heal (restartMinGapSec) подхватит движок сразу после
+                    // включения в панели; лог — один раз на эпизод, не каждые 10 секунд.
+                    if !self.enginesOffRejectionLogged {
+                        self.enginesOffRejectionLogged = true
+                        AgentLogger.shared.info(
+                            "[WakeWord] оба движка выключены — ждём включения (бюджет self-heal не расходуется)")
+                    }
                 } else if why == Self.recorderWorkerHungReason {
                     // Бюджет НЕ жжём (гейт снимется сам, когда тред выйдет), но
                     // это состояние хроническое: watchdog backend'а ведёт по
@@ -521,10 +539,12 @@ final class WakeWordPoller {
     /// (контракт `wake_word_take_preroll`, одноразовый; что именно в нём — WakePreroll.swift).
     /// Таймаут 1 с (минимум IPCClient): дольше держать wake_word_stop за спиной нельзя.
     /// Разговор этот ответ не ждёт; нет метода/звука/privacy — молча без pre-roll.
-    private func requestPreroll(ipc: IPCClient) {
+    private func requestPreroll(ipc: IPCClient, detectionId: Int?) {
         WakePrerollMailbox.shared.arm(at: ProcessInfo.processInfo.systemUptime)
         Self.ipcQueue.async {
-            let resp = try? ipc.call(method: "wake_word_take_preroll", params: [:], timeoutSec: 1)
+            // Без id (старый backend) — пустые params, как раньше.
+            let params: [String: Any] = detectionId.map { ["detection_id": $0] } ?? [:]
+            let resp = try? ipc.call(method: "wake_word_take_preroll", params: params, timeoutSec: 1)
             let samples = WakePrerollDecoder.decode(resp)
             DispatchQueue.main.async {
                 guard let samples else {

@@ -78,16 +78,35 @@ SCANNED=0
 # одним пробелом — живой прогон это доказал: `grep ': Mach-O'` дал 0 находок
 # на дереве с 1124 подтверждёнными Mach-O файлами. Живой замер: 66132 файлов
 # / ~50с батчем через xargs — гейт гоняется раз на релиз, не на коммит.
-find "$VENDOR_DIR" -type f -print0 \
-  | xargs -0 file \
-  | grep -E ':[[:space:]]+Mach-O' \
-  | sed -E 's/:[[:space:]]+Mach-O.*//' \
-  > "$MACHO_LIST" || true
+# Ревью G2-Krab-Ear-02b2, KE02B2-04: раньше весь конвейер кончался `|| true` — сбой
+# find/xargs/file посреди обхода давал укороченный список и «чистый» скан. Теперь
+# конвейер `find | xargs file` проверяется отдельно (его сбой — fail), а код 1 от grep
+# («нет Mach-O») отделён от кода 2 («ошибка grep»); пустой список ловит гард ниже.
+FILE_OUT="$(mktemp)"
+trap 'rm -f "$FILE_OUT" "$MACHO_LIST" "$LEAK_REPORT" "${OTOOL_ERR_REPORT:-}" "${LINK_LIST:-}"' EXIT
+find "$VENDOR_DIR" -type f -print0 | xargs -0 file > "$FILE_OUT" \
+  || fail "find/xargs/file завершились с ошибкой — список файлов неполный, скан недостоверен"
+grep_rc=0
+grep -E ':[[:space:]]+Mach-O' "$FILE_OUT" | sed -E 's/:[[:space:]]+Mach-O.*//' > "$MACHO_LIST" \
+  || grep_rc=$?
+# pipefail: rc конвейера = 1, когда grep ничего не нашёл (это покрывает гард SCANNED=0);
+# любой другой ненулевой код — реальная ошибка.
+[[ "$grep_rc" -eq 0 || "$grep_rc" -eq 1 ]] || fail "grep/sed упали (код $grep_rc) при разборе вывода file"
+rm -f "$FILE_OUT"
 
+OTOOL_ERR_REPORT="$(mktemp)"
+OTOOL_ERRORS=0
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
   SCANNED=$((SCANNED + 1))
-  hits="$(otool -L "$f" 2>/dev/null | grep -E '/opt/homebrew|/usr/local' || true)"
+  # Ошибка самого otool (битый/обрезанный Mach-O, нет прав) — НЕ «зависимостей нет»:
+  # раньше `2>/dev/null | grep || true` превращал её в зелёный результат.
+  if ! otool_out="$(otool -L "$f" 2>&1)"; then
+    OTOOL_ERRORS=$((OTOOL_ERRORS + 1))
+    echo "  $f: ${otool_out%%$'\n'*}" >> "$OTOOL_ERR_REPORT"
+    continue
+  fi
+  hits="$(printf '%s\n' "$otool_out" | grep -E '/opt/homebrew|/usr/local' || true)"
   if [[ -n "$hits" ]]; then
     FOUND_LEAKS=1
     {
@@ -97,6 +116,12 @@ while IFS= read -r f; do
   fi
 done < "$MACHO_LIST"
 rm -f "$MACHO_LIST"
+
+if [[ "$OTOOL_ERRORS" -gt 0 ]]; then
+  echo "" >&2
+  head -20 "$OTOOL_ERR_REPORT" >&2
+  fail "otool не смог прочитать $OTOOL_ERRORS Mach-O файл(ов) — скан неполный (первые строки выше)"
+fi
 
 if [[ "$FOUND_LEAKS" -eq 1 ]]; then
   echo "" >&2
@@ -119,15 +144,52 @@ log "otool-скан: чисто ($SCANNED Mach-O файлов, 0 Homebrew/usr-lo
 # (git ls-files) — эта проверка не должна зависеть от того, что копирующая
 # сторона больше не ошибётся; она независимо ловит РЕЗУЛЬТАТ, а не механизм.
 log "Проверяю на .env/.venv/логи/данные внутри KrabEar/ ..."
-FORBIDDEN="$(find "$VENDOR_DIR/KrabEar" -maxdepth 1 \
+# Ревью G2-Krab-Ear-02b2, KE02B2-03: раньше `-maxdepth 1` и `|| true` — вложенные
+# `KrabEar/x/.env`, `KrabEar/x/y.log` пропускались, а сбой find давал «не найдено».
+# Секреты/логи/чужой venv/кэш ищем по ВСЕМУ дереву KrabEar/; `data` — только в корне
+# (подпакеты вправе называться data). Любая ошибка find — fail.
+FORBIDDEN="$(find "$VENDOR_DIR/KrabEar" \
   \( -name ".env" -o -name ".env.*" -o -name ".venv*" \
-     -o -name "*.log" -o -name "data" -o -name ".pytest_cache" \) \
-  2>/dev/null || true)"
+     -o -name "*.log" -o -name ".pytest_cache" \) -print)" \
+  || fail "find по $VENDOR_DIR/KrabEar завершился с ошибкой — проверка запрещённых файлов недостоверна"
+FORBIDDEN_DATA="$(find "$VENDOR_DIR/KrabEar" -maxdepth 1 -name "data" -print)" \
+  || fail "find (data) по $VENDOR_DIR/KrabEar завершился с ошибкой"
+FORBIDDEN="$(printf '%s\n%s\n' "$FORBIDDEN" "$FORBIDDEN_DATA" | sed '/^$/d')"
 if [[ -n "$FORBIDDEN" ]]; then
   echo "$FORBIDDEN" | sed 's/^/  /' >&2
   fail "найдены файлы, которым не место в дистрибутиве (секреты/логи/чужой venv) — см. список выше"
 fi
 log "Запрещённых файлов внутри KrabEar/: не найдено"
+
+# ── Проверка 2b: symlink не должен вести за пределы бандла (KE02B2-08) ────
+# `find -type f` символические ссылки пропускает: ссылка на /opt/homebrew/... внутри
+# бандла выглядела бы чистой, а у получателя была бы битой (или тянула чужую
+# библиотеку). Резолвим КАЖДУЮ ссылку; наружу, в никуда или с ошибкой резолва — fail.
+log "Проверяю, что symlink внутри бандла не ведут за его пределы ..."
+LINK_LIST="$(mktemp)"
+find "$VENDOR_DIR" -type l -print0 > "$LINK_LIST" \
+  || fail "find -type l завершился с ошибкой — проверка symlink недостоверна"
+LINK_BAD="$(/usr/bin/python3 -I - "$VENDOR_DIR" "$LINK_LIST" <<'PY'
+import os, sys
+root = os.path.realpath(sys.argv[1])
+bad = []
+with open(sys.argv[2], "rb") as fh:
+    links = [x for x in fh.read().split(b"\0") if x]
+for raw in links:
+    link = os.fsdecode(raw)
+    target = os.path.realpath(link)
+    inside = target == root or target.startswith(root + os.sep)
+    if not inside or not os.path.exists(target):
+        bad.append(f"{link} -> {target}")
+print("\n".join(bad[:20]))
+PY
+)" || fail "разбор symlink завершился с ошибкой"
+rm -f "$LINK_LIST"
+if [[ -n "$LINK_BAD" ]]; then
+  echo "$LINK_BAD" | sed 's/^/  /' >&2
+  fail "symlink ведут за пределы бандла или в никуда (первые строки выше) — бандл НЕ самодостаточен"
+fi
+log "Symlink внутри бандла: все резолвятся внутрь"
 
 # ── Проверка 3: критичные импорты с урезанным PATH, без user-site ─────────
 # /usr/bin:/bin — минимум, который есть на ЛЮБОМ Mac без единой сторонней

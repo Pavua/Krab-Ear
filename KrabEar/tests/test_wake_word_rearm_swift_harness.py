@@ -46,6 +46,7 @@ def test_poller_rearms_after_ordinary_settings_commit(tmp_path, monkeypatch):
     streams = []
     starts = []
     published = []
+    take_params = []
 
     class Stream:
         def __init__(self, blocksize, **kwargs):
@@ -78,10 +79,15 @@ def test_poller_rearms_after_ordinary_settings_commit(tmp_path, monkeypatch):
             if call["method"] == "wake_word_start":
                 result = adapter.handle_wake_word_start(call["params"])
                 starts.append(result["ok"])
+            elif call["method"] == "wake_word_take_preroll":
+                # Поллер просит pre-roll сразу после срабатывания; id приходит из last_detection (B2).
+                result = adapter.handle_wake_word_take_preroll(call.get("params") or {})
+                take_params.append(call.get("params") or {})
             else:
                 assert call["method"] == "wake_word_status"
                 result = adapter.handle_wake_word_status({})
-                if result["last_detection"]:
+                # Окно до выхода harness'а — несколько опросов: одно срабатывание считаем один раз.
+                if result["last_detection"] and result["last_detection"] not in published:
                     published.append(result["last_detection"])
             self.wfile.write(json.dumps({"id": call["id"], "ok": True, "result": result}).encode() + b"\n")
 
@@ -100,4 +106,6 @@ def test_poller_rearms_after_ordinary_settings_commit(tmp_path, monkeypatch):
     assert starts == [True, True]
     assert [stream.reads for stream in streams] == [0, 1]
     assert len(published) == 1
-    assert set(published[0]) == {"model", "score", "ts"}
+    assert set(published[0]) == {"id", "model", "score", "ts"}
+    # Реальный Swift-поллер передаёт id наблюдаемого срабатывания в take_preroll (ревью B2).
+    assert take_params and all(p == {"detection_id": published[0]["id"]} for p in take_params), take_params

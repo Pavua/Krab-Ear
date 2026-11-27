@@ -3355,7 +3355,7 @@ Returns: `{ok}`
 wake-word-openwakeword; SSE не подходит — раздельные EventBus двух процессов).  
 Нет params.  
 Returns: `{ok, running, active_model, engine_available, last_detection}`  
-— `last_detection` (object|null): `{model: str, score: float, ts: float}`;
+— `last_detection` (object|null): `{id: int, model: str, score: float, ts: float}` (`id` растёт с каждым срабатыванием; им агент просит звук у `wake_word_take_preroll`);
 `ts` — МОНОТОННЫЙ (`time.monotonic`) таймстамп процесса backend, агент
 дебаунсит по росту (nil re-arm'ит baseline). Сбрасывается в null при
 `wake_word_start`/`wake_word_stop`. Поле добавлено 2026-07-05; до этого
@@ -3366,8 +3366,10 @@ Returns: `{ok, running, active_model, engine_available, last_detection}`
 Звук «после слова» последнего ЖИВОГО срабатывания — чтобы первые слова команды не терялись за 1,3–1,7 с между словом
 «Краб» и стартом записи агента (хвост VAD, распознавание, опрос, старт сессии). Агент вызывает метод сразу при детекции,
 ДО `wake_word_stop`: пока слушатель жив, кольцо не сброшено.  
-Нет params.  
-Returns: `{ok: true, available: bool, reason?: "no_detection"|"session_ended"|"expired"|"privacy", sample_rate: 16000,
+Params (необязательно): `{detection_id?: int}` — `id` срабатывания из `wake_word_status.last_detection.id`. Если передан и
+текущий слот принадлежит другому срабатыванию → `available:false, reason:"superseded"`, слот НЕ расходуется (его заберёт
+тот, кто увидел его id). Без `detection_id` — прежнее поведение (берётся текущий слот).  
+Returns: `{ok: true, available: bool, reason?: "no_detection"|"session_ended"|"expired"|"privacy"|"superseded", sample_rate: 16000,
 format: "pcm_s16le_mono_b64", samples: int, pcm_b64: str, age_ms: int}` (при `available:false` аудио нет).  
 Одноразово (повтор → `no_detection`), не больше 6 с, TTL 15 с от срабатывания, при смене ревизии политики захвата —
 `privacy`. Для STT-движка якорь: одно слово «Краб» → звук с конца слова; реплика длиннее → с её начала; для openWakeWord —

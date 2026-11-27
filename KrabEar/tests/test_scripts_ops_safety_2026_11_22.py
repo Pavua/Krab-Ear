@@ -1158,9 +1158,12 @@ def _update_agent_tree(tmp_path: Path, swift_ok: bool):
     build_cmd = (f'mkdir -p "{build_out}"; echo NEW-BUILD > "{build_out}/KrabEarAgent"; '
                  f'chmod +x "{build_out}/KrabEarAgent"; exit 0') if swift_ok else "exit 1"
     _exe(stub / "swift", 'echo "swift $*" >> "$STUB_LOG"\n' + build_cmd + "\n")
-    _exe(stub / "pgrep", "exit 1\n")
+    # Агент «появляется» только после `open` (KE02B2-11: отсутствие процесса после open — ошибка).
+    _exe(stub / "pgrep", 'if grep -q "^open " "$STUB_LOG" 2>/dev/null; then echo 99999; exit 0; fi\nexit 1\n')
     _exe(stub / "codesign", "exit 0\n")
     _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
+    # Юнит агента под launchd НЕ загружен (иначе скрипт рестартует через kickstart, а не open).
+    _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 1\nexit 0\n')
     return root, ctx
 
 
@@ -1587,10 +1590,13 @@ PLUTIL = shutil.which("plutil") if sys.platform == "darwin" else None  # Swift �
 
 
 def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_pid: bool = True,
-                     launchctl: str | None = None, pid_line_override: str | None = None):
+                     launchctl: str | None = None, pid_line_override: str | None = None,
+                     gate_rc: int = 0, args: tuple = ()):
     root = tmp_path / "agent_proj"
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPTS / "install_agent_launchagent.command", root / "scripts")
+    # busy-гейт установщика = safe_backend_restart --check-only; здесь заглушка с заданным кодом
+    _exe(root / "scripts" / "safe_backend_restart.command", f'echo "$*" >> "$STUB_LOG.gate"\nexit {gate_rc}\n')
     tpl_dir = root / "KrabEar" / "launchagents"
     tpl_dir.mkdir(parents=True)
     template = (ROOT / "KrabEar" / "launchagents" / "ai.krab.ear.agent.plist.template").read_text()
@@ -1616,7 +1622,7 @@ def _agent_installer(tmp_path: Path, *, broken_template: bool = False, job_gets_
     _exe(tmp_path / "stubbin" / "pgrep", "exit 0\n")
     target = ctx["home"] / "Library" / "LaunchAgents" / "ai.krab.ear.agent.plist"
     target.write_text("OLD-PLIST")
-    res = subprocess.run(["/bin/bash", str(root / "scripts" / "install_agent_launchagent.command")],
+    res = subprocess.run(["/bin/bash", str(root / "scripts" / "install_agent_launchagent.command"), *args],
                          env=ctx["env"], capture_output=True, text=True, timeout=60)
     return res, ctx, target
 
@@ -1640,6 +1646,26 @@ class TestInstallAgentLaunchagent:
         assert "OLD-PLIST" not in target.read_text()
         assert str(tmp_path) in target.read_text()
         assert not list(target.parent.glob(".ai.krab.ear.agent*")), "остались временные файлы"
+
+    # ── G2-Krab-Ear-02c-01: busy-гейт до bootout ──
+    def test_busy_backend_refuses_before_any_change(self, tmp_path):
+        res, ctx, target = _agent_installer(tmp_path, gate_rc=1)
+        assert res.returncode != 0, res.stdout + res.stderr
+        assert target.read_text() == "OLD-PLIST", "рабочий plist затёрт под занятым backend"
+        assert not any("bootout" in c or "bootstrap" in c for c in _calls(ctx)), _calls(ctx)
+        assert Path(str(ctx["log"]) + ".gate").read_text().split() == ["--check-only"]
+
+    def test_force_bypasses_busy_gate(self, tmp_path):
+        res, ctx, target = _agent_installer(tmp_path, gate_rc=1, args=("--force",))
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert "OLD-PLIST" not in target.read_text()
+        assert not Path(str(ctx["log"]) + ".gate").exists(), "с --force гейт не должен вызываться"
+
+    def test_unknown_argument_is_an_error_not_ignored(self, tmp_path):
+        res, ctx, target = _agent_installer(tmp_path, args=("--forse",))
+        assert res.returncode == 2, res.stdout + res.stderr
+        assert target.read_text() == "OLD-PLIST"
+        assert not any("bootout" in c for c in _calls(ctx))
 
 
 # ── G2-KE02a-F08 run_release_checklist: git-состояние и в linked worktree ─
@@ -1684,6 +1710,34 @@ class TestReleaseChecklistGitState:
         plain = tmp_path / "plain"
         plain.mkdir()
         assert _git_state(plain) == "unknown"
+
+    # ── G2-Krab-Ear-02c-09: неотслеживаемые файлы — не «чисто» ──
+    def test_untracked_file_is_dirty(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / "new_source.py").write_text("print(1)")
+        assert _git_state(repo) == "dirty", "новый неотслеживаемый файл принят за чистое дерево"
+
+    def test_ignored_file_stays_clean(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / ".gitignore").write_text("*.log\n")
+        _git(repo, "add", ".gitignore")
+        _git(repo, "commit", "-q", "-m", "ignore")
+        (repo / "x.log").write_text("noise")
+        assert _git_state(repo) == "clean"
+
+    def test_git_failure_is_unknown_not_clean(self, tmp_path):
+        repo = self._repo(tmp_path)
+        (repo / ".git" / "index").write_bytes(b"corrupt")
+        assert _git_state(repo) == "unknown"
+
+    def test_unknown_state_fails_the_checklist_not_just_warns(self):
+        """Fail-closed (ревью Opus #2305, P2): ветка `unknown` обязана звать fail(), а не echo-предупреждение."""
+        src = (SCRIPTS / "run_release_checklist.command").read_text(encoding="utf-8")
+        start = src.index('GIT_STATE="$(git_worktree_state)"')
+        block = src[start:src.index("esac", start)]
+        wildcard = block[block.index("*)"):]
+        assert 'fail "git_status"' in wildcard, block
+        assert "⚠" not in wildcard, "unknown снова только предупреждает"
 
 
 # ── G2-KE02a-F06/F09 validate_c1_mps_fix ────────────────────────────────────

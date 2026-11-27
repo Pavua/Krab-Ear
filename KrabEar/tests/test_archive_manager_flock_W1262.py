@@ -195,9 +195,19 @@ class TestFlockHeldAcrossFullOperation(unittest.TestCase):
                     event_log.append("ARCHIVE_OPEN")
                 return fh
 
+            real_os_open = os.open
+
+            def tracking_os_open(path, flags, *args, **kwargs):
+                # Дозапись открывается через os.open(O_NOFOLLOW) (ревью Opus #2306, P3).
+                fd = real_os_open(path, flags, *args, **kwargs)
+                if Path(path) == archive_path and flags & os.O_APPEND:
+                    event_log.append("ARCHIVE_OPEN")
+                return fd
+
             with patch("fcntl.flock", side_effect=tracking_flock):
                 with patch.object(Path, "open", tracking_path_open):
-                    mgr._append_ndjson(mgr._archive_path, {"id": "z", "text": "test"})
+                    with patch("os.open", tracking_os_open):
+                        mgr._append_ndjson(mgr._archive_path, {"id": "z", "text": "test"})
 
             self.assertIn("LOCK_EX", event_log, "LOCK_EX must be in event log")
             self.assertIn("ARCHIVE_OPEN", event_log, "Archive must be opened for append")
@@ -225,14 +235,15 @@ class TestFlockHeldAcrossFullOperation(unittest.TestCase):
                     event_log.append("LOCK_UN")
                 return real_flock(fd, op)
 
-            real_path_replace = Path.replace
+            real_os_replace = os.replace
 
-            def tracking_replace(self_path, target):
+            def tracking_replace(src, dst):
+                # замена идёт через os.replace уникального mkstemp-файла (RF10), а не Path.replace
                 event_log.append("REPLACE")
-                return real_path_replace(self_path, target)
+                return real_os_replace(src, dst)
 
             with patch("fcntl.flock", side_effect=tracking_flock):
-                with patch.object(Path, "replace", tracking_replace):
+                with patch("backend.archive_manager.os.replace", tracking_replace):
                     mgr._rewrite_archive([{"id": "r", "text": "rewrite"}])
 
             self.assertIn("LOCK_EX", event_log)

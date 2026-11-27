@@ -14,10 +14,18 @@ Quick-start scripts для запуска Phase 1 Voice Assistant ecosystem (UI 
 **Что делает:**
 1. ✅ Проверяет LM Studio запущена на порту 1234
 2. ✅ Проверяет qwen3-30b загружена в LM Studio
-3. ✅ Запускает Voice Gateway (FastAPI)
+3. ✅ Запускает Voice Gateway (FastAPI) через лаунчер `scripts/start_voice_gateway.command`; здоровый уже работающий Gateway переиспользует
+   (гейты ниже)
 4. ⏳ Проверяет OpenClaw bridge доступен (Krab agent)
-5. ✅ Запускает Krab Ear.app
+5. ✅ Запускает Krab Ear.app, если агент не запущен (запущенный не трогает)
 6. 📊 Выводит таблицу со статусом всех сервисов
+
+**Гейты (скрипт отказывает, ничего не убивая):**
+- порт 8090 занят, но `/health` молчит — неизвестный процесс не завершается;
+- порт 8090 закрыт, но launchd-юнит `ai.krab.voice-gateway` загружен — второй Gateway с другим окружением не поднимается;
+  перезапуск юнита (`launchctl kickstart gui/<uid>/ai.krab.voice-gateway`) — решение владельца;
+- Krab Ear REST (`:5005`) не отвечает — лаунчер Gateway перезапустил бы прод-backend (`safe_backend_restart.command --with-rest`;
+  гейт «не под записью» у него есть). Без `ALLOW_BACKEND_RESTART_VIA_LAUNCHER=1` скрипт отказывает: поднимите backend штатно.
 
 **Требования перед запуском:**
 - LM Studio установлена и **запущена вручную**
@@ -30,10 +38,7 @@ Quick-start scripts для запуска Phase 1 Voice Assistant ecosystem (UI 
 - 8081 — OpenClaw bridge (управляется Krab agent)
 - 1234 — LM Studio (вручную)
 
-**Логи:**
-```bash
-tail -f /tmp/krab_voice_gateway.log
-```
+**Логи:** пишет канонический `scripts/start_voice_gateway.command` (путь он печатает); сам скрипт содержимое лога не выводит.
 
 ---
 
@@ -73,8 +78,10 @@ Krab Ear .app    | -     | ✅ запущена (PID 12345)
 ```
 
 **Что делает:**
-1. Останавливает Krab Ear.app
-2. Останавливает Voice Gateway (graceful SIGTERM, затем SIGKILL если нужно)
+1. Krab Ear.app **не останавливает** (прод-диктовка; закрыть — меню Krab Ear → Quit)
+2. Останавливает Voice Gateway только через канонический `scripts/stop_voice_gateway.command` (PID-файл + сверка владельца процесса); при ошибке — ненулевой выход.
+   Успех печатается, только если после этого порт 8090 свободен: без PID-файла (Gateway под launchd) канонический скрипт выходит 0 при живом
+   Gateway — тогда скрипт выходит с 1 и просит владельца: `launchctl bootout gui/<uid>/ai.krab.voice-gateway`
 3. Оставляет OpenClaw bridge (управляется Krab agent)
 4. Оставляет LM Studio запущенной (закройте вручную)
 
@@ -145,10 +152,8 @@ Krab Ear .app    | -     | ✅ запущена (PID 12345)
 **Решение:** Откройте LM Studio и выберите модель `lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit` из библиотеки, затем загрузите.
 
 ### "Voice Gateway startup failed"
-**Решение:** Проверьте логи:
-```bash
-tail -f /tmp/krab_voice_gateway.log
-```
+**Решение:** Проверьте лог Voice Gateway (путь печатает канонический `scripts/start_voice_gateway.command`).
+Скрипт сам содержимое лога в терминал не выводит.
 
 ### "OpenClaw voice bridge не доступен"
 **Решение:** Убедитесь что Krab agent запущен:
@@ -157,12 +162,9 @@ tail -f /tmp/krab_voice_gateway.log
 ```
 
 ### Порт уже занят
-**Решение:** Старый процесс ещё запущен. Используйте:
-```bash
-./scripts/stop_voice_assistant.command
-# или принудительно
-lsof -ti:8090 | xargs kill -9
-```
+**Решение:** Порт занят процессом, чей /health не отвечает. Скрипт его НЕ убивает.
+Остановите Gateway штатно (`./scripts/stop_voice_assistant.command`), а если порт занят
+чужим процессом — разберитесь с ним вручную (`lsof -nP -iTCP:8090 -sTCP:LISTEN`).
 
 ---
 
@@ -202,7 +204,7 @@ lsof -ti:8090 | xargs kill -9
 - **Voice Gateway venv:** автоматически активируется если существует `.venv_voice_gateway` или `.venv`
 - **LM Studio:** вне управления этих скриптов (запустите вручную, закройте вручную)
 - **Krab agent:** вне управления Voice Assistant скриптов (управляется отдельной командой)
-- **Logs:** check `/tmp/krab_voice_gateway.log` для отладки
+- **Logs:** лог Voice Gateway пишет канонический launcher; скрипты Voice Assistant логи не печатают
 
 ---
 

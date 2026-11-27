@@ -166,6 +166,22 @@ extension HistoryPanelController {
         }
     }
 
+    /// Снимает уже построенную форму создания профиля со стека (последний
+    /// arranged subview, содержащий поле имени), чтобы переиспользовать её при
+    /// перестройке карточки. nil — формы ещё нет (первая сборка).
+    @MainActor
+    private func detachSummaryCreateForm(
+        from stack: NSStackView,
+        containing field: NSTextField?
+    ) -> NSView? {
+        guard let field,
+              let form = stack.arrangedSubviews.last,
+              field.isDescendant(of: form) else { return nil }
+        stack.removeArrangedSubview(form)
+        form.removeFromSuperview()
+        return form
+    }
+
     // MARK: - Перестройка карточки (Gemini)
 
     @MainActor
@@ -173,6 +189,15 @@ extension HistoryPanelController {
         guard let card = objc_getAssociatedObject(
             self, &SummaryProfilesAssocKeys.card
         ) as? ThemeCardView else { return }
+
+        // KEM08-03: форму создания не пересоздаём — иначе перестройка карточки
+        // (после любого fetch/ошибки) стирает несохранённый черновик профиля.
+        let existingForm = detachSummaryCreateForm(
+            from: card.contentStackView,
+            containing: objc_getAssociatedObject(
+                self, &SummaryProfilesAssocKeys.nameField
+            ) as? NSTextField
+        )
 
         for v in card.contentStackView.arrangedSubviews {
             card.contentStackView.removeArrangedSubview(v)
@@ -198,7 +223,7 @@ extension HistoryPanelController {
         // Форма «Создать новый профиль».
         card.contentStackView.addArrangedSubview(summaryProfilesSeparator())
         card.contentStackView.addArrangedSubview(makeSubhead("СОЗДАТЬ НОВЫЙ ПРОФИЛЬ"))
-        card.contentStackView.addArrangedSubview(makeGeminiCreateForm())
+        card.contentStackView.addArrangedSubview(existingForm ?? makeGeminiCreateForm())
     }
 
     // MARK: - Перестройка карточки (Claude Design)
@@ -208,6 +233,14 @@ extension HistoryPanelController {
         guard let card = objc_getAssociatedObject(
             self, &SummaryProfilesAssocKeys.cdCard
         ) as? CDSettingsCardView else { return }
+
+        // KEM08-03: см. rebuildGeminiSummaryProfilesCard — сохраняем черновик формы.
+        let existingForm = detachSummaryCreateForm(
+            from: card.contentStackView,
+            containing: objc_getAssociatedObject(
+                self, &SummaryProfilesAssocKeys.cdNameField
+            ) as? NSTextField
+        )
 
         for v in card.contentStackView.arrangedSubviews {
             card.contentStackView.removeArrangedSubview(v)
@@ -236,7 +269,7 @@ extension HistoryPanelController {
         createLabel.font = .systemFont(ofSize: 10, weight: .semibold)
         createLabel.textColor = KrabEarTheme.Colors.textSecondary
         card.contentStackView.addArrangedSubview(createLabel)
-        card.contentStackView.addArrangedSubview(makeCDCreateForm())
+        card.contentStackView.addArrangedSubview(existingForm ?? makeCDCreateForm())
     }
 
     // MARK: - Строка профиля (Gemini)
@@ -529,8 +562,15 @@ extension HistoryPanelController {
             return
         }
 
-        let maxTokensText = (maxTokensField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        let maxTokens = Int(maxTokensText) ?? 300
+        // KEM08-08: некорректный max_tokens больше не превращается молча в 300.
+        let submittedMaxTokens = maxTokensField?.stringValue ?? ""
+        guard case .value(let maxTokens) = SummaryProfileInput.parseMaxTokens(submittedMaxTokens) else {
+            BackendToast.shared.show(
+                "Макс. токенов: целое число от 1 до \(SummaryProfileInput.maxTokensUpperBound)",
+                duration: 3.5
+            )
+            return
+        }
         let formatInstructions = (formatInstructionsField?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
 
         var params: [String: Any] = [
@@ -542,34 +582,58 @@ extension HistoryPanelController {
             params["format_instructions"] = formatInstructions
         }
 
+        // Снимок введённого — чтобы после успеха не стереть то, что пользователь
+        // успел набрать, пока шёл IPC (KEM08-03).
+        let submittedName = nameField.stringValue
+        let submittedPrompt = promptTextView?.string ?? ""
+        let submittedFormat = formatInstructionsField?.stringValue ?? ""
+
         let ipc = ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             var success = false
             var errorText = ""
             do {
-                _ = try ipc.call(method: "add_summary_profile", params: params)
-                success = true
+                let response = try ipc.call(method: "add_summary_profile", params: params)
+                // KEM08-04: подтверждением считается только result.profile.
+                if SummaryProfileInput.isCreationAcknowledged(response) {
+                    success = true
+                } else {
+                    errorText = "бэкенд не подтвердил запись профиля"
+                }
             } catch {
                 success = false
                 errorText = error.localizedDescription
             }
             DispatchQueue.main.async {
                 if success {
-                    nameField.stringValue = ""
-                    promptTextView?.string = ""
-                    maxTokensField?.stringValue = "300"
-                    formatInstructionsField?.stringValue = ""
+                    if DraftFieldClearing.shouldClear(current: nameField.stringValue, submitted: submittedName) {
+                        nameField.stringValue = ""
+                    }
+                    if let tv = promptTextView,
+                       DraftFieldClearing.shouldClear(current: tv.string, submitted: submittedPrompt) {
+                        tv.string = ""
+                    }
+                    if let f = maxTokensField,
+                       DraftFieldClearing.shouldClear(current: f.stringValue, submitted: submittedMaxTokens) {
+                        f.stringValue = "300"
+                    }
+                    if let f = formatInstructionsField,
+                       DraftFieldClearing.shouldClear(current: f.stringValue, submitted: submittedFormat) {
+                        f.stringValue = ""
+                    }
                     BackendToast.shared.show("Профиль «\(name)» создан", duration: 2.5)
+                    // Перестройка только после успеха; форма при этом сохраняется.
+                    self.fetchAndRebuildSummaryProfilesCard(isClaudeDesign: false)
+                    self.fetchAndRebuildSummaryProfilesCard(isClaudeDesign: true)
                 } else {
+                    // KEM08-03: при ошибке карточку не перестраиваем и поля не трогаем.
                     BackendToast.shared.show(
                         "Не удалось создать профиль: \(errorText)",
                         duration: 4.0
                     )
                 }
             }
-            self.fetchAndRebuildSummaryProfilesCard(isClaudeDesign: false)
-            self.fetchAndRebuildSummaryProfilesCard(isClaudeDesign: true)
         }
     }
 

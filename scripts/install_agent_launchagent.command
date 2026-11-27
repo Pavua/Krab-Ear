@@ -17,6 +17,16 @@
 
 set -e
 
+# --force: осознанно обойти busy-гейт (backend заведомо мёртв/завис). По умолчанию гейт включён.
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    *) printf '[install-agent] ❌ неизвестный аргумент: %s (допустимо: --force, --help)\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TEMPLATE="$ROOT_DIR/KrabEar/launchagents/ai.krab.ear.agent.plist.template"
 TARGET="$HOME/Library/LaunchAgents/ai.krab.ear.agent.plist"
@@ -50,6 +60,13 @@ chmod 644 "$STAGED"
 # ни затереть установленный файл.
 if ! plutil -lint "$STAGED" >/dev/null; then
   fail "plutil lint failed для нового plist — установленный юнит не тронут"
+fi
+
+# 🔴 Busy-гейт ДО любых изменений: bootout агента посреди диктовки рвёт управление записью
+# (хоткей-стоп, вставка), а аудио живёт в памяти backend. Занято/состояние неизвестно → отказ.
+if [ "$FORCE" -ne 1 ]; then
+  "$ROOT_DIR/scripts/safe_backend_restart.command" --check-only >/dev/null 2>&1 \
+    || fail "backend занят записью/встречей или состояние неизвестно — юнит агента не тронут (--force обходит гейт)"
 fi
 
 # 3. Bootout старой версии (если загружена), затем атомарная подмена файла.

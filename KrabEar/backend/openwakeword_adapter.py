@@ -48,6 +48,11 @@ RECORDING_IN_PROGRESS_REASON = "recording in progress"
 # это состояние было ВИДНО (в логе агента и watchdog'у), а не сливалось с
 # обычной диктовкой в вечный тихий ретрай.
 RECORDER_WORKER_HUNG_REASON = "recorder worker hung"
+# B17 (ревью Opus #2309, P2): оба движка выключены (off/off) — состояние, которое владелец меняет
+# сам и без паузы поллера. Отдельная строка нужна, чтобы Swift НЕ жёг бюджет self-heal (иначе после
+# трёх отказов wake word молчит и после включения движка). Менять парно с
+# WakeWordPoller.enginesOffReason.
+ENGINES_OFF_REASON = "wake engines off"
 
 # Встроенные модели openWakeWord
 _BUILTIN_MODELS: list[str] = [
@@ -87,6 +92,10 @@ _MODEL_LOAD_TIMEOUT_SEC: float = 30.0
 # (мик занят/недоступен) — 2376 событий Sentry за 7 часов.
 _MAX_CONSECUTIVE_STREAM_FAILURES: int = 3
 _STREAM_FAILURE_COOLDOWN_SEC: float = 60.0
+
+
+class WakeEnginesOffError(RuntimeError):
+    """Оба движка (openwakeword и STT-споттер) в режиме off — стартовать нечего, но это не сбой."""
 
 
 class WakeWordDisabledError(RuntimeError):
@@ -150,6 +159,7 @@ class OpenWakeWordAdapter:
         # Последняя детекция для IPC-поллинга агента (wake_word_status).
         # Монотонный ts — агент дебаунсит по росту, wall-clock не нужен.
         self._last_detection: dict[str, Any] | None = None
+        self._detection_seq: int = 0  # id срабатывания: связывает status.last_detection и wake_word_take_preroll (B2)
         # Pre-roll: ссылка на кольцо ТОЙ сессии, что сработала, якорь (абсолютная позиция), время и ревизия политики.
         self._preroll_lock = threading.Lock()
         self._preroll_fire: dict[str, Any] | None = None
@@ -330,8 +340,9 @@ class OpenWakeWordAdapter:
                     "Выполните: pip install openwakeword"
                 )
             if oww_mode == "off" and not stt_wanted:
-                logger.info("OpenWakeWordAdapter.start: все движки wake word выключены (режим off)")
-                raise RuntimeError("все движки wake word выключены в настройках")
+                # DEBUG: поллер стучится каждые ~10 с, INFO заливал бы лог (как и в ветке «идёт запись»).
+                logger.debug("OpenWakeWordAdapter.start: все движки wake word выключены (режим off)")
+                raise WakeEnginesOffError("все движки wake word выключены в настройках")
             use_oww = oww_mode != "off" and self._oww_available
 
             model_path = self._resolve_model_path(model_name) if use_oww else None
@@ -639,8 +650,11 @@ class OpenWakeWordAdapter:
         # Нечего выгружать (модель не загружалась — режим stt никогда не включали) — поток не создаём: stop() входит в
         # путь close() backend, где новые потоки нежелательны (граница rest_stageb_boundary), а выгрузка не нужна.
         is_loaded = getattr(self._stt_transcribe, "is_loaded", None)
+        is_loading = getattr(self._stt_transcribe, "is_loading", None)
         try:
-            if callable(is_loaded) and not is_loaded():
+            # Идущая загрузка — тоже «есть что выгружать» (B18): иначе остановка «насовсем» посреди прогрева пропускала
+            # выгрузку, и по окончании загрузки 1,1 ГБ оставались в памяти при выключенном wake word.
+            if callable(is_loaded) and not is_loaded() and not (callable(is_loading) and is_loading()):
                 return
             threading.Thread(target=self._release_stt_model, name="SttSpotterRelease", daemon=True).start()
         except Exception:  # noqa: BLE001 — stop()/close() не имеют права падать из-за выгрузки модели споттера
@@ -758,7 +772,7 @@ class OpenWakeWordAdapter:
 
     def _record_detection(
         self, model_name: str, score: float, *,
-        capture_revision: str | None = None, generation: int | None = None,
+        capture_revision: str | None = None, generation: int | None = None, detection_id: int | None = None,
     ) -> bool:
         """Публикует детекцию только для текущей ревизии политики захвата и живой сессии.
 
@@ -772,8 +786,12 @@ class OpenWakeWordAdapter:
             revision = self._privacy_revision()
             if revision is None or (capture_revision is not None and revision != capture_revision):
                 return False
+            if detection_id is None:  # прямой вызов без арминга pre-roll (тесты, будущие потребители): свой id
+                self._detection_seq += 1
+                detection_id = self._detection_seq
             self._last_detection = {
                 "_privacy_revision": revision,
+                "id": detection_id,
                 "model": model_name,
                 "score": float(score),
                 "ts": time.monotonic(),
@@ -954,6 +972,10 @@ class OpenWakeWordAdapter:
         try:
             self.start(model_name, _on_detected, threshold=threshold)
             return {"ok": True, "model": model_name, "threshold": threshold}
+        except WakeEnginesOffError:
+            # ТОЛЬКО reason (как в ветке записи): Swift-поллер берёт `error` раньше `reason`, и при наличии
+            # обоих полей why != enginesOffReason — бюджет self-heal сгорал бы (ревью Opus, #2309).
+            return {"ok": False, "reason": ENGINES_OFF_REASON}
         except RuntimeError as e:
             return {"ok": False, "error": str(e)}
         except ValueError as e:
@@ -970,7 +992,13 @@ class OpenWakeWordAdapter:
         Агент вызывает сразу при детекции (до ``wake_word_stop``): пока слушатель жив, кольцо не сброшено. Недоступно
         (``available: false`` + код причины, без аудио): нет свежего срабатывания, истёк TTL, сменилась ревизия политики
         захвата. Звук не пишется на диск и не логируется."""
+        requested = (params or {}).get("detection_id")
         with self._preroll_lock:
+            current = self._preroll_fire
+            if requested is not None and current is not None and current.get("id") != requested:
+                # Агент пришёл за звуком ДРУГОГО срабатывания (его слот уже вытеснен новым или id не наш): чужое
+                # аудио не отдаём и новый слот не расходуем — его заберёт тот, кто увидел его id (ревью B2).
+                return {"ok": True, "available": False, "reason": "superseded"}
             fire, self._preroll_fire = self._preroll_fire, None
             ended, self._preroll_ended = self._preroll_ended, False
         if fire is None:
@@ -1325,6 +1353,12 @@ class OpenWakeWordAdapter:
                         self._last_any_chunk_ts = time.monotonic()
                         if flat.any():
                             self._last_chunk_ts = self._last_any_chunk_ts
+                    # Оба движка выключили на лету (off/off): слушать нечему. Раньше цикл держал открытый тап и
+                    # продолжал копить звук в pre-roll-кольце до ручной остановки (ревью B17): закрываем микрофон
+                    # ДО добавления чанка в кольцо. Новый start() при off/off и так отказывает.
+                    if self.engine_mode(ENGINE_OWW) == "off" and self.engine_mode(ENGINE_STT) == "off":
+                        logger.info("OpenWakeWordAdapter: оба движка выключены — освобождаем микрофон")
+                        break
                     try:
                         ring_total = ring.append(flat)
                     except Exception:  # noqa: BLE001 — pre-roll best-effort: сбой кольца не должен глушить wake word
@@ -1393,14 +1427,18 @@ class OpenWakeWordAdapter:
                                 return  # зомби старого поколения не армирует чужую сессию
                             if self._stop_event.is_set():
                                 return  # stop() уже отозвал срабатывание: не вооружаем и не публикуем после остановки
+                            self._detection_seq += 1
+                            detection_id = self._detection_seq
                             with self._preroll_lock:
                                 self._preroll_ended = False
                                 self._preroll_fire = {
                                     "ring": ring, "rate": sample_rate, "ts": time.monotonic(), "rev": capture_revision,
                                     "anchor": max(0, ring_total - (back if back is not None else 0)),
+                                    "id": detection_id,
                                 }
                         if not self._record_detection(
                             mdl_name, score, capture_revision=capture_revision, generation=generation,
+                            detection_id=detection_id,
                         ):
                             return
                         live_published = True
