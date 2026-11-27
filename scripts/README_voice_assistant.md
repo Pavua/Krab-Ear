@@ -14,10 +14,18 @@ Quick-start scripts для запуска Phase 1 Voice Assistant ecosystem (UI 
 **Что делает:**
 1. ✅ Проверяет LM Studio запущена на порту 1234
 2. ✅ Проверяет qwen3-30b загружена в LM Studio
-3. ✅ Запускает Voice Gateway (FastAPI)
+3. ✅ Запускает Voice Gateway (FastAPI) через лаунчер `scripts/start_voice_gateway.command`; здоровый уже работающий Gateway переиспользует
+   (гейты ниже)
 4. ⏳ Проверяет OpenClaw bridge доступен (Krab agent)
-5. ✅ Запускает Krab Ear.app
+5. ✅ Запускает Krab Ear.app, если агент не запущен (запущенный не трогает)
 6. 📊 Выводит таблицу со статусом всех сервисов
+
+**Гейты (скрипт отказывает, ничего не убивая):**
+- порт 8090 занят, но `/health` молчит — неизвестный процесс не завершается;
+- порт 8090 закрыт, но launchd-юнит `ai.krab.voice-gateway` загружен — второй Gateway с другим окружением не поднимается;
+  перезапуск юнита (`launchctl kickstart gui/<uid>/ai.krab.voice-gateway`) — решение владельца;
+- Krab Ear REST (`:5005`) не отвечает — лаунчер Gateway перезапустил бы прод-backend (`safe_backend_restart.command --with-rest`;
+  гейт «не под записью» у него есть). Без `ALLOW_BACKEND_RESTART_VIA_LAUNCHER=1` скрипт отказывает: поднимите backend штатно.
 
 **Требования перед запуском:**
 - LM Studio установлена и **запущена вручную**
@@ -71,7 +79,9 @@ Krab Ear .app    | -     | ✅ запущена (PID 12345)
 
 **Что делает:**
 1. Krab Ear.app **не останавливает** (прод-диктовка; закрыть — меню Krab Ear → Quit)
-2. Останавливает Voice Gateway только через канонический `scripts/stop_voice_gateway.command` (PID-файл + сверка владельца процесса); при ошибке — ненулевой выход
+2. Останавливает Voice Gateway только через канонический `scripts/stop_voice_gateway.command` (PID-файл + сверка владельца процесса); при ошибке — ненулевой выход.
+   Успех печатается, только если после этого порт 8090 свободен: без PID-файла (Gateway под launchd) канонический скрипт выходит 0 при живом
+   Gateway — тогда скрипт выходит с 1 и просит владельца: `launchctl bootout gui/<uid>/ai.krab.voice-gateway`
 3. Оставляет OpenClaw bridge (управляется Krab agent)
 4. Оставляет LM Studio запущенной (закройте вручную)
 

@@ -14,7 +14,11 @@
 #   проектом (SingleInstanceGuard — только flock). Закрыть приложение —
 #   через меню Krab Ear → Quit.
 # - итоговый статус «остановлено» печатается, только если остановка
-#   подтверждена кодом возврата; иначе — ненулевой выход.
+#   подтверждена кодом возврата И порт Gateway после остановки свободен.
+#   Канонический stop_gateway без .gateway.pid говорит «вероятно, уже
+#   остановлен» и выходит 0, хотя Gateway живёт под launchd — одного кода
+#   возврата мало (ревью Opus #2303, P1). Порт занят → ненулевой выход и
+#   подсказка владельцу; сам скрипт ничего не завершает.
 # ==============================================================================
 
 set -euo pipefail
@@ -27,6 +31,10 @@ NC='\033[0m' # No Color
 
 SCRIPT_DIR="${0:A:h}"
 GATEWAY_STOP="${SCRIPT_DIR}/stop_voice_gateway.command"
+VG_PORT="${VG_PORT:-8090}"
+VG_LAUNCHD_LABEL="${VG_LAUNCHD_LABEL:-ai.krab.voice-gateway}"
+STOP_VERIFY_ATTEMPTS="${STOP_VERIFY_ATTEMPTS:-5}"      # проверок «порт свободен»
+STOP_VERIFY_INTERVAL="${STOP_VERIFY_INTERVAL:-1}"      # секунд между проверками
 
 log_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
@@ -42,6 +50,11 @@ log_warn() {
 
 log_error() {
     echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Слушает ли кто-то порт (`nc -z` есть в базовой macOS).
+is_port_open() {
+    nc -z -w 1 127.0.0.1 "$1" >/dev/null 2>&1
 }
 
 FAILED=0
@@ -66,7 +79,21 @@ if [ ! -f "$GATEWAY_STOP" ]; then
     log_error "Канонический скрипт остановки не найден: $GATEWAY_STOP"
     FAILED=1
 elif zsh "$GATEWAY_STOP"; then
-    log_info "Voice Gateway: канонический скрипт остановки завершился успешно ✅"
+    # Код возврата не доказательство: без PID-файла канонический скрипт выходит 0 при живом Gateway.
+    verify_attempt=0
+    while is_port_open "$VG_PORT" && (( verify_attempt < STOP_VERIFY_ATTEMPTS )); do
+        verify_attempt=$(( verify_attempt + 1 ))
+        sleep "$STOP_VERIFY_INTERVAL"
+    done
+    if is_port_open "$VG_PORT"; then
+        log_error "Voice Gateway НЕ остановлен: порт $VG_PORT всё ещё слушает ❌"
+        log_warn "Вероятно, Gateway под launchd (юнит $VG_LAUNCHD_LABEL), PID-файла нет."
+        log_warn "Остановить может только владелец: launchctl bootout gui/\$(id -u)/$VG_LAUNCHD_LABEL"
+        log_warn "Этот скрипт процесс не завершает."
+        FAILED=1
+    else
+        log_info "Voice Gateway: остановлен, порт $VG_PORT свободен ✅"
+    fi
 else
     log_error "Voice Gateway НЕ остановлен: канонический скрипт вернул ошибку ❌"
     FAILED=1

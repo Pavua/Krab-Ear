@@ -43,6 +43,8 @@ LM_STUDIO_PORT="${LM_STUDIO_PORT:-1234}"
 LM_STUDIO_MODELS_URL="${LM_STUDIO_MODELS_URL:-http://127.0.0.1:${LM_STUDIO_PORT}/v1/models}"
 LM_STUDIO_MODEL_ID="${LM_STUDIO_MODEL_ID:-qwen3-30b}"
 VG_PORT="${VG_PORT:-8090}"
+VG_LAUNCHD_LABEL="${VG_LAUNCHD_LABEL:-ai.krab.voice-gateway}"
+REST_PORT="${REST_PORT:-5005}"
 VG_HEALTH_URL="${VG_HEALTH_URL:-http://127.0.0.1:${VG_PORT}/health}"
 OPENCLAW_PORT="${OPENCLAW_PORT:-8081}"
 STARTUP_TIMEOUT="${STARTUP_TIMEOUT:-15}"          # секунд
@@ -165,6 +167,23 @@ if is_port_open "$VG_PORT"; then
         exit 1
     fi
 else
+    # Лаунчер Gateway (репо VG): (а) при упавшем Krab Ear REST (:REST_PORT) зовёт
+    # safe_backend_restart.command --with-rest — рестарт прод-backend (гейт под
+    # записью у него есть, но это всё равно вмешательство в прод); (б) при
+    # упавшей launchd-копии поднял бы ВТОРОЙ Gateway с другим окружением.
+    # Оба случая здесь не делаем молча (ревью Opus #2303, P2).
+    if launchctl print "gui/$(id -u)/$VG_LAUNCHD_LABEL" >/dev/null 2>&1; then
+        log_error "Порт $VG_PORT закрыт, но юнит $VG_LAUNCHD_LABEL загружен в launchd."
+        log_warn "Второй Gateway с другим окружением не поднимаю. Перезапуск юнита — решение владельца:"
+        log_warn "launchctl kickstart gui/\$(id -u)/$VG_LAUNCHD_LABEL"
+        exit 1
+    fi
+    if ! is_port_open "$REST_PORT" && [ "${ALLOW_BACKEND_RESTART_VIA_LAUNCHER:-0}" != "1" ]; then
+        log_error "Krab Ear REST (:$REST_PORT) не отвечает: лаунчер Gateway перезапустил бы прод-backend."
+        log_warn "Поднимите backend штатно: scripts/safe_backend_restart.command --with-rest"
+        log_warn "или повторите с ALLOW_BACKEND_RESTART_VIA_LAUNCHER=1 (осознанно)."
+        exit 1
+    fi
     if ! zsh "$GATEWAY_LAUNCHER"; then
         log_error "Launcher Voice Gateway завершился с ошибкой"
         exit 1

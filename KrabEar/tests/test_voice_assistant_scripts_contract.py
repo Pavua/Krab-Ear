@@ -109,6 +109,12 @@ for a; do port=$a; done
 grep -qx "$port" "$STATE/open_ports" 2>/dev/null
 """
 
+_STUB_LAUNCHCTL = r"""#!/bin/sh
+echo "launchctl $*" >> "$STATE/calls.log"
+# print gui/<uid>/<label>: «юнит загружен» только если тест это задал.
+[ "${FAKE_LAUNCHD_LOADED:-0}" = 1 ]
+"""
+
 _STUB_PGREP = r"""#!/bin/sh
 echo "pgrep $*" >> "$STATE/calls.log"
 if [ -f "$STATE/agent_running" ]; then echo 4242; exit 0; fi
@@ -154,6 +160,7 @@ class _Tree:
         self.state.mkdir()
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
+        (self.state / "open_ports").write_text("5005\n")
         for name, body in {
             "curl": _STUB_CURL,
             "nc": _STUB_NC,
@@ -161,6 +168,7 @@ class _Tree:
             "open": _STUB_OPEN,
             "pkill": _STUB_RECORD,
             "lsof": _STUB_RECORD,
+            "launchctl": _STUB_LAUNCHCTL,
         }.items():
             _write_exec(self.bin / name, body)
         for src in (START_VA, STOP_VA):
@@ -168,8 +176,10 @@ class _Tree:
         _write_exec(self.scripts / "start_voice_gateway.command", _STUB_GATEWAY_START)
         _write_exec(self.scripts / "stop_voice_gateway.command", _STUB_GATEWAY_STOP)
 
-    def open_ports(self, *ports: int) -> None:
-        (self.state / "open_ports").write_text("\n".join(str(p) for p in ports) + "\n")
+    def open_ports(self, *ports: int, rest: bool = True) -> None:
+        # REST Krab Ear (:5005) по умолчанию жив: иначе start отказывается звать лаунчер Gateway (он рестартил бы backend).
+        all_ports = list(ports) + ([5005] if rest else [])
+        (self.state / "open_ports").write_text("\n".join(str(p) for p in all_ports) + "\n")
 
     def agent_running(self) -> None:
         (self.state / "agent_running").touch()
@@ -186,6 +196,7 @@ class _Tree:
             "HEALTH_POLL_INTERVAL": "0",
             "STARTUP_TIMEOUT": "3",
             "AGENT_START_ATTEMPTS": "3",
+            "STOP_VERIFY_INTERVAL": "0",
             **env,
         }
         # cwd — НЕ каталог скрипта: путь к проекту обязан определяться по $0.
@@ -324,6 +335,53 @@ def test_stop_does_not_claim_success_when_canonical_stop_fails(tree: _Tree) -> N
     assert proc.returncode == 1
     assert "✅ Voice Gateway остановлен" not in proc.stdout
     assert "НЕ остановлен" in proc.stdout
+
+
+@needs_zsh
+def test_stop_does_not_claim_success_while_gateway_still_listens(tree: _Tree) -> None:
+    """Ревью Opus #2303 P1: канонический stop без .gateway.pid выходит 0 при живом Gateway под launchd."""
+    tree.open_ports(8090)
+    proc = tree.run("stop_voice_assistant.command")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "✅ Voice Gateway остановлен" not in proc.stdout
+    assert "порт 8090 всё ещё слушает" in proc.stdout and "launchd" in proc.stdout
+    assert "gateway_stop" in tree.calls()
+    assert "pkill" not in tree.calls() and "lsof" not in tree.calls() and "kill " not in tree.calls()
+
+
+@needs_zsh
+def test_stop_confirms_success_only_when_port_is_free(tree: _Tree) -> None:
+    tree.open_ports(rest=False)
+    proc = tree.run("stop_voice_assistant.command")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "✅ Voice Gateway остановлен" in proc.stdout
+
+
+@needs_zsh
+def test_start_refuses_second_gateway_when_launchd_unit_is_loaded(tree: _Tree) -> None:
+    """Ревью Opus #2303 P2: порт закрыт, но юнит в launchd — не поднимаем второй Gateway с другим окружением."""
+    tree.open_ports(1234, 8081)
+    proc = tree.run("start_voice_assistant.command", FAKE_LAUNCHD_LOADED="1")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "gateway_start" not in tree.calls()
+    assert "launchd" in proc.stdout and "launchctl print" in tree.calls()
+
+
+@needs_zsh
+def test_start_refuses_to_trigger_backend_restart_through_launcher(tree: _Tree) -> None:
+    """Ревью Opus #2303 P2: REST :5005 мёртв — лаунчер Gateway рестартил бы прод-backend; без явного разрешения не зовём."""
+    tree.open_ports(1234, 8081, rest=False)
+    proc = tree.run("start_voice_assistant.command")
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "gateway_start" not in tree.calls()
+    assert "safe_backend_restart" in proc.stdout
+
+
+@needs_zsh
+def test_start_allows_launcher_when_backend_restart_is_explicitly_allowed(tree: _Tree) -> None:
+    tree.open_ports(1234, 8081, rest=False)
+    proc = tree.run("start_voice_assistant.command", ALLOW_BACKEND_RESTART_VIA_LAUNCHER="1", FAKE_HEALTH_FAILS="0")
+    assert "gateway_start" in tree.calls(), proc.stdout + proc.stderr
 
 
 @needs_zsh
