@@ -30,10 +30,7 @@ Quick-start scripts для запуска Phase 1 Voice Assistant ecosystem (UI 
 - 8081 — OpenClaw bridge (управляется Krab agent)
 - 1234 — LM Studio (вручную)
 
-**Логи:**
-```bash
-tail -f /tmp/krab_voice_gateway.log
-```
+**Логи:** пишет канонический `scripts/start_voice_gateway.command` (путь он печатает); сам скрипт содержимое лога не выводит.
 
 ---
 
@@ -73,8 +70,8 @@ Krab Ear .app    | -     | ✅ запущена (PID 12345)
 ```
 
 **Что делает:**
-1. Останавливает Krab Ear.app
-2. Останавливает Voice Gateway (graceful SIGTERM, затем SIGKILL если нужно)
+1. Krab Ear.app **не останавливает** (прод-диктовка; закрыть — меню Krab Ear → Quit)
+2. Останавливает Voice Gateway только через канонический `scripts/stop_voice_gateway.command` (PID-файл + сверка владельца процесса); при ошибке — ненулевой выход
 3. Оставляет OpenClaw bridge (управляется Krab agent)
 4. Оставляет LM Studio запущенной (закройте вручную)
 
@@ -145,10 +142,8 @@ Krab Ear .app    | -     | ✅ запущена (PID 12345)
 **Решение:** Откройте LM Studio и выберите модель `lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit` из библиотеки, затем загрузите.
 
 ### "Voice Gateway startup failed"
-**Решение:** Проверьте логи:
-```bash
-tail -f /tmp/krab_voice_gateway.log
-```
+**Решение:** Проверьте лог Voice Gateway (путь печатает канонический `scripts/start_voice_gateway.command`).
+Скрипт сам содержимое лога в терминал не выводит.
 
 ### "OpenClaw voice bridge не доступен"
 **Решение:** Убедитесь что Krab agent запущен:
@@ -157,12 +152,9 @@ tail -f /tmp/krab_voice_gateway.log
 ```
 
 ### Порт уже занят
-**Решение:** Старый процесс ещё запущен. Используйте:
-```bash
-./scripts/stop_voice_assistant.command
-# или принудительно
-lsof -ti:8090 | xargs kill -9
-```
+**Решение:** Порт занят процессом, чей /health не отвечает. Скрипт его НЕ убивает.
+Остановите Gateway штатно (`./scripts/stop_voice_assistant.command`), а если порт занят
+чужим процессом — разберитесь с ним вручную (`lsof -nP -iTCP:8090 -sTCP:LISTEN`).
 
 ---
 
@@ -202,7 +194,7 @@ lsof -ti:8090 | xargs kill -9
 - **Voice Gateway venv:** автоматически активируется если существует `.venv_voice_gateway` или `.venv`
 - **LM Studio:** вне управления этих скриптов (запустите вручную, закройте вручную)
 - **Krab agent:** вне управления Voice Assistant скриптов (управляется отдельной командой)
-- **Logs:** check `/tmp/krab_voice_gateway.log` для отладки
+- **Logs:** лог Voice Gateway пишет канонический launcher; скрипты Voice Assistant логи не печатают
 
 ---
 
