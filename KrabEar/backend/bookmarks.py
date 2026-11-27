@@ -353,9 +353,20 @@ class BookmarkManager:
             session_id  — ID сессии/записи (обязательно)
             offset_sec  — смещение в секундах (обязательно)
             note        — текстовая заметка (опционально)
+        Privacy gate (ревью R-Krab-Ear-fix-04): закладка хранит session_id + offset +
+        заметку пользователя, привязанные к записи. Под privacy mode не создаётся;
+        если настройку прочитать нельзя — тоже отказ (fail-closed), до разбора параметров.
+
         Returns:
-            {"bookmark": <bookmark_dict>}
+            {"bookmark": <bookmark_dict>} или {"ok": False, "reason": ...}
         """
+        try:
+            privacy_on = bool(self._settings_get("privacy_mode_enabled", False))
+        except Exception:
+            logger.warning("bookmarks: не удалось прочитать privacy_mode_enabled — add отклонён")
+            privacy_on = True
+        if privacy_on:
+            return {"ok": False, "reason": "privacy_mode_active"}
         session_id = str(params.get("session_id", "__live__")).strip()
         offset_sec_raw = params.get("offset_sec")
         if offset_sec_raw is None:
