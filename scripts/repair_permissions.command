@@ -141,7 +141,18 @@ open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibil
 echo ""
 echo "Перезапускаем Krab Ear.app через 3 секунды..."
 sleep 3
-open "$APP_BUNDLE"
+# Агент под launchd-юнитом (KeepAlive) поднимается сам сразу после SIGTERM из шага 1 — ДО сброса TCC.
+# `open` лишь активировал бы уже запущенный процесс (со старым TCC-состоянием), поэтому при загруженном
+# юните перезапускаем его через `kickstart -k`; без юнита — прежний `open` (LaunchServices).
+AGENT_LABEL="ai.krab.ear.agent"
+if "${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
+  if ! "${LAUNCHCTL_BIN:-launchctl}" kickstart -k "gui/$(id -u)/$AGENT_LABEL"; then
+    echo "Ошибка: launchctl kickstart -k $AGENT_LABEL не удался — TCC сброшен, агент не перезапущен." >&2
+    exit 1
+  fi
+else
+  open "$APP_BUNDLE"
+fi
 
 echo ""
 echo "----------------------------------------------------------------"

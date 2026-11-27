@@ -543,6 +543,36 @@ class TestRepairPermissions:
             victim.kill()
             victim.wait()
 
+    def test_loaded_launchd_unit_is_kickstarted_not_opened(self, tmp_path):
+        """Юнит с KeepAlive уже поднял агента до сброса TCC: `open` только активировал бы его (со старым
+        TCC), поэтому финальный перезапуск — kickstart -k, а не open bundle."""
+        root = _rp_tree(tmp_path)
+        _gate(tmp_path, rc=0)
+        _exe(tmp_path / "stubbin" / "launchctl",
+             'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 0\nexit 0\n')
+        res = self._run(root, tmp_path)
+        assert res.returncode == 0, res.stdout + res.stderr
+        calls = _calls(tmp_path)
+        assert any(c.startswith("launchctl kickstart -k") and "ai.krab.ear.agent" in c for c in calls), calls
+        assert not any(c.startswith("open") and "Krab Ear.app" in c for c in calls), calls
+
+    def test_failed_kickstart_is_an_error_not_silent_success(self, tmp_path):
+        root = _rp_tree(tmp_path)
+        _gate(tmp_path, rc=0)
+        _exe(tmp_path / "stubbin" / "launchctl",
+             'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 0\n[ "$1" = kickstart ] && exit 1\nexit 0\n')
+        res = self._run(root, tmp_path)
+        assert res.returncode == 1, res.stdout + res.stderr
+
+    def test_without_launchd_unit_bundle_is_opened(self, tmp_path):
+        root = _rp_tree(tmp_path)
+        _gate(tmp_path, rc=0)
+        res = self._run(root, tmp_path)
+        assert res.returncode == 0, res.stdout + res.stderr
+        calls = _calls(tmp_path)
+        assert any(c.startswith("open") and "Krab Ear.app" in c for c in calls), calls
+        assert not any(c.startswith("launchctl kickstart") for c in calls), calls
+
     def test_launchd_respawned_agent_does_not_abort_the_reset(self, tmp_path):
         """Ревью Opus #2304 (P2): под launchd KeepAlive агент поднимается заново сразу после SIGTERM —
         ждать надо смерти СТАРОГО PID, а не «процессов нет», иначе скрипт падал бы до сброса TCC."""
