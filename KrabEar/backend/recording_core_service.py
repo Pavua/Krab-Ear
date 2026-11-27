@@ -1672,8 +1672,16 @@ class RecordingCoreService:
             # R1: STT упал — спилл ОСТАВИТЬ (восстановление на следующем старте
             # вернёт аудио, которое сейчас потеряно). close() уже сделан
             # recorder.stop() внутри phase_a — повторный вызов безопасен.
+            # Исключение — privacy (fail-closed): тот же приговор, что у спасательного WAV в
+            # phase_c, — plaintext-аудио после краха STT на диске не остаётся, иначе рескан
+            # (_process_one) сохранил бы WAV под privacy (ревью Opus #2307, P1). Цена —
+            # запись теряется осознанно; спилл ЖИВОЙ записи (на случай падения процесса)
+            # это не меняет и покрыт purge.
             if spill is not None:
-                spill.close()
+                if self._privacy_mode_enabled():
+                    spill.discard()
+                else:
+                    spill.close()
             return phase_c["early_return"]
         transcribe_payload = phase_c["transcribe_payload"]
 

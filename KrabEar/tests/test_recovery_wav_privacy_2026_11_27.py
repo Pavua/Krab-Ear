@@ -96,5 +96,40 @@ class TestRecoveryWavPrivacy(unittest.TestCase):
         self.assertIsNone(result.get("audio_recovery_path"))
 
 
+class TestRescueSpillPrivacy(unittest.TestCase):
+    """Ревью Opus #2307 (P1): R1-спилл (rescue/*.f32.part) тоже не переживает краш STT под privacy."""
+
+    def setUp(self):
+        self._tmp_ctx = tempfile.TemporaryDirectory()
+        self._tmp = self._tmp_ctx.name
+        self.addCleanup(self._tmp_ctx.cleanup)
+        self.rescue_dir = Path(self._tmp) / "rescue"
+
+    def _run(self, privacy: bool):
+        from tests.test_recording_spill_wiring import _FakeRecorder, _RaisingTranscriber, _make_service as _mk
+        recorder = _FakeRecorder()
+        svc = _mk(
+            self._tmp, self.rescue_dir, recorder=recorder, transcriber=_RaisingTranscriber(),
+            settings_overrides={"recording_spill_enabled": True, "privacy_mode_enabled": privacy},
+        )
+        svc.handle_start_recording({})
+        self.assertIsNotNone(recorder.received_spill, "предусловие: рекордер получил spill")
+        self.assertTrue(list(self.rescue_dir.glob("*.part")), "предусловие: спилл создан")
+        result = svc.handle_stop_recording({})
+        return result
+
+    def test_privacy_on_stt_crash_discards_rescue_spill(self):
+        result = self._run(privacy=True)
+        self.assertEqual(result.get("status"), "stt_failed")
+        self.assertEqual(list(self.rescue_dir.glob("*.part")), [], "plaintext-спилл пережил краш STT под privacy")
+        self.assertEqual(list(self.rescue_dir.glob("*.meta.json")), [])
+
+    def test_privacy_off_stt_crash_keeps_rescue_spill(self):
+        """Регресс R1: без privacy спилл после краха STT остаётся — рескан вернёт запись."""
+        result = self._run(privacy=False)
+        self.assertEqual(result.get("status"), "stt_failed")
+        self.assertTrue(list(self.rescue_dir.glob("*.part")))
+
+
 if __name__ == "__main__":
     unittest.main()
