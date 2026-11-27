@@ -100,7 +100,7 @@ final class SettingsWriteHonestyTests: XCTestCase {
         }
         let persist = try body(of: "private func persistQuickCaptureSetting", in: src)
         XCTAssertTrue(persist.contains("try ipcClient.call(method: \"set_settings\""))
-        XCTAssertTrue(persist.contains("refreshQuickCaptureSectionState()"),
+        XCTAssertTrue(persist.contains("refreshQuickCaptureSectionState(onReadFailure: rollback)"),
                       "при неудаче контролы обязаны вернуться к состоянию backend'а")
         XCTAssertTrue(persist.contains("BackendToast.shared.show"))
     }
@@ -108,9 +108,9 @@ final class SettingsWriteHonestyTests: XCTestCase {
     func test_hotkeyMonitorRestartsOnlyAfterConfirmedWrite() throws {
         let src = try source("HistoryPanelController+Settings.swift")
         let fn = try body(of: "@objc func onQuickCaptureHotkeyChanged", in: src)
-        XCTAssertTrue(fn.contains("persistQuickCaptureSetting([\"quick_capture_hotkey\": hotkeyId])"))
+        XCTAssertTrue(fn.contains("persistQuickCaptureSetting([\"quick_capture_hotkey\": hotkeyId]"))
         // перезапуск монитора — внутри onSuccess-замыкания, а не безусловно после вызова
-        XCTAssertTrue(fn.contains("{\n            guard let appDelegate"),
+        XCTAssertTrue(fn.contains("{ [weak self] in\n            self?.quickCaptureHotkeySelector.tag = idx + 1\n            guard let appDelegate"),
                       "KEM08-05: stop/start монитора должны жить в onSuccess")
         let persist = try body(of: "private func persistQuickCaptureSetting", in: src)
         XCTAssertTrue(persist.contains("if saved {\n                    onSuccess?()"))

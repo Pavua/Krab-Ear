@@ -1690,10 +1690,14 @@ extension HistoryPanelController {
     /// Раньше `try?` глотал ошибку set_settings: переключатель оставался в новом
     /// положении, хотя backend сохранил старое — для экспорта заметок наружу
     /// (Apple Notes / Obsidian) это ложный сигнал в privacy-чувствительном месте.
-    /// При ошибке: тост + возврат контролов к реальному состоянию backend'а.
+    /// При ошибке: тост + возврат контролов к реальному состоянию backend'а; если backend
+    /// недоступен и перечитать его нельзя (мёртвый backend — именно тогда запись и падает),
+    /// контрол возвращается локально к прежнему значению (`rollback`), а не остаётся в
+    /// несохранённом положении под ложным тостом (ревью Opus #2302, P2-1).
     /// `onSuccess` — побочный эффект, допустимый только после подтверждённой записи.
     private func persistQuickCaptureSetting(
         _ params: [String: Any],
+        rollback: (@MainActor () -> Void)? = nil,
         onSuccess: (@MainActor () -> Void)? = nil
     ) {
         let ipcClient = self.ipcClient
@@ -1712,28 +1716,37 @@ extension HistoryPanelController {
                     onSuccess?()
                 } else {
                     BackendToast.shared.show(
-                        "Настройку не удалось сохранить — показано состояние бэкенда",
+                        "Настройку не удалось сохранить — возвращено прежнее значение",
                         duration: 4.0
                     )
-                    self.refreshQuickCaptureSectionState()
+                    self.refreshQuickCaptureSectionState(onReadFailure: rollback)
                 }
             }
         }
     }
 
+    /// Чекбокс только что переключён кликом, поэтому «прежнее значение» — противоположное текущему.
+    private func invertQuickCaptureButton(_ keyPath: KeyPath<HistoryPanelController, NSButton>) {
+        let button = self[keyPath: keyPath]
+        button.state = (button.state == .on) ? .off : .on
+    }
+
     @objc func onQuickCaptureNotesChanged() {
-        persistQuickCaptureSetting(["quick_capture_send_to_notes": quickCaptureNotesButton.state == .on])
+        persistQuickCaptureSetting(["quick_capture_send_to_notes": quickCaptureNotesButton.state == .on],
+                                   rollback: { [weak self] in self?.invertQuickCaptureButton(\.quickCaptureNotesButton) })
     }
 
     @objc func onQuickCaptureObsidianChanged() {
-        persistQuickCaptureSetting(["quick_capture_obsidian_sync": quickCaptureObsidianButton.state == .on])
+        persistQuickCaptureSetting(["quick_capture_obsidian_sync": quickCaptureObsidianButton.state == .on],
+                                   rollback: { [weak self] in self?.invertQuickCaptureButton(\.quickCaptureObsidianButton) })
     }
 
     /// C3b Task 2: живьё читается из main+QuickCapture.swift::showQuickCapturePanelIfEnabled
     /// на каждом старте заметки — здесь только персист значения (тот же паттерн,
     /// что onQuickCaptureNotesChanged/onQuickCaptureObsidianChanged выше).
     @objc func onQuickCaptureShowPanelChanged() {
-        persistQuickCaptureSetting(["quick_capture_show_panel": quickCaptureShowPanelButton.state == .on])
+        persistQuickCaptureSetting(["quick_capture_show_panel": quickCaptureShowPanelButton.state == .on],
+                                   rollback: { [weak self] in self?.invertQuickCaptureButton(\.quickCaptureShowPanelButton) })
     }
 
     /// Смена комбинации → set_settings off-main → пере-арм монитора на новую
@@ -1746,7 +1759,13 @@ extension HistoryPanelController {
         let idx = quickCaptureHotkeySelector.indexOfSelectedItem
         guard idx >= 0, idx < ids.count else { return }
         let hotkeyId = ids[idx]
-        persistQuickCaptureSetting(["quick_capture_hotkey": hotkeyId]) {
+        // tag селектора хранит подтверждённый индекс + 1 (0 — неизвестен): по нему откат при мёртвом backend.
+        let previousIdx = quickCaptureHotkeySelector.tag - 1
+        persistQuickCaptureSetting(["quick_capture_hotkey": hotkeyId], rollback: { [weak self] in
+            guard previousIdx >= 0 else { return }
+            self?.quickCaptureHotkeySelector.selectItem(at: previousIdx)
+        }) { [weak self] in
+            self?.quickCaptureHotkeySelector.tag = idx + 1
             guard let appDelegate = NSApp.delegate as? AgentAppDelegate else { return }
             appDelegate.stopQuickCaptureHotkeyMonitor()
             appDelegate.startQuickCaptureHotkeyMonitor()
@@ -1757,11 +1776,17 @@ extension HistoryPanelController {
     /// живьём, off-main) — без этого шага контролы показывали бы стейл дефолт
     /// (off / Cmd+Shift+N) после каждого пересоздания панели, даже если
     /// пользователь ранее включил чекбокс в предыдущей сессии.
-    func refreshQuickCaptureSectionState() {
+    func refreshQuickCaptureSectionState(onReadFailure: (@MainActor () -> Void)? = nil) {
         let ipcClient = self.ipcClient
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let resp = try? ipcClient.call(method: "get_settings", params: [:]),
-                  let result = resp["result"] as? [String: Any] else { return }
+                  let result = resp["result"] as? [String: Any] else {
+                // Backend не отвечает: контролы нельзя сверить — вызывающий откатывает свой контрол локально.
+                if let onReadFailure {
+                    DispatchQueue.main.async { onReadFailure() }
+                }
+                return
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.quickCaptureNotesButton.state = ((result["quick_capture_send_to_notes"] as? Bool) == true) ? .on : .off
@@ -1770,6 +1795,7 @@ extension HistoryPanelController {
                 let hotkeyId = (result["quick_capture_hotkey"] as? String) ?? "cmd_shift_n"
                 let idx = HistoryPanelController.quickCaptureHotkeyIds.firstIndex(of: hotkeyId) ?? 0
                 self.quickCaptureHotkeySelector.selectItem(at: idx)
+                self.quickCaptureHotkeySelector.tag = idx + 1
             }
         }
     }
