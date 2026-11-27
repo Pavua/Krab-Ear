@@ -68,13 +68,20 @@ fetch_pinned_git() {
 }
 
 # tarball-путь (нет git/CLT): архив ровно этого коммита. git archive пишет SHA в
-# глобальный pax-заголовок (comment) — сверяем ДО распаковки; распаковка с фильтром
-# data (без абсолютных путей, «..», ссылок наружу). $1 — пустой каталог-стейджинг.
+# глобальный pax-заголовок (comment) — сверяем ДО распаковки. Это проверка
+# согласованности (тот ли коммит отдал адрес), а не криптографическая: подлинность
+# держится на HTTPS; основной путь — git fetch, он проверяет объекты по SHA.
+# curl: -q (без ~/.curlrc), только https, в том числе на редиректах.
+# Члены архива: только файлы, каталоги и относительные симлинки внутри корня
+# (в репо есть симлинки Sparkle.framework); хардлинки, устройства и любые члены
+# «сквозь» симлинк отвергаются, затем распаковка с фильтром data.
+# $1 — пустой каталог-стейджинг.
 fetch_pinned_tarball() {
   local dest="$1" url="${REPO_URL%.git}/archive/${EXPECTED_COMMIT}.tar.gz"
   local tgz="$dest.tar.gz"
-  curl -fL -o "$tgz" "$url" || { rm -f "$tgz"; return 1; }
+  curl -q --proto '=https' --proto-redir '=https' -fL -o "$tgz" "$url" || { rm -f "$tgz"; return 1; }
   "$PY" - "$tgz" "$EXPECTED_COMMIT" "$dest" <<'PYEOF'
+import posixpath
 import sys
 import tarfile
 
@@ -87,6 +94,20 @@ with tarfile.open(path, "r:gz") as tf:
     tops = {m.name.split("/", 1)[0] for m in members}
     if len(tops) != 1:
         sys.exit("tarball: ожидался один корневой каталог")
+    top = tops.pop()
+    links = set()
+    for m in members:
+        if not (m.isreg() or m.isdir() or m.issym()):
+            sys.exit(f"tarball: недопустимый член (хардлинк/устройство): {m.name}")
+        if m.issym():
+            target = posixpath.normpath(posixpath.join(posixpath.dirname(m.name), m.linkname))
+            if m.linkname.startswith("/") or target.split("/", 1)[0] != top:
+                sys.exit(f"tarball: симлинк ведёт за корень архива: {m.name}")
+            links.add(m.name.rstrip("/"))
+    for m in members:
+        parts = m.name.rstrip("/").split("/")
+        if any("/".join(parts[:i]) in links for i in range(1, len(parts))):
+            sys.exit(f"tarball: член лежит внутри симлинка: {m.name}")
     tf.extractall(dest, filter="data")
 PYEOF
   local rc=$?
@@ -113,6 +134,14 @@ install_pinned_code() {
     fi
     src="$(find "$stage/x" -mindepth 1 -maxdepth 1 -type d | head -1)"
     log "tarball: коммит $EXPECTED_COMMIT проверен"
+  fi
+  # Цель не должна существовать даже как симлинк (в т.ч. висящий): mv в ссылку на
+  # каталог положил бы код ВНУТРЬ чужого каталога. Остаток — подмена между этой
+  # проверкой и mv процессом того же пользователя.
+  if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
+    warn "$INSTALL_DIR уже существует — не перезаписываю"
+    rm -rf "$stage"
+    return 1
   fi
   if [ -z "$src" ] || [ ! -f "$src/KrabEar/backend/service.py" ] || ! mv "$src" "$INSTALL_DIR"; then
     rm -rf "$stage"
@@ -176,7 +205,9 @@ fi
 if [ -f "$INSTALL_DIR/KrabEar/backend/service.py" ]; then
   log "Код уже установлен: $INSTALL_DIR (clone пропущен)"
 else
-  [ -e "$INSTALL_DIR" ] && fail "$INSTALL_DIR существует, но это не проект Krab Ear — уберите каталог или задайте KRAB_EAR_INSTALL_DIR"
+  if [ -e "$INSTALL_DIR" ] || [ -L "$INSTALL_DIR" ]; then
+    fail "$INSTALL_DIR существует (или это симлинк), но не проект Krab Ear — уберите его или задайте KRAB_EAR_INSTALL_DIR"
+  fi
   log "Скачиваю код (коммит $EXPECTED_COMMIT) → $INSTALL_DIR ..."
   # git без Xcode CLT падает (или триггерит диалог установки CLT) — внутри fallback на tarball.
   install_pinned_code || fail "Не удалось скачать и проверить коммит $EXPECTED_COMMIT из $REPO_URL"
