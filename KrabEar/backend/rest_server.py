@@ -1101,9 +1101,10 @@ atexit.register(_rest_engine_cleanup)
 
 TEMP_DIR = settings.DATA_DIR / "temp_uploads"
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
-# Сырое аудио осиротевших загрузок (процесс умер до finally) не должно жить неделями:
-# при старте стираем обычные файлы старше часа, дальше — не чаще раза в 10 минут на запросе.
-sweep_stale_uploads(TEMP_DIR)
+# Сырое аудио осиротевших загрузок (процесс умер до finally) не должно жить неделями.
+# Стартовая уборка — в блоке ``__main__`` (НЕ на импорте: модуль импортируют десятки
+# тестов, и они чистили бы реальный ~/.krab_ear_data); дальше — не чаще раза в 10 минут
+# на запросе загрузки.
 
 
 # ---------------------------------------------------------------------------
@@ -3338,6 +3339,9 @@ if __name__ == "__main__":
     # разрешённое место запуска idle-reaper'а mlx_whisper_worker в этом
     # режиме (НИКОГДА на импорте модуля, см. докстринг start_whisper_idle_reaper).
     start_whisper_idle_reaper()
+
+    # Стираем обычные файлы старше часа в temp_uploads (осиротевшие загрузки).
+    sweep_stale_uploads(TEMP_DIR)
 
     try:
         app.run(host="127.0.0.1", port=settings.REST_SERVER_PORT)

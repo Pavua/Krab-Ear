@@ -64,6 +64,9 @@ def sweep_stale_uploads(
     for entry in entries:
         try:
             st = os.lstat(entry.path)
+        except FileNotFoundError:
+            # Исчез между scandir и lstat (штатный finally): цель достигнута.
+            continue
         except OSError:
             failed += 1
             continue

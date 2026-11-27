@@ -98,6 +98,25 @@ class SweepStaleUploadsTest(unittest.TestCase):
         self.assertTrue(a.exists())
         self.assertFalse(b.exists())
 
+    def test_file_vanished_before_lstat_is_not_a_failure(self):
+        """Штатный finally мог удалить файл между scandir и lstat — цель достигнута."""
+        a = _make(self.dir, "a.wav", 7200)
+        real_lstat = os.lstat
+
+        def vanishing(path, *args, **kwargs):
+            if str(path).endswith("a.wav"):
+                raise FileNotFoundError(2, "synthetic")
+            return real_lstat(path, *args, **kwargs)
+
+        orig = sweep.os.lstat
+        sweep.os.lstat = vanishing
+        try:
+            result = sweep.sweep_stale_uploads(self.dir, max_age_sec=3600, now=_NOW)
+        finally:
+            sweep.os.lstat = orig
+        self.assertEqual(result.failed, 0)
+        self.assertTrue(a.exists())
+
 
 class ThrottleTest(unittest.TestCase):
     def setUp(self):
@@ -133,11 +152,21 @@ class RestServerWiringTest(unittest.TestCase):
                     names.add(func.id)
         return names
 
-    def test_module_level_sweep_at_import(self):
+    def test_sweep_not_run_at_import_but_at_server_start(self):
+        """Импорт rest_server (его делают десятки тестов) не должен чистить реальный
+        ~/.krab_ear_data/temp_uploads: стартовая уборка — только в ``__main__``."""
         tree = self._tree()
-        top = ast.Module(body=[n for n in tree.body if not isinstance(
-            n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))], type_ignores=[])
-        self.assertIn("sweep_stale_uploads", self._calls(top))
+        unconditional = ast.Module(body=[n for n in tree.body if not isinstance(
+            n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.If))], type_ignores=[])
+        self.assertNotIn("sweep_stale_uploads", self._calls(unconditional))
+        main_blocks = [
+            n for n in tree.body
+            if isinstance(n, ast.If) and isinstance(n.test, ast.Compare)
+            and isinstance(n.test.left, ast.Name) and n.test.left.id == "__name__"
+        ]
+        self.assertEqual(len(main_blocks), 1, "блок if __name__ == '__main__' не найден")
+        main = ast.Module(body=main_blocks[0].body, type_ignores=[])
+        self.assertIn("sweep_stale_uploads", self._calls(main))
 
     def test_upload_handler_calls_throttled_sweep(self):
         tree = self._tree()
