@@ -47,6 +47,8 @@ if _PROJECT_ROOT not in sys.path:
 # Lazy REST server import with minimal stubs
 # ---------------------------------------------------------------------------
 
+from _rest_import_policy import classify_import_failure  # noqa: E402
+
 _REST_AVAILABLE = False
 # Ошибка импорта rest_server НЕ из-за отсутствующей зависимости (stub разошёлся
 # с модулем) — не повод для skip: TestRestStubImportHealthy падает громко.
@@ -150,10 +152,12 @@ try:
     with patch("pathlib.Path.mkdir"):
         import backend.rest_server as _rest_mod
     _REST_AVAILABLE = True
-except ModuleNotFoundError:
-    # Нет модуля flask/тяжёлой зависимости — честный skip. «cannot import name»
-    # (дрейф stub) — обычный ImportError и уходит в громкую ветку ниже.
-    pass
+except ModuleNotFoundError as _import_exc:
+    # Тихий skip — ТОЛЬКО для объявленной optional-зависимости (_rest_import_policy).
+    # Сбой модуля приложения, пропавший обязательный пакет из requirements.txt и неизвестный
+    # модуль падают громко через TestRestStubImportHealthy: CI ставит полный requirements.txt.
+    if classify_import_failure(_import_exc)[0] == "fail":
+        _REST_IMPORT_ERROR = repr(_import_exc)
 except Exception as _import_exc:
     _REST_IMPORT_ERROR = repr(_import_exc)
 finally:
