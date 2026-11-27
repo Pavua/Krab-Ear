@@ -93,7 +93,7 @@ class TestSnapshotAvoidsFullConcatenateOnLongRecording(unittest.TestCase):
 
     def test_snapshot_avoids_full_concatenate_on_long_recording(self) -> None:
         sample_rate = 16000
-        total_seconds = 30          # simulated 30-minute-ish recording
+        total_seconds = 30          # 30 с: проверка формы вызова; длительный сценарий — ниже
         max_tail_sec = 3.0          # snapshot should only need 3 s
 
         chunks = [
@@ -113,6 +113,10 @@ class TestSnapshotAvoidsFullConcatenateOnLongRecording(unittest.TestCase):
         with patch("numpy.concatenate", side_effect=counting_concatenate):
             audio, _ = rec.snapshot_audio(max_duration_sec=max_tail_sec)
 
+        # G3-P03-10: без вызовов цикл ниже прошёл бы вхолостую.
+        self.assertEqual(len(concat_input_sizes), 1, concat_input_sizes)
+        self.assertEqual(len(chunks), total_seconds)
+
         # The fix should result in at most one concatenate call
         # and that call should cover at most max_tail_sec * sample_rate samples
         # (plus at most one extra chunk boundary).
@@ -128,6 +132,46 @@ class TestSnapshotAvoidsFullConcatenateOnLongRecording(unittest.TestCase):
 
         # Correctness: result must still be trimmed to max_tail_sec
         self.assertLessEqual(audio.size, int(max_tail_sec * sample_rate))
+
+
+class TestSnapshotLongRecordingCopyBudget(unittest.TestCase):
+    """G3-P03-10: 30-минутная запись и повторные snapshot превью.
+
+    Чанки ссылаются на один буфер 1 с, поэтому сам тест памяти не ест. Счётчик
+    останавливает регрессию до реального выделения: полная склейка 30 мин —
+    это 115 МБ на каждый вызов превью.
+    """
+
+    def test_repeated_snapshots_copy_only_the_tail(self) -> None:
+        sample_rate = 16000
+        total_seconds = 30 * 60
+        max_tail_sec = 12.0
+        calls = 60  # минута превью раз в секунду
+
+        one_second = np.zeros((sample_rate, 1), dtype=np.float32)
+        rec = _make_recorder_with_chunks([one_second] * total_seconds, sample_rate=sample_rate)
+        self.assertEqual(len(rec._chunks), total_seconds)  # noqa: SLF001
+
+        per_call_budget = int(max_tail_sec * sample_rate) + sample_rate  # хвост + 1 чанк
+        copied: list[int] = []
+        real_concatenate = np.concatenate
+
+        def budgeted_concatenate(arrays, *args, **kwargs):
+            size = sum(a.size for a in arrays)
+            if size > per_call_budget:
+                raise AssertionError(f"склейка {size} семплов вместо хвоста ≤ {per_call_budget}")
+            copied.append(size)
+            return real_concatenate(arrays, *args, **kwargs)
+
+        with patch("numpy.concatenate", side_effect=budgeted_concatenate):
+            for _ in range(calls):
+                audio, _ = rec.snapshot_audio(max_duration_sec=max_tail_sec)
+                self.assertEqual(audio.size, int(max_tail_sec * sample_rate))
+
+        self.assertEqual(len(copied), calls)
+        self.assertLessEqual(sum(copied), calls * per_call_budget)
+        self.assertLess(sum(copied), total_seconds * sample_rate,
+                        "минута превью скопировала больше, чем вся запись")
 
 
 class TestSnapshotTailCorrectnessWithPartialLastChunk(unittest.TestCase):

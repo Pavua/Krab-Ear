@@ -74,7 +74,8 @@ class FakeStore:
         self._items[item_id] = item
         return item
 
-    def _lock(self):
+    def _lock(self, timeout_sec: float | None = None, nowait: bool = False, shared: bool = False):
+        # G3-P03-05: сигнатура как у StateStore._lock — purge вправе передать любой из аргументов.
         return self._lock_obj
 
     def _load_active_items_unlocked(self) -> list[FakeHistoryItem]:
@@ -97,7 +98,14 @@ class FakeStore:
         return "fake_tombstones.ndjson"
 
     def compact_with_stats(self) -> dict:
-        return {"before_active_count": len(self._items), "after_active_count": 0}
+        # G3-P03-05: как реальный StateStore — физически убирает записи с томбстоунами.
+        # Раньше fake отвечал after_active_count=0, не трогая _items, и E2E не доказывал
+        # уничтожение истории.
+        before = len(self._items)
+        dead = {row.get("id") for row in self._tombstones if isinstance(row, dict)}
+        for item_id in dead:
+            self._items.pop(item_id, None)
+        return {"before_active_count": before, "after_active_count": len(self._items)}
 
     def load_settings(self, lock_timeout_sec: float | None = None, nowait: bool = False) -> dict:
         return dict(self._settings)
@@ -443,6 +451,8 @@ class PurgeAllDataE2EW1770TestCase(unittest.TestCase):
             result = svc.handle_purge_all_data({"confirm": True})
         self.assertTrue(result.get("ok"), result)
         self.assertTrue(result.get("complete"), f"purge должен быть полным: {result.get('errors')}")
+        # G3-P03-05: история физически уничтожена, а не только отчитана счётчиком.
+        self.assertEqual(store._items, {}, "записи истории пережили compact")
 
         # все файлы/директории исчезли
         gone_dirs = ["audio", "failed_recordings", "debug_duration_wav", "exports", "auto_exports", "timeline"]
