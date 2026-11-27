@@ -101,10 +101,22 @@ done
 # Синхронизируем свежесобранный бинарь в обе точки доставки:
 #   * native/runtime/KrabEarAgent — legacy путь (dev-сценарии, smoke-тесты);
 #   * Krab Ear.app/Contents/MacOS/KrabEarAgent — production, запускаемый через LaunchServices.
-cp -f "$BUILD_BIN" "$RUNTIME_BIN"
-chmod +x "$RUNTIME_BIN"
-cp -f "$BUILD_BIN" "$APP_BUNDLE_BIN"
-chmod +x "$APP_BUNDLE_BIN"
+# Ревью G2-Krab-Ear-02b2, KE02B2-02/13: копия идёт во временный файл рядом и встаёт на
+# место атомарным `mv` (обрыв посреди `cp -f` оставлял усечённый бинарник в .app), а
+# destination-symlink отклоняется (`cp -f` пошёл бы по ссылке в чужой файл).
+install_binary() {
+  local src="$1" dest="$2" tmp
+  if [ -L "$dest" ]; then
+    echo "Ошибка: $dest — символическая ссылка, поставка отклонена"
+    exit 1
+  fi
+  tmp="${dest}.new.$$"
+  cp "$src" "$tmp" || { rm -f "$tmp"; echo "Ошибка: копирование в $tmp не удалось"; exit 1; }
+  chmod +x "$tmp"
+  mv -f "$tmp" "$dest" || { rm -f "$tmp"; echo "Ошибка: установка $dest не удалась"; exit 1; }
+}
+install_binary "$BUILD_BIN" "$RUNTIME_BIN"
+install_binary "$BUILD_BIN" "$APP_BUNDLE_BIN"
 
 echo "Подписываю стабильным сертификатом: $SIGN_ID"
 codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN"
@@ -131,5 +143,9 @@ done
 if [ "$started" -eq 1 ]; then
   echo "Готово. Агент обновлён и запущен."
 else
-  echo "Предупреждение: агент ещё запускается. Проверьте лог: ~/Library/Application Support/KrabEar/agent.log"
+  # KE02B2-11: «open отработал» ≠ «агент поднялся». Без процесса — ошибка, а не
+  # предупреждение с кодом 0: вызывающий (цикл волн, CI-обвязка) иначе считает
+  # обновление успешным при мёртвом агенте.
+  echo "Ошибка: процесс агента не появился за 15 с после open. Проверьте лог: ~/Library/Application Support/KrabEar/agent.log"
+  exit 1
 fi

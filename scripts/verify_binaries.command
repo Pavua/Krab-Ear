@@ -11,6 +11,8 @@
 # - Confused debugging session
 #
 # Если drift обнаружен — script:
+# 0. (ревью G2-Krab-Ear-02b2, KE02B2-05) отказывает, пока backend занят записью/
+#    встречей либо его состояние неизвестно (`--force` — осознанный обход);
 # 1. Останавливает running KrabEarAgent
 # 2. Копирует .build/release/KrabEarAgent в оба места
 # 3. Codesign + restart .app
@@ -30,18 +32,32 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 APP_BIN="$ROOT_DIR/Krab Ear.app/Contents/MacOS/KrabEarAgent"
 RUNTIME_BIN="$ROOT_DIR/native/runtime/KrabEarAgent"
 BUILD_BIN="$ROOT_DIR/native/KrabEarAgent/.build/release/KrabEarAgent"
+# Переопределяется окружением только для тестов (контрактные тесты подсовывают заглушку).
+PGREP_BIN="${PGREP_BIN:-/usr/bin/pgrep}"
 
 # CLI flags
 FIX_DRIFT=false
+FORCE=false
 for arg in "$@"; do
   case "$arg" in
     --fix) FIX_DRIFT=true ;;
+    --force) FORCE=true ;;
     --help|-h)
-      echo "Usage: $0 [--fix]"
+      echo "Usage: $0 [--fix [--force]]"
       echo "  --fix    Auto-resync binaries if drift detected (kills running, re-copies, restarts)"
+      echo "  --force  С --fix: не проверять активную запись/встречу (аудио активной записи будет потеряно)"
       exit 0 ;;
+    *)
+      # KE02B2-16: раньше опечатка (`--fx`) молча давала report-only режим.
+      echo "unknown arg: $arg" >&2
+      echo "Usage: $0 [--fix [--force]]" >&2
+      exit 2 ;;
   esac
 done
+if [ "$FORCE" = true ] && [ "$FIX_DRIFT" != true ]; then
+  echo "--force имеет смысл только вместе с --fix" >&2
+  exit 2
+fi
 
 # Report-only не требует Keychain. --fix обязан проверить identity до lifecycle.
 if [ "$FIX_DRIFT" = true ]; then
@@ -76,7 +92,17 @@ BUILD_HASH="$(hash_or_missing "$BUILD_BIN")"
 # Find running PID + its binary path. Use `ps -o comm` (full executable
 # path on macOS) — простой и reliable. lsof может показать stale text-segment
 # entry если binary был replaced after spawn.
-RUNNING_PID="$(/usr/bin/pgrep -f "KrabEarAgent" 2>/dev/null | grep -v "$$" | head -1 || true)"
+# KE02B2-07: точное имя процесса (`pgrep -x`), а не `-f`: `-f` цеплял любой процесс
+# со словом KrabEarAgent в аргументах (редактор, tail, этот же скрипт), и «первый PID»
+# мог оказаться не агентом. Если экземпляров несколько — не угадываем, а считаем это
+# отдельной проблемой (SingleInstanceGuard должен не допускать дублей).
+RUNNING_PIDS="$("$PGREP_BIN" -x "KrabEarAgent" 2>/dev/null || true)"
+RUNNING_COUNT=0
+RUNNING_PID=""
+if [ -n "$RUNNING_PIDS" ]; then
+  RUNNING_COUNT="$(printf '%s\n' "$RUNNING_PIDS" | grep -c . || true)"
+  RUNNING_PID="$(printf '%s\n' "$RUNNING_PIDS" | head -1)"
+fi
 RUNNING_BIN=""
 RUNNING_HASH="NONE"
 if [ -n "$RUNNING_PID" ]; then
@@ -106,6 +132,20 @@ echo ""
 # of deploy paths. Если running запущен из stale path не updated после
 # rebuild — будет confusing UX.
 DRIFT=false
+if [ "$RUNNING_COUNT" -gt 1 ]; then
+  echo "  ⚠️  DRIFT: запущено $RUNNING_COUNT экземпляров KrabEarAgent (PID: $(printf '%s' "$RUNNING_PIDS" | tr '\n' ' '))"
+  DRIFT=true
+fi
+# KE02B2-06: deploy-копии сверяем между собой, а не только процесс с путём.
+APP_SIZE="${APP_HASH%% hdr=*}"
+RUNTIME_SIZE="${RUNTIME_HASH%% hdr=*}"
+if [ "$APP_HASH" = "MISSING" ]; then
+  echo "  ⚠️  DRIFT: нет $APP_BIN"
+  DRIFT=true
+elif [ "$RUNTIME_HASH" != "MISSING" ] && [ "$APP_SIZE" != "$RUNTIME_SIZE" ]; then
+  echo "  ⚠️  DRIFT: .app и native/runtime различаются ($APP_SIZE vs $RUNTIME_SIZE)"
+  DRIFT=true
+fi
 RUNNING_BIN_REAL="$(/usr/bin/python3 -c "import os, sys; p=os.path.realpath(sys.argv[1]) if sys.argv[1] else ''; print(p)" "${RUNNING_BIN:-}" 2>/dev/null)"
 APP_BIN_REAL="$(/usr/bin/python3 -c "import os; print(os.path.realpath('$APP_BIN'))" 2>/dev/null)"
 RUNTIME_BIN_REAL="$(/usr/bin/python3 -c "import os; print(os.path.realpath('$RUNTIME_BIN'))" 2>/dev/null)"
@@ -135,13 +175,32 @@ if [ "$BUILD_HASH" != "MISSING" ]; then
 fi
 
 if [ "$DRIFT" = false ]; then
-  echo "  ✅ All binaries in sync"
+  if [ -z "$RUNNING_PID" ]; then
+    echo "  ✅ Файлы на диске согласованы; процесс KrabEarAgent НЕ запущен — сверка процесса не выполнялась"
+  else
+    echo "  ✅ All binaries in sync"
+  fi
   exit 0
 fi
 
 echo ""
 if [ "$FIX_DRIFT" = false ]; then
   echo "  Run with --fix to auto-resync."
+  exit 1
+fi
+
+# KE02B2-05: busy-гейт ДО любой остановки. Аудио активной записи живёт в памяти
+# backend-процесса; остановка агента посреди диктовки/встречи её теряет. Состояние
+# неизвестно = отказ (как в remove_agent.command).
+if [ -n "$RUNNING_PID" ] && [ "$FORCE" != true ]; then
+  if ! "$ROOT_DIR/scripts/safe_backend_restart.command" --check-only >/dev/null 2>&1; then
+    echo "  ❌ Backend занят записью/встречей либо его состояние неизвестно — ничего не остановлено." >&2
+    echo "     Дождитесь конца записи и повторите, либо запустите с --fix --force." >&2
+    exit 1
+  fi
+fi
+if [ "$RUNNING_COUNT" -gt 1 ]; then
+  echo "  ❌ Запущено несколько экземпляров — не угадываю, какой останавливать. Разберитесь вручную." >&2
   exit 1
 fi
 
@@ -179,11 +238,25 @@ echo "  → using newest source ($(/bin/date -r "$SOURCE_MT" '+%H:%M:%S')): $SOU
 
 # 3. Copy + sign both.
 # Источник может совпадать с destination (самокопирование cp возвращает ошибку).
+# KE02B2-13: destination-symlink не перезаписываем (cp -f пошёл бы по ссылке в чужой
+# файл), копия идёт во временный файл рядом и встаёт на место атомарным `mv`: обрыв
+# посреди копирования не оставляет усечённый бинарник.
+install_binary() {
+  local src="$1" dest="$2" tmp
+  if [ -L "$dest" ]; then
+    echo "  ❌ $dest — символическая ссылка; поставка отклонена" >&2
+    exit 2
+  fi
+  tmp="${dest}.new.$$"
+  /bin/cp "$src" "$tmp" || { /bin/rm -f "$tmp"; echo "  ❌ cp в $tmp не удался" >&2; exit 2; }
+  /bin/chmod +x "$tmp"
+  /bin/mv -f "$tmp" "$dest" || { /bin/rm -f "$tmp"; echo "  ❌ mv в $dest не удался" >&2; exit 2; }
+}
 if [ "$SOURCE_BIN" != "$APP_BIN" ]; then
-  /bin/cp -f "$SOURCE_BIN" "$APP_BIN"
+  install_binary "$SOURCE_BIN" "$APP_BIN"
 fi
 if [ "$SOURCE_BIN" != "$RUNTIME_BIN" ]; then
-  /bin/cp -f "$SOURCE_BIN" "$RUNTIME_BIN"
+  install_binary "$SOURCE_BIN" "$RUNTIME_BIN"
 fi
 BUNDLE_ID="com.antigravity.krab-ear"
 /usr/bin/codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN"
@@ -195,7 +268,7 @@ echo "  → synced both paths to source"
 # 4. Restart .app.
 /usr/bin/open "$ROOT_DIR/Krab Ear.app"
 /bin/sleep 2
-NEW_PID="$(/usr/bin/pgrep -f "Krab Ear.app/Contents/MacOS/KrabEarAgent" 2>/dev/null | head -1 || true)"
+NEW_PID="$("$PGREP_BIN" -x "KrabEarAgent" 2>/dev/null | head -1 || true)"
 if [ -n "$NEW_PID" ]; then
   echo "  ✅ .app restarted (PID $NEW_PID)"
 else
