@@ -1317,6 +1317,12 @@ class OpenWakeWordAdapter:
                         self._last_any_chunk_ts = time.monotonic()
                         if flat.any():
                             self._last_chunk_ts = self._last_any_chunk_ts
+                    # Оба движка выключили на лету (off/off): слушать нечему. Раньше цикл держал открытый тап и
+                    # продолжал копить звук в pre-roll-кольце до ручной остановки (ревью B17): закрываем микрофон
+                    # ДО добавления чанка в кольцо. Новый start() при off/off и так отказывает.
+                    if self.engine_mode(ENGINE_OWW) == "off" and self.engine_mode(ENGINE_STT) == "off":
+                        logger.info("OpenWakeWordAdapter: оба движка выключены — освобождаем микрофон")
+                        break
                     try:
                         ring_total = ring.append(flat)
                     except Exception:  # noqa: BLE001 — pre-roll best-effort: сбой кольца не должен глушить wake word
