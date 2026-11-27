@@ -1158,9 +1158,12 @@ def _update_agent_tree(tmp_path: Path, swift_ok: bool):
     build_cmd = (f'mkdir -p "{build_out}"; echo NEW-BUILD > "{build_out}/KrabEarAgent"; '
                  f'chmod +x "{build_out}/KrabEarAgent"; exit 0') if swift_ok else "exit 1"
     _exe(stub / "swift", 'echo "swift $*" >> "$STUB_LOG"\n' + build_cmd + "\n")
-    _exe(stub / "pgrep", "exit 1\n")
+    # Агент «появляется» только после `open` (KE02B2-11: отсутствие процесса после open — ошибка).
+    _exe(stub / "pgrep", 'if grep -q "^open " "$STUB_LOG" 2>/dev/null; then echo 99999; exit 0; fi\nexit 1\n')
     _exe(stub / "codesign", "exit 0\n")
     _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
+    # Юнит агента под launchd НЕ загружен (иначе скрипт рестартует через kickstart, а не open).
+    _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 1\nexit 0\n')
     return root, ctx
 
 

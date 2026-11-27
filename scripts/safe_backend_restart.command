@@ -39,7 +39,16 @@ WITH_REST=0
 CHECK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --wait) WAIT_SEC="${2:-60}"; shift 2 ;;
+    --wait)
+      # KE02B2-09: значение — только целые секунды. Раньше `--wait --with-rest`
+      # забирал флаг как число (`[ -eq ]` падал, цикл ожидания шёл вечно), а
+      # `--wait` последним аргументом делал `shift 2` с одним параметром.
+      case "${2:-}" in
+        ''|*[!0-9]*)
+          echo "usage: --wait N (N — целое число секунд, получено: '${2:-}')" >&2
+          exit 2 ;;
+      esac
+      WAIT_SEC="$2"; shift 2 ;;
     --with-rest) WITH_REST=1; shift ;;
     --check-only) CHECK_ONLY=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;

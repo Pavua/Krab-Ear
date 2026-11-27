@@ -21,6 +21,50 @@ AGENT_PATTERN_LEGACY="$RUNTIME_BIN --project-root $ROOT_DIR"
 VENV_PY="$ROOT_DIR/.venv_krab_ear/bin/python"
 SETTINGS_PATH="$HOME/Library/Application Support/KrabEar/settings.json"
 
+FORCE=0
+for arg in "$@"; do
+  case "$arg" in
+    --force) FORCE=1 ;;
+    -h|--help)
+      echo "Usage: $0 [--force]"
+      echo "  --force  не проверять активную запись/встречу (аудио активной записи будет потеряно)"
+      exit 0 ;;
+    *) echo "unknown arg: $arg" >&2; echo "Usage: $0 [--force]" >&2; exit 2 ;;
+  esac
+done
+
+# Процесс жив и не зомби.
+pid_alive() {
+  local st
+  st="$(/bin/ps -p "$1" -o stat= 2>/dev/null || true)"
+  [ -n "$st" ] && [ "${st#Z}" = "$st" ]
+}
+
+# launchd-юнит агента (opt-in KeepAlive, install_agent_launchagent.command). Если он загружен, то после
+# pkill launchd сам поднимает СТАРЫЙ бинарник ещё до установки нового, а `open` лишь активирует уже
+# запущенный процесс — «PID не из OLD_PIDS» засчитал бы его как успех при старом коде (ревью Opus #2304, P2).
+AGENT_LABEL="ai.krab.ear.agent"
+agent_unit_loaded() {
+  "${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1
+}
+
+# Сколько секунд процессу (BSD ps: etime = [[dd-]hh:]mm:ss); пусто — неизвестно.
+pid_elapsed_sec() {
+  local el
+  el="$("${PS_BIN:-/bin/ps}" -p "$1" -o etime= 2>/dev/null | tr -d ' ')"
+  [ -n "$el" ] || return 1
+  printf '%s' "$el" | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2 }'
+}
+
+# Процесс стартовал не раньше метки времени $2 (epoch); неизвестный возраст = нет.
+pid_started_since() {
+  local el now
+  el="$(pid_elapsed_sec "$1")" || return 1
+  [ -n "$el" ] || return 1
+  now="$(date +%s)"
+  [ "$el" -le $(( now - $2 )) ]
+}
+
 preflight_fail() {
   echo "Ошибка preflight: $1"
   exit 1
@@ -84,27 +128,57 @@ swift build -c release --package-path "$PACKAGE_DIR"
 
 [ -x "$BUILD_BIN" ] || preflight_fail "build artifact не найден: $BUILD_BIN"
 
-# Останавливаем ранее запущенный агент (как .app bundle, так и legacy standalone).
-# Без этого pkill после rebuild обновление бинаря приведёт к сбою TCC cdhash
-# и "висящему" экземпляру агента.
+# Запоминаем PID работающего агента (как .app bundle, так и legacy standalone).
+OLD_PIDS="$( { pgrep -f "$AGENT_PATTERN_BUNDLE" 2>/dev/null || true; pgrep -f "$AGENT_PATTERN_LEGACY" 2>/dev/null || true; } | sort -u | tr '\n' ' ')"
+
+# Busy-гейт до остановки (ревью Opus #2304, P2; как в remove_agent/repair_permissions): остановка агента
+# посреди диктовки/встречи теряет аудио. Состояние неизвестно = отказ; без работающего агента терять нечего.
+if [ -n "${OLD_PIDS// /}" ] && [ "$FORCE" -ne 1 ]; then
+  if ! "$ROOT_DIR/scripts/safe_backend_restart.command" --check-only >/dev/null 2>&1; then
+    echo "Backend занят записью/встречей либо его состояние неизвестно — ничего не остановлено."
+    echo "Дождитесь конца записи и повторите, либо запустите с --force (аудио активной записи будет потеряно)."
+    exit 1
+  fi
+fi
+
+# Без остановки pkill после rebuild обновление бинаря приведёт к сбою TCC cdhash и "висящему" экземпляру.
 pkill -f "$AGENT_PATTERN_BUNDLE" 2>/dev/null || true
 pkill -f "$AGENT_PATTERN_LEGACY" 2>/dev/null || true
-# Небольшая пауза, чтобы процессы успели завершиться до копирования бинаря.
-for _ in {1..20}; do
-  if ! pgrep -f "$AGENT_PATTERN_BUNDLE" >/dev/null 2>&1 \
-     && ! pgrep -f "$AGENT_PATTERN_LEGACY" >/dev/null 2>&1; then
-    break
-  fi
+# Ждём смерти именно СТАРЫХ PID (под launchd KeepAlive новый процесс поднимается сам — это не помеха).
+# Не вышли — SIGKILL не шлём и бинарники не подменяем: иначе «успех» дал бы ещё живой старый процесс.
+old_gone=0
+for _ in {1..100}; do
+  alive=0
+  for pid in $(printf '%s' "$OLD_PIDS"); do  # разбиение по пробелам: одинаково в zsh и bash
+    if pid_alive "$pid"; then alive=1; fi
+  done
+  if [ "$alive" -eq 0 ]; then old_gone=1; break; fi
   sleep 0.1
 done
+if [ "$old_gone" -ne 1 ]; then
+  echo "Ошибка: прежний агент не завершился по SIGTERM за 10 с — бинарники не тронуты (SIGKILL не посылаю: он мог бы оборвать запись)."
+  exit 1
+fi
 
 # Синхронизируем свежесобранный бинарь в обе точки доставки:
 #   * native/runtime/KrabEarAgent — legacy путь (dev-сценарии, smoke-тесты);
 #   * Krab Ear.app/Contents/MacOS/KrabEarAgent — production, запускаемый через LaunchServices.
-cp -f "$BUILD_BIN" "$RUNTIME_BIN"
-chmod +x "$RUNTIME_BIN"
-cp -f "$BUILD_BIN" "$APP_BUNDLE_BIN"
-chmod +x "$APP_BUNDLE_BIN"
+# Ревью G2-Krab-Ear-02b2, KE02B2-02/13: копия идёт во временный файл рядом и встаёт на
+# место атомарным `mv` (обрыв посреди `cp -f` оставлял усечённый бинарник в .app), а
+# destination-symlink отклоняется (`cp -f` пошёл бы по ссылке в чужой файл).
+install_binary() {
+  local src="$1" dest="$2" tmp
+  if [ -L "$dest" ]; then
+    echo "Ошибка: $dest — символическая ссылка, поставка отклонена"
+    exit 1
+  fi
+  tmp="${dest}.new.$$"
+  cp "$src" "$tmp" || { rm -f "$tmp"; echo "Ошибка: копирование в $tmp не удалось"; exit 1; }
+  chmod +x "$tmp"
+  mv -f "$tmp" "$dest" || { rm -f "$tmp"; echo "Ошибка: установка $dest не удалась"; exit 1; }
+}
+install_binary "$BUILD_BIN" "$RUNTIME_BIN"
+install_binary "$BUILD_BIN" "$APP_BUNDLE_BIN"
 
 echo "Подписываю стабильным сертификатом: $SIGN_ID"
 codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN"
@@ -117,19 +191,42 @@ codesign --verify --strict "$APP_BUNDLE"
 # клике иконки в Dock. Это гарантирует отсутствие дубликата в Dock и
 # отсутствие orphan-процесса `com.apple.xpc.launchd.unmanaged.KrabEarAgent.*`,
 # который раньше появлялся при backgrounded-exec из shell.
-open "$APP_BUNDLE"
+INSTALL_EPOCH="$(date +%s)"
+UNIT_MANAGED=0
+if agent_unit_loaded; then
+  # Юнит под launchd: открыть .app мало — launchd мог уже поднять старый бинарник. kickstart -k
+  # перезапускает процесс юнита уже с новым бинарём.
+  UNIT_MANAGED=1
+  echo "launchd-юнит $AGENT_LABEL загружен — перезапускаю через kickstart -k (а не open)."
+  if ! "${LAUNCHCTL_BIN:-launchctl}" kickstart -k "gui/$(id -u)/$AGENT_LABEL"; then
+    echo "Ошибка: launchctl kickstart -k $AGENT_LABEL не удался — бинарники установлены, агент не перезапущен."
+    exit 1
+  fi
+else
+  open "$APP_BUNDLE"
+fi
 
+# Успех — процесс, которого не было до остановки; под launchd — ещё и стартовавший ПОСЛЕ установки:
+# поднятый до неё старый экземпляр не выдаёт себя за новый.
 started=0
 for _ in {1..60}; do
-  if pgrep -f "$AGENT_PATTERN_BUNDLE" >/dev/null 2>&1; then
-    started=1
-    break
-  fi
+  for cand in $(pgrep -f "$AGENT_PATTERN_BUNDLE" 2>/dev/null || true); do
+    case " $OLD_PIDS " in
+      *" $cand "*) continue ;;
+    esac
+    if [ "$UNIT_MANAGED" -eq 1 ] && ! pid_started_since "$cand" "$INSTALL_EPOCH"; then continue; fi
+    started=1; break
+  done
+  [ "$started" -eq 1 ] && break
   sleep 0.25
 done
 
 if [ "$started" -eq 1 ]; then
   echo "Готово. Агент обновлён и запущен."
 else
-  echo "Предупреждение: агент ещё запускается. Проверьте лог: ~/Library/Application Support/KrabEar/agent.log"
+  # KE02B2-11: «open отработал» ≠ «агент поднялся». Без процесса — ошибка, а не
+  # предупреждение с кодом 0: вызывающий (цикл волн, CI-обвязка) иначе считает
+  # обновление успешным при мёртвом агенте.
+  echo "Ошибка: процесс агента не появился за 15 с после open. Проверьте лог: ~/Library/Application Support/KrabEar/agent.log"
+  exit 1
 fi
