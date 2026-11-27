@@ -40,6 +40,31 @@ pid_alive() {
   [ -n "$st" ] && [ "${st#Z}" = "$st" ]
 }
 
+# launchd-юнит агента (opt-in KeepAlive, install_agent_launchagent.command). Если он загружен, то после
+# pkill launchd сам поднимает СТАРЫЙ бинарник ещё до установки нового, а `open` лишь активирует уже
+# запущенный процесс — «PID не из OLD_PIDS» засчитал бы его как успех при старом коде (ревью Opus #2304, P2).
+AGENT_LABEL="ai.krab.ear.agent"
+agent_unit_loaded() {
+  "${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1
+}
+
+# Сколько секунд процессу (BSD ps: etime = [[dd-]hh:]mm:ss); пусто — неизвестно.
+pid_elapsed_sec() {
+  local el
+  el="$("${PS_BIN:-/bin/ps}" -p "$1" -o etime= 2>/dev/null | tr -d ' ')"
+  [ -n "$el" ] || return 1
+  printf '%s' "$el" | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2 }'
+}
+
+# Процесс стартовал не раньше метки времени $2 (epoch); неизвестный возраст = нет.
+pid_started_since() {
+  local el now
+  el="$(pid_elapsed_sec "$1")" || return 1
+  [ -n "$el" ] || return 1
+  now="$(date +%s)"
+  [ "$el" -le $(( now - $2 )) ]
+}
+
 preflight_fail() {
   echo "Ошибка preflight: $1"
   exit 1
@@ -166,16 +191,31 @@ codesign --verify --strict "$APP_BUNDLE"
 # клике иконки в Dock. Это гарантирует отсутствие дубликата в Dock и
 # отсутствие orphan-процесса `com.apple.xpc.launchd.unmanaged.KrabEarAgent.*`,
 # который раньше появлялся при backgrounded-exec из shell.
-open "$APP_BUNDLE"
+INSTALL_EPOCH="$(date +%s)"
+UNIT_MANAGED=0
+if agent_unit_loaded; then
+  # Юнит под launchd: открыть .app мало — launchd мог уже поднять старый бинарник. kickstart -k
+  # перезапускает процесс юнита уже с новым бинарём.
+  UNIT_MANAGED=1
+  echo "launchd-юнит $AGENT_LABEL загружен — перезапускаю через kickstart -k (а не open)."
+  if ! "${LAUNCHCTL_BIN:-launchctl}" kickstart -k "gui/$(id -u)/$AGENT_LABEL"; then
+    echo "Ошибка: launchctl kickstart -k $AGENT_LABEL не удался — бинарники установлены, агент не перезапущен."
+    exit 1
+  fi
+else
+  open "$APP_BUNDLE"
+fi
 
-# Успех — процесс с PID, которого не было до остановки: старый экземпляр не выдаёт себя за новый.
+# Успех — процесс, которого не было до остановки; под launchd — ещё и стартовавший ПОСЛЕ установки:
+# поднятый до неё старый экземпляр не выдаёт себя за новый.
 started=0
 for _ in {1..60}; do
   for cand in $(pgrep -f "$AGENT_PATTERN_BUNDLE" 2>/dev/null || true); do
     case " $OLD_PIDS " in
-      *" $cand "*) ;;
-      *) started=1; break ;;
+      *" $cand "*) continue ;;
     esac
+    if [ "$UNIT_MANAGED" -eq 1 ] && ! pid_started_since "$cand" "$INSTALL_EPOCH"; then continue; fi
+    started=1; break
   done
   [ "$started" -eq 1 ] && break
   sleep 0.25

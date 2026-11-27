@@ -1162,6 +1162,8 @@ def _update_agent_tree(tmp_path: Path, swift_ok: bool):
     _exe(stub / "pgrep", 'if grep -q "^open " "$STUB_LOG" 2>/dev/null; then echo 99999; exit 0; fi\nexit 1\n')
     _exe(stub / "codesign", "exit 0\n")
     _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
+    # Юнит агента под launchd НЕ загружен (иначе скрипт рестартует через kickstart, а не open).
+    _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 1\nexit 0\n')
     return root, ctx
 
 

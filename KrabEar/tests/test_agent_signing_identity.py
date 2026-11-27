@@ -60,8 +60,8 @@ elif tool == "dsymutil":
     pathlib.Path(args[-1]).mkdir(parents=True, exist_ok=True)
 elif tool == "pgrep":
     # Процесс агента «появляется» после open (как в реальности) либо задан заранее через SIGN_TEST_RUNNING.
-    opened = any(json.loads(row)[0] == "open"
-                 for row in pathlib.Path(os.environ["SIGN_TEST_TRACE"]).read_text().splitlines())
+    rows = [json.loads(row) for row in pathlib.Path(os.environ["SIGN_TEST_TRACE"]).read_text().splitlines()]
+    opened = any(r[0] == "open" or (r[0] == "launchctl" and r[1][:1] == ["kickstart"]) for r in rows)
     # Старый агент (до open) — 424242; после open «поднимается» НОВЫЙ процесс с другим PID.
     if opened:
         print("515151")
@@ -69,15 +69,31 @@ elif tool == "pgrep":
         print("424242")
     else:
         sys.exit(1)
+elif tool == "launchctl":
+    # По умолчанию юнит агента НЕ загружен (реальный launchctl в тестах недопустим: kickstart -k тронул бы
+    # живой агент владельца). SIGN_TEST_UNIT_LOADED=1 моделирует загруженный launchd-юнит.
+    if args[:1] == ["print"]:
+        sys.exit(0 if os.environ.get("SIGN_TEST_UNIT_LOADED") else 1)
 elif tool == "ps":
     # `ps -p PID -o stat=` — проверка «жив ли старый PID»: SIGTERM в фикстуре срабатывает, процесса уже нет.
-    if "stat=" not in args:
+    # `-o etime=` — возраст процесса (SIGN_TEST_ETIME), пусто = неизвестно.
+    if "etime=" in args:
+        if os.environ.get("SIGN_TEST_ETIME"):
+            print(os.environ["SIGN_TEST_ETIME"])
+        else:
+            sys.exit(1)
+    elif "stat=" not in args:
         print("/fixture/foreign/KrabEarAgent")
 elif tool == "stat":
     path = pathlib.Path(args[-1])
     print(int(path.stat().st_mtime) if args[-2] == "%m" else path.stat().st_size)
 elif tool == "date":
-    print("00:00:00")
+    # `date +%s` — настоящая метка времени (скрипты считают возраст процесса от неё); остальное — заглушка.
+    if "+%s" in args:
+        import time
+        print(int(time.time()))
+    else:
+        print("00:00:00")
 elif tool == "df":
     print("Filesystem 1024-blocks Used Available Capacity Mounted")
     print("fixture 9999999 1 9999998 0% /")
@@ -96,7 +112,7 @@ class TestAgentSigningIdentity(unittest.TestCase):
         for tool in (
             "security", "codesign", "cp", "swift", "dwarfdump", "dsymutil",
             "pgrep", "pkill", "kill", "ps", "open", "sleep", "stat", "date",
-            "osascript", "df",
+            "osascript", "df", "launchctl",
         ):
             executable = self.tools / tool
             executable.write_text(f"#!{Path(sys.executable).resolve()}\n" + FAKE_TOOL)
@@ -142,6 +158,8 @@ class TestAgentSigningIdentity(unittest.TestCase):
             # verify_binaries берёт pgrep из PGREP_BIN (подмена по тексту `/usr/bin/pgrep` ломает его
             # значение по умолчанию кавычками): заглушка передаётся явно.
             "PGREP_BIN": str(self.tools / "pgrep"),
+            # то же для PS_BIN: подстановка пути в значение по умолчанию ломается кавычками
+            "PS_BIN": str(self.tools / "ps"),
             "HOME": str(self.root / "fixture-home"),
             "SIGN_TEST_TRACE": str(self.trace),
             "SIGN_TEST_IDENTITIES": (
@@ -299,6 +317,38 @@ class TestAgentSigningIdentity(unittest.TestCase):
         self.assertEqual(self.events(), [])
         self.assertEqual(self.app_bin.read_text(), "old-app")
         self.assertEqual(self.runtime.read_text(), "old-rtm")
+
+    # ── ревью Opus #2304 (P2): под launchd KeepAlive старый бинарник поднимается ДО установки ──
+    def test_launchd_unit_loaded_restarts_via_kickstart_not_open(self) -> None:
+        for entry in ("update_agent.command", "verify_binaries.command"):
+            with self.subTest(entry=entry):
+                self.trace.write_text("")
+                self.env["SIGN_TEST_UNIT_LOADED"] = "1"
+                self.env["SIGN_TEST_ETIME"] = "00:00"  # процесс стартовал после установки (возраст 0 с)
+                result = self.run_entry(entry)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                kinds = [(e[0], e[1][:1]) for e in self.events()]
+                self.assertIn(("launchctl", ["kickstart"]), kinds)
+                self.assertNotIn("open", [e[0] for e in self.events()], "под launchd .app не открываем — open лишь активирует старый")
+
+    def test_launchd_old_process_started_before_install_is_not_success(self) -> None:
+        for entry in ("update_agent.command", "verify_binaries.command"):
+            with self.subTest(entry=entry):
+                self.trace.write_text("")
+                self.env["SIGN_TEST_UNIT_LOADED"] = "1"
+                self.env["SIGN_TEST_ETIME"] = "05:00"  # процесс живёт 5 минут — это старый, поднятый до установки
+                result = self.run_entry(entry)
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("Готово", result.stdout)
+                self.assertNotIn("restarted", result.stdout)
+
+    def test_unit_not_loaded_uses_open(self) -> None:
+        self.env.pop("SIGN_TEST_UNIT_LOADED", None)
+        result = self.run_entry("update_agent.command")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        names = [e[0] for e in self.events()]
+        self.assertIn("open", names)
+        self.assertFalse([e for e in self.events() if e[0] == "launchctl" and e[1][:1] == ["kickstart"]])
 
     def test_report_only_newer_build_never_executes_signing_hint(self) -> None:
         newer = time.time() + 10

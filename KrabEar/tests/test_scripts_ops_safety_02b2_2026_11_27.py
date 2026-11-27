@@ -63,6 +63,10 @@ def _env(tmp_path: Path, **extra: str) -> dict:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     log = tmp_path / "calls.log"
+    if not (stub / "launchctl").exists():
+        # Реальный launchctl в тестах недопустим (kickstart -k тронул бы живой агент владельца):
+        # по умолчанию юнит НЕ загружен.
+        _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 1\nexit 0\n')
     return dict(
         os.environ,
         PATH=f"{stub}{os.pathsep}{os.environ['PATH']}",
@@ -375,6 +379,54 @@ class TestUpdateAgentDelivery:
             res = self._run(root, tmp_path)
             assert res.returncode == 1, res.stdout + res.stderr
             assert "не появился" in res.stdout
+        finally:
+            victim.kill()
+            victim.wait()
+
+    # ── ревью Opus #2304 (P2): launchd поднял СТАРЫЙ бинарник до установки — это не успех ──
+    def _launchd_tree(self, tmp_path: Path, *, kick_starts_new: bool) -> tuple[Path, subprocess.Popen]:
+        victim = self._live_agent()
+        root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=True)
+        self._ua_gate(root, rc=0)
+        stub = tmp_path / "stubbin"
+        etimes = tmp_path / "etimes"
+        etimes.mkdir()
+        (etimes / "88888").write_text("05:00\n")   # старый, поднятый launchd до установки
+        (etimes / "77777").write_text("00:00\n")   # новый, после kickstart
+        _exe(stub / "ps", 'if [ "$3" = "-o" ] && [ "$4" = "etime=" ]; then cat "' + str(etimes)
+             + '/$2" 2>/dev/null || exit 1; exit 0; fi\nexec /bin/ps "$@"\n')
+        _exe(stub / "launchctl",
+             'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 0\n'
+             '[ "$1" = kickstart ] && touch "$STUB_LOG.kicked"\nexit 0\n')
+        new = "77777" if kick_starts_new else "88888"
+        _exe(stub / "pgrep",
+             'if [ -f "$STUB_LOG.kicked" ]; then echo ' + new + '; exit 0; fi\n'
+             'if [ -f "$STUB_LOG.killed" ]; then echo 88888; exit 0; fi\n'
+             f'echo {victim.pid}; exit 0\n')
+        _exe(stub / "pkill", 'echo "pkill $*" >> "$STUB_LOG"\ntouch "$STUB_LOG.killed"\n'
+             f'kill {victim.pid} 2>/dev/null\nexit 0\n')
+        return root, victim
+
+    def test_launchd_unit_is_restarted_with_kickstart_not_open(self, tmp_path):
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
+        try:
+            env = _env(tmp_path, PS_BIN=str(tmp_path / "stubbin" / "ps"))
+            res = _run([ZSH, str(root / "scripts" / "update_agent.command")], env)
+            assert res.returncode == 0, res.stdout + res.stderr
+            calls = _calls(tmp_path)
+            assert any(c.startswith("launchctl kickstart -k") for c in calls), calls
+            assert not any(c.startswith("open") for c in calls), calls
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_old_binary_respawned_before_install_is_not_reported_as_updated(self, tmp_path):
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=False)
+        try:
+            env = _env(tmp_path, PS_BIN=str(tmp_path / "stubbin" / "ps"))
+            res = _run([ZSH, str(root / "scripts" / "update_agent.command")], env)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert "Готово" not in res.stdout
         finally:
             victim.kill()
             victim.wait()

@@ -110,6 +110,31 @@ pid_alive() {
   [ -n "$st" ] && [ "${st#Z}" = "$st" ]
 }
 
+# launchd-юнит агента (opt-in KeepAlive, install_agent_launchagent.command). Если он загружен, то после
+# pkill launchd сам поднимает СТАРЫЙ бинарник ещё до установки нового, а `open` лишь активирует уже
+# запущенный процесс — «PID не из OLD_PIDS» засчитал бы его как успех при старом коде (ревью Opus #2304, P2).
+AGENT_LABEL="ai.krab.ear.agent"
+agent_unit_loaded() {
+  "${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1
+}
+
+# Сколько секунд процессу (BSD ps: etime = [[dd-]hh:]mm:ss); пусто — неизвестно.
+pid_elapsed_sec() {
+  local el
+  el="$("${PS_BIN:-/bin/ps}" -p "$1" -o etime= 2>/dev/null | tr -d ' ')"
+  [ -n "$el" ] || return 1
+  printf '%s' "$el" | awk -F'[-:]' '{ if (NF==4) print $1*86400+$2*3600+$3*60+$4; else if (NF==3) print $1*3600+$2*60+$3; else print $1*60+$2 }'
+}
+
+# Процесс стартовал не раньше метки времени $2 (epoch); неизвестный возраст = нет.
+pid_started_since() {
+  local el now
+  el="$(pid_elapsed_sec "$1")" || return 1
+  [ -n "$el" ] || return 1
+  now="$(date +%s)"
+  [ "$el" -le $(( now - $2 )) ]
+}
+
 APP_HASH="$(hash_or_missing "$APP_BIN")"
 RUNTIME_HASH="$(hash_or_missing "$RUNTIME_BIN")"
 BUILD_HASH="$(hash_or_missing "$BUILD_BIN")"
@@ -303,13 +328,24 @@ BUNDLE_ID="com.antigravity.krab-ear"
 echo "  → synced both paths to source"
 
 # 4. Restart .app.
-/usr/bin/open "$ROOT_DIR/Krab Ear.app"
-# Успех — процесс с PID, которого не было до остановки (старый не выдаёт себя за новый).
+INSTALL_EPOCH="$(date +%s)"
+UNIT_MANAGED=0
+if agent_unit_loaded; then
+  # Под launchd KeepAlive старый бинарник уже мог подняться до установки; open лишь активировал бы его.
+  UNIT_MANAGED=1
+  echo "  → launchd-юнит $AGENT_LABEL загружен: kickstart -k (а не open)"
+  "${LAUNCHCTL_BIN:-launchctl}" kickstart -k "gui/$(id -u)/$AGENT_LABEL" || { echo "  ❌ launchctl kickstart -k не удался" >&2; exit 3; }
+else
+  /usr/bin/open "$ROOT_DIR/Krab Ear.app"
+fi
+# Успех — процесс, которого не было до остановки; под launchd — ещё и стартовавший ПОСЛЕ установки.
 NEW_PID=""
 for _ in {1..40}; do
   while IFS= read -r cand; do
     [ -n "$cand" ] || continue
-    if [ -z "$RUNNING_PID" ] || ! printf '%s\n' "$RUNNING_PIDS" | grep -qx "$cand"; then NEW_PID="$cand"; break; fi
+    if [ -n "$RUNNING_PID" ] && printf '%s\n' "$RUNNING_PIDS" | grep -qx "$cand"; then continue; fi
+    if [ "$UNIT_MANAGED" -eq 1 ] && ! pid_started_since "$cand" "$INSTALL_EPOCH"; then continue; fi
+    NEW_PID="$cand"; break
   done < <("$PGREP_BIN" -x "KrabEarAgent" 2>/dev/null || true)
   [ -n "$NEW_PID" ] && break
   /bin/sleep 0.25
