@@ -125,11 +125,14 @@ class TestTempUploadLeak(unittest.TestCase):
 
         from werkzeug.datastructures import FileStorage
 
-        saved: list[Path] = []
+        saved: list[object] = []
 
         def failing_save(storage, dst, *args, **kwargs):
-            saved.append(Path(dst))
-            Path(dst).write_bytes(b"partial")  # частичная запись, затем ENOSPC
+            # Загрузка идёт через backend.private_upload.save_private: dst — открытый файловый
+            # объект (0600, O_EXCL), а не путь. Пишем частичные данные и падаем как ENOSPC.
+            saved.append(dst)
+            dst.write(b"partial")
+            dst.flush()
             raise OSError(28, "No space left on device")
 
         with tempfile.TemporaryDirectory() as td:
@@ -141,7 +144,6 @@ class TestTempUploadLeak(unittest.TestCase):
                 )
             self.assertNotEqual(response.status_code, 200)
             self.assertTrue(saved, "реальный путь upload не дошёл до file.save()")
-            self.assertTrue(all(not p.exists() for p in saved), "partial temp-файл остался на диске")
             self.assertEqual(list(Path(td).iterdir()), [])
 
 
