@@ -56,6 +56,10 @@ SENSITIVE_FIELDS: frozenset[str] = frozenset({
     "openai_api_key",
     "anthropic_api_key",
     "cloud_rewriter_api_key",
+    # SIP-пароль (находка ревью R-Krab-Ear-fix-08): хранится в settings.json
+    # открытым текстом, но выпадал из списка → попадал в бэкапы и экспорт.
+    # Дрейф ловит test_sensitive_fields_drift_2026_11_27.py.
+    "sip_password",
 })
 # Legacy alias kept for any internal references within this module.
 _SENSITIVE = SENSITIVE_FIELDS
