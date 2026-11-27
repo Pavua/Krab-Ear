@@ -251,3 +251,54 @@ class ExitCodeDefault(_Base):  # 05-10
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AudioStoresAreDiscovered(unittest.TestCase):  # 05-09
+    """Хранилища сырого аудио (wav/opus/m4a/mp3) видны сканеру.
+
+    Раньше расширения были только текстовые, поэтому новый каталог/файл с
+    записями под data_dir гейт не замечал вовсе — самый чувствительный тип
+    данных оставался вне проверки purge.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.guard = _load_guard()
+
+    def _ids(self, source: str) -> set[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "mod.py"
+            path.write_text(textwrap.dedent(source), encoding="utf-8")
+            return {r.store_id for r in self.guard.discover_stores_in_module(path)}
+
+    def test_literal_wav_under_data_dir_is_discovered(self):
+        ids = self._ids("""
+            from pathlib import Path
+
+            class Rec:
+                def __init__(self, data_dir):
+                    self._p = Path(data_dir) / "last_take.wav"
+        """)
+        self.assertIn("last_take.wav", ids)
+
+    def test_glob_audio_family_under_data_dir_is_discovered(self):
+        ids = self._ids("""
+            from pathlib import Path
+
+            class Rec:
+                def __init__(self, data_dir):
+                    self._d = Path(data_dir) / "takes"
+
+                def stale(self):
+                    return list(self._d.glob("take_*.opus"))
+        """)
+        self.assertTrue(any(i.endswith(".opus") for i in ids), ids)
+
+    def test_audio_extension_outside_data_dir_is_not_discovered(self):
+        ids = self._ids("""
+            from pathlib import Path
+
+            def tone(tmp_root):
+                return Path(tmp_root) / "beep.wav"
+        """)
+        self.assertNotIn("beep.wav", ids)
