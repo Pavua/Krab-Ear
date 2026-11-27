@@ -48,6 +48,11 @@ RECORDING_IN_PROGRESS_REASON = "recording in progress"
 # это состояние было ВИДНО (в логе агента и watchdog'у), а не сливалось с
 # обычной диктовкой в вечный тихий ретрай.
 RECORDER_WORKER_HUNG_REASON = "recorder worker hung"
+# B17 (ревью Opus #2309, P2): оба движка выключены (off/off) — состояние, которое владелец меняет
+# сам и без паузы поллера. Отдельная строка нужна, чтобы Swift НЕ жёг бюджет self-heal (иначе после
+# трёх отказов wake word молчит и после включения движка). Менять парно с
+# WakeWordPoller.enginesOffReason.
+ENGINES_OFF_REASON = "wake engines off"
 
 # Встроенные модели openWakeWord
 _BUILTIN_MODELS: list[str] = [
@@ -87,6 +92,10 @@ _MODEL_LOAD_TIMEOUT_SEC: float = 30.0
 # (мик занят/недоступен) — 2376 событий Sentry за 7 часов.
 _MAX_CONSECUTIVE_STREAM_FAILURES: int = 3
 _STREAM_FAILURE_COOLDOWN_SEC: float = 60.0
+
+
+class WakeEnginesOffError(RuntimeError):
+    """Оба движка (openwakeword и STT-споттер) в режиме off — стартовать нечего, но это не сбой."""
 
 
 class WakeWordDisabledError(RuntimeError):
@@ -331,8 +340,9 @@ class OpenWakeWordAdapter:
                     "Выполните: pip install openwakeword"
                 )
             if oww_mode == "off" and not stt_wanted:
-                logger.info("OpenWakeWordAdapter.start: все движки wake word выключены (режим off)")
-                raise RuntimeError("все движки wake word выключены в настройках")
+                # DEBUG: поллер стучится каждые ~10 с, INFO заливал бы лог (как и в ветке «идёт запись»).
+                logger.debug("OpenWakeWordAdapter.start: все движки wake word выключены (режим off)")
+                raise WakeEnginesOffError("все движки wake word выключены в настройках")
             use_oww = oww_mode != "off" and self._oww_available
 
             model_path = self._resolve_model_path(model_name) if use_oww else None
@@ -962,6 +972,10 @@ class OpenWakeWordAdapter:
         try:
             self.start(model_name, _on_detected, threshold=threshold)
             return {"ok": True, "model": model_name, "threshold": threshold}
+        except WakeEnginesOffError:
+            # ТОЛЬКО reason (как в ветке записи): Swift-поллер берёт `error` раньше `reason`, и при наличии
+            # обоих полей why != enginesOffReason — бюджет self-heal сгорал бы (ревью Opus, #2309).
+            return {"ok": False, "reason": ENGINES_OFF_REASON}
         except RuntimeError as e:
             return {"ok": False, "error": str(e)}
         except ValueError as e:
@@ -1339,6 +1353,12 @@ class OpenWakeWordAdapter:
                         self._last_any_chunk_ts = time.monotonic()
                         if flat.any():
                             self._last_chunk_ts = self._last_any_chunk_ts
+                    # Оба движка выключили на лету (off/off): слушать нечему. Раньше цикл держал открытый тап и
+                    # продолжал копить звук в pre-roll-кольце до ручной остановки (ревью B17): закрываем микрофон
+                    # ДО добавления чанка в кольцо. Новый start() при off/off и так отказывает.
+                    if self.engine_mode(ENGINE_OWW) == "off" and self.engine_mode(ENGINE_STT) == "off":
+                        logger.info("OpenWakeWordAdapter: оба движка выключены — освобождаем микрофон")
+                        break
                     try:
                         ring_total = ring.append(flat)
                     except Exception:  # noqa: BLE001 — pre-roll best-effort: сбой кольца не должен глушить wake word
