@@ -44,12 +44,12 @@ class ClassifyImportFailureTest(unittest.TestCase):
                 self.assertEqual(classify_import_failure(_mnf(name))[0], "skip")
 
     def test_required_package_from_requirements_fails(self):
-        for name in ("flask", "flask_cors", "flask_limiter", "numpy", "requests", "marshmallow"):
+        for name in ("flask", "flask_cors", "flask_limiter", "numpy", "requests", "marshmallow", "pyannote.audio", "xdist"):
             with self.subTest(name=name):
                 self.assertEqual(classify_import_failure(_mnf(name))[0], "fail")
 
     def test_app_module_failure_fails(self):
-        for name in ("backend.rest_server", "backend.service", "core.engine", "contracts.x"):
+        for name in ("backend.rest_server", "backend.service", "core.engine", "contracts.x", "KrabEar.__version__"):
             with self.subTest(name=name):
                 self.assertEqual(classify_import_failure(_mnf(name))[0], "fail")
 
@@ -76,27 +76,32 @@ _HIDE_FLASK_PLUGIN = textwrap.dedent(
 
 
 class MissingRequiredPackageIsLoudTest(unittest.TestCase):
+    def _run(self, fname, tmp, hide_flask):
+        env = dict(os.environ)
+        # Корень репо нужен: код делает `from KrabEar.__version__ import ...`, без него падение
+        # было бы «No module named KrabEar», а не про flask (регрессия шла бы вхолостую).
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(_KRABEAR_ROOT.parent), str(_KRABEAR_ROOT), str(_TESTS_DIR), str(tmp)])
+        cmd = [sys.executable, "-m", "pytest", str(_TESTS_DIR / fname), "-q", "-p", "no:cacheprovider",
+               "--rootdir", str(_KRABEAR_ROOT), "-k", "TestRestStubImportHealthy"]
+        if hide_flask:
+            cmd[3:3] = ["-p", "hide_flask_plugin"]
+        return subprocess.run(cmd, env=env, cwd=str(_KRABEAR_ROOT), capture_output=True, text=True,
+                              timeout=240)
+
     def test_hidden_flask_fails_in_every_file(self):
         with tempfile.TemporaryDirectory(prefix="krab_ear_rest_skip_policy_") as td:
             tmp = Path(td)
             (tmp / "hide_flask_plugin.py").write_text(_HIDE_FLASK_PLUGIN, encoding="utf-8")
-            env = dict(os.environ)
-            env["PYTHONPATH"] = os.pathsep.join([str(_KRABEAR_ROOT), str(_TESTS_DIR), str(tmp)])
             for fname in _FILES:
                 with self.subTest(file=fname):
-                    proc = subprocess.run(
-                        [sys.executable, "-m", "pytest", str(_TESTS_DIR / fname), "-q",
-                         "-p", "no:cacheprovider", "-p", "hide_flask_plugin",
-                         "--rootdir", str(_KRABEAR_ROOT),
-                         "-k", "TestRestStubImportHealthy"],
-                        env=env, cwd=str(_KRABEAR_ROOT), capture_output=True, text=True,
-                        timeout=240,
-                    )
-                    self.assertNotEqual(
-                        proc.returncode, 0,
-                        f"{fname}: пропавший обязательный flask дал rc=0 (тихий skip)\n"
-                        f"{proc.stdout[-800:]}",
-                    )
+                    # Контроль: без сокрытия flask проверка зелёная — иначе падение ниже ничего не доказывает.
+                    ok = self._run(fname, tmp, hide_flask=False)
+                    self.assertEqual(ok.returncode, 0, f"{fname}: контрольный прогон не зелёный\n{ok.stdout[-800:]}")
+                    bad = self._run(fname, tmp, hide_flask=True)
+                    out = bad.stdout + bad.stderr
+                    self.assertEqual(bad.returncode, 1, f"{fname}: ждали rc=1 (тест упал), rc={bad.returncode}\n{out[-800:]}")
+                    self.assertIn("flask", out, f"{fname}: падение не про flask\n{out[-800:]}")
 
 
 class NoSilentModuleNotFoundHandlerTest(unittest.TestCase):

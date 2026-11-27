@@ -15,7 +15,7 @@ from pathlib import Path
 _REQUIREMENTS = Path(__file__).resolve().parent.parent / "requirements.txt"
 
 # Корни пакетов самого приложения: их отсутствие — дефект кода/путей, не optional.
-_APP_ROOTS = frozenset({"backend", "core", "contracts"})
+_APP_ROOTS = frozenset({"backend", "core", "contracts", "KrabEar"})
 
 # Optional-зависимости, объявленные в requirements.txt закомментированными блоками
 # («Установи вручную …»), плюс платформенные, которые на не-Apple раннере не ставятся.
@@ -32,7 +32,7 @@ _DECLARED_OPTIONAL = frozenset({
 # Различия import-имени и имени дистрибутива для обязательных пакетов.
 _IMPORT_NAME_ALIASES = {
     "pyannote.audio": "pyannote",
-    "pytest_xdist": "xdist",
+    "pytest-xdist": "xdist",
 }
 
 
