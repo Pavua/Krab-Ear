@@ -639,8 +639,11 @@ class OpenWakeWordAdapter:
         # Нечего выгружать (модель не загружалась — режим stt никогда не включали) — поток не создаём: stop() входит в
         # путь close() backend, где новые потоки нежелательны (граница rest_stageb_boundary), а выгрузка не нужна.
         is_loaded = getattr(self._stt_transcribe, "is_loaded", None)
+        is_loading = getattr(self._stt_transcribe, "is_loading", None)
         try:
-            if callable(is_loaded) and not is_loaded():
+            # Идущая загрузка — тоже «есть что выгружать» (B18): иначе остановка «насовсем» посреди прогрева пропускала
+            # выгрузку, и по окончании загрузки 1,1 ГБ оставались в памяти при выключенном wake word.
+            if callable(is_loaded) and not is_loaded() and not (callable(is_loading) and is_loading()):
                 return
             threading.Thread(target=self._release_stt_model, name="SttSpotterRelease", daemon=True).start()
         except Exception:  # noqa: BLE001 — stop()/close() не имеют права падать из-за выгрузки модели споттера
