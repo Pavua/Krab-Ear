@@ -956,9 +956,11 @@ class ObsidianSyncManager:
                             "ObsidianSync: vault из state-файла отвергнут: %s", exc
                         )
                     else:
-                        # G3-P03-04: храним resolve()-путь, как configure(): иначе старый
-                        # state с симлинком в пути ложно отказал бы в purge.
-                        self._vault_path = p.resolve()
+                        # G3-P03-04: путь храним КАК ЕСТЬ, без resolve(). resolve() здесь
+                        # «отмыл» бы подмену vault симлинком, сделанную до перезапуска:
+                        # проверка в purge_all_synced_files прошла бы по чужой цели. Старый
+                        # state с симлинком в пути даёт отказ purge до перенастройки vault.
+                        self._vault_path = p
             # W1768 (MED, path-traversal): folder из state-файла может быть подделан
             # (например внешним процессом). Валидируем при загрузке: если он выходит
             # за пределы vault (или vault ещё не настроен и folder сам по себе
