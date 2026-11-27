@@ -59,8 +59,14 @@ extension AgentAppDelegate {
                 "offset_sec": offsetSec,
                 "note": "",
             ]
-            guard (try? await ipc.callAsync(method: "add_bookmark", params: bookmarkParams)) != nil else {
+            guard let bookmarkResponse = try? await ipc.callAsync(method: "add_bookmark", params: bookmarkParams) else {
                 log.warn("Ошибка создания закладки")
+                return
+            }
+            // Бэкенд отвечает {"ok": false, "reason": ...} при privacy/лимите — это НЕ успех:
+            // без проверки «📌» показывался бы, хотя закладка не создана.
+            if case .refused(let reason) = AgentAppDelegate.classifyBookmarkResponse(bookmarkResponse) {
+                log.warn("Закладка отклонена бэкендом: \(reason)")
                 return
             }
 
@@ -75,6 +81,28 @@ extension AgentAppDelegate {
     }
 
     // MARK: - Helpers
+
+    /// Исход ответа `add_bookmark`.
+    enum BookmarkResponse: Equatable, Sendable {
+        case success
+        case refused(String)
+    }
+
+    /// Разбирает ответ `add_bookmark` (плоский или в конверте `result`).
+    /// Успех — только непустой `bookmark` и `ok != false`; всё остальное — отказ с причиной.
+    nonisolated static func classifyBookmarkResponse(_ response: Any?) -> BookmarkResponse {
+        guard let envelope = response as? [String: Any] else {
+            return .refused("invalid_response")
+        }
+        let payload = (envelope["result"] as? [String: Any]) ?? envelope
+        if let ok = payload["ok"] as? Bool, ok == false {
+            return .refused((payload["reason"] as? String) ?? "refused")
+        }
+        if let bookmark = payload["bookmark"] as? [String: Any], !bookmark.isEmpty {
+            return .success
+        }
+        return .refused((payload["reason"] as? String) ?? "invalid_response")
+    }
 
     /// Форматирует секунды как "M:SS" или "H:MM:SS".
     static func formatOffsetSec(_ sec: Double) -> String {
