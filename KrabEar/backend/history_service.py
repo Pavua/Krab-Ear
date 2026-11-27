@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, TYPE_CHECKING
 
 from backend.observability import add_breadcrumb
-from backend.purge_fs import rmtree_strict
+from backend.purge_fs import purge_flat_dir_contents, rmtree_strict
 from backend.transcript_writer import TranscriptWriter, _sanitize_md_body, history_markdown_suffix
 from core.fuzzy_search import FuzzySearcher
 from core.parsing_utils import safe_json_loads
@@ -3351,12 +3351,16 @@ class HistoryService:
         # расширений формата.
         rescue_deleted = 0
         try:
-            rescue_dir = Path(self.store.data_dir) / "rescue"
-            if rescue_dir.is_dir():
-                for f in rescue_dir.iterdir():
-                    if f.is_file():
-                        f.unlink(missing_ok=True)
-                        rescue_deleted += 1
+            # G3-P03-06: iterdir() шёл по симлинку rescue/ и удалял файлы ВНЕ профиля, а
+            # is_dir() на 3.14 читал PermissionError как «каталога нет». Каталог плоский —
+            # чистим через его fd: симлинк/не каталог/ошибка доступа → ошибка шага.
+            rescue_deleted, rescue_problems = purge_flat_dir_contents(
+                Path(self.store.data_dir) / "rescue"
+            )
+            if rescue_problems:
+                logger.warning("purge_all_data: rescue/ очищен не полностью: %d объектов",
+                               len(rescue_problems))
+                secondary_errors.append("rescue")
         except Exception:
             logger.warning("purge_all_data: rescue/ deletion failed", exc_info=True)
             secondary_errors.append("rescue")
@@ -4292,23 +4296,21 @@ class HistoryService:
         temp_uploads_deleted = 0
         try:
             if _data_dir is not None:
-                _temp_uploads_dir = _data_dir / "temp_uploads"
-                if _temp_uploads_dir.is_dir():
-                    _temp_upload_files = [p for p in _temp_uploads_dir.iterdir() if p.is_file()]
-                    for _upload_path in _temp_upload_files:
-                        try:
-                            _upload_path.unlink(missing_ok=True)
-                            temp_uploads_deleted += 1
-                        except OSError:
-                            logger.warning(
-                                "purge_all_data: не удалось удалить %s", _upload_path, exc_info=True
-                            )
-                    if len(_temp_upload_files) > temp_uploads_deleted:
-                        secondary_errors.append("temp_uploads")
-                    if temp_uploads_deleted:
-                        logger.info(
-                            "purge_all_data: удалено %d файлов из temp_uploads/", temp_uploads_deleted
-                        )
+                # G3-P03-06: как rescue/ — через fd каталога, по симлинку не ходим, ошибку
+                # доступа не принимаем за отсутствие. Сам каталог остаётся.
+                temp_uploads_deleted, _temp_upload_problems = purge_flat_dir_contents(
+                    _data_dir / "temp_uploads"
+                )
+                if _temp_upload_problems:
+                    logger.warning(
+                        "purge_all_data: temp_uploads/ очищен не полностью: %d объектов",
+                        len(_temp_upload_problems),
+                    )
+                    secondary_errors.append("temp_uploads")
+                if temp_uploads_deleted:
+                    logger.info(
+                        "purge_all_data: удалено %d файлов из temp_uploads/", temp_uploads_deleted
+                    )
         except Exception:
             logger.warning("purge_all_data: удаление содержимого temp_uploads/ не удалось", exc_info=True)
             secondary_errors.append("temp_uploads")

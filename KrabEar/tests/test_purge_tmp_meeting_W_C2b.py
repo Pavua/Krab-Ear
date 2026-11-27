@@ -29,7 +29,8 @@ class _FakeStore:
         self._lock_obj = threading.Lock()
         self._settings: dict = {}
 
-    def _lock(self):
+    def _lock(self, timeout_sec: float | None = None, nowait: bool = False, shared: bool = False):
+        # G3-P03-05: сигнатура как у StateStore._lock — purge вправе передать любой из аргументов.
         return self._lock_obj
 
     def _load_active_items_unlocked(self) -> list:
