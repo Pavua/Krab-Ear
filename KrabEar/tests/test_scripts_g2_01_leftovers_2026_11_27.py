@@ -222,10 +222,16 @@ def src_repo(tmp_path):
 _HARNESS_FUNCS = ("resolve_expected_commit", "fetch_pinned_git", "fetch_pinned_tarball", "install_pinned_code")
 
 
-def _bootstrap(tmp_path: Path, snippet: str, **env_extra: str) -> subprocess.CompletedProcess:
+# Скрипт пускает curl только по https. Тестовые архивы лежат по file:// — обёртка
+# дописывает разрешение file ПОСЛЕ аргументов скрипта (у curl последний --proto побеждает).
+# Сам запрет http/file проверяет TestCurlHttpsOnly без обёртки.
+_CURL_ALLOW_FILE = "curl() { command curl \"$@\" --proto '=file' --proto-redir '=file'; }\n"
+
+
+def _bootstrap(tmp_path: Path, snippet: str, prelude_extra: str = "", **env_extra: str) -> subprocess.CompletedProcess:
     funcs = "".join(_function_source("bootstrap_backend.command", f) for f in _HARNESS_FUNCS)
     prelude = ("log() { echo \"LOG $*\"; }\nwarn() { echo \"WARN $*\"; }\n"
-               f'PY="{sys.executable}"\nPINNED_COMMIT="${{TEST_STAMP:-}}"\n')
+               f'PY="{sys.executable}"\nPINNED_COMMIT="${{TEST_STAMP:-}}"\n' + prelude_extra)
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path)}
     env.update(env_extra)
     return subprocess.run([BASH, "-c", prelude + funcs + snippet], env=env, capture_output=True,
@@ -234,8 +240,8 @@ def _bootstrap(tmp_path: Path, snippet: str, **env_extra: str) -> subprocess.Com
 
 def _install(tmp_path: Path, repo_url: str, sha: str) -> tuple[subprocess.CompletedProcess, Path]:
     dest = tmp_path / "home" / "KrabEar"
-    res = _bootstrap(tmp_path, 'install_pinned_code', REPO_URL=repo_url, EXPECTED_COMMIT=sha,
-                     INSTALL_DIR=str(dest))
+    res = _bootstrap(tmp_path, 'install_pinned_code', prelude_extra=_CURL_ALLOW_FILE,
+                     REPO_URL=repo_url, EXPECTED_COMMIT=sha, INSTALL_DIR=str(dest))
     return res, dest
 
 
@@ -332,6 +338,155 @@ class TestInstallPinnedCode:
         assert res.returncode != 0, res.stdout
         assert not dest.exists()
         assert list(tmp_path.rglob("escaped")) == []
+
+
+def _publish_crafted(tmp_path: Path, sha: str, members: list[tarfile.TarInfo | tuple[str, bytes]]) -> str:
+    """Собирает архив с pax comment = sha из произвольных членов; возвращает REPO_URL."""
+    archive_dir = tmp_path / "web" / "repo" / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.PAX_FORMAT,
+                      pax_headers={"comment": sha}) as tf:
+        for item in members:
+            if isinstance(item, tarfile.TarInfo):
+                tf.addfile(item)
+            else:
+                name, data = item
+                info = tarfile.TarInfo(name)
+                info.size = len(data)
+                tf.addfile(info, io.BytesIO(data))
+    (archive_dir / f"{sha}.tar.gz").write_bytes(buf.getvalue())
+    return f"file://{tmp_path / 'web' / 'repo'}.git"
+
+
+def _link(name: str, target: str, kind: bytes = tarfile.SYMTYPE) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type = kind
+    info.linkname = target
+    return info
+
+
+class TestTarballMemberTypes:
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+    ROOT_DIR = f"Krab-Ear-{SHA}"
+    SERVICE = (f"{ROOT_DIR}/KrabEar/backend/service.py", b"VERSION = 'T'\n")
+
+    def _install_crafted(self, tmp_path: Path, *extra) -> tuple[subprocess.CompletedProcess, Path]:
+        url = _publish_crafted(tmp_path, self.SHA, [self.SERVICE, *extra])
+        # git-путь по этому адресу не сработает (нет репозитория) — ставится tarball.
+        return _install(tmp_path, url, self.SHA)
+
+    def test_internal_relative_symlink_is_kept(self, tmp_path):
+        """Как Sparkle.framework в репо: относительная ссылка внутри корня допустима."""
+        fw = f"{self.ROOT_DIR}/Krab Ear.app/Contents/Frameworks/Sparkle.framework"
+        res, dest = self._install_crafted(
+            tmp_path, (f"{fw}/Versions/B/Sparkle", b"bin"), _link(f"{fw}/Versions/Current", "B"),
+            _link(f"{fw}/Sparkle", "Versions/Current/Sparkle"))
+        assert res.returncode == 0, res.stdout + res.stderr
+        link = dest / "Krab Ear.app/Contents/Frameworks/Sparkle.framework/Sparkle"
+        assert link.is_symlink() and link.read_bytes() == b"bin"
+        assert _leftovers(tmp_path) == []
+
+    @pytest.mark.parametrize("member", [
+        pytest.param(lambda r: _link(f"{r}/KrabEar/hard.py", f"{r}/KrabEar/backend/service.py", tarfile.LNKTYPE),
+                     id="hardlink"),
+        pytest.param(lambda r: _link(f"{r}/out", "../../outside"), id="symlink-escapes-root"),
+        pytest.param(lambda r: _link(f"{r}/abs", "/etc"), id="symlink-absolute"),
+        pytest.param(lambda r: _link(f"{r}/dev", "", tarfile.CHRTYPE), id="char-device"),
+        pytest.param(lambda r: _link(f"{r}/fifo", "", tarfile.FIFOTYPE), id="fifo"),
+    ])
+    def test_forbidden_member_refuses_whole_install(self, tmp_path, member):
+        res, dest = self._install_crafted(tmp_path, member(self.ROOT_DIR))
+        assert res.returncode != 0, res.stdout
+        assert "tarball:" in res.stdout + res.stderr
+        assert not os.path.lexists(dest)
+        assert _leftovers(tmp_path) == []
+
+    def test_member_written_through_internal_symlink_is_refused(self, tmp_path):
+        res, dest = self._install_crafted(
+            tmp_path, (f"{self.ROOT_DIR}/sub/keep.txt", b"k"), _link(f"{self.ROOT_DIR}/lnk", "sub"),
+            (f"{self.ROOT_DIR}/lnk/injected.txt", b"x"))
+        assert res.returncode != 0, res.stdout
+        assert "внутри симлинка" in res.stdout + res.stderr
+        assert not os.path.lexists(dest)
+
+
+class TestCurlHttpsOnly:
+    """Без тестовой обёртки: curl скрипта не ходит ни по http, ни по file."""
+
+    @pytest.mark.parametrize("scheme_url", ["http://127.0.0.1:9/repo.git", "file:///nonexistent/repo.git"])
+    def test_non_https_url_is_refused_by_curl(self, tmp_path, scheme_url):
+        stage = tmp_path / "stage"
+        stage.mkdir()
+        res = _bootstrap(tmp_path, f'fetch_pinned_tarball "{stage}"', REPO_URL=scheme_url,
+                         EXPECTED_COMMIT="0123456789abcdef0123456789abcdef01234567")
+        assert res.returncode != 0
+        assert "disabled" in res.stderr, res.stderr
+        assert list(stage.iterdir()) == []
+
+    def test_every_curl_call_ignores_curlrc_and_pins_https(self):
+        text = (SCRIPTS / "bootstrap_backend.command").read_text()
+        calls = [ln.strip() for ln in text.splitlines()
+                 if re.search(r"(^|[\s;|&(])curl\s", ln) and not ln.lstrip().startswith("#")]
+        assert calls, "curl не найден — проверка пустая"
+        for call in calls:
+            assert call.startswith("curl -q --proto '=https' --proto-redir '=https' "), call
+
+
+_CODE_BLOCK_RE = re.compile(r'^if \[ -f "\$INSTALL_DIR/KrabEar/backend/service\.py" \]; then\n.*?^fi\n', re.S | re.M)
+
+
+def _run_code_step(tmp_path: Path, install_dir: Path) -> subprocess.CompletedProcess:
+    """Шаг «3. Код проекта» верхнего уровня; скачивание заменено заглушкой."""
+    block = _CODE_BLOCK_RE.search((SCRIPTS / "bootstrap_backend.command").read_text())
+    assert block, "блок «Код проекта» не найден"
+    prelude = ('log() { echo "LOG $*"; }\nfail() { echo "FAIL $*"; exit 1; }\n'
+               'install_pinned_code() { echo DOWNLOAD_CALLED; return 1; }\n')
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": str(tmp_path),
+           "INSTALL_DIR": str(install_dir), "EXPECTED_COMMIT": "0" * 40, "REPO_URL": "https://example.invalid/r.git"}
+    return subprocess.run([BASH, "-c", prelude + block.group()], env=env, capture_output=True, text=True, timeout=60)
+
+
+class TestInstallDirSymlinkRefused:
+    def test_dangling_symlink_install_dir_fails_before_download(self, tmp_path):
+        target = tmp_path / "nowhere"
+        link = tmp_path / "KrabEar"
+        link.symlink_to(target)
+        res = _run_code_step(tmp_path, link)
+        assert res.returncode != 0 and "FAIL" in res.stdout, res.stdout
+        assert "DOWNLOAD_CALLED" not in res.stdout
+        assert link.is_symlink() and not target.exists()
+
+    def test_symlink_to_foreign_dir_fails_before_download(self, tmp_path):
+        foreign = tmp_path / "foreign"
+        foreign.mkdir()
+        link = tmp_path / "KrabEar"
+        link.symlink_to(foreign, target_is_directory=True)
+        res = _run_code_step(tmp_path, link)
+        assert res.returncode != 0 and "DOWNLOAD_CALLED" not in res.stdout, res.stdout
+        assert list(foreign.iterdir()) == []
+
+    def test_absent_install_dir_proceeds_to_download(self, tmp_path):
+        res = _run_code_step(tmp_path, tmp_path / "KrabEar")
+        assert "DOWNLOAD_CALLED" in res.stdout, res.stdout + res.stderr
+
+    @needs_git
+    @pytest.mark.parametrize("kind", ["dangling", "to-empty-dir"])
+    def test_symlink_appearing_during_download_is_not_replaced(self, tmp_path, src_repo, kind):
+        """install_pinned_code тоже не делает mv в симлинк (появился после шага 3)."""
+        repo, sha_a, _b = src_repo
+        dest = tmp_path / "home" / "KrabEar"
+        dest.parent.mkdir(parents=True)
+        target = tmp_path / ("nowhere" if kind == "dangling" else "empty")
+        if kind == "to-empty-dir":
+            target.mkdir()
+        dest.symlink_to(target, target_is_directory=True)
+        res = _bootstrap(tmp_path, "install_pinned_code", REPO_URL=f"file://{repo}", EXPECTED_COMMIT=sha_a,
+                         INSTALL_DIR=str(dest))
+        assert res.returncode != 0, res.stdout
+        assert dest.is_symlink() and os.readlink(dest) == str(target)
+        assert (not target.exists()) if kind == "dangling" else list(target.iterdir()) == []
+        assert _leftovers(tmp_path) == []
 
 
 class TestAssembleStampsBootstrapCommit:
