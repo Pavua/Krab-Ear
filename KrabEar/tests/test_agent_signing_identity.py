@@ -59,7 +59,10 @@ elif tool == "dwarfdump":
 elif tool == "dsymutil":
     pathlib.Path(args[-1]).mkdir(parents=True, exist_ok=True)
 elif tool == "pgrep":
-    if os.environ.get("SIGN_TEST_RUNNING"):
+    # Процесс агента «появляется» после open (как в реальности) либо задан заранее через SIGN_TEST_RUNNING.
+    opened = any(json.loads(row)[0] == "open"
+                 for row in pathlib.Path(os.environ["SIGN_TEST_TRACE"]).read_text().splitlines())
+    if os.environ.get("SIGN_TEST_RUNNING") or opened:
         print("424242")
     else:
         sys.exit(1)
@@ -109,12 +112,17 @@ class TestAgentSigningIdentity(unittest.TestCase):
                     for prefix in ("/usr/bin/", "/bin/"):
                         body = body.replace(prefix + tool, shlex.quote(str(self.tools / tool)))
                 (scripts / name).write_text(body)
+        # busy-гейт verify_binaries --fix (KE02B2-05) зовёт safe_backend_restart --check-only; его логика
+        # покрыта собственными тестами, здесь backend «свободен».
+        gate = scripts / "safe_backend_restart.command"
+        gate.write_text("#!/bin/bash\nexit 0\n")
+        gate.chmod(0o755)
         self.runtime = self.root / "native/runtime/KrabEarAgent"
         self.bundle = self.root / "Krab Ear.app"
         self.app_bin = self.bundle / "Contents/MacOS/KrabEarAgent"
         self.build = self.root / "native/KrabEarAgent/.build/release/KrabEarAgent"
         for path, value in (
-            (self.runtime, "old-runtime"), (self.app_bin, "old-app"),
+            (self.runtime, "old-rtm"), (self.app_bin, "old-app"),
             (self.build, "build"),
         ):
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -126,6 +134,9 @@ class TestAgentSigningIdentity(unittest.TestCase):
         self.env = dict(os.environ)
         self.env.update({
             "PATH": str(self.tools) + os.pathsep + os.environ["PATH"],
+            # verify_binaries берёт pgrep из PGREP_BIN (подмена по тексту `/usr/bin/pgrep` ломает его
+            # значение по умолчанию кавычками): заглушка передаётся явно.
+            "PGREP_BIN": str(self.tools / "pgrep"),
             "HOME": str(self.root / "fixture-home"),
             "SIGN_TEST_TRACE": str(self.trace),
             "SIGN_TEST_IDENTITIES": (
@@ -135,7 +146,7 @@ class TestAgentSigningIdentity(unittest.TestCase):
         })
 
     def run_entry(self, entry: str, shell: str = "bash") -> subprocess.CompletedProcess:
-        self.runtime.write_text("old-runtime")
+        self.runtime.write_text("old-rtm")
         self.app_bin.write_text("old-app")
         if entry in ("sign", "app"):
             command = [shutil.which("make"), entry]
@@ -159,7 +170,7 @@ class TestAgentSigningIdentity(unittest.TestCase):
     def assert_preflight_refused(self, entry: str) -> None:
         result = self.run_entry(entry)
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.runtime.read_text(), "old-runtime")
+        self.assertEqual(self.runtime.read_text(), "old-rtm")
         self.assertEqual(self.app_bin.read_text(), "old-app")
         prohibited = {"swift", "cp", "codesign", "pkill", "kill", "open"}
         self.assertFalse([event for event in self.events() if event[0] in prohibited])
@@ -282,7 +293,7 @@ class TestAgentSigningIdentity(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.events(), [])
         self.assertEqual(self.app_bin.read_text(), "old-app")
-        self.assertEqual(self.runtime.read_text(), "old-runtime")
+        self.assertEqual(self.runtime.read_text(), "old-rtm")
 
     def test_report_only_newer_build_never_executes_signing_hint(self) -> None:
         newer = time.time() + 10
@@ -295,7 +306,7 @@ class TestAgentSigningIdentity(unittest.TestCase):
         prohibited = {"security", "swift", "cp", "codesign", "pkill", "kill", "open"}
         self.assertFalse([event for event in self.events() if event[0] in prohibited])
         self.assertEqual(self.app_bin.read_text(), "old-app")
-        self.assertEqual(self.runtime.read_text(), "old-runtime")
+        self.assertEqual(self.runtime.read_text(), "old-rtm")
 
 
 if __name__ == "__main__":
