@@ -159,6 +159,10 @@ def stt_budget_profile_for_owner(owner: str | None) -> str:
     return stt_budget.BATCH if owner == "meeting" else stt_budget.INTERACTIVE
 
 
+class _RecoveryWavSkipped(Exception):
+    """Спасательный WAV сознательно не создаётся (privacy / небезопасный каталог)."""
+
+
 class RecordingCoreService:
     """Recording lifecycle + transcription orchestration service.
 
@@ -3265,7 +3269,15 @@ class RecordingCoreService:
             import uuid as _uuid
 
             import soundfile as _sf
+            # Privacy ON (или состояние неизвестно — гейт fail-closed): сырой голос на диск
+            # не пишем. Ценой этого краш STT под privacy теряет аудио — осознанно: приватный
+            # режим обещает, что plaintext-аудио не оседает на диске.
+            if self._privacy_mode_enabled():
+                raise _RecoveryWavSkipped("privacy_mode")
             _failed_dir = Path(self.store.data_dir) / "failed_recordings"
+            # Симлинк на каталог увёл бы запись за пределы data_dir.
+            if _failed_dir.is_symlink():
+                raise _RecoveryWavSkipped("failed_recordings_is_symlink")
             _failed_dir.mkdir(parents=True, exist_ok=True)
             _presaved_path = _failed_dir / f"{_uuid.uuid4().hex}.wav"
             _sf.write(
@@ -3273,6 +3285,9 @@ class RecordingCoreService:
                 int(getattr(self.recorder, "sample_rate", 16000)),
             )
             audio_recovery_path = str(Path("failed_recordings") / _presaved_path.name)
+        except _RecoveryWavSkipped as _skip:
+            _presaved_path = None
+            logger.info("phase_c: спасательная копия аудио не создаётся (%s)", _skip)
         except Exception as _pre_exc:
             _presaved_path = None
             logger.warning("phase_c: не удалось сохранить спасательную копию аудио: %s", _pre_exc)
@@ -3292,7 +3307,19 @@ class RecordingCoreService:
             )
         except Exception as _stt_exc:
             logger.exception("phase_c: STT crashed", extra={"quality_profile": quality_profile})
-            # Спасательная копия уже на диске (см. presave выше) — её и отдаём.
+            # Спасательная копия уже на диске (см. presave выше) — её и отдаём, КРОМЕ случая,
+            # когда privacy включили, пока STT работал (или состояние неизвестно): тогда
+            # plaintext-аудио удаляется, а путь не отдаётся. Не удалилось — путь остаётся
+            # (файл реально на диске), сбой громко логируется.
+            if _presaved_path is not None and self._privacy_mode_enabled():
+                try:
+                    _presaved_path.unlink(missing_ok=True)
+                    audio_recovery_path = None
+                except OSError as _unlink_exc:
+                    logger.error(
+                        "privacy: recovery WAV не удалён после краха STT (%s)",
+                        type(_unlink_exc).__name__,
+                    )
             if self._error_bus is not None:
                 try:
                     from backend.error_bus import KrabError
