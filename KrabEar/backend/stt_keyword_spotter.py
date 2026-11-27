@@ -321,6 +321,12 @@ class SttKeywordModel:
                 return
             self._closed = True
             self._queue.clear()
+            # ChatGPT 26.11, п.9: close() сбрасывает и метаданные срабатывания; реплика, которая ещё
+            # распознаётся, после close() устарела (поколение сдвинуто) и ничего не публикует.
+            self._gen += 1
+            self._fired = False
+            self._fire_anchor = None
+            self._fire_back = None
             self._cond.notify_all()
         self._worker.join(timeout)
 
@@ -392,7 +398,7 @@ class SttKeywordModel:
                 logger.warning("SttKeywordSpotter: распознавание реплики не удалось (%s)", type(exc).__name__)
             finally:
                 with self._cond:
-                    if kind is not None and gen != self._gen:
+                    if kind is not None and (gen != self._gen or self._closed):
                         self._stats["stale_discarded"] += 1  # reset() случился, пока шло распознавание
                     elif kind is not None:
                         now = self._clock()
