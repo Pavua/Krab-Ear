@@ -275,6 +275,7 @@ from core.config import settings  # noqa: E402 — needed after sys.path patch
 try:
     with patch("pathlib.Path.mkdir"):
         from backend.rest_server import app, require_api_key  # noqa: E402
+        import backend.rest_server as _rest_server_mod  # noqa: E402 — модуль, давший `app`
 finally:
     # подмены атрибутов возвращаются СРАЗУ после импорта и при исключении импорта
     _restore_patched_attrs()
@@ -355,6 +356,13 @@ class TestAuthEnabledCorrectKey(unittest.TestCase):
     def setUp(self):
         self._orig_key = settings.REST_API_KEY
         settings.REST_API_KEY = self._TEST_KEY
+        # Готовность читается через имя BackendService В МОДУЛЕ rest_server. Если соседний
+        # файл импортировал rest_server раньше, подмена backend.service.BackendService при
+        # импорте сюда не доходит: реальный проб STT без кэша моделей (CI) даёт 503.
+        # Подменяем имя там, где его разрешает обработчик, и возвращаем в cleanup.
+        patcher = patch.object(_rest_server_mod, "BackendService", _FakeBackendService)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.client = app.test_client()
 
     def tearDown(self):
