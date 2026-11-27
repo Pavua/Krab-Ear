@@ -99,7 +99,8 @@ PURGE_METHOD_NAMES: frozenset[str] = frozenset(
 # uses these extensions, so they only ever surface via the per-extension (f-string /
 # glob) sibling-extension detection — adding them here lets that path recognise them.
 PERSIST_EXTENSIONS: frozenset[str] = frozenset(
-    {"json", "ndjson", "txt", "npy", "key", "csv", "html", "srt", "bak"}
+    {"json", "ndjson", "txt", "npy", "key", "csv", "html", "srt", "bak",
+     "wav", "opus", "m4a", "mp3"}
 )
 
 # A5.2c1: a ``.bak``-copy is a DERIVED copy of the store whose name precedes it
