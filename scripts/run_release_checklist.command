@@ -60,7 +60,11 @@ pass() {
 # clean | dirty | unknown — работает и в обычном clone, и в linked worktree.
 git_worktree_state() {
   git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1 || { echo unknown; return 0; }
-  if git -C "$ROOT_DIR" diff-index --quiet HEAD -- 2>/dev/null; then echo clean; else echo dirty; fi
+  # `diff-index --quiet HEAD` не видит НЕОТСЛЕЖИВАЕМЫХ файлов (новые исходники/конфиги), а сбой
+  # git не должен читаться как dirty или clean: status --porcelain отдаёт и их (игнорируемые — нет).
+  local out
+  out="$(git -C "$ROOT_DIR" status --porcelain --untracked-files=all 2>/dev/null)" || { echo unknown; return 0; }
+  if [ -z "$out" ]; then echo clean; else echo dirty; fi
 }
 
 print_section() {
@@ -115,7 +119,9 @@ GIT_STATE="$(git_worktree_state)"
 case "$GIT_STATE" in
   dirty) fail "git_status" "Uncommitted changes detected; run: git status" ;;
   clean) pass "git status clean" ;;
-  *) echo "  ⚠ git status: unknown (не git work tree)" ;;
+  # unknown (не git work tree ИЛИ сбой git) — fail-closed: чеклист не вправе вернуть PASS,
+  # не зная состояния дерева (раньше сбой git давал dirty → fail; ревью Opus #2305, P2).
+  *) fail "git_status" "git status unknown (не git work tree или сбой git) — состояние дерева не проверено" ;;
 esac
 
 # =====================================================================
@@ -190,10 +196,7 @@ print_section "FINAL REPORT"
   echo "| python version | ✓ $PY_VERSION |"
   echo "| pip dependencies | ✓ |"
   echo "| disk space | ✓ $(($DISK_AVAIL / 1048576)) GB |"
-  case "$GIT_STATE" in
-    clean) echo "| git status | ✓ clean |" ;;
-    *) echo "| git status | ⚠ unknown (не git work tree) |" ;;
-  esac
+  echo "| git status | ✓ clean |"  # unknown/dirty завершают чеклист раньше (fail)
   echo "| shell scripts | ✓ |"
   echo "| swift build | ✓ |"
   if [ "$QUICK_MODE" = "--quick" ]; then
