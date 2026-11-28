@@ -8,5 +8,4 @@ AI-агента в этом репозитории (Codex, Antigravity/Gemini, �
 Для skill-процедур, особенно runtime/CI/Sentry и safe test-call воркфлоу,
 сначала смотри [`docs/AGENT_SKILLS.md`](docs/AGENT_SKILLS.md).
 
-Для полного контекста после `AGENTS.md` — `CLAUDE.md` рядом (тот же корень
-репозитория): полная история проекта, все паттерны, все живые уроки.
+Read the applicable sections of current project rules and docs/claude/architecture.md; consult the historical evidence only for the relevant task. Preserve all safety gates.
