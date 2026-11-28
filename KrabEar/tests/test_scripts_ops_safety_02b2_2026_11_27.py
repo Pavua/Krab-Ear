@@ -637,6 +637,63 @@ class TestRepairPermissions:
         calls = _calls(tmp_path)
         assert any(c.startswith("open") and "Krab Ear.app" in c for c in calls), calls
         assert not any(c.startswith("launchctl kickstart") for c in calls), calls
+        assert f"Выбери: {root / 'Krab Ear.app'}" in res.stdout, res.stdout
+
+    @staticmethod
+    def _launchctl_print(tmp_path: Path, print_body: str) -> None:
+        """launchctl-заглушка: `print` выводит print_body (формат реального launchctl print)."""
+        (tmp_path / "print.out").write_text(print_body)
+        _exe(tmp_path / "stubbin" / "launchctl",
+             'echo "launchctl $*" >> "$STUB_LOG"\n'
+             f'[ "$1" = print ] && cat "{tmp_path / "print.out"}" && exit 0\nexit 0\n')
+
+    @staticmethod
+    def _choose_line(stdout: str) -> str:
+        lines = [ln for ln in stdout.splitlines() if "Выбери:" in ln]
+        assert len(lines) == 1, stdout
+        return lines[0]
+
+    def test_loaded_unit_instruction_names_the_unit_program_bundle(self, tmp_path):
+        """Ревью Opus #2319 (P3): под launchd TCC-запись нужна для того бинаря, который запускает юнит
+        (прод может идти из release-копии), а не для `Krab Ear.app` рядом со скриптом."""
+        root = _rp_tree(tmp_path)
+        _gate(tmp_path, rc=0)
+        prog = "/opt/ear release/Krab Ear.app/Contents/MacOS/KrabEarAgent"
+        self._launchctl_print(
+            tmp_path,
+            "gui/501/ai.krab.ear.agent = {\n\tactive count = 1\n"
+            "\tpath = /Users/x/Library/LaunchAgents/ai.krab.ear.agent.plist\n"
+            "\ttype = LaunchAgent\n\tstate = running\n\n"
+            f"\tprogram = {prog}\n\targuments = {{\n\t\t{prog}\n\t}}\n}}\n",
+        )
+        res = self._run(root, tmp_path)
+        assert res.returncode == 0, res.stdout + res.stderr
+        line = self._choose_line(res.stdout)
+        assert line.rstrip().endswith("Выбери: /opt/ear release/Krab Ear.app"), line
+        assert prog in res.stdout, res.stdout  # программа юнита названа при kickstart
+        calls = _calls(tmp_path)
+        assert any(c.startswith("launchctl kickstart -k") for c in calls), calls
+
+    def test_loaded_unit_with_bare_binary_program_names_the_binary(self, tmp_path):
+        root = _rp_tree(tmp_path)
+        _gate(tmp_path, rc=0)
+        prog = "/opt/ear/native/runtime/KrabEarAgent"
+        self._launchctl_print(tmp_path, f"gui/501/ai.krab.ear.agent = {{\n\tprogram = {prog}\n}}\n")
+        res = self._run(root, tmp_path)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert self._choose_line(res.stdout).rstrip().endswith(f"Выбери: {prog}"), res.stdout
+
+    def test_loaded_unit_without_program_falls_back_with_warning(self, tmp_path):
+        """Путь программы не разобран — подсказываем bundle рядом со скриптом, но честно предупреждаем;
+        перезапуск юнита всё равно идёт через kickstart."""
+        root = _rp_tree(tmp_path)
+        _gate(tmp_path, rc=0)
+        self._launchctl_print(tmp_path, "gui/501/ai.krab.ear.agent = {\n\tstate = running\n}\n")
+        res = self._run(root, tmp_path)
+        assert res.returncode == 0, res.stdout + res.stderr
+        assert self._choose_line(res.stdout).rstrip().endswith(f"Выбери: {root / 'Krab Ear.app'}")
+        assert "не удалось определить" in res.stderr, res.stderr
+        assert any(c.startswith("launchctl kickstart -k") for c in _calls(tmp_path))
 
     def test_launchd_respawned_agent_does_not_abort_the_reset(self, tmp_path):
         """Ревью Opus #2304 (P2): под launchd KeepAlive агент поднимается заново сразу после SIGTERM —

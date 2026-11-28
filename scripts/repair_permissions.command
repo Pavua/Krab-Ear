@@ -121,6 +121,28 @@ tcc_reset ListenEvent "$BUNDLE_ID" 0
 tcc_reset PostEvent "$BUNDLE_ID" 0
 tcc_reset AppleEvents "$BUNDLE_ID" 0
 
+# Под launchd-юнитом (KeepAlive) работает тот бинарь, что прописан в юните, — прод может идти из
+# release-копии, а не из `Krab Ear.app` рядом со скриптом (ревью Opus #2319, P3). TCC-запись нужна
+# именно для него, поэтому в инструкции называем bundle программы юнита.
+AGENT_LABEL="ai.krab.ear.agent"
+UNIT_LOADED=0
+UNIT_PROGRAM=""
+TCC_TARGET="$APP_BUNDLE"
+if UNIT_PRINT="$("${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" 2>/dev/null)"; then
+  UNIT_LOADED=1
+  # Верхний уровень вывода `launchctl print` — ровно один таб перед ключом. Первое совпадение
+  # берёт сам sed (q), без `| head`: под pipefail ранний выход head мог бы уронить скрипт по SIGPIPE.
+  UNIT_PROGRAM="$(printf '%s\n' "$UNIT_PRINT" | /usr/bin/sed -n '/^	program = /{s/^	program = //p;q;}')"
+  case "$UNIT_PROGRAM" in
+    *.app/Contents/MacOS/*) TCC_TARGET="${UNIT_PROGRAM%%.app/Contents/MacOS/*}.app" ;;
+    /*) TCC_TARGET="$UNIT_PROGRAM" ;;
+    *)
+      echo "Предупреждение: не удалось определить программу юнита $AGENT_LABEL — проверьте" \
+        "'launchctl print gui/$(id -u)/$AGENT_LABEL' (строка program); ниже подсказан bundle рядом со скриптом." >&2
+      ;;
+  esac
+fi
+
 echo ""
 echo "----------------------------------------------------------------"
 echo "ИНСТРУКЦИЯ: что сделать в System Settings"
@@ -129,7 +151,7 @@ echo ""
 echo "  1. Найди Krab Ear в списке Универсального доступа."
 echo "  2. Нажми '-' чтобы удалить запись."
 echo "  3. Нажми '+' чтобы добавить заново."
-echo "  4. Выбери: $APP_BUNDLE"
+echo "  4. Выбери: $TCC_TARGET"
 echo "  5. Toggle должен включиться."
 echo "  6. Повтори для Microphone и Screen Recording в соседних pane."
 echo ""
@@ -144,12 +166,12 @@ sleep 3
 # Агент под launchd-юнитом (KeepAlive) поднимается сам сразу после SIGTERM из шага 1 — ДО сброса TCC.
 # `open` лишь активировал бы уже запущенный процесс (со старым TCC-состоянием), поэтому при загруженном
 # юните перезапускаем его через `kickstart -k`; без юнита — прежний `open` (LaunchServices).
-AGENT_LABEL="ai.krab.ear.agent"
-if "${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1; then
+if [ "$UNIT_LOADED" -eq 1 ]; then
   if ! "${LAUNCHCTL_BIN:-launchctl}" kickstart -k "gui/$(id -u)/$AGENT_LABEL"; then
     echo "Ошибка: launchctl kickstart -k $AGENT_LABEL не удался — TCC сброшен, агент не перезапущен." >&2
     exit 1
   fi
+  echo "Юнит $AGENT_LABEL перезапущен, программа: ${UNIT_PROGRAM:-<не определена>}"
 else
   open "$APP_BUNDLE"
 fi
