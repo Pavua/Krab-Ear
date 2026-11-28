@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import shutil
+import struct
 import sys
 import tempfile
 import tracemalloc
@@ -132,12 +133,14 @@ class TestReadAudioCappedHelper(_Tmp):
         self.assertEqual(gsr, esr)
         np.testing.assert_array_equal(got, expected)
 
-    def test_frames_beyond_declared_header_are_refused(self) -> None:
-        # Защитная ветка: если библиотека отдаст больше кадров, чем объявлено в
-        # заголовке (заголовок занижен), потолок держится по ФАКТИЧЕСКИ прочитанному.
+    def test_unit_guard_branch_refuses_reader_returning_more_than_header(self) -> None:
+        # UNIT защитной ветки `got > max_frames`. Настоящий seekable SoundFile так
+        # себя НЕ ведёт (режет чтение до заявленных кадров, см. интеграционный
+        # тест ниже); подмена моделирует не-seekable источник или нестандартную
+        # обёртку, которая отдаёт столько кадров, сколько попросили.
         import core.audio_decode_guard as guard
 
-        class LyingFile:
+        class OverReadingFile:
             channels = 1
             samplerate = SR
             frames = 10  # заголовок «10 кадров»
@@ -152,9 +155,61 @@ class TestReadAudioCappedHelper(_Tmp):
                 return np.zeros(frames, dtype=np.float32)  # отдаёт столько, сколько попросили
 
         with patch.object(guard, "MAX_DECODED_SAMPLES", 100), \
-             patch("soundfile.SoundFile", return_value=LyingFile()):
+             patch("soundfile.SoundFile", return_value=OverReadingFile()):
             with self.assertRaises(ValueError):
                 guard.read_audio_capped(self.root / "x.flac")
+
+
+class TestUnderstatedHeaderOnRealSoundfile(_Tmp):
+    """Интеграция: настоящий soundfile и файл с заниженным заголовком."""
+
+    REAL_SEC = 120.0
+    CLAIM_SEC = 1.0
+
+    def _understated_wav(self) -> Path:
+        # Фактически 2 минуты, а размер data-чанка в заголовке — «1 с».
+        path = self.root / "under.wav"
+        frames = int(SR * self.REAL_SEC)
+        t = np.arange(frames, dtype=np.float32) / SR
+        sf.write(str(path), (0.05 * np.sin(2 * np.pi * 440 * t)).astype(np.float32), SR, subtype="PCM_16")
+        raw = bytearray(path.read_bytes())
+        idx = raw.find(b"data")
+        struct.pack_into("<I", raw, idx + 4, int(SR * self.CLAIM_SEC) * 2)
+        path.write_bytes(bytes(raw))
+        return path
+
+    def test_reads_no_more_than_declared_and_memory_is_bounded(self) -> None:
+        from core.audio_decode_guard import read_audio_capped
+
+        path = self._understated_wav()
+        claim = int(SR * self.CLAIM_SEC)
+        actual_decoded_bytes = int(SR * self.REAL_SEC) * 4
+        tracemalloc.start()
+        try:
+            data, sr = read_audio_capped(path)
+            _cur, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+        self.assertEqual(sr, SR)
+        self.assertEqual(len(data), claim, "прочитано больше заявленного заголовком")
+        self.assertLess(peak, actual_decoded_bytes // 4,
+                        f"пик {peak} Б — декодировано больше заявленного")
+
+    def test_flac_with_unknown_length_is_refused(self) -> None:
+        # total_samples=0 в STREAMINFO: libsndfile объявляет SF_COUNT_MAX кадров.
+        from core.audio_decode_guard import read_audio_capped
+
+        path = self.root / "unknown.flac"
+        _write_flac(path, seconds=1.0)
+        raw = bytearray(path.read_bytes())
+        self.assertEqual(raw[:4], b"fLaC")
+        off = 4 + 4 + 13  # маркер, заголовок блока, байт 13 STREAMINFO
+        raw[off] &= 0xF0
+        struct.pack_into(">I", raw, off + 1, 0)
+        path.write_bytes(bytes(raw))
+        with self.assertRaises(ValueError) as cm:
+            read_audio_capped(path)
+        self.assertIn("декодирован", str(cm.exception))
 
 
 if __name__ == "__main__":
