@@ -66,6 +66,23 @@ def _fake_store_with_items(items=None):
     return _FakeStore(items=items)
 
 
+def _real_audio_file(tc: unittest.TestCase, suffix: str = ".wav") -> str:
+    """Реальный файл в разрешённом корне (G3-audio-01 A07: обработчик открывает
+    файл и передаёт анализатору закреплённый снимок, а не исходную строку)."""
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="ke_aas_")
+    os.write(fd, b"audio-bytes")
+    os.close(fd)
+    tc.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+    return path
+
+
+def _assert_snapshot_arg(tc: unittest.TestCase, got: str, original: str) -> None:
+    """Анализатор получил снимок (другой путь, тот же суффикс), не исходник."""
+    tc.assertNotEqual(got, original)
+    tc.assertEqual(Path(got).suffix, Path(original).suffix.lower())
+    tc.assertFalse(Path(got).exists(), "снимок должен удаляться после вызова")
+
+
 # ---------------------------------------------------------------------------
 # handle_analyze_audio_quality
 # ---------------------------------------------------------------------------
@@ -81,10 +98,12 @@ class TestAnalyzeAudioQuality(unittest.TestCase):
         fake_report.to_dict.return_value = {"quality_score": 85, "warnings": []}
 
         svc = _make_service()
+        src = _real_audio_file(self)
         with patch("core.audio_quality.analyze_file", return_value=fake_report) as mock_af:
-            result = svc.handle_analyze_audio_quality({"file_path": "/tmp/audio.wav"})
+            result = svc.handle_analyze_audio_quality({"file_path": src})
 
-        mock_af.assert_called_once_with("/tmp/audio.wav")
+        mock_af.assert_called_once()
+        _assert_snapshot_arg(self, mock_af.call_args.args[0], src)
         self.assertEqual(result["quality_score"], 85)
         self.assertEqual(result["warnings"], [])
 
@@ -102,17 +121,23 @@ class TestAnalyzeSilence(unittest.TestCase):
     def test_default_threshold(self) -> None:
         fake_result = {"speech_ratio": 0.8, "total_silence_sec": 2.0}
         svc = _make_service()
+        src = _real_audio_file(self)
         with patch("core.silence_detector.analyze_silence_file", return_value=fake_result) as mock_fn:
-            result = svc.handle_analyze_silence({"file_path": "/tmp/audio.wav"})
-            mock_fn.assert_called_once_with("/tmp/audio.wav", threshold_db=-40.0)
+            result = svc.handle_analyze_silence({"file_path": src})
+            mock_fn.assert_called_once()
+            self.assertEqual(mock_fn.call_args.kwargs, {"threshold_db": -40.0})
+            _assert_snapshot_arg(self, mock_fn.call_args.args[0], src)
         self.assertEqual(result["speech_ratio"], 0.8)
 
     def test_custom_threshold(self) -> None:
         fake_result = {"speech_ratio": 0.9, "total_silence_sec": 1.0}
         svc = _make_service()
+        src = _real_audio_file(self)
         with patch("core.silence_detector.analyze_silence_file", return_value=fake_result) as mock_fn:
-            svc.handle_analyze_silence({"file_path": "/tmp/a.wav", "threshold_db": -30.0})
-            mock_fn.assert_called_once_with("/tmp/a.wav", threshold_db=-30.0)
+            svc.handle_analyze_silence({"file_path": src, "threshold_db": -30.0})
+            mock_fn.assert_called_once()
+            self.assertEqual(mock_fn.call_args.kwargs, {"threshold_db": -30.0})
+            _assert_snapshot_arg(self, mock_fn.call_args.args[0], src)
 
 
 # ---------------------------------------------------------------------------
@@ -228,9 +253,11 @@ class TestGetAudioInfo(unittest.TestCase):
         conv.get_audio_info.return_value = info
 
         svc = _make_service(audio_converter=conv)
-        result = svc.handle_get_audio_info({"path": "/tmp/audio.flac"})
+        src = _real_audio_file(self, ".flac")
+        result = svc.handle_get_audio_info({"path": src})
 
-        conv.get_audio_info.assert_called_once_with("/tmp/audio.flac")
+        conv.get_audio_info.assert_called_once()
+        _assert_snapshot_arg(self, conv.get_audio_info.call_args.args[0], src)
         self.assertEqual(result["duration"], 120.5)
         self.assertEqual(result["format"], "flac")
         self.assertEqual(result["channels"], 2)
@@ -258,10 +285,13 @@ class TestGetWaveform(unittest.TestCase):
         fake_gen.generate_from_file.return_value = fake_wf
 
         svc = _make_service()
+        src = _real_audio_file(self)
         with patch("core.waveform_generator.WaveformGenerator", return_value=fake_gen):
-            result = svc.handle_get_waveform({"file_path": "/tmp/audio.wav"})
+            result = svc.handle_get_waveform({"file_path": src})
 
-        fake_gen.generate_from_file.assert_called_once_with("/tmp/audio.wav", num_points=200)
+        fake_gen.generate_from_file.assert_called_once()
+        self.assertEqual(fake_gen.generate_from_file.call_args.kwargs, {"num_points": 200})
+        _assert_snapshot_arg(self, fake_gen.generate_from_file.call_args.args[0], src)
         self.assertEqual(len(result["points"]), 200)
         self.assertEqual(result["sample_rate"], 16000)
 
@@ -277,10 +307,13 @@ class TestGetWaveform(unittest.TestCase):
         fake_gen.generate_from_file.return_value = fake_wf
 
         svc = _make_service()
+        src = _real_audio_file(self)
         with patch("core.waveform_generator.WaveformGenerator", return_value=fake_gen):
-            svc.handle_get_waveform({"file_path": "/tmp/audio.wav", "num_points": 100})
+            svc.handle_get_waveform({"file_path": src, "num_points": 100})
 
-        fake_gen.generate_from_file.assert_called_once_with("/tmp/audio.wav", num_points=100)
+        fake_gen.generate_from_file.assert_called_once()
+        self.assertEqual(fake_gen.generate_from_file.call_args.kwargs, {"num_points": 100})
+        _assert_snapshot_arg(self, fake_gen.generate_from_file.call_args.args[0], src)
 
 
 # ---------------------------------------------------------------------------
