@@ -124,15 +124,24 @@ def _pinned_audio_snapshot(p: str, data_dir: Path | None = None) -> Iterator[str
     несколько раз (exists → getsize → info → read) — каждое открытие было
     окном TOCTOU. Снимок копируется ТОЛЬКО из дескриптора, открытого
     `_open_pinned_regular_file`, в каталог 0700 и удаляется на выходе при
-    любом исходе. Суффикс сохраняется (в нижнем регистре): по нему
-    get_audio_info определяет формат.
+    любом исходе. Суффикс берётся из ЗАПРОШЕННОГО пути (как раньше получал
+    get_audio_info, определяющий по нему формат), не из цели симлинка; в
+    нижнем регистре.
     """
     resolved = _validate_audio_read_path(p, data_dir)
-    fd = _open_pinned_regular_file(resolved)
+    suffix = Path(p).suffix.lower()
     with tempfile.TemporaryDirectory(prefix="krab_ear_audio_read_") as tmp_dir:
-        snapshot = Path(tmp_dir) / ("audio" + resolved.suffix.lower())
+        snapshot = Path(tmp_dir) / ("audio" + suffix)
+        # fd открываем только когда каталог снимка уже есть: сбой mkdtemp
+        # (ENOSPC/EACCES) не должен оставлять открытый исходный дескриптор.
+        fd = _open_pinned_regular_file(resolved)
+        try:
+            src = os.fdopen(fd, "rb")
+        except BaseException:
+            os.close(fd)
+            raise
         copied = 0
-        with os.fdopen(fd, "rb") as src, open(snapshot, "xb") as dst:
+        with src, open(snapshot, "xb") as dst:
             while True:
                 chunk = src.read(_COPY_CHUNK)
                 if not chunk:

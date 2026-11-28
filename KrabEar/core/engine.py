@@ -444,9 +444,9 @@ def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
             tmp_path = tmp.name
         shutil.copy2(path, tmp_path)
         return tmp_path
-    except Exception as exc:
-        # G3-audio-01 A13: неполная копия (ENOSPC, обрыв iCloud) не должна
-        # оставаться в TMPDIR — вызывающий при None работает с оригиналом.
+    except BaseException as exc:
+        # G3-audio-01 A13: неполная копия (ENOSPC, обрыв iCloud, Ctrl-C) не
+        # должна оставаться в TMPDIR — вызывающий при None работает с оригиналом.
         if tmp_path is not None:
             try:
                 os.unlink(tmp_path)
@@ -454,6 +454,9 @@ def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
                 pass
             except OSError as cleanup_exc:
                 _log.warning("Не удалось удалить неполную временную копию %s: %s", tmp_path, cleanup_exc)
+        # KeyboardInterrupt/SystemExit не глушим в None — только убрали за собой.
+        if not isinstance(exc, Exception):
+            raise
         _log.warning("Не удалось скопировать iCloud файл %s: %s", path, exc)
         return None
 

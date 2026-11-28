@@ -135,23 +135,23 @@ class _TmpTree(unittest.TestCase):
 
 
 class TestA07SymlinkSwapAfterValidation(_TmpTree):
-    def _swap_after_validation(self, swap):
+    def _swap_after_validation(self, swap, done: list):
         real = aas._validate_audio_read_path
 
         def validate_then_swap(p, data_dir=None):
             resolved = real(p, data_dir)
             swap()
+            done.append(True)  # подмена реально выполнилась (без исключения)
             return resolved
 
         return patch.object(aas, "_validate_audio_read_path", side_effect=validate_then_swap)
 
-    def _assert_no_secret_read(self, h: _HandlerHarness, name: str, run) -> None:
-        try:
+    def _assert_refused_without_analyzer(self, h: _HandlerHarness, name: str, done: list, run) -> None:
+        # Узкий ValueError: исключение самой подмены (OSError) не должно сойти за отказ.
+        with self.assertRaises(ValueError, msg=f"{name}: подмена после проверки не отклонена"):
             run()
-        except (ValueError, OSError):
-            pass  # отказ — допустимый исход; главное, что чужие байты не прочитаны
-        for _path, data in h.calls:
-            self.assertNotEqual(data, SECRET, f"{name}: анализатор прочитал подменённый файл")
+        self.assertEqual(done, [True], f"{name}: callback подмены не выполнился")
+        self.assertEqual(h.calls, [], f"{name}: анализатор вызван после подмены")
 
     def test_final_component_symlink_swap_never_reaches_analyzer(self) -> None:
         for name in _HandlerHarness.HANDLERS:
@@ -165,8 +165,9 @@ class TestA07SymlinkSwapAfterValidation(_TmpTree):
                     os.replace(link, target)
 
                 h = _HandlerHarness()
-                with self._swap_after_validation(swap):
-                    self._assert_no_secret_read(h, name, lambda: h.run(name, str(target)))
+                done: list = []
+                with self._swap_after_validation(swap, done):
+                    self._assert_refused_without_analyzer(h, name, done, lambda: h.run(name, str(target)))
 
     def test_intermediate_directory_symlink_swap_is_refused(self) -> None:
         for name in _HandlerHarness.HANDLERS:
@@ -183,8 +184,10 @@ class TestA07SymlinkSwapAfterValidation(_TmpTree):
                     os.symlink(decoy, sub)
 
                 h = _HandlerHarness()
-                with self._swap_after_validation(swap):
-                    self._assert_no_secret_read(h, name, lambda: h.run(name, str(sub / "a.wav")))
+                done: list = []
+                with self._swap_after_validation(swap, done):
+                    self._assert_refused_without_analyzer(
+                        h, name, done, lambda: h.run(name, str(sub / "a.wav")))
 
 
 class TestA07PinnedSnapshotContract(_TmpTree):
@@ -235,6 +238,22 @@ class TestA07PinnedSnapshotContract(_TmpTree):
             self.fail("обработчик заблокировался на FIFO")
         self.assertIsInstance(outcome.get("result"), ValueError)
 
+    def test_snapshot_suffix_comes_from_requested_path_not_symlink_target(self) -> None:
+        # F07: раньше get_audio_info получал пользовательский путь — формат
+        # определялся по ЕГО расширению, а не по расширению цели симлинка.
+        real = self.root / "rec.flac"
+        real.write_bytes(LEGIT)
+        link = self.root / "rec.WAV"
+        os.symlink(real, link)
+        for name in _HandlerHarness.HANDLERS:
+            with self.subTest(handler=name):
+                h = _HandlerHarness()
+                h.run(name, str(link))
+                self.assertEqual(len(h.calls), 1)
+                got_path, got_bytes = h.calls[0]
+                self.assertEqual(got_bytes, LEGIT)
+                self.assertEqual(Path(got_path).suffix, ".wav")
+
     def test_snapshot_size_cap_refuses_before_analyzer(self) -> None:
         target = self.root / "big.wav"
         target.write_bytes(b"x" * 11)
@@ -243,6 +262,44 @@ class TestA07PinnedSnapshotContract(_TmpTree):
             with self.assertRaises(ValueError):
                 h.run("analyze_audio_quality", str(target))
         self.assertEqual(h.calls, [])
+
+
+class TestA07SourceFdNeverLeaks(_TmpTree):
+    """F01: исходный fd не должен утекать, если снимок не удалось подготовить."""
+
+    def _open_fds(self) -> set[int]:
+        return {int(n) for n in os.listdir("/dev/fd")}
+
+    def _run_and_check_no_leak(self, failing_patch, exc_type) -> None:
+        target = self.root / "leak.wav"
+        target.write_bytes(LEGIT)
+        opened: list[int] = []
+        real_open = aas._open_pinned_regular_file
+
+        def spy_open(resolved):
+            fd = real_open(resolved)
+            opened.append(fd)
+            return fd
+
+        h = _HandlerHarness()
+        before = self._open_fds()
+        with patch.object(aas, "_open_pinned_regular_file", side_effect=spy_open), failing_patch:
+            with self.assertRaises(exc_type):
+                h.run("analyze_audio_quality", str(target))
+        self.assertEqual(h.calls, [])
+        for fd in opened:
+            with self.assertRaises(OSError, msg=f"исходный fd {fd} остался открытым"):
+                os.fstat(fd)
+        self.assertEqual(self._open_fds() - before, set(), "после отказа остались открытые fd")
+
+    def test_tempdir_creation_failure_does_not_leak_source_fd(self) -> None:
+        enospc = OSError(28, "No space left on device")
+        self._run_and_check_no_leak(
+            patch.object(aas.tempfile, "TemporaryDirectory", side_effect=enospc), OSError)
+
+    def test_fdopen_failure_does_not_leak_source_fd(self) -> None:
+        emfile = OSError(24, "Too many open files")
+        self._run_and_check_no_leak(patch.object(aas.os, "fdopen", side_effect=emfile), OSError)
 
 
 # ---------------------------------------------------------------------------
@@ -276,11 +333,35 @@ class TestA13IcloudCopyCleanup(_IsolatedTempdir):
                 out.write(b"part")
             raise OSError(28, "No space left on device")
 
-        with patch.object(engine.shutil, "copy2", side_effect=partial_copy):
+        with patch.object(engine.shutil, "copy2", side_effect=partial_copy) as copy:
             result = engine._copy_to_tmp_with_icloud_download(src)
 
+        copy.assert_called_once()
         self.assertIsNone(result)
         self.assertEqual(self.leftovers("krab_ear_import_"), [])
+
+    def test_interrupt_during_copy_removes_partial_copy_and_propagates(self) -> None:
+        # F06: KeyboardInterrupt/SystemExit не глушатся в None, но неполная копия удаляется.
+        from core import engine
+
+        src_dir = tempfile.mkdtemp(prefix="ke_src_", dir=os.path.dirname(self.tmpdir))
+        self.addCleanup(shutil.rmtree, src_dir, True)
+        src = os.path.join(src_dir, "voice.m4a")
+        with open(src, "wb") as f:
+            f.write(b"audio")
+
+        for exc_type in (KeyboardInterrupt, SystemExit):
+            with self.subTest(exc=exc_type.__name__):
+                def partial_copy(_src, dst, *a, exc_type=exc_type, **k):
+                    with open(dst, "wb") as out:
+                        out.write(b"part")
+                    raise exc_type()
+
+                with patch.object(engine.shutil, "copy2", side_effect=partial_copy) as copy:
+                    with self.assertRaises(exc_type):
+                        engine._copy_to_tmp_with_icloud_download(src)
+                copy.assert_called_once()
+                self.assertEqual(self.leftovers("krab_ear_import_"), [])
 
 
 class TestA03DiarizationTempWav(_IsolatedTempdir):
