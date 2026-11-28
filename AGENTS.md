@@ -7,17 +7,9 @@
 Это стартовый документ для ЛЮБОГО AI-агента, впервые открывающего этот репозиторий —
 Codex, Antigravity (Gemini), Cursor или человек-новичок.
 
-**Сначала [`docs/NOW.md`](docs/NOW.md)** (одна страница: база ветки, баны, следующая
-волна) и [`docs/EXECUTOR_PLAYBOOK.md`](docs/EXECUTOR_PLAYBOOK.md) (режимы, модели, DoD).
-Этот файл — ориентация за 2 минуты. Полная история (200+ волн, все находки) — в
-`CLAUDE.md` рядом; читай его **точечно**, когда карточка волны ссылается на раздел,
-а не целиком «на всякий случай». `docs/ROADMAP-2026H2.md` — журнал волн, не очередь.
+- Start with the relevant current sections of docs/NOW.md, including active streams/ownership, runtime/release gates, Brain and bans. For read-only review, scope historical reads to the actual question. Before an executor's first edit, follow docs/EXECUTOR_PLAYBOOK.md §0 in full: read NOW.md completely and the assigned card, stop if no card, verify an isolated owned worktree from origin/codex/krab-ear-v2. Follow all applicable bans, stages and DoD; scoped reading never overrides §0. All agents must read applicable hard rules in CLAUDE.md and its referenced guidance before touching that area. Archives are historical evidence, not current state.
 
-**Поиск по коду — `tgrep` основной инструмент** (индексирован 2026-09-11, персистентный сервер
-уже поднят для этого чекаута): `tgrep <флаги> -- <запрос> <путь>` первым; `rg` — fallback при
-сомнении в результате, `ast-grep` — для структурного поиска/точечных рефакторингов. Если
-`tgrep status .` зелёный, а поиск пишет «Server unreachable» — сервер завис под нагрузкой:
-`pkill -f "tgrep serve $(pwd)"` + заново `tgrep serve .` (индекс переживает рестарт).
+- tgrep first from the indexed root when healthy; rg is the fallback and verification for doubtful/empty results; ast-grep for structural search. For an unreachable server inspect the exact owned service/label/PID and health; never use broad pkill, start duplicate servers or restart another agent’s process.
 
 ## Кто ты и что тебе доверено
 
@@ -47,13 +39,13 @@ Swift Agent (macOS)  ◄── Unix socket JSON-RPC ──►  Python Backend
 - `KrabEar/backend/service.py` — `BackendService`, диспетчер ~360 IPC-методов,
   делегирует в 18 извлечённых сервисов (`CallAssistService`, `HistoryService`,
   `TranslationService`, `RecordingCoreService`, и т.д. — полный список и роли
-  в `CLAUDE.md` под "Service map").
+  в docs/claude/architecture.md, service map).
 - `KrabEar/core/engine.py` — `AudioEngine`: STT fallback-цепочка, аудио-нормализация,
   диаризация, TTS.
 - `native/KrabEarAgent/HistoryPanelController.swift` + 12 extension-файлов —
   вся Swift UI-логика.
 - Полный список из 70+ модулей `core/`/`backend/` с однострочным описанием
-  каждого — в `CLAUDE.md`, раздел "Key layers inside KrabEar/". Не дублирую
+  каждого — в docs/claude/architecture.md; command reference: docs/claude/session-reference.md. Не дублирую
   здесь намеренно — это единственный источник правды, дублирование дрейфует.
 - API-справочник всех IPC-методов — `docs/IPC_API_REFERENCE.md`.
 - Оперативный фронт — `docs/NOW.md`. Журнал волн — `docs/ROADMAP-2026H2.md`
@@ -160,8 +152,7 @@ make sign
 
 ## Куда смотреть за деталями
 
-- `CLAUDE.md` — полная история проекта, service map, все паттерны, все
-  живые уроки. Единственный источник правды для деталей.
+- CLAUDE.md retains the standing hard rules; docs/claude/architecture.md, patterns.md, session-reference.md and archived handoffs contain detailed guidance. Read the applicable section before changes; verify present state against the current tree.
 - `docs/IPC_API_REFERENCE.md` — контракт всех IPC-методов.
 - `docs/NOW.md` — что делать сейчас (одна страница).
 - `docs/EXECUTOR_PLAYBOOK.md` — рельсы для слабых исполнителей.
@@ -170,3 +161,6 @@ make sign
   перед реализацией).
 - `.remember/` — журналы сессий (handoff-заметки между сессиями Claude;
   полезны как история решений, не как источник правды о текущем коде).
+
+## Context continuity
+Maintain your own concise semantic handoff at meaningful work boundaries and before compaction, including exact Git SHA, task, constraints, evidence, remaining risks and ownership of active jobs/PRs. Preserve mandatory gates; link logs instead of copying them. Never overwrite another agent's handoff. Use the local context economics guide when available. A native compact may happen unexpectedly; keep essential progress current without waiting for a reminder.
