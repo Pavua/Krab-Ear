@@ -16,10 +16,14 @@ Handlers (8):
 
 from __future__ import annotations
 
+import errno
 import logging
+import os
+import stat
 import tempfile
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -63,6 +67,117 @@ def _validate_audio_read_path(p: str, data_dir: Path | None = None) -> Path:
         f"audio analytics: путь {resolved!s} находится за пределами разрешённых директорий. "
         f"Разрешённые корни: {[str(r) for r in allowed]}"
     )
+
+
+# G3-audio-01 A07: предел снимка. Анализаторы всё равно грузят PCM целиком
+# (analyze_file режет на 500 МБ), так что 1 ГиБ копии — верхняя граница.
+_MAX_SNAPSHOT_BYTES = 1024 * 1024 * 1024
+_COPY_CHUNK = 1024 * 1024
+
+
+def _open_pinned_regular_file(resolved: Path) -> int:
+    """Открывает проверенный путь без перехода по симлинкам ни в одном компоненте.
+
+    `resolved` уже канонический (resolve() снял симлинки на момент проверки),
+    поэтому обход от корня с O_NOFOLLOW гарантирует: открыт файл, лежащий
+    ровно по проверенному пути, даже если каталог или файл подменили после
+    проверки (подмена → ELOOP/ENOTDIR → отказ). O_NONBLOCK — чтобы FIFO не
+    подвесил IPC-поток; не-обычные файлы отклоняются по fstat.
+    """
+    nofollow = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    dir_fd = os.open(resolved.anchor or os.sep, nofollow | os.O_DIRECTORY)
+    try:
+        try:
+            for part in resolved.parts[1:-1]:
+                child = os.open(part, nofollow | os.O_DIRECTORY, dir_fd=dir_fd)
+                os.close(dir_fd)
+                dir_fd = child
+            fd = os.open(resolved.name, nofollow | os.O_NONBLOCK, dir_fd=dir_fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ValueError(
+                    f"audio analytics: путь {resolved!s} изменился после проверки (симлинк)"
+                ) from exc
+            raise
+    finally:
+        os.close(dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError(f"audio analytics: {resolved!s} — не обычный файл")
+        if st.st_size > _MAX_SNAPSHOT_BYTES:
+            raise ValueError(
+                f"audio analytics: файл {resolved!s} больше предела "
+                f"{_MAX_SNAPSHOT_BYTES // (1024 * 1024)} МБ"
+            )
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _snapshot_name(p: str, tmp_dir: str) -> str:
+    """Имя снимка: «audio» + суффикс запрошенного пути, если влезает в NAME_MAX.
+
+    Иначе (имя запроса уже около NAME_MAX, и «audio» + суффикс длиннее) —
+    имя запроса целиком (оно существует, значит влезает на своей ФС), в
+    крайнем случае — просто «audio». get_audio_info сам приводит суффикс
+    к нижнему регистру.
+    """
+    try:
+        name_max = os.pathconf(tmp_dir, "PC_NAME_MAX")
+    except (OSError, ValueError):
+        name_max = 255
+    if name_max <= 0:
+        # -1 без исключения = «лимит не определён»; 0 бессмыслен. Не значит
+        # «никакое имя не влезает» — иначе снимок теряет суффикс запроса.
+        name_max = 255
+    requested = Path(p)
+    for candidate in ("audio" + requested.suffix.lower(), requested.name):
+        if candidate and len(os.fsencode(candidate)) <= name_max:
+            return candidate
+    return "audio"
+
+
+@contextmanager
+def _pinned_audio_snapshot(p: str, data_dir: Path | None = None) -> Iterator[str]:
+    """Проверяет путь и отдаёт анализатору приватный снимок закреплённого файла.
+
+    Анализаторы (soundfile/libsndfile) открывают файл по пути и делают это
+    несколько раз (exists → getsize → info → read) — каждое открытие было
+    окном TOCTOU. Снимок копируется ТОЛЬКО из дескриптора, открытого
+    `_open_pinned_regular_file`, в каталог 0700 и удаляется на выходе при
+    любом исходе. Суффикс берётся из ЗАПРОШЕННОГО пути (как раньше получал
+    get_audio_info, определяющий по нему формат), не из цели симлинка; в
+    нижнем регистре.
+    """
+    resolved = _validate_audio_read_path(p, data_dir)
+    with tempfile.TemporaryDirectory(prefix="krab_ear_audio_read_") as tmp_dir:
+        snapshot = Path(tmp_dir) / _snapshot_name(p, tmp_dir)
+        copied = 0
+        with ExitStack() as stack:
+            # fd открываем только когда каталог снимка уже есть: сбой mkdtemp
+            # (ENOSPC/EACCES) не должен оставлять открытый исходный дескриптор.
+            fd = _open_pinned_regular_file(resolved)
+            # Владелец fd — только этот callback (ровно одно закрытие). С
+            # closefd=True io.open при сбое ПОСЛЕ создания FileIO сам закрывает
+            # fd, и наш os.close дал бы EBADF поверх исходной ошибки или закрыл
+            # чужой переиспользованный номер.
+            stack.callback(os.close, fd)
+            src = stack.enter_context(os.fdopen(fd, "rb", closefd=False))
+            dst = stack.enter_context(open(snapshot, "xb"))
+            while True:
+                chunk = src.read(_COPY_CHUNK)
+                if not chunk:
+                    break
+                copied += len(chunk)
+                # Файл мог вырасти после fstat — предел держим и во время копии.
+                if copied > _MAX_SNAPSHOT_BYTES:
+                    raise ValueError(
+                        f"audio analytics: файл {resolved!s} вырос сверх предела во время чтения"
+                    )
+                dst.write(chunk)
+        yield str(snapshot)
 
 
 class AudioAnalyticsService:
@@ -118,9 +233,9 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
-        _validate_audio_read_path(file_path, self._data_dir)  # W1736
-
-        report = analyze_file(file_path)
+        # W1736 + A07: анализатор читает закреплённый снимок, не исходный путь.
+        with _pinned_audio_snapshot(file_path, self._data_dir) as snapshot:
+            report = analyze_file(snapshot)
         return report.to_dict()
 
     def handle_analyze_silence(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -138,8 +253,6 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
-        _validate_audio_read_path(file_path, self._data_dir)  # W1736
-
         # D1 MED: clamp threshold_db to prevent OverflowError in 10**(db/20) inside
         # silence_detector when callers supply extreme values (e.g. threshold_db=99999).
         import math
@@ -148,7 +261,9 @@ class AudioAnalyticsService:
         if not math.isfinite(threshold_db):
             threshold_db = SILENCE_THRESHOLD_DB
         threshold_db = max(-80.0, min(0.0, threshold_db))
-        return analyze_silence_file(file_path, threshold_db=threshold_db)
+        # W1736 + A07: проверка пути и чтение — через закреплённый снимок.
+        with _pinned_audio_snapshot(file_path, self._data_dir) as snapshot:
+            return analyze_silence_file(snapshot, threshold_db=threshold_db)
 
     def handle_analyze_quality_trends(self, params: dict[str, Any]) -> dict[str, Any]:
         """Анализирует тренды качества распознавания за последние N дней.
@@ -202,8 +317,9 @@ class AudioAnalyticsService:
         path = str(params.get("path", "")).strip()
         if not path:
             raise ValueError("Параметр 'path' обязателен")
-        _validate_audio_read_path(path, self._data_dir)  # W1736
-        info = self._audio_converter.get_audio_info(path)
+        # W1736 + A07: метаданные читаются из закреплённого снимка.
+        with _pinned_audio_snapshot(path, self._data_dir) as snapshot:
+            info = self._audio_converter.get_audio_info(snapshot)
         return {
             "duration": info.duration,
             "sample_rate": info.sample_rate,
@@ -227,14 +343,14 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
-        _validate_audio_read_path(file_path, self._data_dir)  # W1736
-
         # W18: clamp num_points to prevent CPU/memory DoS via huge values
         # (e.g. 10_000_000 → ~80 MB + ~9 s blocking the IPC thread).
         # Valid GUI range is 1–2000; defence-in-depth also lives in WaveformGenerator.
         num_points = max(1, min(int(params.get("num_points", 200)), 2000))
         gen = WaveformGenerator()
-        wf = gen.generate_from_file(file_path, num_points=num_points)
+        # W1736 + A07: проверка пути и чтение — через закреплённый снимок.
+        with _pinned_audio_snapshot(file_path, self._data_dir) as snapshot:
+            wf = gen.generate_from_file(snapshot, num_points=num_points)
         return {
             "points": wf.points,
             "duration_sec": wf.duration_sec,
@@ -258,16 +374,12 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
-        resolved = _validate_audio_read_path(file_path, self._data_dir)  # W1736 — returns resolved Path
-
         import soundfile as sf  # lazy import
 
-        # W1736 Fix 3: read through the SAME resolved path the validator checked
-        # (avoid TOCTOU: expanduser() without resolve() could follow a late symlink swap)
-        if not resolved.exists():
-            raise FileNotFoundError(f"Аудиофайл не найден: {resolved}")
-
-        audio_data, sample_rate = sf.read(str(resolved), dtype="float32", always_2d=False)
+        # W1736 + A07: повторное открытие resolved-пути тоже было окном TOCTOU
+        # (подмена каталога/файла после проверки); читаем закреплённый снимок.
+        with _pinned_audio_snapshot(file_path, self._data_dir) as snapshot:
+            audio_data, sample_rate = sf.read(snapshot, dtype="float32", always_2d=False)
         profiler = NoiseProfiler()
         result = profiler.profile(audio_data, sample_rate)
         return result.to_dict()

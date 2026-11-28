@@ -411,6 +411,7 @@ def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
     и получит осмысленную ошибку позже).
     """
     _log = logging.getLogger("KrabEar.Engine")
+    tmp_path: Optional[str] = None
     try:
         # Шаг 1: проверяем, нужна ли загрузка (placeholder = 0 байт)
         file_size = os.path.getsize(path)
@@ -443,7 +444,19 @@ def _copy_to_tmp_with_icloud_download(path: str) -> Optional[str]:
             tmp_path = tmp.name
         shutil.copy2(path, tmp_path)
         return tmp_path
-    except Exception as exc:
+    except BaseException as exc:
+        # G3-audio-01 A13: неполная копия (ENOSPC, обрыв iCloud, Ctrl-C) не
+        # должна оставаться в TMPDIR — вызывающий при None работает с оригиналом.
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except FileNotFoundError:
+                pass
+            except OSError as cleanup_exc:
+                _log.warning("Не удалось удалить неполную временную копию %s: %s", tmp_path, cleanup_exc)
+        # KeyboardInterrupt/SystemExit не глушим в None — только убрали за собой.
+        if not isinstance(exc, Exception):
+            raise
         _log.warning("Не удалось скопировать iCloud файл %s: %s", path, exc)
         return None
 
@@ -4778,10 +4791,19 @@ class AudioEngine:
             "16000",
             str(temp_path),
         ]
-        completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if completed.returncode != 0:
+        # G3-audio-01 A03: temp WAV создан ДО subprocess — любое исключение
+        # (таймаут, OSError, KeyboardInterrupt) обязано его удалить. Код 0 без
+        # непустого WAV — не успех: файл создан пустым заранее, а pyannote на
+        # пустом входе упал бы позже с непонятной ошибкой.
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if completed.returncode != 0:
+                raise RuntimeError(f"ffmpeg не смог подготовить аудио для diarization: {completed.stderr.strip()}")
+            if not temp_path.is_file() or temp_path.stat().st_size == 0:
+                raise RuntimeError("ffmpeg не создал непустой WAV для diarization")
+        except BaseException:
             temp_path.unlink(missing_ok=True)
-            raise RuntimeError(f"ffmpeg не смог подготовить аудио для diarization: {completed.stderr.strip()}")
+            raise
         return str(temp_path), True
 
     def _annotate_segments_with_speakers(
