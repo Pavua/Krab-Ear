@@ -105,13 +105,16 @@ class CallSessionService:
 
     @staticmethod
     def _scrub_session(raw: dict[str, Any]) -> dict[str, Any]:
-        """Возвращает копию словаря сессии с redacted phone и пустым транскриптом.
+        """Возвращает копию словаря сессии с redacted phone/goal и пустым транскриптом.
 
-        Используется в privacy_mode: номер телефона и история транскрипций —
-        PII; структура ответа (все ключи) сохраняется для schema-parity.
+        Используется в privacy_mode: номер телефона, цель звонка (`goal_text`
+        раскрывает суть разговора не меньше транскрипта) и история
+        транскрипций — PII; структура ответа (все ключи) сохраняется для
+        schema-parity.
         """
         scrubbed = dict(raw)
         scrubbed["phone_number"] = _REDACTED
+        scrubbed["goal_text"] = _REDACTED
         scrubbed["transcript_history"] = []
         return scrubbed
 
