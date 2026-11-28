@@ -128,6 +128,10 @@ def _snapshot_name(p: str, tmp_dir: str) -> str:
         name_max = os.pathconf(tmp_dir, "PC_NAME_MAX")
     except (OSError, ValueError):
         name_max = 255
+    if name_max <= 0:
+        # -1 без исключения = «лимит не определён»; 0 бессмыслен. Не значит
+        # «никакое имя не влезает» — иначе снимок теряет суффикс запроса.
+        name_max = 255
     requested = Path(p)
     for candidate in ("audio" + requested.suffix.lower(), requested.name):
         if candidate and len(os.fsencode(candidate)) <= name_max:

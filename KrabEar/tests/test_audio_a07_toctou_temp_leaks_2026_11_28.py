@@ -399,6 +399,24 @@ class TestA07SourceFdNeverLeaks(_TmpTree):
         self.assertIn("closed", seen[True], "ожидался путь, где fdopen сам закрыл fd")
         self.assertNotIn("closed", seen[False], "closefd=False не должен закрывать fd")
 
+    def test_undefined_name_max_keeps_requested_suffix(self) -> None:
+        # rev4: pathconf может вернуть -1 (лимит не определён) или 0 без исключения —
+        # это не «ни одно имя не влезает», суффикс запроса должен сохраниться.
+        for bad in (-1, 0):
+            with self.subTest(pathconf=bad), patch.object(aas.os, "pathconf", return_value=bad):
+                self.assertEqual(aas._snapshot_name("recording.WAV", str(self.root)), "audio.wav")
+
+    def test_undefined_name_max_end_to_end_get_audio_info(self) -> None:
+        target = self.root / "recording.WAV"
+        target.write_bytes(LEGIT)
+        h = _HandlerHarness()
+        with patch.object(aas.os, "pathconf", return_value=-1):
+            h.run("get_audio_info", str(target))
+        self.assertEqual(len(h.calls), 1)
+        got_path, got_bytes = h.calls[0]
+        self.assertEqual(got_bytes, LEGIT)
+        self.assertEqual(Path(got_path).name, "audio.wav")
+
     def test_overlong_requested_name_falls_back_to_fitting_snapshot_name(self) -> None:
         # rev3 F07: "audio" + суффикс имени в NAME_MAX байт длиннее NAME_MAX → ENAMETOOLONG.
         name_max = os.pathconf(self.root, "PC_NAME_MAX")
