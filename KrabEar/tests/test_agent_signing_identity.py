@@ -61,7 +61,7 @@ elif tool == "dsymutil":
 elif tool == "pgrep":
     # Процесс агента «появляется» после open (как в реальности) либо задан заранее через SIGN_TEST_RUNNING.
     rows = [json.loads(row) for row in pathlib.Path(os.environ["SIGN_TEST_TRACE"]).read_text().splitlines()]
-    opened = any(r[0] == "open" or (r[0] == "launchctl" and r[1][:1] == ["kickstart"]) for r in rows)
+    opened = any(r[0] == "open" or (r[0] == "launchctl" and r[1][:1] in (["kickstart"], ["bootstrap"])) for r in rows)
     # Старый агент (до open) — 424242; после open «поднимается» НОВЫЙ процесс с другим PID.
     if opened:
         print("515151")
@@ -319,7 +319,12 @@ class TestAgentSigningIdentity(unittest.TestCase):
         self.assertEqual(self.runtime.read_text(), "old-rtm")
 
     # ── ревью Opus #2304 (P2): под launchd KeepAlive старый бинарник поднимается ДО установки ──
-    def test_launchd_unit_loaded_restarts_via_kickstart_not_open(self) -> None:
+    def test_launchd_unit_loaded_restarts_via_bootout_bootstrap_not_open(self) -> None:
+        # Хвост 27.11: юнит выгружается ДО подмены бинаря и загружается после подписи (не kickstart поверх
+        # KeepAlive, который успевал поднять старый бинарник в окне подмены).
+        plist = Path(self.env["HOME"]) / "Library/LaunchAgents/ai.krab.ear.agent.plist"
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text("<plist/>")
         for entry in ("update_agent.command", "verify_binaries.command"):
             with self.subTest(entry=entry):
                 self.trace.write_text("")
@@ -328,10 +333,20 @@ class TestAgentSigningIdentity(unittest.TestCase):
                 result = self.run_entry(entry)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 kinds = [(e[0], e[1][:1]) for e in self.events()]
-                self.assertIn(("launchctl", ["kickstart"]), kinds)
+                self.assertIn(("launchctl", ["bootout"]), kinds)
+                self.assertIn(("launchctl", ["bootstrap"]), kinds)
+                self.assertNotIn(("launchctl", ["kickstart"]), kinds)
+                self.assertLess(kinds.index(("launchctl", ["bootout"])), kinds.index(("codesign", ["--force"])))
+                self.assertLess(
+                    max(i for i, k in enumerate(kinds) if k[0] == "codesign"),
+                    kinds.index(("launchctl", ["bootstrap"])),
+                )
                 self.assertNotIn("open", [e[0] for e in self.events()], "под launchd .app не открываем — open лишь активирует старый")
 
     def test_launchd_old_process_started_before_install_is_not_success(self) -> None:
+        plist = Path(self.env["HOME"]) / "Library/LaunchAgents/ai.krab.ear.agent.plist"
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_text("<plist/>")
         for entry in ("update_agent.command", "verify_binaries.command"):
             with self.subTest(entry=entry):
                 self.trace.write_text("")
