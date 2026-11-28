@@ -72,8 +72,16 @@ elif tool == "pgrep":
 elif tool == "launchctl":
     # По умолчанию юнит агента НЕ загружен (реальный launchctl в тестах недопустим: kickstart -k тронул бы
     # живой агент владельца). SIGN_TEST_UNIT_LOADED=1 моделирует загруженный launchd-юнит.
+    # Состояние с памятью (ревью #2324): bootout выгружает, bootstrap загружает; «нет сервиса» = 113.
     if args[:1] == ["print"]:
-        sys.exit(0 if os.environ.get("SIGN_TEST_UNIT_LOADED") else 1)
+        loaded = bool(os.environ.get("SIGN_TEST_UNIT_LOADED"))
+        rows = [json.loads(row) for row in pathlib.Path(os.environ["SIGN_TEST_TRACE"]).read_text().splitlines()]
+        for r in rows:
+            if r[0] == "launchctl" and r[1][:1] == ["bootout"]:
+                loaded = False
+            elif r[0] == "launchctl" and r[1][:1] == ["bootstrap"]:
+                loaded = True
+        sys.exit(0 if loaded else 113)
 elif tool == "ps":
     # `ps -p PID -o stat=` — проверка «жив ли старый PID»: SIGTERM в фикстуре срабатывает, процесса уже нет.
     # `-o etime=` — возраст процесса (SIGN_TEST_ETIME), пусто = неизвестно.
@@ -120,7 +128,7 @@ class TestAgentSigningIdentity(unittest.TestCase):
         shutil.copy2(ROOT / "Makefile", self.root / "Makefile")
         scripts = self.root / "scripts"
         scripts.mkdir()
-        for name in (*SCRIPTS, "agent_signing_identity.sh"):
+        for name in (*SCRIPTS, "agent_signing_identity.sh", "agent_unit_maintenance.sh"):
             source = ROOT / "scripts" / name
             if source.exists():
                 body = source.read_text()

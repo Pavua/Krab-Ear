@@ -45,9 +45,9 @@ pid_alive() {
 # запущенный процесс — «PID не из OLD_PIDS» засчитал бы его как успех при старом коде (ревью Opus #2304, P2).
 AGENT_LABEL="ai.krab.ear.agent"
 AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
-agent_unit_loaded() {
-  "${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1
-}
+# Общий с verify_binaries --fix lifecycle юнита: блокировка, сверка состояния, загрузка только
+# проверенного бинаря, откат из копии (ревью #2324).
+source "$ROOT_DIR/scripts/agent_unit_maintenance.sh"
 
 # Сколько секунд процессу (BSD ps: etime = [[dd-]hh:]mm:ss); пусто — неизвестно.
 pid_elapsed_sec() {
@@ -129,6 +129,21 @@ swift build -c release --package-path "$PACKAGE_DIR"
 
 [ -x "$BUILD_BIN" ] || preflight_fail "build artifact не найден: $BUILD_BIN"
 
+# Выход в любой точке: сверка юнита с откатом (если мы его выгружали), уборка копии, снятие блокировки.
+on_exit() {
+  agent_unit_recover || true
+  agent_backup_cleanup
+  maint_lock_release
+}
+trap on_exit EXIT
+# zsh не исполняет EXIT-trap при гибели от сигнала — превращаем сигнал в штатный exit.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+# Эксклюзивно с verify_binaries --fix и вторым update_agent: держим до конца загрузки юнита.
+maint_lock_acquire || exit 1
+
 # Запоминаем PID работающего агента (как .app bundle, так и legacy standalone).
 OLD_PIDS="$( { pgrep -f "$AGENT_PATTERN_BUNDLE" 2>/dev/null || true; pgrep -f "$AGENT_PATTERN_LEGACY" 2>/dev/null || true; } | sort -u | tr '\n' ' ')"
 
@@ -144,37 +159,28 @@ fi
 
 # launchd-юнит (KeepAlive) останавливаем ВЫГРУЗКОЙ, а не pkill: иначе launchd поднимает старый бинарник
 # прямо в окне cp → mv → codesign и может стартовать бинарь с ещё не обновлённой подписью (сбой TCC/cdhash).
-# Процедура та же, что ручная пересборка 27.11: bootout → подмена → подпись → bootstrap.
+# Процедура та же, что ручная пересборка 27.11: bootout → подмена → подпись → проверка → bootstrap.
+# Busy-гейт выше — последняя проверка перед bootout (между ними только launchctl print и копия бинарей);
+# quiesce-рукопожатие с backend (запрет старта записи на время обслуживания) — вне объёма.
 UNIT_MANAGED=0
-UNIT_BOOTED_OUT=0
-if agent_unit_loaded; then
+UNIT_STATE="$(agent_unit_state)" || preflight_fail "состояние launchd-юнита $AGENT_LABEL неизвестно — агент не остановлен"
+if [ "$UNIT_STATE" = loaded ]; then
   UNIT_MANAGED=1
   # Без plist юнит потом не вернуть — ничего не останавливаем.
   [ -f "$AGENT_PLIST" ] || preflight_fail "юнит $AGENT_LABEL загружен, но нет $AGENT_PLIST — агент не остановлен"
 fi
 
-# Любой выход после выгрузки юнита (сбой копирования/подписи) возвращает юнит, чтобы не оставить машину без
-# агента (хоткей, вставка): лучше прежний/неподписанный бинарь под launchd, чем никакого.
-restore_unit_on_exit() {
-  if [ "$UNIT_BOOTED_OUT" -eq 1 ]; then
-    echo "Возвращаю launchd-юнит $AGENT_LABEL после сбоя обновления."
-    "${LAUNCHCTL_BIN:-launchctl}" bootstrap "gui/$(id -u)" "$AGENT_PLIST" \
-      || echo "Ошибка: не удалось вернуть юнит. Вручную: launchctl bootstrap gui/$(id -u) \"$AGENT_PLIST\""
-  fi
-}
-trap restore_unit_on_exit EXIT
-# zsh не исполняет EXIT-trap при гибели от сигнала — превращаем сигнал в штатный exit.
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+# Копия прежних бинарей до любых изменений: из неё откат, если новая подпись не пройдёт проверку.
+agent_backup_binaries || preflight_fail "не удалось сохранить резервную копию бинарей — агент не остановлен"
 
 if [ "$UNIT_MANAGED" -eq 1 ]; then
   echo "launchd-юнит $AGENT_LABEL загружен — выгружаю (bootout) до подмены бинаря."
+  # Флаг ДО bootout: сигнал посреди выгрузки тоже ведёт к сверке реального состояния на выходе.
+  UNIT_RECOVERY=1
   if ! "${LAUNCHCTL_BIN:-launchctl}" bootout "gui/$(id -u)/$AGENT_LABEL"; then
     echo "Ошибка: launchctl bootout $AGENT_LABEL не удался — бинарники не тронуты."
     exit 1
   fi
-  UNIT_BOOTED_OUT=1
 fi
 
 # Без остановки pkill после rebuild обновление бинаря приведёт к сбою TCC cdhash и "висящему" экземпляру.
@@ -217,10 +223,11 @@ install_binary "$BUILD_BIN" "$RUNTIME_BIN"
 install_binary "$BUILD_BIN" "$APP_BUNDLE_BIN"
 
 echo "Подписываю стабильным сертификатом: $SIGN_ID"
-codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$RUNTIME_BIN"
-codesign --force --sign "$SIGN_ID" --timestamp=none --identifier "$BUNDLE_ID" "$APP_BUNDLE"
-codesign --verify --strict "$RUNTIME_BIN"
-codesign --verify --strict "$APP_BUNDLE"
+if ! agent_sign_and_verify; then
+  # Юнит под launchd вернёт on_exit — только после отката и проверенной подписи.
+  echo "Ошибка: новый бинарь не прошёл подпись/проверку (codesign --verify --strict)."
+  exit 1
+fi
 
 # Запускаем через LaunchServices (`open`) — macOS создаёт управляемый
 # application.com.antigravity.krab-ear.* job, тот же самый, что появляется при
@@ -230,13 +237,14 @@ codesign --verify --strict "$APP_BUNDLE"
 INSTALL_EPOCH="$(date +%s)"
 if [ "$UNIT_MANAGED" -eq 1 ]; then
   # Юнит под launchd: `open` поверх него даёт второй экземпляр (шторм agent.lock) — возвращаем юнит.
-  UNIT_BOOTED_OUT=0  # дальше trap не повторяет bootstrap
   echo "Загружаю launchd-юнит $AGENT_LABEL с новым бинарём (bootstrap)."
-  if ! "${LAUNCHCTL_BIN:-launchctl}" bootstrap "gui/$(id -u)" "$AGENT_PLIST"; then
-    echo "Ошибка: launchctl bootstrap $AGENT_LABEL не удался — бинарники установлены, агент не запущен."
-    echo "Вручную: launchctl bootstrap gui/$(id -u) \"$AGENT_PLIST\""
+  if ! agent_unit_bootstrap; then
+    UNIT_RECOVERY=0  # попытки исчерпаны (две); on_exit не повторяет
+    echo "Ошибка: launchctl bootstrap $AGENT_LABEL не удался — бинарники установлены и подписаны, агент не запущен."
+    agent_unit_manual_hint "launchctl bootstrap не удался"
     exit 1
   fi
+  UNIT_RECOVERY=0  # загрузка подтверждена launchctl print
 else
   open "$APP_BUNDLE"
 fi

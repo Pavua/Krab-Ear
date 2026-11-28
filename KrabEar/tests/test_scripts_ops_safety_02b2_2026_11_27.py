@@ -54,6 +54,9 @@ def _copy(tmp_path: Path, *names: str) -> Path:
     scripts.mkdir(exist_ok=True)
     for name in names:
         shutil.copy2(SCRIPTS / name, scripts / name)
+    if {"update_agent.command", "verify_binaries.command"} & set(names):
+        # общий lifecycle launchd-юнита (ревью #2324), подключается через source
+        shutil.copy2(SCRIPTS / "agent_unit_maintenance.sh", scripts / "agent_unit_maintenance.sh")
     return tmp_path
 
 
@@ -65,8 +68,8 @@ def _env(tmp_path: Path, **extra: str) -> dict:
     log = tmp_path / "calls.log"
     if not (stub / "launchctl").exists():
         # Реальный launchctl в тестах недопустим (kickstart -k тронул бы живой агент владельца):
-        # по умолчанию юнит НЕ загружен.
-        _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 1\nexit 0\n')
+        # по умолчанию юнит НЕ загружен (113 — код launchctl print «сервиса нет»).
+        _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 113\nexit 0\n')
     return dict(
         os.environ,
         PATH=f"{stub}{os.pathsep}{os.environ['PATH']}",
@@ -254,6 +257,25 @@ class TestVerifyBinaries:
                 p.kill()
                 p.wait()
 
+    def test_fix_shares_maintenance_lock_with_update_agent(self, tmp_path):
+        """#2324 (д): --fix и update_agent под одной блокировкой; занята живым процессом — отказ до гейта."""
+        root = _vb_tree(tmp_path, None, None)
+        _gate(tmp_path, rc=0)
+        victim = subprocess.Popen(["sleep", "30"])
+        lock = tmp_path / "home" / "Library" / "Caches" / "KrabEar" / "agent_maintenance.lock"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{victim.pid}\n")
+        try:
+            res = self._vb(root, tmp_path, _pgrep_stub(tmp_path, [victim.pid]), "--fix")
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert "Обслуживание агента уже идёт" in res.stderr
+            assert victim.poll() is None
+            assert not any(c.startswith(("gate", "launchctl")) for c in _calls(tmp_path))
+            assert lock.is_dir()
+        finally:
+            victim.kill()
+            victim.wait()
+
     def test_symlink_destination_is_refused_and_victim_untouched(self, tmp_path):
         root = _vb_tree(tmp_path, None, "RUNTIME-OLD-LONGER", build="NEW")
         victim = tmp_path / "victim.txt"
@@ -278,6 +300,7 @@ def _ua_tree(tmp_path: Path, agent_appears: bool, *, running_pid: int | None = N
     root = tmp_path / "proj"
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPTS / "update_agent.command", root / "scripts")
+    shutil.copy2(SCRIPTS / "agent_unit_maintenance.sh", root / "scripts")
     (root / "scripts" / "agent_signing_identity.sh").write_text('resolve_agent_signing_identity() { echo TEST; }\n')
     _exe(root / ".venv_krab_ear" / "bin" / "python", "exit 0\n")
     (root / "native" / "runtime").mkdir(parents=True)
@@ -385,7 +408,10 @@ class TestUpdateAgentDelivery:
 
     # ── ревью Opus #2304 (P2): launchd поднял СТАРЫЙ бинарник до установки — это не успех ──
     def _launchd_tree(self, tmp_path: Path, *, kick_starts_new: bool, plist: bool = True,
-                      bootout_rc: int = 0, bootstrap_rc: int = 0) -> tuple[Path, subprocess.Popen]:
+                      bootout_rc: int = 0, bootstrap_rc: int = 0, print_rc: int | None = None,
+                      bootstrap_loads: bool = False) -> tuple[Path, subprocess.Popen]:
+        """Заглушка launchctl с состоянием: юнит загружен, пока есть $STUB_LOG.unit (bootout убирает,
+        bootstrap с rc 0 — или bootstrap_loads — возвращает). print_rc — принудительный код print."""
         victim = self._live_agent()
         root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=True)
         self._ua_gate(root, rc=0)
@@ -398,12 +424,16 @@ class TestUpdateAgentDelivery:
              + '/$2" 2>/dev/null || exit 1; exit 0; fi\nexec /bin/ps "$@"\n')
         app_bin = root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
         # Заглушка пишет, какой бинарь лежит в .app в момент bootout/bootstrap — проверка порядка.
+        (tmp_path / "calls.log.unit").touch()
+        print_line = (f'[ "$1" = print ] && exit {print_rc}\n' if print_rc is not None else
+                      '[ "$1" = print ] && { [ -f "$STUB_LOG.unit" ] && exit 0; exit 113; }\n')
+        loads = "1" if (bootstrap_rc == 0 or bootstrap_loads) else "0"
         _exe(stub / "launchctl",
-             'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 0\n'
+             'echo "launchctl $*" >> "$STUB_LOG"\n' + print_line +
              f'if [ "$1" = bootout ]; then echo "bootout-bin $(cat \'{app_bin}\')" >> "$STUB_LOG"; '
-             f'kill {victim.pid} 2>/dev/null; exit {bootout_rc}; fi\n'
+             f'kill {victim.pid} 2>/dev/null; [ {bootout_rc} -eq 0 ] && rm -f "$STUB_LOG.unit"; exit {bootout_rc}; fi\n'
              f'if [ "$1" = bootstrap ]; then echo "bootstrap-bin $(cat \'{app_bin}\')" >> "$STUB_LOG"; '
-             f'[ {bootstrap_rc} -eq 0 ] && touch "$STUB_LOG.kicked"; exit {bootstrap_rc}; fi\n'
+             f'[ {loads} -eq 1 ] && touch "$STUB_LOG.unit" "$STUB_LOG.kicked"; exit {bootstrap_rc}; fi\n'
              '[ "$1" = kickstart ] && touch "$STUB_LOG.kicked"\nexit 0\n')
         new = "77777" if kick_starts_new else "88888"
         _exe(stub / "pgrep",
@@ -461,15 +491,44 @@ class TestUpdateAgentDelivery:
             victim.kill()
             victim.wait()
 
-    def test_launchd_failure_mid_install_restores_unit(self, tmp_path):
+    def test_launchd_sign_failure_rolls_back_and_bootstraps_verified_old_binary(self, tmp_path):
+        """#2324 (а): новая подпись не прошла — откат из копии, подпись, проверка, и лишь затем bootstrap."""
         root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
-        _exe(tmp_path / "stubbin" / "codesign", "exit 1\n")  # подпись упала после подмены
+        # первая подпись (новый бинарь) падает, дальше — успех; как настоящий codesign, --verify
+        # отклоняет новый бинарь, подпись которого не удалась
+        app_bin = root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
+        _exe(tmp_path / "stubbin" / "codesign",
+             'echo "codesign $*" >> "$STUB_LOG"\n'
+             'if [ "$1" = --force ] && [ ! -f "$STUB_LOG.signfail" ]; then touch "$STUB_LOG.signfail"; exit 1; fi\n'
+             f'if [ "$1" = --verify ] && grep -q NEW-BUILD \'{app_bin}\'; then exit 1; fi\nexit 0\n')
         try:
             res = self._launchd_run(root, tmp_path)
-            assert res.returncode != 0, res.stdout + res.stderr
+            assert res.returncode == 1, res.stdout + res.stderr
             calls = _calls(tmp_path)
-            assert any(c.startswith("launchctl bootstrap") for c in calls), calls
+            assert "bootstrap-bin OLD-BUNDLE" in calls, calls          # загружен откаченный бинарь
+            assert "bootstrap-bin NEW-BUILD" not in calls, calls
+            verify_idx = max(i for i, c in enumerate(calls) if c.startswith("codesign --verify"))
+            assert verify_idx < calls.index("bootstrap-bin OLD-BUNDLE"), calls
+            app = root / "Krab Ear.app" / "Contents" / "MacOS"
+            assert (app / "KrabEarAgent").read_text() == "OLD-BUNDLE"
+            assert [p.name for p in app.iterdir()] == ["KrabEarAgent"], "копия лежит внутри бандла"
             assert "Возвращаю launchd-юнит" in res.stdout
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_unverifiable_binary_is_never_bootstrapped(self, tmp_path):
+        """#2324 (а): подпись не проходит и после отката — юнит остаётся выгруженным + инструкция."""
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
+        _exe(tmp_path / "stubbin" / "codesign", 'echo "codesign $*" >> "$STUB_LOG"\nexit 1\n')
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            calls = _calls(tmp_path)
+            assert not any(c.startswith("launchctl bootstrap") for c in calls), calls
+            assert "ОСТАВЛЕН ВЫГРУЖЕННЫМ" in res.stderr
+            assert "launchctl bootstrap gui/" in res.stderr
+            assert not (tmp_path / "calls.log.unit").exists()
         finally:
             victim.kill()
             victim.wait()
@@ -479,9 +538,82 @@ class TestUpdateAgentDelivery:
         try:
             res = self._launchd_run(root, tmp_path)
             assert res.returncode == 1, res.stdout + res.stderr
-            assert "launchctl bootstrap gui/" in res.stdout
-            # повторный bootstrap из trap не делаем: один вызов
+            assert "launchctl bootstrap gui/" in res.stderr
+            # #2324 (б): одна ограниченная повторная попытка, on_exit больше не повторяет
+            assert sum(c.startswith("launchctl bootstrap") for c in _calls(tmp_path)) == 2
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_bootstrap_already_loaded_is_success(self, tmp_path):
+        """#2324 (б): bootstrap идемпотентен — ошибка «уже загружен» при загруженном юните = успех."""
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True, bootstrap_rc=5, bootstrap_loads=True)
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 0, res.stdout + res.stderr
             assert sum(c.startswith("launchctl bootstrap") for c in _calls(tmp_path)) == 1
+        finally:
+            victim.kill()
+            victim.wait()
+
+    @pytest.mark.parametrize("rc", [1, 112])
+    def test_launchd_unknown_print_code_refuses_before_any_change(self, tmp_path, rc):
+        """#2324 (в): print 113 = юнита нет; любой иной ненулевой код — отказ до изменений."""
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True, print_rc=rc)
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert victim.poll() is None, "агент остановлен при неизвестном состоянии юнита"
+            calls = _calls(tmp_path)
+            assert not any(c.startswith(("launchctl bootout", "launchctl bootstrap", "pkill", "open"))
+                           for c in calls), calls
+            assert (root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent").read_text() == "OLD-BUNDLE"
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_signal_after_bootout_reconciles_and_restores_unit(self, tmp_path):
+        """#2324 (б): SIGTERM после bootout — выход сверяет реальное состояние и возвращает проверенный юнит."""
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
+        _exe(tmp_path / "stubbin" / "pkill", 'echo "pkill $*" >> "$STUB_LOG"\nkill -TERM $PPID\nexit 0\n')
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 143, res.stdout + res.stderr
+            calls = _calls(tmp_path)
+            assert "bootstrap-bin OLD-BUNDLE" in calls, calls
+            assert (tmp_path / "calls.log.unit").exists()
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_maintenance_lock_held_by_live_process_refuses_before_any_change(self, tmp_path):
+        """#2324 (д): общий эксклюзивный lock с verify_binaries --fix."""
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
+        lock = tmp_path / "home" / "Library" / "Caches" / "KrabEar" / "agent_maintenance.lock"
+        lock.mkdir(parents=True)
+        (lock / "pid").write_text(f"{victim.pid}\n")
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert "Обслуживание агента уже идёт" in res.stderr
+            assert not any(c.startswith(("gate", "launchctl", "pkill")) for c in _calls(tmp_path))
+            assert lock.is_dir(), "чужая блокировка снята"
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_maintenance_lock_stale_is_taken_and_released_after_success(self, tmp_path):
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
+        lock = tmp_path / "home" / "Library" / "Caches" / "KrabEar" / "agent_maintenance.lock"
+        lock.mkdir(parents=True)
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        (lock / "pid").write_text(f"{dead.pid}\n")
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 0, res.stdout + res.stderr
+            assert not lock.exists(), "блокировка не снята после успеха"
+            assert not list(lock.parent.glob("*.stale.*"))
         finally:
             victim.kill()
             victim.wait()

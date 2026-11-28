@@ -1143,6 +1143,7 @@ def _update_agent_tree(tmp_path: Path, swift_ok: bool):
     root = tmp_path / "proj"
     (root / "scripts").mkdir(parents=True)
     shutil.copy2(SCRIPTS / "update_agent.command", root / "scripts")
+    shutil.copy2(SCRIPTS / "agent_unit_maintenance.sh", root / "scripts")
     (root / "scripts" / "agent_signing_identity.sh").write_text(
         'resolve_agent_signing_identity() { echo "TEST-IDENTITY"; }\n')
     _exe(root / ".venv_krab_ear" / "bin" / "python", "exit 0\n")
@@ -1163,7 +1164,8 @@ def _update_agent_tree(tmp_path: Path, swift_ok: bool):
     _exe(stub / "codesign", "exit 0\n")
     _exe(stub / "open", 'echo "open $*" >> "$STUB_LOG"\nexit 0\n')
     # Юнит агента под launchd НЕ загружен (иначе скрипт рестартует через kickstart, а не open).
-    _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 1\nexit 0\n')
+    # 113 — код launchctl print «сервиса нет» (иной ненулевой код — отказ, ревью #2324).
+    _exe(stub / "launchctl", 'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 113\nexit 0\n')
     return root, ctx
 
 
