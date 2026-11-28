@@ -44,6 +44,7 @@ pid_alive() {
 # pkill launchd сам поднимает СТАРЫЙ бинарник ещё до установки нового, а `open` лишь активирует уже
 # запущенный процесс — «PID не из OLD_PIDS» засчитал бы его как успех при старом коде (ревью Opus #2304, P2).
 AGENT_LABEL="ai.krab.ear.agent"
+AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
 agent_unit_loaded() {
   "${LAUNCHCTL_BIN:-launchctl}" print "gui/$(id -u)/$AGENT_LABEL" >/dev/null 2>&1
 }
@@ -141,6 +142,41 @@ if [ -n "${OLD_PIDS// /}" ] && [ "$FORCE" -ne 1 ]; then
   fi
 fi
 
+# launchd-юнит (KeepAlive) останавливаем ВЫГРУЗКОЙ, а не pkill: иначе launchd поднимает старый бинарник
+# прямо в окне cp → mv → codesign и может стартовать бинарь с ещё не обновлённой подписью (сбой TCC/cdhash).
+# Процедура та же, что ручная пересборка 27.11: bootout → подмена → подпись → bootstrap.
+UNIT_MANAGED=0
+UNIT_BOOTED_OUT=0
+if agent_unit_loaded; then
+  UNIT_MANAGED=1
+  # Без plist юнит потом не вернуть — ничего не останавливаем.
+  [ -f "$AGENT_PLIST" ] || preflight_fail "юнит $AGENT_LABEL загружен, но нет $AGENT_PLIST — агент не остановлен"
+fi
+
+# Любой выход после выгрузки юнита (сбой копирования/подписи) возвращает юнит, чтобы не оставить машину без
+# агента (хоткей, вставка): лучше прежний/неподписанный бинарь под launchd, чем никакого.
+restore_unit_on_exit() {
+  if [ "$UNIT_BOOTED_OUT" -eq 1 ]; then
+    echo "Возвращаю launchd-юнит $AGENT_LABEL после сбоя обновления."
+    "${LAUNCHCTL_BIN:-launchctl}" bootstrap "gui/$(id -u)" "$AGENT_PLIST" \
+      || echo "Ошибка: не удалось вернуть юнит. Вручную: launchctl bootstrap gui/$(id -u) \"$AGENT_PLIST\""
+  fi
+}
+trap restore_unit_on_exit EXIT
+# zsh не исполняет EXIT-trap при гибели от сигнала — превращаем сигнал в штатный exit.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+if [ "$UNIT_MANAGED" -eq 1 ]; then
+  echo "launchd-юнит $AGENT_LABEL загружен — выгружаю (bootout) до подмены бинаря."
+  if ! "${LAUNCHCTL_BIN:-launchctl}" bootout "gui/$(id -u)/$AGENT_LABEL"; then
+    echo "Ошибка: launchctl bootout $AGENT_LABEL не удался — бинарники не тронуты."
+    exit 1
+  fi
+  UNIT_BOOTED_OUT=1
+fi
+
 # Без остановки pkill после rebuild обновление бинаря приведёт к сбою TCC cdhash и "висящему" экземпляру.
 pkill -f "$AGENT_PATTERN_BUNDLE" 2>/dev/null || true
 pkill -f "$AGENT_PATTERN_LEGACY" 2>/dev/null || true
@@ -192,14 +228,13 @@ codesign --verify --strict "$APP_BUNDLE"
 # отсутствие orphan-процесса `com.apple.xpc.launchd.unmanaged.KrabEarAgent.*`,
 # который раньше появлялся при backgrounded-exec из shell.
 INSTALL_EPOCH="$(date +%s)"
-UNIT_MANAGED=0
-if agent_unit_loaded; then
-  # Юнит под launchd: открыть .app мало — launchd мог уже поднять старый бинарник. kickstart -k
-  # перезапускает процесс юнита уже с новым бинарём.
-  UNIT_MANAGED=1
-  echo "launchd-юнит $AGENT_LABEL загружен — перезапускаю через kickstart -k (а не open)."
-  if ! "${LAUNCHCTL_BIN:-launchctl}" kickstart -k "gui/$(id -u)/$AGENT_LABEL"; then
-    echo "Ошибка: launchctl kickstart -k $AGENT_LABEL не удался — бинарники установлены, агент не перезапущен."
+if [ "$UNIT_MANAGED" -eq 1 ]; then
+  # Юнит под launchd: `open` поверх него даёт второй экземпляр (шторм agent.lock) — возвращаем юнит.
+  UNIT_BOOTED_OUT=0  # дальше trap не повторяет bootstrap
+  echo "Загружаю launchd-юнит $AGENT_LABEL с новым бинарём (bootstrap)."
+  if ! "${LAUNCHCTL_BIN:-launchctl}" bootstrap "gui/$(id -u)" "$AGENT_PLIST"; then
+    echo "Ошибка: launchctl bootstrap $AGENT_LABEL не удался — бинарники установлены, агент не запущен."
+    echo "Вручную: launchctl bootstrap gui/$(id -u) \"$AGENT_PLIST\""
     exit 1
   fi
 else

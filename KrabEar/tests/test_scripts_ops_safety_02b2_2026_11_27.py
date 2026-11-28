@@ -384,7 +384,8 @@ class TestUpdateAgentDelivery:
             victim.wait()
 
     # ── ревью Opus #2304 (P2): launchd поднял СТАРЫЙ бинарник до установки — это не успех ──
-    def _launchd_tree(self, tmp_path: Path, *, kick_starts_new: bool) -> tuple[Path, subprocess.Popen]:
+    def _launchd_tree(self, tmp_path: Path, *, kick_starts_new: bool, plist: bool = True,
+                      bootout_rc: int = 0, bootstrap_rc: int = 0) -> tuple[Path, subprocess.Popen]:
         victim = self._live_agent()
         root = _ua_tree(tmp_path, agent_appears=True, running_pid=victim.pid, kill_old=True)
         self._ua_gate(root, rc=0)
@@ -392,11 +393,17 @@ class TestUpdateAgentDelivery:
         etimes = tmp_path / "etimes"
         etimes.mkdir()
         (etimes / "88888").write_text("05:00\n")   # старый, поднятый launchd до установки
-        (etimes / "77777").write_text("00:00\n")   # новый, после kickstart
+        (etimes / "77777").write_text("00:00\n")   # новый, после bootstrap
         _exe(stub / "ps", 'if [ "$3" = "-o" ] && [ "$4" = "etime=" ]; then cat "' + str(etimes)
              + '/$2" 2>/dev/null || exit 1; exit 0; fi\nexec /bin/ps "$@"\n')
+        app_bin = root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent"
+        # Заглушка пишет, какой бинарь лежит в .app в момент bootout/bootstrap — проверка порядка.
         _exe(stub / "launchctl",
              'echo "launchctl $*" >> "$STUB_LOG"\n[ "$1" = print ] && exit 0\n'
+             f'if [ "$1" = bootout ]; then echo "bootout-bin $(cat \'{app_bin}\')" >> "$STUB_LOG"; '
+             f'kill {victim.pid} 2>/dev/null; exit {bootout_rc}; fi\n'
+             f'if [ "$1" = bootstrap ]; then echo "bootstrap-bin $(cat \'{app_bin}\')" >> "$STUB_LOG"; '
+             f'[ {bootstrap_rc} -eq 0 ] && touch "$STUB_LOG.kicked"; exit {bootstrap_rc}; fi\n'
              '[ "$1" = kickstart ] && touch "$STUB_LOG.kicked"\nexit 0\n')
         new = "77777" if kick_starts_new else "88888"
         _exe(stub / "pgrep",
@@ -405,17 +412,76 @@ class TestUpdateAgentDelivery:
              f'echo {victim.pid}; exit 0\n')
         _exe(stub / "pkill", 'echo "pkill $*" >> "$STUB_LOG"\ntouch "$STUB_LOG.killed"\n'
              f'kill {victim.pid} 2>/dev/null\nexit 0\n')
+        if plist:
+            agents = tmp_path / "home" / "Library" / "LaunchAgents"
+            agents.mkdir(parents=True)
+            (agents / "ai.krab.ear.agent.plist").write_text("<plist/>")
         return root, victim
 
-    def test_launchd_unit_is_restarted_with_kickstart_not_open(self, tmp_path):
+    def _launchd_run(self, root: Path, tmp_path: Path) -> subprocess.CompletedProcess:
+        env = _env(tmp_path, PS_BIN=str(tmp_path / "stubbin" / "ps"))
+        return _run([ZSH, str(root / "scripts" / "update_agent.command")], env)
+
+    def test_launchd_unit_is_booted_out_before_swap_and_bootstrapped_after(self, tmp_path):
+        """P3 (хвост 27.11): pkill под KeepAlive давал launchd поднять старый бинарь в окне подмены/подписи."""
         root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
         try:
-            env = _env(tmp_path, PS_BIN=str(tmp_path / "stubbin" / "ps"))
-            res = _run([ZSH, str(root / "scripts" / "update_agent.command")], env)
+            res = self._launchd_run(root, tmp_path)
             assert res.returncode == 0, res.stdout + res.stderr
             calls = _calls(tmp_path)
-            assert any(c.startswith("launchctl kickstart -k") for c in calls), calls
+            assert "bootout-bin OLD-BUNDLE" in calls, calls      # выгрузка ДО подмены
+            assert "bootstrap-bin NEW-BUILD" in calls, calls     # загрузка ПОСЛЕ подмены
+            assert calls.index("bootout-bin OLD-BUNDLE") < calls.index("bootstrap-bin NEW-BUILD")
+            assert not any(c.startswith("launchctl kickstart") for c in calls), calls
             assert not any(c.startswith("open") for c in calls), calls
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_bootout_failure_leaves_binaries_and_unit_untouched(self, tmp_path):
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True, bootout_rc=1)
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert (root / "Krab Ear.app" / "Contents" / "MacOS" / "KrabEarAgent").read_text() == "OLD-BUNDLE"
+            assert not any(c.startswith("launchctl bootstrap") for c in _calls(tmp_path))
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_loaded_without_plist_refuses_before_stopping(self, tmp_path):
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True, plist=False)
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert victim.poll() is None, "агент остановлен, хотя юнит потом не вернуть"
+            calls = _calls(tmp_path)
+            assert not any(c.startswith(("launchctl bootout", "pkill")) for c in calls), calls
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_failure_mid_install_restores_unit(self, tmp_path):
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True)
+        _exe(tmp_path / "stubbin" / "codesign", "exit 1\n")  # подпись упала после подмены
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode != 0, res.stdout + res.stderr
+            calls = _calls(tmp_path)
+            assert any(c.startswith("launchctl bootstrap") for c in calls), calls
+            assert "Возвращаю launchd-юнит" in res.stdout
+        finally:
+            victim.kill()
+            victim.wait()
+
+    def test_launchd_bootstrap_failure_is_error_with_manual_hint(self, tmp_path):
+        root, victim = self._launchd_tree(tmp_path, kick_starts_new=True, bootstrap_rc=1)
+        try:
+            res = self._launchd_run(root, tmp_path)
+            assert res.returncode == 1, res.stdout + res.stderr
+            assert "launchctl bootstrap gui/" in res.stdout
+            # повторный bootstrap из trap не делаем: один вызов
+            assert sum(c.startswith("launchctl bootstrap") for c in _calls(tmp_path)) == 1
         finally:
             victim.kill()
             victim.wait()
@@ -423,8 +489,7 @@ class TestUpdateAgentDelivery:
     def test_launchd_old_binary_respawned_before_install_is_not_reported_as_updated(self, tmp_path):
         root, victim = self._launchd_tree(tmp_path, kick_starts_new=False)
         try:
-            env = _env(tmp_path, PS_BIN=str(tmp_path / "stubbin" / "ps"))
-            res = _run([ZSH, str(root / "scripts" / "update_agent.command")], env)
+            res = self._launchd_run(root, tmp_path)
             assert res.returncode == 1, res.stdout + res.stderr
             assert "Готово" not in res.stdout
         finally:

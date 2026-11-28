@@ -262,6 +262,38 @@ echo ""
 # 1. Kill running. Ждём смерти именно СТАРОГО PID (а не «процессов нет»): под launchd (KeepAlive)
 # агент поднимается заново сразу после SIGTERM, и это нормально. Не вышел за 10 с — SIGKILL не шлём
 # (мог бы оборвать запись) и ничего не подменяем (ревью Opus #2304, P2).
+# launchd-юнит (KeepAlive) выгружаем ДО подмены: иначе launchd поднимает старый бинарник прямо в окне
+# cp → mv → codesign (сбой TCC/cdhash). bootout → подмена → подпись → bootstrap; сбой посередине — trap
+# возвращает юнит (хвост 27.11, тот же класс в update_agent.command).
+AGENT_PLIST="$HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+UNIT_MANAGED=0
+UNIT_BOOTED_OUT=0
+if agent_unit_loaded; then
+  UNIT_MANAGED=1
+  if [ ! -f "$AGENT_PLIST" ]; then
+    echo "  ❌ юнит $AGENT_LABEL загружен, но нет $AGENT_PLIST — агент не остановлен, бинарники не тронуты." >&2
+    exit 3
+  fi
+fi
+restore_unit_on_exit() {
+  if [ "$UNIT_BOOTED_OUT" -eq 1 ]; then
+    echo "  → возвращаю launchd-юнит $AGENT_LABEL после сбоя"
+    "${LAUNCHCTL_BIN:-launchctl}" bootstrap "gui/$(id -u)" "$AGENT_PLIST" \
+      || echo "  ❌ не удалось вернуть юнит. Вручную: launchctl bootstrap gui/$(id -u) \"$AGENT_PLIST\"" >&2
+  fi
+}
+trap restore_unit_on_exit EXIT
+# zsh не исполняет EXIT-trap при гибели от сигнала — превращаем сигнал в штатный exit.
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+if [ "$UNIT_MANAGED" -eq 1 ]; then
+  echo "  → launchd-юнит $AGENT_LABEL загружен: bootout до подмены"
+  "${LAUNCHCTL_BIN:-launchctl}" bootout "gui/$(id -u)/$AGENT_LABEL" \
+    || { echo "  ❌ launchctl bootout не удался — бинарники не тронуты" >&2; exit 3; }
+  UNIT_BOOTED_OUT=1
+fi
+
 if [ -n "$RUNNING_PID" ]; then
   echo "  → kill running PID $RUNNING_PID"
   /bin/kill "$RUNNING_PID" 2>/dev/null || true
@@ -329,12 +361,15 @@ echo "  → synced both paths to source"
 
 # 4. Restart .app.
 INSTALL_EPOCH="$(date +%s)"
-UNIT_MANAGED=0
-if agent_unit_loaded; then
-  # Под launchd KeepAlive старый бинарник уже мог подняться до установки; open лишь активировал бы его.
-  UNIT_MANAGED=1
-  echo "  → launchd-юнит $AGENT_LABEL загружен: kickstart -k (а не open)"
-  "${LAUNCHCTL_BIN:-launchctl}" kickstart -k "gui/$(id -u)/$AGENT_LABEL" || { echo "  ❌ launchctl kickstart -k не удался" >&2; exit 3; }
+if [ "$UNIT_MANAGED" -eq 1 ]; then
+  # Под launchd `open` дал бы второй экземпляр поверх юнита — возвращаем юнит с новым бинарём.
+  UNIT_BOOTED_OUT=0  # дальше trap не повторяет bootstrap
+  echo "  → bootstrap launchd-юнита $AGENT_LABEL с новым бинарём"
+  "${LAUNCHCTL_BIN:-launchctl}" bootstrap "gui/$(id -u)" "$AGENT_PLIST" || {
+    echo "  ❌ launchctl bootstrap не удался — бинарники установлены, агент не запущен." >&2
+    echo "     Вручную: launchctl bootstrap gui/$(id -u) \"$AGENT_PLIST\"" >&2
+    exit 3
+  }
 else
   /usr/bin/open "$ROOT_DIR/Krab Ear.app"
 fi
