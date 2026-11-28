@@ -238,13 +238,14 @@ def analyze_silence_file(
     Returns:
         Словарь с результатами анализа тишины.
     """
-    import soundfile as sf
+    from core.audio_decode_guard import read_audio_capped
 
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Аудиофайл не найден: {path}")
 
-    audio_data, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
+    # F03: потолок декодированного PCM (сжатый файл раскрывается многократно).
+    audio_data, sample_rate = read_audio_capped(path, dtype="float32", always_2d=False)
     if detector is None:
         detector = SilenceDetector()
 

@@ -287,9 +287,10 @@ def analyze_file(path: str | Path, analyzer: Optional[AudioQualityAnalyzer] = No
 
     Raises:
         FileNotFoundError: файл не найден.
-        ValueError: файл превышает _MAX_AUDIO_FILE_BYTES (DoS-guard C1).
+        ValueError: файл превышает _MAX_AUDIO_FILE_BYTES (DoS-guard C1) или
+            декодированный PCM превышает MAX_DECODED_SAMPLES (F03).
     """
-    import soundfile as sf
+    from core.audio_decode_guard import read_audio_capped
 
     path = Path(path)
     if not path.exists():
@@ -303,7 +304,9 @@ def analyze_file(path: str | Path, analyzer: Optional[AudioQualityAnalyzer] = No
             f"{file_bytes // (1024 * 1024)} МБ > {_MAX_AUDIO_FILE_BYTES // (1024 * 1024)} МБ"
         )
 
-    audio_data, sample_rate = sf.read(str(path), dtype="float32", always_2d=False)
+    # F03: предел файла выше — по байтам на диске; сжатый файл раскрывается
+    # многократно, поэтому PCM ограничен по числу декодированных сэмплов.
+    audio_data, sample_rate = read_audio_capped(path, dtype="float32", always_2d=False)
     if analyzer is None:
         analyzer = AudioQualityAnalyzer()
     return analyzer.analyze(audio_data, sample_rate)
