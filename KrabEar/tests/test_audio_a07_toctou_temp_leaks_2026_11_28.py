@@ -126,7 +126,7 @@ class _HandlerHarness:
                 return np.zeros(16, dtype=np.float32), 16000
 
             with patch("core.noise_profiler.NoiseProfiler", return_value=profiler), \
-                 patch("soundfile.read", side_effect=sfr):
+                 patch("core.audio_decode_guard.read_audio_capped", side_effect=sfr):
                 return _make_service().handle_profile_noise({"file_path": file_path})
         raise AssertionError(name)
 

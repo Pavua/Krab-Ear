@@ -374,12 +374,13 @@ class AudioAnalyticsService:
         file_path = params.get("file_path", "")
         if not file_path:
             raise ValueError("Параметр file_path обязателен")
-        import soundfile as sf  # lazy import
+        from core.audio_decode_guard import read_audio_capped
 
         # W1736 + A07: повторное открытие resolved-пути тоже было окном TOCTOU
         # (подмена каталога/файла после проверки); читаем закреплённый снимок.
         with _pinned_audio_snapshot(file_path, self._data_dir) as snapshot:
-            audio_data, sample_rate = sf.read(snapshot, dtype="float32", always_2d=False)
+            # F03: потолок декодированного PCM, а не только байтов снимка.
+            audio_data, sample_rate = read_audio_capped(snapshot, dtype="float32", always_2d=False)
         profiler = NoiseProfiler()
         result = profiler.profile(audio_data, sample_rate)
         return result.to_dict()

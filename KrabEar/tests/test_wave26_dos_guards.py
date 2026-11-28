@@ -41,7 +41,7 @@ class TestAudioQualityFileSizeGuard(unittest.TestCase):
         small = self._write_tmp_file(1024)
         try:
             fake_audio = np.zeros(16000, dtype="float32")
-            with patch("soundfile.read", return_value=(fake_audio, 16000)):
+            with patch("core.audio_decode_guard.read_audio_capped", return_value=(fake_audio, 16000)):
                 report = analyze_file(small)
             self.assertEqual(report.quality_score, "poor")  # тишина → poor
         finally:
@@ -67,7 +67,7 @@ class TestAudioQualityFileSizeGuard(unittest.TestCase):
         at_limit = self._write_tmp_file(_MAX_AUDIO_FILE_BYTES)
         try:
             fake_audio = np.zeros(16000, dtype="float32")
-            with patch("soundfile.read", return_value=(fake_audio, 16000)):
+            with patch("core.audio_decode_guard.read_audio_capped", return_value=(fake_audio, 16000)):
                 report = analyze_file(at_limit)
             self.assertIsNotNone(report)
         finally:

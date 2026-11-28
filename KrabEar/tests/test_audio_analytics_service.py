@@ -351,7 +351,7 @@ class TestProfileNoise(unittest.TestCase):
 
         svc = _make_service()
         with patch("core.noise_profiler.NoiseProfiler", return_value=fake_profiler), \
-             patch("soundfile.read", return_value=(audio_data, 16000)):
+             patch("core.audio_decode_guard.read_audio_capped", return_value=(audio_data, 16000)):
             result = svc.handle_profile_noise({"file_path": tmp_path})
 
         self.assertEqual(result["noise_type"], "white")
