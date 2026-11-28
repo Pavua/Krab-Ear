@@ -14,6 +14,7 @@ A03/A13: временная копия iCloud-импорта и временны
 
 from __future__ import annotations
 
+import io
 import os
 import shutil
 import subprocess
@@ -32,6 +33,13 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import backend.audio_analytics_service as aas  # noqa: E402
 from backend.audio_analytics_service import AudioAnalyticsService  # noqa: E402
+
+try:
+    import _testcapi
+    _HAS_TESTCAPI = hasattr(_testcapi, "set_nomemory")
+except ImportError:  # сборки без тестовых модулей
+    _testcapi = None
+    _HAS_TESTCAPI = False
 
 LEGIT = b"LEGIT-AUDIO-BYTES"
 SECRET = b"SECRET-OUTSIDE-BYTES"
@@ -300,6 +308,114 @@ class TestA07SourceFdNeverLeaks(_TmpTree):
     def test_fdopen_failure_does_not_leak_source_fd(self) -> None:
         emfile = OSError(24, "Too many open files")
         self._run_and_check_no_leak(patch.object(aas.os, "fdopen", side_effect=emfile), OSError)
+
+    def test_fdopen_failure_after_taking_fd_keeps_original_error_and_closes_once(self) -> None:
+        # rev3: настоящий io.open (Modules/_io/_iomodule.c) сначала создаёт FileIO
+        # (владение fd при closefd=True), и если затем падает создание буфера,
+        # в ветке error: закрывает raw — то есть и fd. Повторный os.close(fd)
+        # давал EBADF поверх исходной ошибки или закрывал чужой переиспользованный
+        # fd. Эмуляция ниже повторяет именно этот путь на настоящем FileIO.
+        target = self.root / "own.wav"
+        target.write_bytes(LEGIT)
+        opened: list[int] = []
+        real_open_pinned = aas._open_pinned_regular_file
+        real_io_open = io.open
+        real_close = os.close
+        closes: list[int] = []
+        mark: list[int] = []
+
+        def spy_open(resolved):
+            fd = real_open_pinned(resolved)
+            opened.append(fd)
+            # Каталожные fd обхода закрыты раньше и могли носить тот же номер.
+            mark.append(len(closes))
+            return fd
+
+        def io_open_buffer_fails(file, mode="r", buffering=-1, encoding=None,
+                                 errors=None, newline=None, closefd=True, opener=None):
+            if not (isinstance(file, int) and file in opened):
+                return real_io_open(file, mode, buffering, encoding, errors, newline, closefd, opener)
+            raw = io.FileIO(file, "rb", closefd=closefd)  # _iomodule.c: raw создан, result = raw
+            raw.close()                                   # _iomodule.c: error: → close(result)
+            raise MemoryError("буфер BufferedReader не создан")
+
+        def counting_close(fd):
+            try:
+                real_close(fd)
+            except OSError as exc:
+                closes.append((fd, exc.errno))
+                raise
+            closes.append((fd, 0))
+
+        h = _HandlerHarness()
+        with patch.object(aas, "_open_pinned_regular_file", side_effect=spy_open), \
+             patch.object(io, "open", side_effect=io_open_buffer_fails), \
+             patch.object(aas.os, "close", side_effect=counting_close):
+            with self.assertRaises(MemoryError):  # не OSError(EBADF) поверх исходной ошибки
+                h.run("analyze_audio_quality", str(target))
+        self.assertEqual(h.calls, [])
+        self.assertEqual(len(opened), 1)
+        fd = opened[0]
+        # Номер fd после закрытия законно переиспользуется (rmtree TemporaryDirectory
+        # ходит через dir_fd), поэтому «ровно один раз» = первое os.close(fd) после
+        # открытия успешно (fd был ещё открыт, т.е. никто не закрыл его раньше) и
+        # ни одно закрытие этого номера не упало с EBADF (двойное закрытие).
+        after = [errno_ for n, errno_ in closes[mark[0]:] if n == fd]
+        self.assertTrue(after, "исходный fd не закрыт через os.close")
+        self.assertEqual(after[0], 0, "первое закрытие исходного fd должно быть успешным")
+        self.assertNotIn(9, after, "двойное закрытие исходного fd (EBADF)")
+        with self.assertRaises(OSError):
+            os.fstat(fd)
+
+    @unittest.skipUnless(_HAS_TESTCAPI, "нужен _testcapi.set_nomemory")
+    def test_cpython_fdopen_closes_fd_itself_when_failing_after_fileio(self) -> None:
+        # Предпосылка rev3 на НАСТОЯЩЕМ CPython: сбой аллокации после создания
+        # FileIO — os.fdopen(fd) уже закрыл fd; с closefd=False — нет.
+        target = self.root / "probe.bin"
+        target.write_bytes(LEGIT)
+        seen: dict[bool, set[str]] = {True: set(), False: set()}
+        for closefd in (True, False):
+            for k in range(60):
+                fd = os.open(target, os.O_RDONLY)
+                exc = None
+                _testcapi.set_nomemory(k, k + 1)
+                try:
+                    obj = os.fdopen(fd, "rb", closefd=closefd)
+                except (MemoryError, RuntimeError) as e:  # «can't allocate read lock» и т.п.
+                    exc = e
+                finally:
+                    _testcapi.remove_mem_hooks()
+                if exc is None:
+                    obj.close()
+                    if not closefd:
+                        os.close(fd)
+                    continue
+                try:
+                    os.fstat(fd)
+                    seen[closefd].add("open")
+                    os.close(fd)
+                except OSError:
+                    seen[closefd].add("closed")
+        self.assertIn("closed", seen[True], "ожидался путь, где fdopen сам закрыл fd")
+        self.assertNotIn("closed", seen[False], "closefd=False не должен закрывать fd")
+
+    def test_overlong_requested_name_falls_back_to_fitting_snapshot_name(self) -> None:
+        # rev3 F07: "audio" + суффикс имени в NAME_MAX байт длиннее NAME_MAX → ENAMETOOLONG.
+        name_max = os.pathconf(self.root, "PC_NAME_MAX")
+        real = self.root / "real.wav"
+        real.write_bytes(LEGIT)
+        link = self.root / ("a." + "x" * (name_max - 2))
+        os.symlink(real, link)
+        for name in _HandlerHarness.HANDLERS:
+            with self.subTest(handler=name):
+                h = _HandlerHarness()
+                h.run(name, str(link))
+                self.assertEqual(len(h.calls), 1)
+                got_path, got_bytes = h.calls[0]
+                self.assertEqual(got_bytes, LEGIT)
+                self.assertLessEqual(len(os.fsencode(Path(got_path).name)), name_max)
+                self.assertEqual(Path(got_path).suffix.lower(), link.suffix.lower())
+                self.assertFalse(Path(got_path).exists())
 
 
 # ---------------------------------------------------------------------------

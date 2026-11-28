@@ -21,7 +21,7 @@ import logging
 import os
 import stat
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -116,6 +116,25 @@ def _open_pinned_regular_file(resolved: Path) -> int:
         raise
 
 
+def _snapshot_name(p: str, tmp_dir: str) -> str:
+    """Имя снимка: «audio» + суффикс запрошенного пути, если влезает в NAME_MAX.
+
+    Иначе (имя запроса уже около NAME_MAX, и «audio» + суффикс длиннее) —
+    имя запроса целиком (оно существует, значит влезает на своей ФС), в
+    крайнем случае — просто «audio». get_audio_info сам приводит суффикс
+    к нижнему регистру.
+    """
+    try:
+        name_max = os.pathconf(tmp_dir, "PC_NAME_MAX")
+    except (OSError, ValueError):
+        name_max = 255
+    requested = Path(p)
+    for candidate in ("audio" + requested.suffix.lower(), requested.name):
+        if candidate and len(os.fsencode(candidate)) <= name_max:
+            return candidate
+    return "audio"
+
+
 @contextmanager
 def _pinned_audio_snapshot(p: str, data_dir: Path | None = None) -> Iterator[str]:
     """Проверяет путь и отдаёт анализатору приватный снимок закреплённого файла.
@@ -129,19 +148,20 @@ def _pinned_audio_snapshot(p: str, data_dir: Path | None = None) -> Iterator[str
     нижнем регистре.
     """
     resolved = _validate_audio_read_path(p, data_dir)
-    suffix = Path(p).suffix.lower()
     with tempfile.TemporaryDirectory(prefix="krab_ear_audio_read_") as tmp_dir:
-        snapshot = Path(tmp_dir) / ("audio" + suffix)
-        # fd открываем только когда каталог снимка уже есть: сбой mkdtemp
-        # (ENOSPC/EACCES) не должен оставлять открытый исходный дескриптор.
-        fd = _open_pinned_regular_file(resolved)
-        try:
-            src = os.fdopen(fd, "rb")
-        except BaseException:
-            os.close(fd)
-            raise
+        snapshot = Path(tmp_dir) / _snapshot_name(p, tmp_dir)
         copied = 0
-        with src, open(snapshot, "xb") as dst:
+        with ExitStack() as stack:
+            # fd открываем только когда каталог снимка уже есть: сбой mkdtemp
+            # (ENOSPC/EACCES) не должен оставлять открытый исходный дескриптор.
+            fd = _open_pinned_regular_file(resolved)
+            # Владелец fd — только этот callback (ровно одно закрытие). С
+            # closefd=True io.open при сбое ПОСЛЕ создания FileIO сам закрывает
+            # fd, и наш os.close дал бы EBADF поверх исходной ошибки или закрыл
+            # чужой переиспользованный номер.
+            stack.callback(os.close, fd)
+            src = stack.enter_context(os.fdopen(fd, "rb", closefd=False))
+            dst = stack.enter_context(open(snapshot, "xb"))
             while True:
                 chunk = src.read(_COPY_CHUNK)
                 if not chunk:
