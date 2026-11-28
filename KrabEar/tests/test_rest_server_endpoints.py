@@ -896,5 +896,76 @@ class ModelsEndpointTest(_RestBase):
         self.assertEqual(body["default_stt"], "mlx-community/whisper-large-v3-mlx")
 
 
+# ===========================================================================
+# 14. GET /v1/models — проба LM Studio не уносит Bearer через редирект (R05-12/K08-09)
+# ===========================================================================
+
+def _start_http(handler_cls):
+    import http.server
+    import threading
+
+    srv = http.server.HTTPServer(("127.0.0.1", 0), handler_cls)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+@unittest.skipUnless(_REST_AVAILABLE, "REST server dependencies not available")
+class ModelsEndpointLmProbeRedirectTest(_RestBase):
+    """Дефолтный urllib переносит ВСЕ заголовки (и Authorization) на адрес из 30x.
+    Проба каталога LM Studio в REST не должна отдавать llm_api_key другому origin;
+    IPC-сиблинг (llm_ops_service) уже ходит с allow_redirects=False."""
+
+    def setUp(self):
+        super().setUp()
+        import http.server
+        import json as _json
+
+        self.seen_auth = []
+        seen = self.seen_auth
+
+        class _Sink(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                seen.append(self.headers.get("Authorization"))
+                body = _json.dumps({"data": [{"id": "leaked-model"}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+
+        self.sink = _start_http(_Sink)
+        sink_url = f"http://127.0.0.1:{self.sink.server_address[1]}"
+
+        class _Redirector(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                self.send_response(302)
+                self.send_header("Location", f"{sink_url}{self.path}")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        self.redirector = _start_http(_Redirector)
+        for srv in (self.sink, self.redirector):
+            self.addCleanup(srv.server_close)
+            self.addCleanup(srv.shutdown)
+
+    def test_cross_origin_redirect_does_not_receive_bearer(self):
+        self.mock_store.load_settings.return_value = {
+            "llm_base_url": f"http://127.0.0.1:{self.redirector.server_address[1]}/v1",
+            "llm_api_key": "sk-secret-lm",
+        }
+        with patch("core.pipeline.stt_router_factory.build_router", return_value=MagicMock(_adapters=[])):
+            resp = self.client.get("/v1/models")
+        self.assertEqual(resp.status_code, 200)
+        self.assertNotIn("Bearer sk-secret-lm", self.seen_auth)
+        self.assertEqual(self.seen_auth, [], "проба не должна идти по редиректу на другой origin")
+        self.assertEqual(resp.get_json()["llm_models"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

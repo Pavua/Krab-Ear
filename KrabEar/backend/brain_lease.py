@@ -340,7 +340,9 @@ def observe_brain_lease(lock_path: Optional[Path] = None) -> dict:
         # произвольную цель symlink. Никаких mkdir/O_CREAT/записей shared lease.
         fd = os.open(str(path), os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode):
+        # R05-09: O_NOFOLLOW не ловит hardlink (второе имя произвольного файла).
+        # Lease пишется через temp+os.replace, у настоящего файла ровно одно имя.
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             return result
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)

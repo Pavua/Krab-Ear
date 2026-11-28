@@ -2524,6 +2524,7 @@ def list_models():
         _llm_key = str(_s2.get("llm_api_key", "")).strip()
         from backend.lm_studio_lifecycle import (
             CATALOG_ENDPOINTS,
+            _SAFE_OPENER as _lm_safe_opener,
             parse_lm_studio_catalog,
         )
         # Strip the trailing /v<N> segment: каталог живёт рядом с ним, а не под ним.
@@ -2537,7 +2538,10 @@ def list_models():
             _req = _urlreq.Request(_llm_url)
             if _llm_key:
                 _req.add_header("Authorization", f"Bearer {_llm_key}")
-            with _urlreq.urlopen(_req, timeout=5) as _resp:  # noqa: S310
+            # R05-12/K08-09: дефолтный urlopen переносит Authorization на адрес из 30x
+            # (в т.ч. чужой хост) и умеет file://. Opener lifecycle — только http(s),
+            # редирект на другой origin отклоняется (как allow_redirects=False у IPC-сиблинга).
+            with _lm_safe_opener.open(_req, timeout=5) as _resp:
                 if _resp.status != 200:
                     continue
                 _data = json.loads(

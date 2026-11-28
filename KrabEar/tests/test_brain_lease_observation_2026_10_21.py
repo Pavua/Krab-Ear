@@ -111,6 +111,18 @@ class LeaseObservationTests(unittest.TestCase):
         self.path.symlink_to(target)
         self.assertFalse(self.observe()['known'])
 
+    def test_hardlink_is_not_read(self):
+        """R05-09: O_NOFOLLOW не ловит hardlink — второе имя чужого файла. Lease с st_nlink != 1
+        не читается и не выдаётся за наблюдение, даже если содержимое похоже на lease."""
+        target = self.path.with_name('elsewhere')
+        target.write_text('{"owner":"a","pid":1,"acquired_ts":1,"exp_ts":2}')
+        os.link(target, self.path)
+        with patch.object(brain_lease.time, 'time', return_value=1.5):
+            result = self.observe()
+        self.assertFalse(result['known'])
+        self.assertEqual(result['state'], 'unavailable')
+        self.assertNotIn('holder', result)
+
 
 if __name__ == '__main__':
     unittest.main()
