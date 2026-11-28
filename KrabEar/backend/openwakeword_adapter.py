@@ -93,6 +93,15 @@ _MODEL_LOAD_TIMEOUT_SEC: float = 30.0
 _MAX_CONSECUTIVE_STREAM_FAILURES: int = 3
 _STREAM_FAILURE_COOLDOWN_SEC: float = 60.0
 
+# Инцидент 27.11 20:38: агент на старте шлёт set_settings, эксклюзивный лок StateStore занят записью,
+# чтение privacy-ревизии (shared, 0.5 с) падает по таймауту. Слушатель принимал СБОЙ ЧТЕНИЯ за смену
+# политики, закрывал поток, Pa_StopStream зависал → stale heartbeat → wedged → рестарт backend.
+# Теперь сбой чтения внутри потока слушателя повторяется с ограниченным backoff. Бюджет держим
+# меньше стандартного starve_sec (3 с) и много меньше wake_word_stale_sec (30 с).
+_PRIVACY_READ_RETRY_BUDGET_SEC: float = 2.5
+_PRIVACY_READ_RETRY_FIRST_DELAY_SEC: float = 0.1
+_PRIVACY_READ_RETRY_MAX_DELAY_SEC: float = 0.8
+
 
 class WakeEnginesOffError(RuntimeError):
     """Оба движка (openwakeword и STT-споттер) в режиме off — стартовать нечего, но это не сбой."""
@@ -822,14 +831,54 @@ class OpenWakeWordAdapter:
     def _privacy_revision(self) -> str | None:
         """Ревизия разрешённого захвата. Ошибка чтения закрывает микрофон."""
         try:
-            if self._read_privacy_revision is not None:
-                return self._read_privacy_revision()
-            # Совместимость с адаптерами без версионированного провайдера.
-            allowed = self._settings_get("privacy_mode_enabled", False) is False
-            return "unversioned" if allowed else None
+            return self._privacy_revision_or_raise()
         except Exception:
             logger.warning("OpenWakeWordAdapter: privacy settings недоступны — микрофон заблокирован")
             return None
+
+    def _privacy_revision_or_raise(self) -> str | None:
+        """None — политика запрещает захват (ON или битые настройки); исключение — сбой ЧТЕНИЯ."""
+        if self._read_privacy_revision is not None:
+            return self._read_privacy_revision()
+        # Совместимость с адаптерами без версионированного провайдера.
+        allowed = self._settings_get("privacy_mode_enabled", False) is False
+        return "unversioned" if allowed else None
+
+    def _privacy_revision_with_retry(self) -> str | None:
+        """Ревизия для потока слушателя: сбой чтения повторяется, а не принимается за смену политики.
+
+        Пока ревизия неизвестна, поток стоит здесь — ни чтения кадров, ни pre-roll кольца, ни
+        распознавания (fail-closed по звуку). Ответ провайдера None (privacy ON/битая политика) не
+        повторяется. Исчерпан бюджет или запрошен stop() — None, вызывающий закрывает захват как прежде.
+        Только для потока слушателя: IPC-обработчики ждать не должны и зовут _privacy_revision().
+        """
+        deadline = time.monotonic() + _PRIVACY_READ_RETRY_BUDGET_SEC
+        delay = _PRIVACY_READ_RETRY_FIRST_DELAY_SEC
+        failures = 0
+        while True:
+            try:
+                revision = self._privacy_revision_or_raise()
+            except Exception as exc:
+                failures += 1
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._stop_event.is_set():
+                    logger.warning(
+                        "OpenWakeWordAdapter: privacy settings недоступны (%s, попыток %d) — микрофон заблокирован",
+                        type(exc).__name__, failures,
+                    )
+                    return None
+                if failures == 1:
+                    logger.info(
+                        "OpenWakeWordAdapter: сбой чтения privacy (%s) — повторяем до %.1fs, звук не обрабатываем",
+                        type(exc).__name__, _PRIVACY_READ_RETRY_BUDGET_SEC,
+                    )
+                if self._stop_event.wait(min(delay, remaining)):
+                    return None
+                delay = min(delay * 2, _PRIVACY_READ_RETRY_MAX_DELAY_SEC)
+                continue
+            if failures:
+                logger.info("OpenWakeWordAdapter: чтение privacy восстановлено после %d сбоев", failures)
+            return revision
 
     def _privacy_blocked(self) -> bool:
         return self._privacy_revision() is None
@@ -1259,7 +1308,7 @@ class OpenWakeWordAdapter:
                 self._cleanup_session_after_loop_exit(generation)
                 return
 
-        capture_revision = self._privacy_revision()
+        capture_revision = self._privacy_revision_with_retry()
         if capture_revision is None:
             self._cleanup_session_after_loop_exit(generation)
             return
@@ -1267,8 +1316,9 @@ class OpenWakeWordAdapter:
 
         # Смена ревизии завершает сессию целиком: ring buffer и модель могли
         # накопить PCM за время краткого ON→OFF. Повторный start создаёт оба заново.
+        # Транзиентный сбой чтения (лок занят записью настроек) — не смена: повторяем (инцидент 27.11).
         def privacy_changed() -> bool:
-            return self._privacy_revision() != capture_revision
+            return self._privacy_revision_with_retry() != capture_revision
 
         try:
             with sd.InputStream(
